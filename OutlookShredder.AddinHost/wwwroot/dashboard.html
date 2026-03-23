@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RFQ Dashboard &mdash; Metal Supermarkets Hackensack</title>
+  <link rel="stylesheet" href="/css/dashboard.css"/>
+</head>
+<body>
+
+<div class="header">
+  <span class="icon">&#x1F4CB;</span>
+  <h1>RFQ Line Items</h1>
+  <span class="sub">metalsupermarkets.sharepoint.com &middot; RFQLineItems</span>
+  <button id="refresh-btn" onclick="load()">&#x21BA; Refresh</button>
+</div>
+
+<div class="filters">
+  <div class="ref-wrap">
+    <span class="bracket">[</span>
+    <input id="ref-input" placeholder="XXXXXX" maxlength="6"
+           oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'');filter()"/>
+    <span class="bracket">]</span>
+  </div>
+  <select id="supplier-select" onchange="filter()">
+    <option value="">All suppliers</option>
+  </select>
+  <input id="search-input" placeholder="Search product, comments&hellip;" oninput="filter()"/>
+  <div class="src-btns">
+    <button class="src-btn active" data-src="" onclick="setSrc(this)">All</button>
+    <button class="src-btn" data-src="body"       onclick="setSrc(this)">&#x1F4C4; Body</button>
+    <button class="src-btn" data-src="attachment" onclick="setSrc(this)">&#x1F4CE; Attachment</button>
+  </div>
+</div>
+
+<div id="stats-bar"></div>
+
+<div class="table-wrap">
+  <table id="main-table">
+    <thead>
+      <tr>
+        <th>Ref</th><th>Src</th><th>Supplier</th><th>Quote Date</th><th>Delivery</th>
+        <th>Product</th><th>Req</th><th>Quoted</th><th>Length</th><th>Weight</th>
+        <th>$/lb</th><th>$/ft</th><th>Comments</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+<div id="row-count"></div>
+
+<!-- Detail modal -->
+<div id="modal-overlay" onclick="closeModal()" style="display:none">
+  <div id="modal" onclick="event.stopPropagation()">
+    <button class="close-btn" onclick="closeModal()">&times;</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script type="module">
+import { readSpItems } from '/js/graphClient.js';
+
+let allItems = [];
+let srcFilter = '';
+
+window.load = async function () {
+  document.getElementById('tbody').innerHTML = '<tr><td colspan="13" class="loading">Loading&hellip;</td></tr>';
+  try {
+    allItems = await readSpItems(500);
+    buildSupplierDropdown();
+    renderStats();
+    filter();
+  } catch (e) {
+    document.getElementById('tbody').innerHTML =
+      `<tr><td colspan="13" class="error-row">Error loading data: ${e.message}</td></tr>`;
+  }
+};
+
+function buildSupplierDropdown() {
+  const sel = document.getElementById('supplier-select');
+  const suppliers = [...new Set(allItems.map(i => i.fields?.SupplierName).filter(Boolean))].sort();
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All suppliers</option>' +
+    suppliers.map(s => `<option value="${s}"${s===current?' selected':''}>${s}</option>`).join('');
+}
+
+function renderStats() {
+  const total   = allItems.length;
+  const refs    = new Set(allItems.map(i => i.fields?.JobReference).filter(Boolean)).size;
+  const byBody  = allItems.filter(i => i.fields?.ProcessingSource === 'body').length;
+  const byAtt   = allItems.filter(i => i.fields?.ProcessingSource === 'attachment').length;
+  document.getElementById('stats-bar').innerHTML = `
+    <div class="stat-card"><div class="stat-label">Total rows</div><div class="stat-val">${total}</div></div>
+    <div class="stat-card blue"><div class="stat-label">Unique job refs</div><div class="stat-val">${refs}</div></div>
+    <div class="stat-card teal"><div class="stat-label">From body</div><div class="stat-val">${byBody}</div></div>
+    <div class="stat-card amber"><div class="stat-label">From attachments</div><div class="stat-val">${byAtt}</div></div>
+  `;
+}
+
+window.filter = function () {
+  const ref      = document.getElementById('ref-input').value.toUpperCase();
+  const supplier = document.getElementById('supplier-select').value;
+  const search   = document.getElementById('search-input').value.toLowerCase();
+
+  const filtered = allItems.filter(item => {
+    const f = item.fields || {};
+    if (ref && !(f.JobReference||'').includes(ref)) return false;
+    if (supplier && f.SupplierName !== supplier)     return false;
+    if (srcFilter && f.ProcessingSource !== srcFilter) return false;
+    if (search && !JSON.stringify(f).toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  renderRows(filtered);
+  document.getElementById('row-count').textContent =
+    `${filtered.length} product line${filtered.length !== 1 ? 's' : ''}`;
+};
+
+window.setSrc = function (btn) {
+  document.querySelectorAll('.src-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  srcFilter = btn.dataset.src;
+  filter();
+};
+
+function fmtDate(v) {
+  if (!v) return '&mdash;';
+  return new Date(v).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+}
+function money(v) { return v != null ? '$'+Number(v).toFixed(2) : null; }
+function dim(val, unit) { return val != null ? `${val}${unit ? ' '+unit : ''}` : null; }
+function n(v) { return v ?? '<span class="null-val">&mdash;</span>'; }
+
+function renderRows(items) {
+  const tbody = document.getElementById('tbody');
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="13" class="empty">
+      No records yet. Emails containing [XXXXXX] job references will appear here automatically.
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = items.map(item => {
+    const f = item.fields || {};
+    const isAtt = f.ProcessingSource === 'attachment';
+    return `<tr onclick="openModal(${JSON.stringify(JSON.stringify(f))})">
+      <td><span class="ref-chip">[${f.JobReference||'?'}]</span></td>
+      <td><span class="src-badge ${isAtt?'attach':'body'}">${isAtt?'&#x1F4CE;':'&#x1F4C4;'}</span></td>
+      <td class="ellipsis">${n(f.SupplierName)}</td>
+      <td class="nowrap">${fmtDate(f.DateOfQuote)}</td>
+      <td class="nowrap">${fmtDate(f.EstimatedDeliveryDate)}</td>
+      <td class="ellipsis bold">${n(f.ProductName)}</td>
+      <td class="right">${n(f.UnitsRequested)}</td>
+      <td class="right">${n(f.UnitsQuoted)}</td>
+      <td class="nowrap">${n(dim(f.LengthPerUnit, f.LengthUnit))}</td>
+      <td class="nowrap">${n(dim(f.WeightPerUnit, f.WeightUnit))}</td>
+      <td class="mono right">${n(money(f.PricePerPound))}</td>
+      <td class="mono right">${n(money(f.PricePerFoot))}</td>
+      <td class="ellipsis muted">${f.SupplierProductComments
+        ? f.SupplierProductComments.slice(0,60)+(f.SupplierProductComments.length>60?'&hellip;':'')
+        : '<span class="null-val">&mdash;</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
+window.openModal = function(jsonStr) {
+  const f = JSON.parse(jsonStr);
+  const rows = [
+    ['Job Reference',          f.JobReference],
+    ['Supplier',               f.SupplierName],
+    ['Date of Quote',          fmtDate(f.DateOfQuote)],
+    ['Est. Delivery',          fmtDate(f.EstimatedDeliveryDate)],
+    ['Product',                f.ProductName],
+    ['Units Requested',        f.UnitsRequested],
+    ['Units Quoted',           f.UnitsQuoted],
+    ['Length per Unit',        dim(f.LengthPerUnit, f.LengthUnit)],
+    ['Weight per Unit',        dim(f.WeightPerUnit, f.WeightUnit)],
+    ['Price per Pound',        money(f.PricePerPound)],
+    ['Price per Foot',         money(f.PricePerFoot)],
+    ['Supplier Comments',      f.SupplierProductComments],
+    ['Source',                 f.ProcessingSource],
+    ['Source File',            f.SourceFile],
+    ['Email From',             f.EmailFrom],
+    ['Received',               fmtDate(f.ReceivedAt)],
+  ].filter(([,v]) => v != null && v !== '');
+
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-header">
+      <span class="ref-chip">[${f.JobReference||'?'}]</span>
+      <span class="src-badge ${f.ProcessingSource==='attachment'?'attach':'body'}">${f.ProcessingSource==='attachment'?'&#x1F4CE; Attachment':'&#x1F4C4; Body'}</span>
+    </div>
+    <h3>${f.ProductName||'&mdash;'}</h3>
+    <div class="modal-sup">${f.SupplierName||'&mdash;'}</div>
+    <table class="modal-table">
+      ${rows.map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}
+    </table>
+  `;
+  document.getElementById('modal-overlay').style.display = 'flex';
+};
+
+window.closeModal = function () {
+  document.getElementById('modal-overlay').style.display = 'none';
+};
+
+// Auto-load on page open
+load();
+
+// Auto-refresh every 30 seconds
+setInterval(load, 30_000);
+</script>
+</body>
+</html>

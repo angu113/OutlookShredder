@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RFQ Processor</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="/css/taskpane.css"/>
+</head>
+<body>
+
+<div class="header">
+  <span class="icon">&#x1F4CB;</span>
+  <h2>RFQ Processor</h2>
+</div>
+
+<div id="ref-row"><span class="hint">Scanning for job references&hellip;</span></div>
+
+<div id="path-row">
+  <div class="pill" id="pill-attach">&#x1F4CE; Attachment path</div>
+  <div class="pill" id="pill-body">&#x1F4C4; Body path</div>
+</div>
+
+<div id="status">Ready &mdash; click Process RFQ to extract and save.</div>
+
+<div id="rows-area"></div>
+
+<button id="btn" onclick="run()">Process RFQ</button>
+
+<a href="/dashboard.html" class="dash-link" target="_blank">Open Dashboard &rarr;</a>
+
+<script type="module">
+import { processItem }              from '/js/criteriaEngine.js';
+import { findJobRefs }              from '/js/jobRef.js';
+import { hasProcessableAttachment } from '/js/attachmentReader.js';
+
+const statusEl   = document.getElementById('status');
+const refRow     = document.getElementById('ref-row');
+const rowsArea   = document.getElementById('rows-area');
+const pillAttach = document.getElementById('pill-attach');
+const pillBody   = document.getElementById('pill-body');
+const btn        = document.getElementById('btn');
+
+async function quickScan() {
+  await new Promise(r => Office.onReady(r));
+  const item = Office.context.mailbox.item;
+  const subj = await new Promise(r =>
+    typeof item.subject === 'string' ? r(item.subject)
+    : item.subject.getAsync(res => r(res.value || '')));
+  const atts  = (item.attachments || []).map(a => a.name || '').join(' ');
+  renderRefs(findJobRefs(`${subj} ${atts}`));
+  const hasAtts = hasProcessableAttachment(item);
+  pillAttach.className = 'pill' + (hasAtts  ? ' active-attach' : '');
+  pillBody.className   = 'pill' + (!hasAtts ? ' active-body'   : '');
+}
+
+window.run = async function () {
+  btn.disabled = true;
+  statusEl.className = '';
+  statusEl.innerHTML = '<span class="spinner"></span>Extracting&hellip;';
+  rowsArea.innerHTML = '';
+  try {
+    await new Promise(r => Office.onReady(r));
+    const result = await processItem(Office.context.mailbox.item);
+    renderRefs(result.jobRefs || []);
+    pillAttach.className = 'pill' + (result.path === 'attachment' ? ' active-attach' : '');
+    pillBody.className   = 'pill' + (result.path === 'body'       ? ' active-body'   : '');
+    if (!result.matched) {
+      statusEl.className = 'error';
+      statusEl.textContent = result.message;
+      return;
+    }
+    const allRows = result.results.flatMap(r => r.rows || []);
+    statusEl.className   = allRows.some(r => !r.success) ? 'error' : 'ok';
+    statusEl.textContent = result.message;
+    if (allRows.length) rowsArea.appendChild(buildTable(allRows, result.results[0]?.extracted));
+  } catch (e) {
+    statusEl.className = 'error';
+    statusEl.textContent = 'Error: ' + e.message;
+  } finally { btn.disabled = false; }
+};
+
+function renderRefs(refs) {
+  refRow.innerHTML = refs.length
+    ? refs.map(r => `<span class="ref-chip">${r}</span>`).join('')
+    : '<span class="hint">No [XXXXXX] job reference detected</span>';
+}
+
+function n(v, pre='', suf='') {
+  return v == null ? '<span class="null-val">&mdash;</span>' : `${pre}${v}${suf}`;
+}
+
+function buildTable(rows, extracted) {
+  const wrap = document.createElement('div');
+  const sup  = extracted?.supplierName || '';
+  if (sup || extracted?.dateOfQuote) {
+    wrap.innerHTML = `<div class="sup-header"><strong>${sup || '&mdash;'}</strong>${extracted?.dateOfQuote ? ' &middot; Quote: ' + extracted.dateOfQuote : ''}${extracted?.estimatedDeliveryDate ? ' &middot; Delivery: ' + extracted.estimatedDeliveryDate : ''}</div>`;
+  }
+  const t  = document.createElement('table');
+  t.className = 'rows-table';
+  t.innerHTML = `<thead><tr>
+    <th>Product</th><th>Req</th><th>Quoted</th>
+    <th>Length</th><th>Weight</th><th>$/lb</th><th>$/ft</th><th>Comments</th><th></th>
+  </tr></thead>`;
+  const tb = document.createElement('tbody');
+  for (const row of rows) {
+    const f  = row.fields || {};
+    const tr = document.createElement('tr');
+    if (!row.success) tr.className = 'err';
+    const len = f.LengthPerUnit != null ? `${f.LengthPerUnit}${f.LengthUnit ? ' '+f.LengthUnit : ''}` : null;
+    const wt  = f.WeightPerUnit != null ? `${f.WeightPerUnit}${f.WeightUnit ? ' '+f.WeightUnit : ''}` : null;
+    tr.innerHTML = `
+      <td>${n(f.ProductName)}</td>
+      <td>${n(f.UnitsRequested)}</td>
+      <td>${n(f.UnitsQuoted)}</td>
+      <td>${n(len)}</td>
+      <td>${n(wt)}</td>
+      <td>${f.PricePerPound != null ? '$'+Number(f.PricePerPound).toFixed(2) : '<span class="null-val">&mdash;</span>'}</td>
+      <td>${f.PricePerFoot  != null ? '$'+Number(f.PricePerFoot).toFixed(2)  : '<span class="null-val">&mdash;</span>'}</td>
+      <td class="comments" title="${f.SupplierProductComments||''}">${n(f.SupplierProductComments ? f.SupplierProductComments.slice(0,40)+(f.SupplierProductComments.length>40?'&hellip;':'') : null)}</td>
+      <td>${row.spWebUrl ? `<a href="${row.spWebUrl}" target="_blank" class="sp-link">&#x2197;</a>` : row.error ? `<span title="${row.error}" class="err-ico">&#x26A0;</span>` : ''}</td>
+    `;
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  wrap.appendChild(t);
+  return wrap;
+}
+
+quickScan();
+</script>
+</body>
+</html>
