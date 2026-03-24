@@ -73,10 +73,10 @@ public class SharePointService
             .GetAsync(req => req.QueryParameters.Filter = $"displayName eq '{listName}'");
 
         var list  = lists?.Value?.FirstOrDefault()
-            ?? throw new Exception($"SharePoint list "{listName}" not found. Run POST /api/setup-columns first.");
+            ?? throw new Exception($"SharePoint list '{listName}' not found. Run POST /api/setup-columns first.");
 
         _listId = list.Id ?? throw new Exception("List ID was null");
-        _log.LogInformation("[SP] List "{Name}" → id: {Id}", listName, _listId);
+        _log.LogInformation("[SP] List '{Name}' -> id: {Id}", listName, _listId);
         return _listId;
     }
 
@@ -131,13 +131,13 @@ public class SharePointService
             result.Success  = true;
             result.SpItemId = item!.Id;
             result.SpWebUrl = item.WebUrl;
-            _log.LogInformation("[SP] Wrote row for product "{Name}" → item {Id}", prodName, item.Id);
+            _log.LogInformation("[SP] Wrote row for product '{Name}' -> item {Id}", prodName, item.Id);
         }
         catch (Exception ex)
         {
             result.Success = false;
             result.Error   = ex.Message;
-            _log.LogError(ex, "[SP] Failed to write row for product "{Name}"", product.ProductName);
+            _log.LogError(ex, "[SP] Failed to write row for product '{Name}'", product.ProductName);
         }
         return result;
     }
@@ -191,7 +191,7 @@ public class SharePointService
                 };
                 await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col);
                 results[name] = "created";
-                _log.LogInformation("[SP] Created column "{Name}" ({Type})", name, type);
+                _log.LogInformation("[SP] Created column '{Name}' ({Type})", name, type);
             }
             catch (Exception ex)
             {
