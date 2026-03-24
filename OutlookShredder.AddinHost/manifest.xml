@@ -41,7 +41,7 @@
     <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
                       xsi:type="VersionOverridesV1_1">
       <Requirements>
-        <bt:Sets><bt:Set Name="Mailbox" MinVersion="1.12"/></bt:Sets>
+        <bt:Sets><bt:Set Name="Mailbox" MinVersion="1.3"/></bt:Sets>
       </Requirements>
       <Hosts>
         <Host xsi:type="MailHost">
@@ -86,10 +86,10 @@
         <bt:ShortStrings>
           <bt:String id="GroupLabel"         DefaultValue="RFQ Processor"/>
           <bt:String id="ProcessBtn.Label"   DefaultValue="Process RFQ"/>
-          <bt:String id="ProcessBtn.Tooltip" DefaultValue="Extract RFQ data and save to SharePoint"/>
+          <bt:String id="ProcessBtn.Tooltip" DefaultValue="Detects job references and extracts supplier quote data into the RFQLineItems SharePoint list."/>
         </bt:ShortStrings>
         <bt:LongStrings>
-          <bt:String id="ProcessBtn.Tooltip" DefaultValue="Detects job references and extracts supplier quote data into the RFQLineItems SharePoint list."/>
+          <bt:String id="ProcessBtn.Description" DefaultValue="Detects job references and extracts supplier quote data into the RFQLineItems SharePoint list."/>
         </bt:LongStrings>
       </Resources>
     </VersionOverrides>
