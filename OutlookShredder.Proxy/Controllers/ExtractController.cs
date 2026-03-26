@@ -105,6 +105,27 @@ public class ExtractController : ControllerBase
         return Ok(await _sp.DiagnoseAsync());
     }
 
+    // ── GET /api/items ────────────────────────────────────────────────────────
+    /// <summary>
+    /// Returns all RFQLineItems for the dashboard.
+    /// Uses server-side app credentials — no browser auth token required.
+    /// Each item is a flat field dictionary matching the SharePoint column names.
+    /// </summary>
+    [HttpGet("items")]
+    public async Task<IActionResult> GetItems([FromQuery] int top = 500)
+    {
+        try
+        {
+            var items = await _sp.ReadItemsAsync(top);
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to read SharePoint items");
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
     // ── GET /api/health ──────────────────────────────────────────────────────
     [HttpGet("health")]
     public IActionResult Health() =>

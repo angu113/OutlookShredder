@@ -80,6 +80,44 @@ public class SharePointService
         return _listId;
     }
 
+    // ── Read all items (for dashboard) ───────────────────────────────────────
+    /// <summary>
+    /// Returns up to <paramref name="top"/> items from the RFQLineItems list as
+    /// plain field dictionaries, suitable for JSON serialisation to the dashboard.
+    /// Uses the same app-only credentials as writes — no browser token required.
+    /// </summary>
+    public async Task<List<Dictionary<string, object?>>> ReadItemsAsync(int top = 500)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetListIdAsync();
+
+        var result = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = top;
+            });
+
+        // Strip SharePoint system keys (@odata.*, LinkTitle*, ContentType, Lookup IDs, etc.)
+        // so the dashboard only receives the columns we care about.
+        static bool IsAppField(string key) =>
+            !key.StartsWith('@') &&
+            !key.StartsWith('_') &&
+            key is not ("LinkTitle" or "LinkTitleNoMenu" or "ContentType"
+                     or "Edit" or "Attachments" or "ItemChildCount" or "FolderChildCount"
+                     or "Modified" or "Created"
+                     or "AuthorLookupId" or "EditorLookupId"
+                     or "AppAuthorLookupId" or "AppEditorLookupId");
+
+        return result?.Value?
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i => i.Fields!.AdditionalData!
+                .Where(kv => IsAppField(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => kv.Value))
+            .ToList()
+            ?? [];
+    }
+
     // ── Write one product row ────────────────────────────────────────────────
     public async Task<SpWriteResult> WriteProductRowAsync(
         RfqExtraction header,
@@ -102,7 +140,7 @@ public class SharePointService
             {
                 AdditionalData = new Dictionary<string, object?>
                 {
-                    ["Title"]                    = $"[{jobRef}] {supplier} – {prodName}"[..Math.Min($"[{jobRef}] {supplier} – {prodName}".Length, 255)],
+                    ["Title"]                    = $"[{jobRef}] {supplier} - {prodName}"[..Math.Min($"[{jobRef}] {supplier} - {prodName}".Length, 255)],
                     ["JobReference"]             = jobRef,
                     ["EmailFrom"]                = emailMeta.EmailFrom,
                     ["ReceivedAt"]               = emailMeta.ReceivedAt,
