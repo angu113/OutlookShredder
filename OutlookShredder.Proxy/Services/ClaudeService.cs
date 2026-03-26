@@ -72,12 +72,31 @@ public class ClaudeService
         var systemPrompt = $"You are a precise supplier quote data extraction assistant. " +
                            $"Return ONLY valid JSON. Use null for absent fields. {jobHint}";
 
-        // Build content array — PDF/DOCX use Claude's native document understanding
-        object userContent;
-        var ct = (req.ContentType ?? string.Empty).ToLowerInvariant();
+        // Determine attachment type and resolve the text content to send.
+        // - PDF/DOCX → sent as a native Claude document; no text content decoding needed.
+        // - Text-type attachment (txt, csv, rtf, html…) → decode base64 to UTF-8 text.
+        // - Body → req.Content is already plain text.
+        var ct     = (req.ContentType ?? string.Empty).ToLowerInvariant();
         var isPdf  = ct.Contains("pdf");
         var isDocx = ct.Contains("wordprocessingml") || ct.Contains("msword");
 
+        // Decoded text for non-PDF/DOCX attachments (null means use req.Content or doc API)
+        string? decodedAttachmentText = null;
+        if (!isPdf && !isDocx && req.SourceType == "attachment" && !string.IsNullOrEmpty(req.Base64Data))
+        {
+            try
+            {
+                decodedAttachmentText = Encoding.UTF8.GetString(Convert.FromBase64String(req.Base64Data));
+                _log.LogDebug("Decoded text attachment '{File}' ({Chars} chars)", req.FileName, decodedAttachmentText.Length);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("Cannot decode attachment '{File}' as UTF-8 text: {Err}", req.FileName, ex.Message);
+            }
+        }
+
+        // Build content array — PDF/DOCX use Claude's native document understanding
+        object userContent;
         if ((isPdf || isDocx) && !string.IsNullOrEmpty(req.Base64Data))
         {
             var mediaType = isPdf
@@ -93,13 +112,13 @@ public class ClaudeService
                 },
                 new {
                     type = "text",
-                    text = BuildUserText(req)
+                    text = BuildUserText(req, textContent: null)   // prompt + context only; doc carries the content
                 }
             };
         }
         else
         {
-            userContent = BuildUserText(req);
+            userContent = BuildUserText(req, textContent: decodedAttachmentText);
         }
 
         var body = new
@@ -145,7 +164,13 @@ public class ClaudeService
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
     }
 
-    private static string BuildUserText(ExtractRequest req)
+    /// <summary>
+    /// Builds the user-turn text for the Claude prompt.
+    /// <paramref name="textContent"/> overrides the default body/attachment content selection:
+    /// pass the decoded attachment text for non-PDF/DOCX attachments, or null to fall back to
+    /// req.Content (body path) or omit the content block (PDF/DOCX document API path).
+    /// </summary>
+    private static string BuildUserText(ExtractRequest req, string? textContent)
     {
         var sb = new StringBuilder();
         sb.AppendLine(ExtractionPrompt);
@@ -157,13 +182,21 @@ public class ClaudeService
             sb.AppendLine(req.BodyContext[..Math.Min(req.BodyContext.Length, 2000)]);
         }
 
-        if (req.SourceType == "body" || string.IsNullOrEmpty(req.Base64Data))
+        // Resolve what text to show in the content block:
+        //   - Explicit override (decoded text attachment)         → use it
+        //   - Body extraction or no base64 (EWS fallback path)   → use req.Content
+        //   - PDF/DOCX sent via document API (textContent=null)  → omit block; doc carries content
+        var content = textContent
+            ?? (req.SourceType == "body" || string.IsNullOrEmpty(req.Base64Data)
+                    ? req.Content ?? string.Empty
+                    : null);
+
+        if (content is not null)
         {
-            var text = req.Content ?? string.Empty;
             sb.AppendLine();
             sb.AppendLine("Content:");
             sb.AppendLine("---");
-            sb.AppendLine(text[..Math.Min(text.Length, 12_000)]);
+            sb.AppendLine(content[..Math.Min(content.Length, 12_000)]);
             sb.AppendLine("---");
         }
 
