@@ -93,6 +93,18 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/sp-test ─────────────────────────────────────────────────────
+    /// <summary>
+    /// Diagnoses SharePoint connectivity step by step.
+    /// <para><b>Development use only.</b> Remove or protect this endpoint before deploying to
+    /// production — it returns token audience, tenant ID, and site details.</para>
+    /// </summary>
+    [HttpGet("sp-test")]
+    public async Task<IActionResult> SpTest()
+    {
+        return Ok(await _sp.DiagnoseAsync());
+    }
+
     // ── GET /api/health ──────────────────────────────────────────────────────
     [HttpGet("health")]
     public IActionResult Health() =>

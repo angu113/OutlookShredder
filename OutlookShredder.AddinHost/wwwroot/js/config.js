@@ -15,8 +15,8 @@ export const CONFIG = {
     // Azure AD app registration (used for Graph API — SharePoint writes)
     // The Proxy uses its OWN client credentials for Claude.
     // The add-in uses MSAL interactive / SSO for Graph API.
-    AAD_CLIENT_ID: 'REPLACE_WITH_YOUR_CLIENT_ID',
-    AAD_TENANT_ID: 'REPLACE_WITH_YOUR_TENANT_ID',
+    AAD_CLIENT_ID: 'd996d907-e1f2-4028-b05a-4b575f0698c1',
+    AAD_TENANT_ID: '9826771f-a143-4d02-b286-cdd0c4c17ee6',
 
     // Graph API scopes needed by the add-in
     GRAPH_SCOPES: ['https://graph.microsoft.com/Sites.ReadWrite.All'],

@@ -12,3 +12,9 @@ secrets.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Claude Code
+.claude/

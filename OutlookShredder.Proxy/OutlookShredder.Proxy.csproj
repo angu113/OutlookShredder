@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>OutlookShredder.Proxy</RootNamespace>
+    <UserSecretsId>9f91eb69-7caf-41b3-aadb-5fbe0a2b2252</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>

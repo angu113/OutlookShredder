@@ -91,8 +91,11 @@ function n(v, pre='', suf='') {
 }
 
 function buildTable(rows, extracted) {
-  const wrap = document.createElement('div');
-  const sup  = extracted?.supplierName || '';
+  const wrap     = document.createElement('div');
+  // Product-level data comes from extracted.products[] (camelCase JSON from proxy).
+  // rows[] (SpWriteResult) provides the SharePoint write outcome for each product.
+  const products = extracted?.products || [];
+  const sup = extracted?.supplierName || '';
   if (sup || extracted?.dateOfQuote) {
     wrap.innerHTML = `<div class="sup-header"><strong>${sup || '&mdash;'}</strong>${extracted?.dateOfQuote ? ' &middot; Quote: ' + extracted.dateOfQuote : ''}${extracted?.estimatedDeliveryDate ? ' &middot; Delivery: ' + extracted.estimatedDeliveryDate : ''}</div>`;
   }
@@ -103,21 +106,22 @@ function buildTable(rows, extracted) {
     <th>Length</th><th>Weight</th><th>$/lb</th><th>$/ft</th><th>Comments</th><th></th>
   </tr></thead>`;
   const tb = document.createElement('tbody');
-  for (const row of rows) {
-    const f  = row.fields || {};
-    const tr = document.createElement('tr');
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const p   = products[i] || {};   // parallel index into extracted.products
+    const tr  = document.createElement('tr');
     if (!row.success) tr.className = 'err';
-    const len = f.LengthPerUnit != null ? `${f.LengthPerUnit}${f.LengthUnit ? ' '+f.LengthUnit : ''}` : null;
-    const wt  = f.WeightPerUnit != null ? `${f.WeightPerUnit}${f.WeightUnit ? ' '+f.WeightUnit : ''}` : null;
+    const len = p.lengthPerUnit != null ? `${p.lengthPerUnit}${p.lengthUnit ? ' '+p.lengthUnit : ''}` : null;
+    const wt  = p.weightPerUnit != null ? `${p.weightPerUnit}${p.weightUnit ? ' '+p.weightUnit : ''}` : null;
     tr.innerHTML = `
-      <td>${n(f.ProductName)}</td>
-      <td>${n(f.UnitsRequested)}</td>
-      <td>${n(f.UnitsQuoted)}</td>
+      <td>${n(p.productName)}</td>
+      <td>${n(p.unitsRequested)}</td>
+      <td>${n(p.unitsQuoted)}</td>
       <td>${n(len)}</td>
       <td>${n(wt)}</td>
-      <td>${f.PricePerPound != null ? '$'+Number(f.PricePerPound).toFixed(2) : '<span class="null-val">&mdash;</span>'}</td>
-      <td>${f.PricePerFoot  != null ? '$'+Number(f.PricePerFoot).toFixed(2)  : '<span class="null-val">&mdash;</span>'}</td>
-      <td class="comments" title="${f.SupplierProductComments||''}">${n(f.SupplierProductComments ? f.SupplierProductComments.slice(0,40)+(f.SupplierProductComments.length>40?'&hellip;':'') : null)}</td>
+      <td>${p.pricePerPound != null ? '$'+Number(p.pricePerPound).toFixed(2) : '<span class="null-val">&mdash;</span>'}</td>
+      <td>${p.pricePerFoot  != null ? '$'+Number(p.pricePerFoot).toFixed(2)  : '<span class="null-val">&mdash;</span>'}</td>
+      <td class="comments" title="${p.supplierProductComments||''}">${n(p.supplierProductComments ? p.supplierProductComments.slice(0,40)+(p.supplierProductComments.length>40?'&hellip;':'') : null)}</td>
       <td>${row.spWebUrl ? `<a href="${row.spWebUrl}" target="_blank" class="sp-link">&#x2197;</a>` : row.error ? `<span title="${row.error}" class="err-ico">&#x26A0;</span>` : ''}</td>
     `;
     tb.appendChild(tr);

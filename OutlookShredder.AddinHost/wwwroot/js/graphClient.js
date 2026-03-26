@@ -9,9 +9,11 @@
 
 import { CONFIG } from './config.js';
 
-const GRAPH   = 'https://graph.microsoft.com/v1.0';
-const SP_SITE = 'metalsupermarkets.sharepoint.com:/sites/hackensack';
-const SP_LIST = 'RFQLineItems';
+const GRAPH = 'https://graph.microsoft.com/v1.0';
+// Derive the Graph host:path selector from the configured SharePoint site URL.
+const _spUrl  = new URL(CONFIG.SP_SITE_URL);
+const SP_SITE = `${_spUrl.host}:${_spUrl.pathname}`;   // e.g. 'contoso.sharepoint.com:/sites/mysite'
+const SP_LIST = CONFIG.SP_LIST_NAME;
 
 let _accessToken = null;
 
@@ -46,17 +48,20 @@ export async function readSpItems(top = 200, filter = '') {
   const params = new URLSearchParams({ '$top': top, '$expand': 'fields', '$orderby': 'fields/ReceivedAt desc' });
   if (filter) params.set('$filter', filter);
 
-  const siteRes  = await fetch(`${GRAPH}/sites/${SP_SITE}`, { headers });
+  const siteRes = await fetch(`${GRAPH}/sites/${SP_SITE}`, { headers });
+  if (!siteRes.ok) throw new Error(`Graph site lookup failed (${siteRes.status})`);
   const siteData = await siteRes.json();
   const siteId   = siteData.id;
 
-  const listRes  = await fetch(
+  const listRes = await fetch(
     `${GRAPH}/sites/${siteId}/lists?$filter=displayName eq '${SP_LIST}'`, { headers });
+  if (!listRes.ok) throw new Error(`Graph list lookup failed (${listRes.status})`);
   const listData = await listRes.json();
   const listId   = listData.value?.[0]?.id;
   if (!listId) throw new Error(`List "${SP_LIST}" not found`);
 
-  const itemsRes  = await fetch(`${GRAPH}/sites/${siteId}/lists/${listId}/items?${params}`, { headers });
+  const itemsRes = await fetch(`${GRAPH}/sites/${siteId}/lists/${listId}/items?${params}`, { headers });
+  if (!itemsRes.ok) throw new Error(`Graph items fetch failed (${itemsRes.status})`);
   const itemsData = await itemsRes.json();
   return itemsData.value || [];
 }

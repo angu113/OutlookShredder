@@ -63,6 +63,16 @@ import { readSpItems } from '/js/graphClient.js';
 let allItems = [];
 let srcFilter = '';
 
+/** Escape a value for safe insertion into HTML text or attribute content. */
+function esc(v) {
+  if (v == null) return '';
+  return String(v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 window.load = async function () {
   document.getElementById('tbody').innerHTML = '<tr><td colspan="13" class="loading">Loading&hellip;</td></tr>';
   try {
@@ -81,7 +91,7 @@ function buildSupplierDropdown() {
   const suppliers = [...new Set(allItems.map(i => i.fields?.SupplierName).filter(Boolean))].sort();
   const current = sel.value;
   sel.innerHTML = '<option value="">All suppliers</option>' +
-    suppliers.map(s => `<option value="${s}"${s===current?' selected':''}>${s}</option>`).join('');
+    suppliers.map(s => `<option value="${esc(s)}"${s===current?' selected':''}>${esc(s)}</option>`).join('');
 }
 
 function renderStats() {
@@ -142,13 +152,13 @@ function renderRows(items) {
   tbody.innerHTML = items.map(item => {
     const f = item.fields || {};
     const isAtt = f.ProcessingSource === 'attachment';
-    return `<tr onclick="openModal(${JSON.stringify(JSON.stringify(f))})">
-      <td><span class="ref-chip">[${f.JobReference||'?'}]</span></td>
+    return `<tr onclick="openModal(${esc(JSON.stringify(JSON.stringify(f)))})">
+      <td><span class="ref-chip">[${esc(f.JobReference)||'?'}]</span></td>
       <td><span class="src-badge ${isAtt?'attach':'body'}">${isAtt?'&#x1F4CE;':'&#x1F4C4;'}</span></td>
-      <td class="ellipsis">${n(f.SupplierName)}</td>
+      <td class="ellipsis">${n(esc(f.SupplierName))}</td>
       <td class="nowrap">${fmtDate(f.DateOfQuote)}</td>
       <td class="nowrap">${fmtDate(f.EstimatedDeliveryDate)}</td>
-      <td class="ellipsis bold">${n(f.ProductName)}</td>
+      <td class="ellipsis bold">${n(esc(f.ProductName))}</td>
       <td class="right">${n(f.UnitsRequested)}</td>
       <td class="right">${n(f.UnitsQuoted)}</td>
       <td class="nowrap">${n(dim(f.LengthPerUnit, f.LengthUnit))}</td>
@@ -156,7 +166,7 @@ function renderRows(items) {
       <td class="mono right">${n(money(f.PricePerPound))}</td>
       <td class="mono right">${n(money(f.PricePerFoot))}</td>
       <td class="ellipsis muted">${f.SupplierProductComments
-        ? f.SupplierProductComments.slice(0,60)+(f.SupplierProductComments.length>60?'&hellip;':'')
+        ? esc(f.SupplierProductComments.slice(0,60))+(f.SupplierProductComments.length>60?'&hellip;':'')
         : '<span class="null-val">&mdash;</span>'}</td>
     </tr>`;
   }).join('');
@@ -164,32 +174,33 @@ function renderRows(items) {
 
 window.openModal = function(jsonStr) {
   const f = JSON.parse(jsonStr);
+  // Raw field values are HTML-escaped here; fmtDate/money/dim return safe HTML.
   const rows = [
-    ['Job Reference',          f.JobReference],
-    ['Supplier',               f.SupplierName],
+    ['Job Reference',          esc(f.JobReference)],
+    ['Supplier',               esc(f.SupplierName)],
     ['Date of Quote',          fmtDate(f.DateOfQuote)],
     ['Est. Delivery',          fmtDate(f.EstimatedDeliveryDate)],
-    ['Product',                f.ProductName],
+    ['Product',                esc(f.ProductName)],
     ['Units Requested',        f.UnitsRequested],
     ['Units Quoted',           f.UnitsQuoted],
     ['Length per Unit',        dim(f.LengthPerUnit, f.LengthUnit)],
     ['Weight per Unit',        dim(f.WeightPerUnit, f.WeightUnit)],
     ['Price per Pound',        money(f.PricePerPound)],
     ['Price per Foot',         money(f.PricePerFoot)],
-    ['Supplier Comments',      f.SupplierProductComments],
-    ['Source',                 f.ProcessingSource],
-    ['Source File',            f.SourceFile],
-    ['Email From',             f.EmailFrom],
+    ['Supplier Comments',      esc(f.SupplierProductComments)],
+    ['Source',                 esc(f.ProcessingSource)],
+    ['Source File',            esc(f.SourceFile)],
+    ['Email From',             esc(f.EmailFrom)],
     ['Received',               fmtDate(f.ReceivedAt)],
   ].filter(([,v]) => v != null && v !== '');
 
   document.getElementById('modal-content').innerHTML = `
     <div class="modal-header">
-      <span class="ref-chip">[${f.JobReference||'?'}]</span>
+      <span class="ref-chip">[${esc(f.JobReference)||'?'}]</span>
       <span class="src-badge ${f.ProcessingSource==='attachment'?'attach':'body'}">${f.ProcessingSource==='attachment'?'&#x1F4CE; Attachment':'&#x1F4C4; Body'}</span>
     </div>
-    <h3>${f.ProductName||'&mdash;'}</h3>
-    <div class="modal-sup">${f.SupplierName||'&mdash;'}</div>
+    <h3>${esc(f.ProductName)||'&mdash;'}</h3>
+    <div class="modal-sup">${esc(f.SupplierName)||'&mdash;'}</div>
     <table class="modal-table">
       ${rows.map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}
     </table>

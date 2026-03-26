@@ -133,6 +133,18 @@ public class SharePointService
             result.SpWebUrl = item.WebUrl;
             _log.LogInformation("[SP] Wrote row for product '{Name}' -> item {Id}", prodName, item.Id);
         }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataEx)
+        {
+            result.Success = false;
+            result.Error   = odataEx.Message;
+            _log.LogError("[SP] ODataError writing '{Name}': code={Code} message={Msg} inner={Inner}",
+                product.ProductName,
+                odataEx.Error?.Code,
+                odataEx.Error?.Message,
+                odataEx.Error?.InnerError?.AdditionalData != null
+                    ? string.Join(", ", odataEx.Error.InnerError.AdditionalData.Select(k => $"{k.Key}={k.Value}"))
+                    : "none");
+        }
         catch (Exception ex)
         {
             result.Success = false;
@@ -140,6 +152,79 @@ public class SharePointService
             _log.LogError(ex, "[SP] Failed to write row for product '{Name}'", product.ProductName);
         }
         return result;
+    }
+
+    // ── Diagnostics ──────────────────────────────────────────────────────────
+    public async Task<object> DiagnoseAsync()
+    {
+        var steps = new List<object>();
+        try
+        {
+            // Step 1: explicitly acquire a token so we know credentials are valid
+            steps.Add(new { step = "token", status = "trying" });
+            var tenantId     = _config["SharePoint:TenantId"]     ?? throw new Exception("SharePoint:TenantId not set");
+            var clientId     = _config["SharePoint:ClientId"]     ?? throw new Exception("SharePoint:ClientId not set");
+            var clientSecret = _config["SharePoint:ClientSecret"] ?? throw new Exception("SharePoint:ClientSecret not set");
+            var credential   = new Azure.Identity.ClientSecretCredential(tenantId, clientId, clientSecret);
+            var tokenCtx     = new Azure.Core.TokenRequestContext(["https://graph.microsoft.com/.default"]);
+            var token        = await credential.GetTokenAsync(tokenCtx);
+            // Decode token claims (middle JWT segment) without validating signature
+            var jwtParts  = token.Token.Split('.');
+            var claimsJson = jwtParts.Length > 1
+                ? System.Text.Encoding.UTF8.GetString(
+                    Convert.FromBase64String(jwtParts[1].PadRight((jwtParts[1].Length + 3) & ~3, '=')))
+                : "{}";
+            using var claimsDoc = System.Text.Json.JsonDocument.Parse(claimsJson);
+            var roles = claimsDoc.RootElement.TryGetProperty("roles", out var r) ? r.ToString() : "NONE";
+            var aud   = claimsDoc.RootElement.TryGetProperty("aud",   out var a) ? a.ToString() : "?";
+            var tid   = claimsDoc.RootElement.TryGetProperty("tid",   out var t) ? t.ToString() : "?";
+            steps[^1] = new { step = "token", status = "ok", expiresOn = token.ExpiresOn, aud, tid, roles };
+            var graph = GetGraph();
+
+            // Step 2: raw HTTP call to /sites/root so we see the exact response
+            steps.Add(new { step = "sites/root (raw)", status = "trying" });
+            using var http = new System.Net.Http.HttpClient();
+            http.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
+            var rawResp = await http.GetAsync("https://graph.microsoft.com/v1.0/sites/root");
+            var rawBody = await rawResp.Content.ReadAsStringAsync();
+            steps[^1] = new { step = "sites/root (raw)", status = ((int)rawResp.StatusCode).ToString(), body = rawBody };
+
+            if (!rawResp.IsSuccessStatusCode) return new { steps };
+
+            // Step 3: can we reach Graph /sites/root via SDK?
+            steps.Add(new { step = "sites/root", status = "trying" });
+            var root = await graph.Sites["root"].GetAsync();
+            steps[^1] = new { step = "sites/root", status = "ok", siteId = root?.Id, webUrl = root?.WebUrl };
+
+            // Step 4: can we resolve the configured site by host:path?
+            var siteUrl  = _config["SharePoint:SiteUrl"] ?? "https://metalsupermarkets.sharepoint.com/sites/hackensack";
+            var uri      = new Uri(siteUrl);
+            var siteKey  = $"{uri.Host}:{uri.AbsolutePath}";
+            steps.Add(new { step = $"sites/{siteKey}", status = "trying" });
+            var site = await graph.Sites[siteKey].GetAsync();
+            steps[^1] = new { step = $"sites/{siteKey}", status = "ok", siteId = site?.Id };
+
+            // Step 5: can we list lists on that site?
+            steps.Add(new { step = "list lookup", status = "trying" });
+            var listName = _config["SharePoint:ListName"] ?? "RFQLineItems";
+            var lists    = await graph.Sites[site!.Id!].Lists
+                .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+            var found = lists?.Value?.FirstOrDefault();
+            steps[^1] = new { step = "list lookup", status = found != null ? "ok" : "not_found",
+                              listId = found?.Id, listName };
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+        {
+            steps.Add(new { step = "error", code = ex.Error?.Code, message = ex.Error?.Message,
+                            inner = ex.Error?.InnerError?.AdditionalData?
+                                .Select(k => $"{k.Key}={k.Value}") });
+        }
+        catch (Exception ex)
+        {
+            steps.Add(new { step = "error", message = ex.Message });
+        }
+        return new { steps };
     }
 
     // ── Provision columns (run once) ─────────────────────────────────────────

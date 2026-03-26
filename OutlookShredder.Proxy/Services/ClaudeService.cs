@@ -15,7 +15,7 @@ public class ClaudeService
     private readonly ILogger<ClaudeService> _log;
     private readonly HttpClient _http;
 
-    private const string Model = "claude-sonnet-4-5";
+    private const string Model = "claude-sonnet-4-6";
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
 
     private const string ExtractionPrompt = """
@@ -159,10 +159,11 @@ public class ClaudeService
 
         if (req.SourceType == "body" || string.IsNullOrEmpty(req.Base64Data))
         {
+            var text = req.Content ?? string.Empty;
             sb.AppendLine();
             sb.AppendLine("Content:");
             sb.AppendLine("---");
-            sb.AppendLine(req.Content[..Math.Min(req.Content.Length, 12_000)]);
+            sb.AppendLine(text[..Math.Min(text.Length, 12_000)]);
             sb.AppendLine("---");
         }
 
