@@ -17,13 +17,15 @@ namespace OutlookShredder.Proxy.Services;
 ///   Mail:MailboxAddress       — UPN of the inbox to watch, e.g. "rfq@example.com"
 ///   Mail:PollIntervalSeconds  — how often to poll (default: 30)
 ///   Mail:LookbackHours        — rolling lookback window per poll (default: 24)
+///   Mail:MaxEmailsPerMinute   — max Claude API calls per minute (default: 5)
 /// </summary>
 public class MailPollerService : BackgroundService
 {
-    private readonly IConfiguration       _config;
-    private readonly MailService          _mail;
-    private readonly ClaudeService        _claude;
-    private readonly SharePointService    _sp;
+    private readonly IConfiguration            _config;
+    private readonly MailService               _mail;
+    private readonly ClaudeService             _claude;
+    private readonly SharePointService         _sp;
+    private readonly RfqNotificationService    _notifications;
     private readonly ILogger<MailPollerService> _log;
 
     private static readonly Regex JobRefRegex =
@@ -35,18 +37,38 @@ public class MailPollerService : BackgroundService
     private static readonly Regex WhitespaceRegex =
         new(@"\s{2,}", RegexOptions.Compiled);
 
+    // Sliding-window rate limiter — tracks timestamps of recent Claude calls.
+    private readonly Queue<DateTimeOffset> _claudeCallTimestamps = new();
+    private readonly SemaphoreSlim         _rateLimitLock        = new(1, 1);
+
+    // Signalled by TriggerReprocessAllAsync to request an immediate full scan.
+    private readonly SemaphoreSlim _reprocessTrigger = new(0, 1);
+
+    /// <summary>
+    /// Triggers an immediate full scan of all unprocessed inbox messages (no lookback limit).
+    /// Returns immediately; the scan runs on the background poller thread.
+    /// </summary>
+    public void TriggerReprocessAll()
+    {
+        // Release the semaphore (max 1 — extra calls are no-ops).
+        if (_reprocessTrigger.CurrentCount == 0)
+            _reprocessTrigger.Release();
+    }
+
     public MailPollerService(
-        IConfiguration          config,
-        MailService             mail,
-        ClaudeService           claude,
-        SharePointService       sp,
+        IConfiguration             config,
+        MailService                mail,
+        ClaudeService              claude,
+        SharePointService          sp,
+        RfqNotificationService     notifications,
         ILogger<MailPollerService> log)
     {
-        _config = config;
-        _mail   = mail;
-        _claude = claude;
-        _sp     = sp;
-        _log    = log;
+        _config        = config;
+        _mail          = mail;
+        _claude        = claude;
+        _sp            = sp;
+        _notifications = notifications;
+        _log           = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -56,32 +78,52 @@ public class MailPollerService : BackgroundService
                 "Mail:MailboxAddress is not configured. " +
                 "Add it to User Secrets or appsettings.Development.json.");
 
-        var intervalSeconds = int.TryParse(_config["Mail:PollIntervalSeconds"], out var s) ? s : 30;
-        var lookbackHours   = double.TryParse(_config["Mail:LookbackHours"], out var h) ? h : 24.0;
-        var interval        = TimeSpan.FromSeconds(intervalSeconds);
+        var intervalSeconds          = int.TryParse(_config["Mail:PollIntervalSeconds"],      out var s)  ? s          : 30;
+        var lookbackHours            = double.TryParse(_config["Mail:LookbackHours"],          out var h)  ? h          : 24.0;
+        var maxPerMinute             = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 30;
+        var bodyContextChars         = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc         : 2_000;
+        var extractBodyWithoutJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
+        var interval                 = TimeSpan.FromSeconds(intervalSeconds);
 
-        _log.LogInformation("[Mail] Poller started — mailbox={Mailbox} interval={Interval}s lookback={Lookback}h",
-            mailbox, intervalSeconds, lookbackHours);
+        _log.LogInformation(
+            "[Mail] Poller started — mailbox={Mailbox} interval={Interval}s lookback={Lookback}h rateLimit={Rate}/min extractBodyNoRef={ExtractNoRef}",
+            mailbox, intervalSeconds, lookbackHours, maxPerMinute, extractBodyWithoutJobRef);
 
+        bool firstCycle = true;
         while (!stoppingToken.IsCancellationRequested)
         {
-            var since = DateTimeOffset.UtcNow.AddHours(-lookbackHours);
+            // Full scan when: first cycle on startup OR triggered via TriggerReprocessAll().
+            // Subsequent regular cycles use the rolling lookback window.
+            bool fullScan = firstCycle || _reprocessTrigger.CurrentCount > 0;
+            if (fullScan && !firstCycle) await _reprocessTrigger.WaitAsync(stoppingToken);
+
+            var since = fullScan
+                ? DateTimeOffset.MinValue
+                : DateTimeOffset.UtcNow.AddHours(-lookbackHours);
+
+            if (fullScan)
+                _log.LogInformation("[Mail] {Reason} — scanning all unprocessed messages (no lookback limit)",
+                    firstCycle ? "Startup cycle" : "Triggered reprocess");
+
             try
             {
-                await PollAsync(mailbox, since, stoppingToken);
+                await PollAsync(mailbox, since, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, stoppingToken);
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
                 _log.LogError(ex, "[Mail] Poll cycle failed");
             }
 
+            firstCycle = false;
             await Task.Delay(interval, stoppingToken).ConfigureAwait(false);
         }
     }
 
     // ── Poll one cycle ────────────────────────────────────────────────────────
 
-    private async Task PollAsync(string mailbox, DateTimeOffset since, CancellationToken ct)
+    private async Task PollAsync(
+        string mailbox, DateTimeOffset since, int maxPerMinute,
+        int bodyContextChars, bool extractBodyWithoutJobRef, CancellationToken ct)
     {
         var messages = await _mail.GetMessagesAsync(mailbox, since);
 
@@ -96,13 +138,74 @@ public class MailPollerService : BackgroundService
         foreach (var msg in messages)
         {
             if (ct.IsCancellationRequested) break;
-            await ProcessMessageAsync(mailbox, msg, ct);
+            await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
+        }
+    }
+
+    // ── Rate limiter ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Waits until a Claude API call is allowed under the sliding-window rate limit.
+    /// Records the call timestamp so subsequent calls count against the same window.
+    /// </summary>
+    private async Task AcquireRateSlotAsync(int maxPerMinute, CancellationToken ct)
+    {
+        var window = TimeSpan.FromMinutes(1);
+
+        while (true)
+        {
+            await _rateLimitLock.WaitAsync(ct);
+            try
+            {
+                var now    = DateTimeOffset.UtcNow;
+                var cutoff = now - window;
+
+                // Evict timestamps older than one minute.
+                while (_claudeCallTimestamps.Count > 0 && _claudeCallTimestamps.Peek() <= cutoff)
+                    _claudeCallTimestamps.Dequeue();
+
+                if (_claudeCallTimestamps.Count < maxPerMinute)
+                {
+                    _claudeCallTimestamps.Enqueue(now);
+                    return;   // slot acquired
+                }
+
+                // Calculate exactly how long until the oldest call leaves the window.
+                var waitUntil = _claudeCallTimestamps.Peek() + window;
+                var precise   = waitUntil - now + TimeSpan.FromMilliseconds(50); // 50 ms buffer
+                _log.LogDebug("[Mail] Rate limit reached ({Max}/min) — waiting {Ms}ms", maxPerMinute, (int)precise.TotalMilliseconds);
+            }
+            finally
+            {
+                _rateLimitLock.Release();
+            }
+
+            // Sleep precisely until the next slot opens rather than a fixed back-off.
+            // Re-read under lock for accuracy; use a short minimum to avoid tight spin.
+            TimeSpan sleepFor;
+            await _rateLimitLock.WaitAsync(ct);
+            try
+            {
+                var now2   = DateTimeOffset.UtcNow;
+                var cutoff = now2 - window;
+                while (_claudeCallTimestamps.Count > 0 && _claudeCallTimestamps.Peek() <= cutoff)
+                    _claudeCallTimestamps.Dequeue();
+                sleepFor = _claudeCallTimestamps.Count >= maxPerMinute
+                    ? (_claudeCallTimestamps.Peek() + window - now2 + TimeSpan.FromMilliseconds(50))
+                    : TimeSpan.Zero;
+            }
+            finally { _rateLimitLock.Release(); }
+
+            if (sleepFor > TimeSpan.Zero)
+                await Task.Delay(sleepFor, ct);
         }
     }
 
     // ── Process one message ───────────────────────────────────────────────────
 
-    private async Task ProcessMessageAsync(string mailbox, Message msg, CancellationToken ct)
+    private async Task ProcessMessageAsync(
+        string mailbox, Message msg, int maxPerMinute,
+        int bodyContextChars, bool extractBodyWithoutJobRef, CancellationToken ct)
     {
         var subject  = msg.Subject ?? "(no subject)";
         var fromAddr = msg.From?.EmailAddress?.Address ?? "unknown";
@@ -118,33 +221,71 @@ public class MailPollerService : BackgroundService
             .Distinct()
             .ToList();
 
-        // Gate: skip emails without a [XXXXXX] job reference to avoid unnecessary Claude calls.
-        if (jobRefs.Count == 0)
+        // Decide whether to call Claude.
+        // Claude is always used when a job reference is present or there is an attachment
+        // (which may be a quote PDF/DOCX even without a reference in the body).
+        // Body-only emails with no job reference bypass Claude and get a direct placeholder row
+        // unless ExtractBodyWithoutJobRef is explicitly enabled in config.
+        bool hasJobRef    = jobRefs.Count > 0;
+        bool hasAttachment = msg.HasAttachments == true;
+        bool sendToClaude = hasJobRef || hasAttachment || extractBodyWithoutJobRef;
+
+        if (!hasJobRef && !hasAttachment)
+            _log.LogInformation("[Mail] No job ref or attachment in \"{Subject}\" from {From} — {Action}",
+                subject, fromAddr, sendToClaude ? "sending to Claude" : "writing direct row under [000000]");
+        else
+            _log.LogInformation("[Mail] Processing: \"{Subject}\" from {From} refs=[{Refs}] attachments={Att}",
+                subject, fromAddr, string.Join(", ", jobRefs), hasAttachment);
+
+        var bodySnippet = body[..Math.Min(body.Length, bodyContextChars)];
+
+        bool supplierUnknown = false;
+
+        if (!sendToClaude)
         {
-            _log.LogDebug("[Mail] No job reference in \"{Subject}\" — skipping extraction, marking processed", subject);
-            if (msg.Id is not null) await _mail.MarkProcessedAsync(mailbox, msg.Id);
-            return;
+            // Fast path: no job ref and no attachment — write a placeholder row directly
+            // without spending a Claude API call. SP will assign [000000] or [WHOIS] as appropriate.
+            var req = new ExtractRequest
+            {
+                Content      = string.Empty,
+                EmailBody    = body,
+                SourceType   = "body",
+                JobRefs      = jobRefs,
+                EmailSubject = subject,
+                EmailFrom    = fromAddr,
+                ReceivedAt   = received,
+            };
+            var extraction = new RfqExtraction();
+            var placeholder = new ProductLine
+            {
+                SupplierProductComments = "Email recorded without extraction — no job reference or quote attachment detected."
+            };
+            var row = await _sp.WriteProductRowAsync(extraction, placeholder, req, "body", null, 0);
+            supplierUnknown = row.SupplierUnknown;
+            if (row.Success) _notifications.NotifyRfqProcessed();
         }
-
-        _log.LogInformation("[Mail] Processing: \"{Subject}\" from {From} refs=[{Refs}]",
-            subject, fromAddr, string.Join(", ", jobRefs));
-
-        // 1. Extract from body
-        await RunExtractionAsync(new ExtractRequest
+        else if (!hasAttachment || msg.Id is null)
         {
-            Content       = body[..Math.Min(body.Length, 12_000)],
-            SourceType    = "body",
-            JobRefs       = jobRefs,
-            EmailSubject  = subject,
-            EmailFrom     = fromAddr,
-            ReceivedAt    = received,
-            HasAttachment = msg.HasAttachments ?? false,
-        }, "body", null);
-
-        // 2. Extract from PDF / DOCX attachments
-        if (msg.HasAttachments == true && !ct.IsCancellationRequested && msg.Id is not null)
+            // No attachments — extract pricing from body; always write at least one row.
+            supplierUnknown = await RunExtractionAsync(new ExtractRequest
+            {
+                Content       = body[..Math.Min(body.Length, 12_000)],
+                EmailBody     = body,
+                SourceType    = "body",
+                JobRefs       = jobRefs,
+                EmailSubject  = subject,
+                EmailFrom     = fromAddr,
+                ReceivedAt    = received,
+                HasAttachment = false,
+            }, "body", null, maxPerMinute, ct);
+        }
+        else
         {
+            // Has attachments — prefer attachment data for pricing; skip body-only extraction
+            // so only one row is written per email.  Body is stored in EmailBody column.
             var attachments = await _mail.GetAttachmentsAsync(mailbox, msg.Id);
+            bool processedAny = false;
+
             foreach (var att in attachments)
             {
                 if (ct.IsCancellationRequested) break;
@@ -157,58 +298,108 @@ public class MailPollerService : BackgroundService
 
                 if (fa.ContentBytes is null) continue;
 
-                await RunExtractionAsync(new ExtractRequest
+                supplierUnknown = await RunExtractionAsync(new ExtractRequest
                 {
                     Content      = string.Empty,
+                    EmailBody    = body,
                     SourceType   = "attachment",
                     FileName     = fa.Name,
                     ContentType  = fa.ContentType,
                     Base64Data   = Convert.ToBase64String(fa.ContentBytes),
-                    BodyContext  = body[..Math.Min(body.Length, 2_000)],
+                    BodyContext  = bodySnippet,
                     JobRefs      = jobRefs,
                     EmailSubject = subject,
                     EmailFrom    = fromAddr,
                     ReceivedAt   = received,
-                }, "attachment", fa.Name);
+                    HasAttachment = true,
+                }, "attachment", fa.Name, maxPerMinute, ct);
+
+                processedAny = true;
+            }
+
+            // No recognisable attachment format — fall back to body extraction.
+            if (!processedAny && !ct.IsCancellationRequested)
+            {
+                supplierUnknown = await RunExtractionAsync(new ExtractRequest
+                {
+                    Content       = body[..Math.Min(body.Length, 12_000)],
+                    EmailBody     = body,
+                    SourceType    = "body",
+                    JobRefs       = jobRefs,
+                    EmailSubject  = subject,
+                    EmailFrom     = fromAddr,
+                    ReceivedAt    = received,
+                    HasAttachment = true,
+                }, "body", null, maxPerMinute, ct);
             }
         }
 
-        if (msg.Id is not null) await _mail.MarkProcessedAsync(mailbox, msg.Id);
+        if (msg.Id is not null)
+        {
+            var extra = supplierUnknown ? "Unknown" : null;
+            if (supplierUnknown)
+                _log.LogInformation("[Mail] Supplier unrecognised in \"{Subject}\" — stamping 'Unknown' category", subject);
+            await _mail.MarkProcessedAsync(mailbox, msg.Id, extra);
+        }
     }
 
     // ── Claude → SharePoint ───────────────────────────────────────────────────
 
-    private async Task RunExtractionAsync(ExtractRequest req, string source, string? fileName)
+    // Returns true if the supplier was not found in the reference list.
+    private async Task<bool> RunExtractionAsync(
+        ExtractRequest req, string source, string? fileName, int maxPerMinute, CancellationToken ct)
     {
+        await AcquireRateSlotAsync(maxPerMinute, ct);
+
         try
         {
             var extraction = await _claude.ExtractAsync(req);
 
-            if (extraction is null || extraction.Products.Count == 0)
+            // Always write at least one row — even when nothing useful could be extracted —
+            // so every processed email has a visible record in SharePoint.
+            var products = extraction?.Products ?? [];
+            if (products.Count == 0)
             {
-                _log.LogInformation("[Mail] No products extracted from {Source}", source);
-                return;
+                products = [new ProductLine { SupplierProductComments = "No products could be extracted from this email." }];
+                extraction ??= new RfqExtraction();
+                _log.LogInformation("[Mail] No products extracted from {Source} — writing placeholder row", source);
+            }
+            else
+            {
+                _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
             }
 
-            _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}",
-                extraction.Products.Count, source);
+            // Write all product rows concurrently — each is an independent SP upsert.
+            var rows = await Task.WhenAll(
+                products.Select((p, i) => _sp.WriteProductRowAsync(extraction!, p, req, source, fileName, i)));
 
-            for (int i = 0; i < extraction.Products.Count; i++)
+            bool anyUnknown    = false;
+            bool anySuccessful = false;
+            for (int i = 0; i < rows.Length; i++)
             {
-                var row = await _sp.WriteProductRowAsync(
-                    extraction, extraction.Products[i], req, source, fileName, i);
-
-                if (row.Success)
-                    _log.LogInformation("[Mail] SP row written: '{Product}' -> {Url}",
-                        extraction.Products[i].ProductName, row.SpWebUrl);
+                var row = rows[i];
+                if (row.SupplierUnknown)
+                    anyUnknown = true;
+                else if (row.Success)
+                {
+                    anySuccessful = true;
+                    _log.LogInformation("[Mail] SP row {Action}: '{Product}' -> {Url}",
+                        row.Updated ? "updated" : "inserted", products[i].ProductName, row.SpWebUrl);
+                }
                 else
-                    _log.LogWarning("[Mail] SP write failed for '{Product}': {Error}",
-                        extraction.Products[i].ProductName, row.Error);
+                    _log.LogWarning("[Mail] SP upsert failed for '{Product}': {Error}",
+                        products[i].ProductName, row.Error);
             }
+
+            if (anySuccessful)
+                _notifications.NotifyRfqProcessed();
+
+            return anyUnknown;
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "[Mail] Extraction failed for {Source} ({File})", source, fileName ?? "body");
+            return false;
         }
     }
 }

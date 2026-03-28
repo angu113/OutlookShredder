@@ -59,6 +59,7 @@
 
 <script type="module">
 import { readSpItems } from '/js/graphClient.js';
+import { CONFIG }      from '/js/config.js';
 
 let allItems = [];
 let srcFilter = '';
@@ -178,6 +179,7 @@ window.openModal = function(jsonStr) {
   const rows = [
     ['Job Reference',          esc(f.JobReference)],
     ['Supplier',               esc(f.SupplierName)],
+    ['Quote Reference',        esc(f.QuoteReference)],
     ['Date of Quote',          fmtDate(f.DateOfQuote)],
     ['Est. Delivery',          fmtDate(f.EstimatedDeliveryDate)],
     ['Product',                esc(f.ProductName)],
@@ -187,12 +189,24 @@ window.openModal = function(jsonStr) {
     ['Weight per Unit',        dim(f.WeightPerUnit, f.WeightUnit)],
     ['Price per Pound',        money(f.PricePerPound)],
     ['Price per Foot',         money(f.PricePerFoot)],
+    ['Price per Piece',        money(f.PricePerPiece)],
+    ['Total Price',            money(f.TotalPrice)],
+    ['Lead Time',              esc(f.LeadTimeText)],
+    ['Certifications',         esc(f.Certifications)],
+    ['Freight Terms',          esc(f.FreightTerms)],
     ['Supplier Comments',      esc(f.SupplierProductComments)],
     ['Source',                 esc(f.ProcessingSource)],
     ['Source File',            esc(f.SourceFile)],
     ['Email From',             esc(f.EmailFrom)],
     ['Received',               fmtDate(f.ReceivedAt)],
   ].filter(([,v]) => v != null && v !== '');
+
+  const bodyHtml = f.EmailBody
+    ? `<div class="modal-body-section">
+        <div class="modal-body-label">Email Body</div>
+        <pre class="modal-body-text">${esc(f.EmailBody)}</pre>
+       </div>`
+    : '';
 
   document.getElementById('modal-content').innerHTML = `
     <div class="modal-header">
@@ -204,6 +218,7 @@ window.openModal = function(jsonStr) {
     <table class="modal-table">
       ${rows.map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}
     </table>
+    ${bodyHtml}
   `;
   document.getElementById('modal-overlay').style.display = 'flex';
 };
@@ -215,8 +230,13 @@ window.closeModal = function () {
 // Auto-load on page open
 load();
 
-// Auto-refresh every 30 seconds
+// Auto-refresh every 30 seconds (fallback in case the SSE connection drops)
 setInterval(load, 30_000);
+
+// SSE: reload immediately whenever the proxy writes a new RFQ row
+const _evtSource = new EventSource(`${CONFIG.PROXY_URL}/api/events`);
+_evtSource.addEventListener('rfq-processed', () => load());
+_evtSource.onerror = () => { /* browser reconnects automatically — suppress console noise */ };
 </script>
 </body>
 </html>

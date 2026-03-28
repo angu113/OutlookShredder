@@ -31,6 +31,12 @@ public class SpWriteResult
     /// <summary>Web URL to the SharePoint list item (used by the task pane link).</summary>
     public string? SpWebUrl    { get; set; }
 
+    /// <summary>True if an existing row was updated; false if a new row was inserted.</summary>
+    public bool    Updated         { get; set; }
+
+    /// <summary>True when the supplier name could not be matched to the reference list — no row was written.</summary>
+    public bool    SupplierUnknown { get; set; }
+
     /// <summary>Error message if Success is false.</summary>
-    public string? Error       { get; set; }
+    public string? Error           { get; set; }
 }

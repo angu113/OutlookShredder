@@ -15,21 +15,22 @@ public class ClaudeService
     private readonly ILogger<ClaudeService> _log;
     private readonly HttpClient _http;
 
-    private const string Model = "claude-sonnet-4-6";
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
 
     private const string ExtractionPrompt = """
-        You are extracting supplier quote data from an RFQ email or attachment.
+        You are extracting supplier quote data from a metals distribution RFQ email or attachment.
         Return ONLY a valid JSON object — no commentary, no markdown fences. Use null for absent fields.
 
         {
           "jobReference":          "6-character alphanumeric code from [XXXXXX] pattern, no brackets",
-          "supplierName":          "company or person providing the quote",
+          "quoteReference":        "supplier's own quote/reference number, e.g. 'QP60600', 'Q-2024-1234' — see QUOTE REFERENCE rules below",
+          "supplierName":          "company providing the quote — see SUPPLIER NAME rules below",
           "dateOfQuote":           "YYYY-MM-DD or null",
-          "estimatedDeliveryDate": "YYYY-MM-DD or null",
+          "estimatedDeliveryDate": "YYYY-MM-DD or null — derive from lead time if no specific date",
+          "freightTerms":          "verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included / null",
           "products": [
             {
-              "productName":              "product name as stated by supplier",
+              "productName":              "full spec — see PRODUCT NAME rules below",
               "unitsRequested":           number or null,
               "unitsQuoted":              number or null,
               "lengthPerUnit":            number or null,
@@ -38,23 +39,117 @@ public class ClaudeService
               "weightUnit":               "lb | kg | oz | g | null",
               "pricePerPound":            number or null,
               "pricePerFoot":             number or null,
-              "supplierProductComments":  "supplier notes for this product or null"
+              "pricePerPiece":            number or null,
+              "totalPrice":               number or null,
+              "leadTimeText":             "verbatim lead time as stated, e.g. '4-6 weeks ARO' or 'In Stock' or null",
+              "certifications":           "e.g. MTR Included / ASTM / AMS / Certified / null",
+              "supplierProductComments":  "all remaining notes — see COMMENTS rules below"
             }
           ]
         }
 
-        Rules:
-        - Every distinct product or material is a separate entry in products[].
-        - Prices are numbers only — no $ or currency symbols.
-        - If only one product, still return it inside the products array.
-        - supplierProductComments: capture availability, lead times, alternates, spec notes.
+        ── QUOTE REFERENCE ────────────────────────────────────────────────────────
+        The supplier's own internal reference number for this quote — distinct from the
+        [XXXXXX] job reference which belongs to Metal Supermarkets.
+        Look for: "Quote #", "Our Ref:", "Ref:", "Quote No.", "QP", "Q-", or similar
+        prefixes in the subject line, document header, or body.
+        Strip any prefix label — store only the reference value itself (e.g. "QP60600").
+        If no supplier quote reference is present, use null.
+
+        ── SUPPLIER NAME ──────────────────────────────────────────────────────────
+        Search in this priority order:
+        1. Company letterhead or quote header in the document/attachment.
+        2. The "From:" email address display name (company portion, not the person's name).
+        3. The email signature block (look for company name after the person's name/title).
+        4. If this is a forwarded email, identify the original quoting company, not the forwarder.
+        Use the company name only — not a person's first/last name.
+
+        ── PRODUCT NAME ───────────────────────────────────────────────────────────
+        Always build the product name to include ALL of the following that are present:
+        1. Material grade: 304, 316L, 6061-T6, A36, 1018, Grade 2 Ti, etc.
+        2. Product form: Flat Bar, Round Bar, Hex Bar, Angle, Channel, I-Beam, Round Tube,
+           Square Tube, Rect Tube, Pipe, Sheet, Plate, Coil, Round Rod, Strip.
+        3. ALL dimensions in the standard form for that product:
+           - Bar/Strip:  thickness × width (e.g. 3/16" × 2")
+           - Sheet/Plate: gauge or thickness × width × length (e.g. 11GA × 48" × 120")
+           - Tube/Pipe:  OD × wall thickness (e.g. 2" OD × 0.120" wall)
+           - Angle/Channel: leg × leg × thickness (e.g. 1-1/2" × 1-1/2" × 1/8")
+        4. Length (e.g. "20' random lengths", "cut to 36\"", "12' mill lengths").
+        5. Finish or condition if stated: 2B, #4, HR, CR, DOM, ERW, Annealed, T6.
+        Example: "316L Stainless Round Tube 2\" OD × 0.120\" wall × 20' ERW"
+
+        ── PRICING — work through ALL steps; leave a field null only if no path yields a value ──
+        Step 1 — Direct: use $/lb, $/ft, $/piece if stated outright.
+                  Also capture totalPrice directly if the document states a line total,
+                  extended price, amount, subtotal, or extended amount for the line.
+        Step 2 — $/cwt: if price is per hundred-weight (cwt), divide by 100 → $/lb.
+        Step 3 — $/kg: divide by 2.20462 → $/lb.
+        Step 4 — Unit price → $/lb: if pricePerPiece is known AND weightPerUnit is known,
+                  YOU MUST compute pricePerPound = pricePerPiece ÷ weightPerUnit (convert weight to lb first).
+                  Example: $61.75/pc ÷ 82 lb/pc = $0.7531/lb — always do this arithmetic.
+        Step 5 — Unit price → $/ft: if pricePerPiece is known AND lengthPerUnit is known,
+                  YOU MUST compute pricePerFoot = pricePerPiece ÷ lengthPerUnit (convert to ft first).
+        Step 6 — Total → $/lb: if totalPrice and total weight are derivable,
+                  YOU MUST compute pricePerPound = totalPrice ÷ (unitsQuoted × weightPerUnit).
+        Step 7 — Total → $/ft: if totalPrice and total length are derivable,
+                  YOU MUST compute pricePerFoot = totalPrice ÷ (unitsQuoted × lengthPerUnit in ft).
+        Step 8 — Compute line total (forward): after steps 1-7, if totalPrice is still null, derive it:
+          a. pricePerPiece × unitsQuoted                                              → totalPrice
+          b. pricePerFoot × unitsQuoted × lengthPerUnit (convert to ft first)         → totalPrice
+          c. pricePerPound × unitsQuoted × weightPerUnit (convert to lb first)        → totalPrice
+          Use the first applicable option in that order (piece price is most direct).
+        Prices are bare numbers — no $, commas, or currency symbols.
+
+        ── QUANTITIES ─────────────────────────────────────────────────────────────
+        - unitsRequested: pieces/bars/sheets asked for in the original RFQ.
+        - unitsQuoted: what the supplier can actually supply (may be less — "can supply 50 of 100").
+        - If the supplier gives no separate quantity, assume unitsQuoted = unitsRequested.
+
+        ── DATES ──────────────────────────────────────────────────────────────────
+        - dateOfQuote: the date the supplier issued this quote.
+        - estimatedDeliveryDate: when the material will arrive / be ready.
+          Look for fields labelled: "Delivery Date", "Due Date", "Ship Date",
+          "Lead Time", or "ARO" (After Receipt of Order).
+          !! DO NOT use "Quote Valid Until", "Expiry", "Valid Through", or any
+          quote-validity/expiry date — those describe how long the price is
+          guaranteed, not when the goods will be delivered.
+          Derivation rules (apply in priority order):
+            1. Specific calendar date stated → use it directly (YYYY-MM-DD).
+            2. Single lead time expressed in days (e.g. "10 days ARO", "5 days ARO")
+               → count that many BUSINESS DAYS (Mon–Fri, skip Sat/Sun) forward from
+               dateOfQuote (or today if dateOfQuote is unknown).
+               e.g. if today is Wednesday and lead time is 3 days ARO → Monday.
+            3. Single lead time expressed in weeks/months (e.g. "3 weeks ARO", "ships in 2 weeks")
+               → add that duration in calendar weeks/months to dateOfQuote / today.
+            4. Range lead time (e.g. "3-5 days ARO", "2-4 weeks")
+               → use the LONGEST end of the range (most conservative estimate):
+               "3-5 days ARO" → +5 business days; "2-4 weeks" → +4 calendar weeks.
+            5. No delivery information present → null.
+          ARO = After Receipt of Order; treat the receipt date as today / dateOfQuote.
+        - Always populate leadTimeText with the verbatim lead time string regardless.
+
+        ── MULTIPLE PRODUCTS ──────────────────────────────────────────────────────
+        Every distinct grade, form, size, or finish is a SEPARATE entry.
+        "1\" and 2\" flat bar" → two entries. "304 and 316 sheet" → two entries.
+
+        ── COMMENTS ───────────────────────────────────────────────────────────────
+        Capture in supplierProductComments: partial availability, alternates offered
+        ("can supply 316 instead of 304"), spec deviations, cut charges, surcharges,
+        minimum order quantities, certification details, freight notes, and any
+        dimension detail not already encoded in productName.
+
+        ── NO QUOTE FOUND ─────────────────────────────────────────────────────────
+        If the email is an acknowledgement, out-of-office, or clearly not a price quote,
+        return one entry with all numeric/date product fields null and explain in
+        supplierProductComments. Always return at least one entry in products[].
         """;
 
     public ClaudeService(IConfiguration config, ILogger<ClaudeService> log)
     {
         _config = config;
         _log    = log;
-        _http   = new HttpClient();
+        var timeoutSeconds = int.TryParse(_config["Claude:TimeoutSeconds"], out var t) ? t : 60;
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
     public async Task<RfqExtraction?> ExtractAsync(ExtractRequest req)
@@ -95,6 +190,9 @@ public class ClaudeService
             }
         }
 
+        var maxContentChars = int.TryParse(_config["Claude:MaxContentChars"], out var mcc) ? mcc : 12_000;
+        var maxContextChars = int.TryParse(_config["Claude:MaxContextChars"], out var mcx) ? mcx : 2_000;
+
         // Build content array — PDF/DOCX use Claude's native document understanding
         object userContent;
         if ((isPdf || isDocx) && !string.IsNullOrEmpty(req.Base64Data))
@@ -112,19 +210,22 @@ public class ClaudeService
                 },
                 new {
                     type = "text",
-                    text = BuildUserText(req, textContent: null)   // prompt + context only; doc carries the content
+                    text = BuildUserText(req, textContent: null, maxContentChars, maxContextChars)
                 }
             };
         }
         else
         {
-            userContent = BuildUserText(req, textContent: decodedAttachmentText);
+            userContent = BuildUserText(req, textContent: decodedAttachmentText, maxContentChars, maxContextChars);
         }
+
+        var model     = _config["Claude:Model"]     ?? "claude-sonnet-4-6";
+        var maxTokens = int.TryParse(_config["Claude:MaxTokens"], out var mt) ? mt : 2048;
 
         var body = new
         {
-            model      = Model,
-            max_tokens = 2048,
+            model      = model,
+            max_tokens = maxTokens,
             system     = systemPrompt,
             messages   = new[] { new { role = "user", content = userContent } }
         };
@@ -170,7 +271,8 @@ public class ClaudeService
     /// pass the decoded attachment text for non-PDF/DOCX attachments, or null to fall back to
     /// req.Content (body path) or omit the content block (PDF/DOCX document API path).
     /// </summary>
-    private static string BuildUserText(ExtractRequest req, string? textContent)
+    private static string BuildUserText(
+        ExtractRequest req, string? textContent, int maxContentChars, int maxContextChars)
     {
         var sb = new StringBuilder();
         sb.AppendLine(ExtractionPrompt);
@@ -179,7 +281,7 @@ public class ClaudeService
         {
             sb.AppendLine();
             sb.AppendLine("Email body context:");
-            sb.AppendLine(req.BodyContext[..Math.Min(req.BodyContext.Length, 2000)]);
+            sb.AppendLine(req.BodyContext[..Math.Min(req.BodyContext.Length, maxContextChars)]);
         }
 
         // Resolve what text to show in the content block:
@@ -196,7 +298,7 @@ public class ClaudeService
             sb.AppendLine();
             sb.AppendLine("Content:");
             sb.AppendLine("---");
-            sb.AppendLine(content[..Math.Min(content.Length, 12_000)]);
+            sb.AppendLine(content[..Math.Min(content.Length, maxContentChars)]);
             sb.AppendLine("---");
         }
 

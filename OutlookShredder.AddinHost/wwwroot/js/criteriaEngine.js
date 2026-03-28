@@ -87,6 +87,7 @@ export async function processItem(item) {
             contentType: payload.contentType,
             jobRefs,
             bodyContext: body.substring(0, 2000),
+            emailBody:   body,
             ...emailMeta,
             // EWS fallback fields (proxy uses these if base64Data is null)
             ewsToken: payload.ewsToken,
@@ -109,6 +110,7 @@ export async function processItem(item) {
       const res = await callProxy('extract', {
         content:    body.substring(0, 12000),
         sourceType: 'body',
+        emailBody:  body,
         jobRefs,
         ...emailMeta,
       });

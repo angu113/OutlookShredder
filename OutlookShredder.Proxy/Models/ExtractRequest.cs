@@ -26,6 +26,9 @@ public class ExtractRequest
     /// <summary>Short email body snippet — context when processing an attachment</summary>
     public string? BodyContext { get; set; }
 
+    /// <summary>Full email body text — stored in SharePoint alongside attachment data</summary>
+    public string? EmailBody { get; set; }
+
     // Email metadata (written straight to SharePoint alongside extracted fields)
     public string? EmailSubject    { get; set; }
     public string? EmailFrom       { get; set; }
