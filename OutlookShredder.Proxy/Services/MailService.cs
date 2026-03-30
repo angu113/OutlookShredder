@@ -80,7 +80,7 @@ public class MailService
         string emailFrom, DateTimeOffset receivedAt)
     {
         var messages = await FindMessagesAsync(emailFrom, receivedAt,
-            ["id", "subject", "body", "receivedDateTime"]);
+            ["id", "subject", "body", "receivedDateTime"], windowSeconds: 120);
 
         var msg = messages.FirstOrDefault();
         if (msg is null) return null;

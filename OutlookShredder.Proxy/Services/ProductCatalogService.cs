@@ -28,6 +28,9 @@ public class ProductCatalogService : BackgroundService
 
     private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens);
     private volatile IReadOnlyList<Entry> _cache = [];
+    public string? LastError    { get; private set; }
+    public string? LastDiag     { get; private set; }
+    public DateTime? LastRefreshAt { get; private set; }
 
     public ProductCatalogService(IConfiguration config, ILogger<ProductCatalogService> log)
     {
@@ -47,23 +50,28 @@ public class ProductCatalogService : BackgroundService
         }
     }
 
-    private async Task RefreshAsync()
+    public async Task RefreshAsync()
     {
         try
         {
-            var entries = await FetchEntriesAsync();
+            var (entries, diag) = await FetchEntriesAsync();
             _cache = entries.AsReadOnly();
+            LastError     = null;
+            LastDiag      = diag;
+            LastRefreshAt = DateTime.UtcNow;
             _log.LogInformation("[ProductCatalog] Cache refreshed — {Count} product(s) loaded", entries.Count);
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
+            LastDiag  = ex.ToString();
             _log.LogWarning(ex, "[ProductCatalog] Cache refresh failed — stale cache will be used");
         }
     }
 
     // ── Graph fetch ───────────────────────────────────────────────────────────
 
-    private async Task<List<Entry>> FetchEntriesAsync()
+    private async Task<(List<Entry> Entries, string Diag)> FetchEntriesAsync()
     {
         var graph = GetGraph();
 
@@ -74,43 +82,58 @@ public class ProductCatalogService : BackgroundService
 
         var site = await graph.Sites[siteKey].GetAsync();
         if (site?.Id is null)
-        {
-            _log.LogWarning("[ProductCatalog] Could not resolve site '{Key}'", siteKey);
-            return [];
-        }
+            throw new InvalidOperationException($"Site not found: '{siteKey}'");
 
         var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+
         var lists = await graph.Sites[site.Id].Lists
             .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
 
         var list = lists?.Value?.FirstOrDefault();
         if (list?.Id is null)
         {
-            _log.LogWarning("[ProductCatalog] List '{Name}' not found in site '{Key}'", listName, siteKey);
-            return [];
+            var allLists = await graph.Sites[site.Id].Lists
+                .GetAsync(r => r.QueryParameters.Select = ["displayName", "id"]);
+            var names = string.Join(", ", allLists?.Value?.Select(l => l.DisplayName ?? "?") ?? []);
+            throw new InvalidOperationException(
+                $"List '{listName}' not found. Available lists: [{names}]");
         }
 
         var items = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,SearchKey)"];
+                r.QueryParameters.Expand = ["fields"];
                 r.QueryParameters.Top    = 2000;
             });
 
-        return items?.Value?
+        var raw = items?.Value ?? [];
+        var firstFields = raw.Count > 0
+            ? string.Join(", ", raw[0].Fields?.AdditionalData?.Keys ?? [])
+            : "(no items)";
+
+        var diag = $"site={site.Id} list={list.Id} rawItems={raw.Count} firstFields=[{firstFields}]";
+
+        var entries = raw
             .Select(i =>
             {
                 var data = i.Fields?.AdditionalData;
                 if (data is null) return null;
-                var name = data.TryGetValue("Title",     out var t) ? t?.ToString() : null;
-                var key  = data.TryGetValue("SearchKey", out var k) ? k?.ToString() : null;
+                // Internal field names: "Product" (display: Product), "Product_x0020_SearchKey" (display: Product SearchKey).
+                // Fallback to "Title" in case the list is restructured.
+                var name = (data.TryGetValue("Product",                  out var p)  ? p  :
+                            data.TryGetValue("Title",                    out var tt) ? tt : null)
+                           ?.ToString();
+                var key  = (data.TryGetValue("Product_x0020_SearchKey",  out var sk) ? sk :
+                            data.TryGetValue("SearchKey",                out var k2) ? k2 : null)
+                           ?.ToString();
                 if (string.IsNullOrWhiteSpace(name)) return null;
                 return new Entry(name!, key, Tokenize(name!));
             })
             .Where(e => e is not null)
             .Select(e => e!)
-            .ToList()
-            ?? [];
+            .ToList();
+
+        return (entries, diag);
     }
 
     private GraphServiceClient GetGraph()
@@ -129,6 +152,11 @@ public class ProductCatalogService : BackgroundService
     /// <summary>
     /// Returns the best-matching catalog entry for <paramref name="rawName"/>, or
     /// <see langword="null"/> when the cache is empty or no match is found.
+    ///
+    /// Matching is done on non-dimension tokens only. Catalog entries use decimal
+    /// cross-section dimensions (0.375 X 5.000) while vendor descriptions use fractions
+    /// (3/8 x 5 x 144), so dimension tokens will never match across sources. Only grade
+    /// tokens (3+ digit pure numbers, e.g. 304, 6061) are used to block false matches.
     /// </summary>
     public (string Name, string? SearchKey)? ResolveProduct(string? rawName)
     {
@@ -138,51 +166,80 @@ public class ProductCatalogService : BackgroundService
         if (cache.Count == 0) return null;
 
         var vendorTokens = Tokenize(rawName);
+        var vendorNonDim = NonDimTokens(vendorTokens);
 
-        // Strategy 1: all catalog tokens are contained in the vendor description.
-        // Requires ≥ 2 catalog tokens so single-word entries don't match too broadly.
-        // Grade/numeric tokens must agree (no matching 304 catalog to a 316 vendor name).
+        // Strategy 1: containment with dim-overlap composite score.
+        //
+        // For each catalog entry:
+        //   • fraction = (# catalog non-dim tokens found in vendor non-dim tokens)
+        //                / (total catalog non-dim tokens)   — require ≥ 0.55 and ≥ 2 overlap tokens
+        //   • dimScore = fraction of catalog's individual dim-components (e.g. "0d375", "5d0")
+        //                that appear in vendor's dim-components (rewards correct size matches)
+        //   • composite = overlap_count × (1 + dimScore)
+        //
+        // Sorting by composite rather than fraction alone means a catalog entry with 4/7 tokens
+        // matching AND perfect dims beats one with 4/4 tokens but zero dim overlap.
+        // This is critical when catalog entries include surface-finish words (Mill Finish, Ornamental)
+        // that vendors omit, but share the same dimensions.
         Entry? bestContained = null;
-        int    bestCount     = 0;
+        double bestComposite = -1;
         foreach (var entry in cache)
         {
-            if (entry.Tokens.Count < 2) continue;
-            if (!entry.Tokens.IsSubsetOf(vendorTokens)) continue;
-            if (!NumericTokensCompatible(entry.Tokens, vendorTokens)) continue;
-            if (entry.Tokens.Count > bestCount)
+            var catalogNonDim = NonDimTokens(entry.Tokens);
+            if (catalogNonDim.Count < 2) continue;
+            if (!GradeTokensCompatible(catalogNonDim, vendorNonDim)) continue;
+            var overlap  = catalogNonDim.Count(t => vendorNonDim.Contains(t));
+            if (overlap < 2) continue;
+            var fraction = (double)overlap / catalogNonDim.Count;
+            if (fraction < 0.55) continue;
+            var dimScore  = DimOverlapFraction(entry.Tokens, vendorTokens);
+            var composite = overlap * (1.0 + dimScore);
+            if (composite > bestComposite)
             {
                 bestContained = entry;
-                bestCount     = entry.Tokens.Count;
+                bestComposite = composite;
             }
         }
 
         if (bestContained is not null)
         {
-            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (containment, {N} tokens)",
-                rawName, bestContained.Name, bestCount);
+            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (containment composite {Score:F2})",
+                rawName, bestContained.Name, bestComposite);
             return (bestContained.Name, bestContained.SearchKey);
         }
 
-        // Strategy 2: Jaccard ≥ 0.25 on non-dimension tokens, with grade agreement.
-        var vendorNonDim = NonDimTokens(vendorTokens);
-
+        // Strategy 2: Jaccard ≥ 0.30 on non-dimension tokens with grade agreement.
+        // Tiebreaker: dim-component overlap.
         var best = cache
-            .Where(e =>
+            .Select(e =>
             {
-                if (!NumericTokensCompatible(e.Tokens, vendorTokens)) return false;
                 var catalogNonDim = NonDimTokens(e.Tokens);
-                return Jaccard(catalogNonDim, vendorNonDim) >= 0.25;
+                if (!GradeTokensCompatible(catalogNonDim, vendorNonDim)) return default;
+                var jac = Jaccard(catalogNonDim, vendorNonDim);
+                if (jac < 0.30) return default;
+                var dim = DimOverlapFraction(e.Tokens, vendorTokens);
+                return (Entry: e, Jac: jac, Dim: dim);
             })
-            .Select(e => (Entry: e, Score: Jaccard(NonDimTokens(e.Tokens), vendorNonDim)))
-            .OrderByDescending(x => x.Score)
+            .Where(x => x.Entry is not null)
+            .OrderByDescending(x => x.Jac)
+            .ThenByDescending(x => x.Dim)
             .FirstOrDefault();
 
         if (best.Entry is not null)
         {
-            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (jaccard {Score:F2})",
-                rawName, best.Entry.Name, best.Score);
+            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (jaccard {Jac:F2}, dim {Dim:P0})",
+                rawName, best.Entry.Name, best.Jac, best.Dim);
             return (best.Entry.Name, best.Entry.SearchKey);
         }
+
+        // Log best candidate even on miss to aid diagnosis.
+        var top = cache
+            .Select(e => (Entry: e, Score: Jaccard(NonDimTokens(e.Tokens), vendorNonDim)))
+            .OrderByDescending(x => x.Score)
+            .FirstOrDefault();
+        if (top.Entry is not null)
+            _log.LogDebug("[ProductCatalog] No match for '{Raw}' — best '{Name}' jaccard {Score:F2}",
+                rawName, top.Entry.Name, top.Score);
 
         return null;
     }
@@ -195,11 +252,12 @@ public class ProductCatalogService : BackgroundService
     // Common abbreviation expansions so vendor shorthand matches catalog full names.
     private static readonly (Regex Pattern, string Replacement)[] _abbrevExpansions =
     [
-        (new Regex(@"\bss\b",   RegexOptions.IgnoreCase | RegexOptions.Compiled), "stainless"),
-        (new Regex(@"\bh\.?r\.?s\.?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "hotrolled"),
-        (new Regex(@"\bc\.?r\.?s\.?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "coldrolled"),
-        (new Regex(@"\b(?:al|alum)\b",  RegexOptions.IgnoreCase | RegexOptions.Compiled), "aluminum"),
-        (new Regex(@"\bcu\b",           RegexOptions.IgnoreCase | RegexOptions.Compiled), "copper"),
+        (new Regex(@"\bss\b",              RegexOptions.IgnoreCase | RegexOptions.Compiled), "stainless"),
+        (new Regex(@"\bh\.?r\.?s\.?\b",   RegexOptions.IgnoreCase | RegexOptions.Compiled), "hotrolled"),
+        (new Regex(@"\bc\.?r\.?s\.?\b",   RegexOptions.IgnoreCase | RegexOptions.Compiled), "coldrolled"),
+        (new Regex(@"\b(?:al|alum)\b",    RegexOptions.IgnoreCase | RegexOptions.Compiled), "aluminum"),
+        (new Regex(@"\bcu\b",             RegexOptions.IgnoreCase | RegexOptions.Compiled), "copper"),
+        (new Regex(@"\bsch(?:edule)?\b",  RegexOptions.IgnoreCase | RegexOptions.Compiled), "schedule"),
     ];
 
     // Reuse the same dimension-normalisation approach as SharePointService.
@@ -215,21 +273,65 @@ public class ProductCatalogService : BackgroundService
         // Expand abbreviations before anything else.
         foreach (var (pattern, replacement) in _abbrevExpansions)
             s = pattern.Replace(s, replacement);
-        // Dimension normalisation (mirrors SharePointService.PreprocessProduct).
+        // Convert fractions to their 3-decimal-place equivalents so they can be
+        // compared against catalog entries that use decimal notation (3/8 → 0.375).
+        s = _dimFraction.Replace(s, m =>
+        {
+            if (int.TryParse(m.Groups[1].Value, out var num) &&
+                int.TryParse(m.Groups[2].Value, out var den) && den != 0)
+                return ((double)num / den).ToString("F3");
+            return m.Value;
+        });
         s = _orLength.Replace(s, "");
         s = Regex.Replace(s, @"\brandom\s+lengths?\b|\bmill\s+lengths?\b|\bfull\s+lengths?\b|\blengths?\b", "");
-        s = _dimFraction.Replace(s, "$1f$2");
+        // Decimal → internal "XdY" form; strip trailing zeros (5.000 → 5d0, 0.375 → 0d375).
         s = _dimDecimal.Replace(s, "$1d$2");
         s = Regex.Replace(s, @"d(\d+)", m => { var stripped = m.Groups[1].Value.TrimEnd('0'); return "d" + (stripped.Length == 0 ? "0" : stripped); });
-        s = _dimSeparator.Replace(s, "$1x$2");
-        s = _dimSeparator.Replace(s, "$1x$2");
+        // Combine cross-section dimensions; bare integers are normalised to "Nd0" so
+        // a vendor's "5" and a catalog's "5.000" produce the same token (5d0).
+        s = _dimSeparator.Replace(s, m =>
+            $"{NormDimPart(m.Groups[1].Value)}x{NormDimPart(m.Groups[2].Value)}");
+        s = _dimSeparator.Replace(s, m =>
+            $"{NormDimPart(m.Groups[1].Value)}x{NormDimPart(m.Groups[2].Value)}");
         s = Regex.Replace(s, @"[""']", "");
         return _dimSplit.Split(s)
             .Where(t => t.Length > 1 || (t.Length == 1 && char.IsDigit(t[0])))
             .ToHashSet();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Normalises a single dimension group captured by <see cref="_dimSeparator"/>:
+    /// bare integers (no d/f/x suffix) get a "d0" suffix so "5" matches "5.000" → "5d0".
+    /// Already-processed tokens like "0d375" or "1d0x2d0" are returned unchanged.
+    /// </summary>
+    private static string NormDimPart(string t) =>
+        t.Length > 0 && t.All(char.IsDigit) ? t + "d0" : t;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Splits combined dimension tokens ("0d375x5d0x144d0") into their individual
+    /// components ("0d375", "5d0", "144d0") for proximity comparison.
+    /// </summary>
+    private static HashSet<string> DimComponents(HashSet<string> tokens) =>
+        tokens.Where(IsDimToken)
+              .SelectMany(t => t.Split('x'))
+              .Where(c => c.Length > 0)
+              .ToHashSet();
+
+    /// <summary>
+    /// Fraction of catalog dim-components found inside the vendor dim-components.
+    /// Used as a tiebreaker so "0.375 X 5.000" beats "0.125 X 0.500" when the
+    /// vendor says "3/8 x 5".  Returns 0 when either side has no dim tokens.
+    /// </summary>
+    private static double DimOverlapFraction(HashSet<string> catalogTokens, HashSet<string> vendorTokens)
+    {
+        var catDims = DimComponents(catalogTokens);
+        if (catDims.Count == 0) return 0;
+        var vendDims = DimComponents(vendorTokens);
+        if (vendDims.Count == 0) return 0;
+        return (double)catDims.Count(c => vendDims.Contains(c)) / catDims.Count;
+    }
 
     // A "dimension" token contains a digit plus one of the compound separators (x, f, d).
     private static bool IsDimToken(string t) =>
@@ -246,29 +348,30 @@ public class ProductCatalogService : BackgroundService
         return union == 0 ? 0 : (double)intersection / union;
     }
 
+    // Common metal stock lengths in inches (multiples of 12, 10 ft – 44 ft).
+    // These look like grade numbers (3+ digits) but are measurements, not material grades.
+    private static readonly HashSet<string> _commonLengths =
+        Enumerable.Range(10, 35).Select(i => (i * 12).ToString()).ToHashSet();
+
     /// <summary>
-    /// Returns true when the numeric tokens in both sets are compatible:
-    /// grade-only tokens must be subsets of each other; dimension tokens must agree when both sides have them.
+    /// A "grade" token is a purely-numeric token with ≥ 3 digits that is NOT a common stock
+    /// length (e.g. 304, 316, 1018, 6061 are grades; 120, 144, 240, 288 are lengths and excluded).
     /// </summary>
-    private static bool NumericTokensCompatible(HashSet<string> a, HashSet<string> b)
+    private static bool IsGradeToken(string t) =>
+        t.All(char.IsDigit) && t.Length >= 3 && !_commonLengths.Contains(t);
+
+    /// <summary>
+    /// Returns false only when both token sets contain grade tokens that don't overlap
+    /// (e.g. 304 vs 316). If only one side specifies a grade, the match is allowed.
+    /// Dimension tokens are intentionally not checked here — the catalog uses decimal
+    /// dimensions and vendor descriptions use fractions, so they never compare equal.
+    /// </summary>
+    private static bool GradeTokensCompatible(HashSet<string> a, HashSet<string> b)
     {
-        var numA = a.Where(t => t.Any(char.IsDigit)).ToHashSet();
-        var numB = b.Where(t => t.Any(char.IsDigit)).ToHashSet();
-        var dimA = numA.Where(IsDimToken).ToHashSet();
-        var dimB = numB.Where(IsDimToken).ToHashSet();
-
-        if (dimA.Count > 0 && dimB.Count > 0)
-        {
-            if (!dimA.SetEquals(dimB)) return false;
-            var gradeA = numA.Where(t => !IsDimToken(t)).ToHashSet();
-            var gradeB = numB.Where(t => !IsDimToken(t)).ToHashSet();
-            return gradeA.IsSubsetOf(gradeB) || gradeB.IsSubsetOf(gradeA);
-        }
-
-        if (dimA.Count > 0) return false;   // A has dims, B doesn't — block
-
-        var gA = numA.Where(t => !IsDimToken(t)).ToHashSet();
-        var gB = numB.Where(t => !IsDimToken(t)).ToHashSet();
-        return gA.IsSubsetOf(gB) || gB.IsSubsetOf(gA);
+        var gradeA = a.Where(IsGradeToken).ToHashSet();
+        var gradeB = b.Where(IsGradeToken).ToHashSet();
+        if (gradeA.Count > 0 && gradeB.Count > 0)
+            return gradeA.Overlaps(gradeB);
+        return true;
     }
 }
