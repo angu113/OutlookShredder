@@ -28,6 +28,8 @@ builder.Services.AddControllers();
 builder.Services.AddSingleton<ClaudeService>();
 builder.Services.AddSingleton<SupplierCacheService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());
+builder.Services.AddSingleton<ProductCatalogService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
 builder.Services.AddSingleton<SharePointService>();
 builder.Services.AddSingleton<MailService>();
 builder.Services.AddSingleton<RfqNotificationService>();

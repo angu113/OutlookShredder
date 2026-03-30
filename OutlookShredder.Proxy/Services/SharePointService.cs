@@ -16,18 +16,21 @@ public class SharePointService
 {
     private readonly IConfiguration _config;
     private readonly ILogger<SharePointService> _log;
-    private readonly SupplierCacheService _suppliers;
+    private readonly SupplierCacheService  _suppliers;
+    private readonly ProductCatalogService _catalog;
 
     private GraphServiceClient?       _graph;
     private ClientSecretCredential?   _spCredential;
     private string? _siteId;
     private string? _listId;
 
-    public SharePointService(IConfiguration config, ILogger<SharePointService> log, SupplierCacheService suppliers)
+    public SharePointService(IConfiguration config, ILogger<SharePointService> log,
+        SupplierCacheService suppliers, ProductCatalogService catalog)
     {
         _config    = config;
         _log       = log;
         _suppliers = suppliers;
+        _catalog   = catalog;
     }
 
     // ── Graph client (lazy init) ─────────────────────────────────────────────
@@ -191,6 +194,13 @@ public class SharePointService
             var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
             var prodTokens = ProductTokens(prodName);
 
+            // Fuzzy-match against the product catalog. Falls back to null (vendor's description used by dashboard).
+            var catalogMatch   = _catalog.ResolveProduct(prodName);
+            var catalogName    = catalogMatch?.Name;
+            var catalogKey     = catalogMatch?.SearchKey;
+            if (catalogName is not null && !string.Equals(catalogName, prodName, StringComparison.OrdinalIgnoreCase))
+                _log.LogDebug("[SP] Product '{Raw}' → catalog '{Catalog}'", prodName, catalogName);
+
             var title = $"[{jobRef}] {supplier} - {prodName}";
             title = title[..Math.Min(title.Length, 255)];
 
@@ -222,6 +232,8 @@ public class SharePointService
                 ["LeadTimeText"]            = product.LeadTimeText,
                 ["Certifications"]          = product.Certifications,
                 ["SupplierProductComments"] = product.SupplierProductComments,
+                ["CatalogProductName"]      = catalogName,
+                ["ProductSearchKey"]        = catalogKey,
                 ["EmailBody"]               = emailMeta.EmailBody is not null
                     ? emailMeta.EmailBody[..Math.Min(emailMeta.EmailBody.Length,
                           int.TryParse(_config["SharePoint:MaxEmailBodyChars"], out var mebc) ? mebc : 10_000)]
@@ -676,6 +688,8 @@ public class SharePointService
             ("Certifications",         "text"),
             ("FreightTerms",           "text"),
             ("SupplierProductComments","note"),
+            ("CatalogProductName",     "text"),
+            ("ProductSearchKey",       "text"),
             ("EmailBody",              "note"),
         };
 
