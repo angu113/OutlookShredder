@@ -440,6 +440,26 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/rfq-import/line-items-lookup ────────────────────────────────
+    /// <summary>
+    /// Returns all RFQ Line Items (RFQ_ID, MSPC, Product) for the Shredder dashboard header display.
+    /// </summary>
+    [HttpGet("rfq-import/line-items-lookup")]
+    public async Task<IActionResult> GetRfqLineItemsLookup()
+    {
+        try
+        {
+            var items  = await _sp.ReadAllRfqLineItemsAsync();
+            var result = items.Select(x => new { rfqId = x.RfqId, mspc = x.Mspc, product = x.Product, units = x.Units, sizeOfUnits = x.SizeOfUnits }).ToList();
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetRfqLineItemsLookup failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── POST /api/rfq-import/line-items ──────────────────────────────────────
     /// <summary>Batch-creates RFQ Line Item rows.</summary>
     [HttpPost("rfq-import/line-items")]
@@ -453,6 +473,27 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "CreateRfqLineItems failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq-import/dedupe-references ───────────────────────────────
+    /// <summary>
+    /// Removes duplicate RFQ Reference rows (same RFQ_ID), keeping the entry with Notes
+    /// (or oldest if all blank).  Safe to call at any time.
+    /// </summary>
+    [HttpPost("rfq-import/dedupe-references")]
+    public async Task<IActionResult> DedupeRfqReferences()
+    {
+        try
+        {
+            var deleted = await _sp.DedupeRfqReferencesAsync();
+            _log.LogInformation("[Dedupe] Removed {Count} duplicate RFQ Reference(s)", deleted);
+            return Ok(new { deleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DedupeRfqReferences failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }

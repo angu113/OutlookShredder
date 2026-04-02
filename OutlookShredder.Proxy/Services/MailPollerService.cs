@@ -31,11 +31,17 @@ public class MailPollerService : BackgroundService
     private static readonly Regex JobRefRegex =
         new(@"\[([A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex HtmlLineBreakRegex =
+        new(@"<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex HtmlTagRegex =
         new(@"<[^>]+>", RegexOptions.Compiled);
 
-    private static readonly Regex WhitespaceRegex =
-        new(@"\s{2,}", RegexOptions.Compiled);
+    private static readonly Regex HorizontalWhitespaceRegex =
+        new(@"[ \t]{2,}", RegexOptions.Compiled);
+
+    private static readonly Regex ExcessiveNewlineRegex =
+        new(@"\n{3,}", RegexOptions.Compiled);
 
     // Sliding-window rate limiter — tracks timestamps of recent Claude calls.
     private readonly Queue<DateTimeOffset> _claudeCallTimestamps = new();
@@ -213,8 +219,18 @@ public class MailPollerService : BackgroundService
 
         var rawBody = msg.Body?.Content ?? string.Empty;
         if (msg.Body?.ContentType == BodyType.Html)
+        {
+            rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
             rawBody = HtmlTagRegex.Replace(rawBody, " ");
-        var body = WhitespaceRegex.Replace(rawBody, " ").Trim();
+            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+            rawBody = HorizontalWhitespaceRegex.Replace(rawBody, " ");
+            rawBody = ExcessiveNewlineRegex.Replace(rawBody, "\n\n");
+        }
+        else
+        {
+            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+        }
+        var body = rawBody.Trim();
 
         var jobRefs = JobRefRegex.Matches(subject + " " + body)
             .Select(m => m.Groups[1].Value.ToUpperInvariant())

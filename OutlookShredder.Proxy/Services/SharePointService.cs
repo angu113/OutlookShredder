@@ -328,20 +328,24 @@ public class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var result = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(r =>
+        // Fetch all refs client-side — OData filter on unindexed columns is unreliable
+        // and was causing duplicate rows to be created on every note save.
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
             {
-                r.QueryParameters.Filter = $"fields/{col} eq '{EscapeOdata(rfqId)}'";
-                r.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                r.QueryParameters.Top    = 5;
-                r.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
+                req.QueryParameters.Top    = 500;
             });
 
-        var item = result?.Value?.FirstOrDefault();
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            rfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
-        if (item is null)
+        if (matches.Count == 0)
         {
-            // RFQ came in via supplier email, not the import tab — create the row on first note save.
             _log.LogInformation("[SP] RFQ Reference '{Id}' not found — creating it", rfqId);
             await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem
@@ -350,8 +354,8 @@ public class SharePointService
                     {
                         AdditionalData = new Dictionary<string, object?>
                         {
-                            [col]      = rfqId,
-                            ["Notes"]  = notes,
+                            [col]     = rfqId,
+                            ["Notes"] = notes,
                         }
                     }
                 });
@@ -359,13 +363,72 @@ public class SharePointService
             return;
         }
 
-        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id!].Fields
+        // Update the primary entry.
+        var primary = matches[0];
+        await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
             .PatchAsync(new FieldValueSet
             {
                 AdditionalData = new Dictionary<string, object?> { ["Notes"] = notes }
             });
-
         _log.LogInformation("[SP] Updated Notes for RFQ '{Id}'", rfqId);
+
+        // Delete any duplicate entries found alongside the primary.
+        foreach (var dupe in matches.Skip(1))
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[dupe.Id!].DeleteAsync();
+            _log.LogWarning("[SP] Deleted duplicate RFQ Reference '{Id}' (item {ItemId})", rfqId, dupe.Id);
+        }
+    }
+
+    /// <summary>
+    /// Removes duplicate RFQ Reference rows (same RFQ_ID).
+    /// Keeps the entry with Notes (if any), otherwise the oldest item.
+    /// Returns the number of rows deleted.
+    /// </summary>
+    public async Task<int> DedupeRfqReferencesAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col},Notes)"];
+                req.QueryParameters.Top    = 1000;
+            });
+
+        var groups = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i => new
+            {
+                Item  = i,
+                RfqId = i.Fields!.AdditionalData!.TryGetValue(col,      out var v) ? v?.ToString() : null,
+                Notes = i.Fields!.AdditionalData!.TryGetValue("Notes",  out var n) ? n?.ToString() : null,
+            })
+            .Where(x => x.RfqId is not null)
+            .GroupBy(x => x.RfqId!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .ToList();
+
+        int deleted = 0;
+        foreach (var group in groups)
+        {
+            // Keep: prefer entry with notes, then smallest numeric item ID (oldest).
+            var ordered = group
+                .OrderByDescending(x => x.Notes?.Length > 0 ? 1 : 0)
+                .ThenBy(x => int.TryParse(x.Item.Id, out var n) ? n : int.MaxValue)
+                .ToList();
+
+            foreach (var dupe in ordered.Skip(1))
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[dupe.Item.Id!].DeleteAsync();
+                _log.LogWarning("[SP] Dedupe: deleted duplicate RFQ Reference '{Id}' (item {ItemId})",
+                    group.Key, dupe.Item.Id);
+                deleted++;
+            }
+        }
+        return deleted;
     }
 
     // ── RFQ Import: read / write RFQ References + RFQ Line Items ────────────
@@ -413,9 +476,15 @@ public class SharePointService
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        // Use whichever column name the list accepts (probe once, cache result).
-        var col = await ResolveRfqIdColumnAsync(siteId, listId);
+        // Server-side guard: skip if already exists (prevents race-condition duplicates).
+        var existing = await GetExistingRfqIdsAsync();
+        if (existing.Contains(req.RfqId))
+        {
+            _log.LogInformation("[SP] RFQ Reference '{Id}' already exists — skipping create", req.RfqId);
+            return;
+        }
 
         await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new ListItem
@@ -433,6 +502,45 @@ public class SharePointService
             });
 
         _log.LogInformation("[SP] Created RFQ Reference '{Id}'", req.RfqId);
+    }
+
+    /// <summary>
+    /// Returns all rows from the RFQ Line Items list.
+    /// Used by the Shredder dashboard to display requested items under each RFQ group header.
+    /// </summary>
+    public async Task<List<(string RfqId, string? Mspc, string? Product, double? Units, string? SizeOfUnits)>> ReadAllRfqLineItemsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var result = new List<(string, string?, string?, double?, string?)>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is null) continue;
+            var d = item.Fields.AdditionalData;
+            string? id = d.TryGetValue(col,            out var v0) ? v0?.ToString()
+                       : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                       : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                       : null;
+            if (string.IsNullOrEmpty(id)) continue;
+            var mspc    = d.TryGetValue("MSPC",        out var vm) ? vm?.ToString() : null;
+            var product = d.TryGetValue("Product",     out var vp) ? vp?.ToString() : null;
+            var size    = d.TryGetValue("SizeOfUnits", out var vs) ? vs?.ToString() : null;
+            double? units = null;
+            if (d.TryGetValue("Units", out var vu) && vu is double du) units = du;
+            else if (vu is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.Number)
+                units = je.GetDouble();
+            result.Add((id, mspc, product, units, size));
+        }
+        return result;
     }
 
     /// <summary>Creates one row per entry in <paramref name="items"/> in the RFQ Line Items list.</summary>
@@ -1254,7 +1362,7 @@ public class SharePointService
             .Where(i => i.Fields?.AdditionalData is not null)
             .Select(i => i.Fields!.AdditionalData!
                 .Where(kv => IsAppField(kv.Key))
-                .ToDictionary(kv => kv.Key, kv => kv.Value))
+                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value))
             .ToList()
             ?? [];
     }
