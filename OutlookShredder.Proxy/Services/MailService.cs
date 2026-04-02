@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
 
@@ -20,6 +21,10 @@ public class MailService
     private GraphServiceClient? _graph;
 
     private const string ProcessedCategory = "RFQ-Processed";
+
+    private static readonly Regex _rfqSubjectRegex = new(
+        @"^RFQ\s+\[([A-Za-z0-9]+)\]",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex _htmlTag    = new(@"<[^>]+>",  RegexOptions.Compiled);
     private static readonly Regex _whitespace = new(@"\s{2,}",   RegexOptions.Compiled);
@@ -41,6 +46,78 @@ public class MailService
         var credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
         _graph = new GraphServiceClient(credential, ["https://graph.microsoft.com/.default"]);
         return _graph;
+    }
+
+    // ── RFQ Import: scan a named folder ──────────────────────────────────────
+
+    /// <summary>
+    /// Scans a named mail folder in <paramref name="mailbox"/> and returns raw email
+    /// data for all messages whose subject matches "RFQ [JobNo]".
+    /// Shredder parses the body locally into line items.
+    /// </summary>
+    public async Task<List<RfqScanEmailDto>> ScanRfqFolderAsync(string mailbox, string folderName)
+    {
+        // Resolve folder ID from display name.
+        var folders = await GetGraph().Users[mailbox].MailFolders
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Filter = $"displayName eq '{folderName}'";
+                req.QueryParameters.Select = ["id", "displayName"];
+            });
+
+        var folder = folders?.Value?.FirstOrDefault()
+            ?? throw new InvalidOperationException(
+                $"Folder \"{folderName}\" not found in mailbox {mailbox}. " +
+                "Create the folder in Outlook and copy RFQ sent emails into it.");
+
+        // Fetch messages — no subject filter in Graph OData (not supported for mailFolders),
+        // so we filter client-side with the subject regex.
+        var messages = await GetGraph().Users[mailbox].MailFolders[folder.Id!].Messages
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Select  = ["subject", "sender", "toRecipients",
+                                               "ccRecipients", "sentDateTime", "body"];
+                req.QueryParameters.Top     = 500;
+                req.QueryParameters.Orderby = ["sentDateTime desc"];
+            });
+
+        var result = new List<RfqScanEmailDto>();
+
+        foreach (var msg in messages?.Value ?? [])
+        {
+            var subject = msg.Subject ?? "";
+            var m = _rfqSubjectRegex.Match(subject);
+            if (!m.Success) continue;
+
+            var rfqId = m.Groups[1].Value.ToUpperInvariant();
+
+            var requester = mailbox;
+            var senderName = msg.Sender?.EmailAddress?.Name;
+            if (!string.IsNullOrWhiteSpace(senderName)) requester = senderName;
+
+            var recipients = new List<string>();
+            foreach (var r in msg.ToRecipients ?? [])
+                if (r.EmailAddress?.Address is string a) recipients.Add(a);
+            foreach (var r in msg.CcRecipients ?? [])
+                if (r.EmailAddress?.Address is string a) recipients.Add(a);
+
+            var bodyText    = msg.Body?.Content ?? "";
+            var contentType = msg.Body?.ContentType == BodyType.Html ? "html" : "text";
+
+            result.Add(new RfqScanEmailDto
+            {
+                RfqId           = rfqId,
+                Subject         = subject,
+                SentAt          = msg.SentDateTime?.UtcDateTime ?? DateTime.UtcNow,
+                Requester       = requester,
+                EmailRecipients = string.Join("\n", recipients),
+                MailboxSource   = mailbox,
+                BodyText        = bodyText,
+                ContentType     = contentType,
+            });
+        }
+
+        return result;
     }
 
     /// <summary>

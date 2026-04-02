@@ -86,11 +86,27 @@ public class ExtractController : ControllerBase
         });
     }
 
-    // ── POST /api/setup-columns ──────────────────────────────────────────────
+    // ── POST /api/setup-supplier-lists ───────────────────────────────────────
     /// <summary>
-    /// Provisions all required columns on the RFQLineItems SharePoint list.
-    /// Run once after creating the blank list. Safe to re-run.
+    /// Creates and provisions SupplierResponses and SupplierLineItems lists.
+    /// Safe to re-run — skips columns that already exist.
     /// </summary>
+    [HttpPost("setup-supplier-lists")]
+    public async Task<IActionResult> SetupSupplierLists()
+    {
+        try
+        {
+            var results = await _sp.EnsureSupplierListsAsync();
+            return Ok(new { success = true, lists = results });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
+    // ── POST /api/setup-columns ──────────────────────────────────────────────
+    /// <summary>Legacy — provisions the old RFQ Line Items list. Kept for recovery.</summary>
     [HttpPost("setup-columns")]
     public async Task<IActionResult> SetupColumns()
     {
@@ -119,21 +135,63 @@ public class ExtractController : ControllerBase
 
     // ── GET /api/items ────────────────────────────────────────────────────────
     /// <summary>
-    /// Returns all RFQLineItems for the dashboard.
-    /// Uses server-side app credentials — no browser auth token required.
-    /// Each item is a flat field dictionary matching the SharePoint column names.
+    /// Returns SupplierLineItems merged with their parent SupplierResponses fields.
+    /// Shape is flat field dictionaries compatible with the Shredder dashboard DTO.
     /// </summary>
     [HttpGet("items")]
     public async Task<IActionResult> GetItems([FromQuery] int top = 500)
     {
         try
         {
-            var items = await _sp.ReadItemsAsync(top);
+            var items = await _sp.ReadSupplierItemsAsync(top);
             return Ok(items);
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "Failed to read SharePoint items");
+            _log.LogError(ex, "Failed to read supplier items");
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-references ───────────────────────────────────────────────
+    /// <summary>
+    /// Returns RFQ References records (RFQ_ID + Notes) for the dashboard header display.
+    /// </summary>
+    [HttpGet("rfq-references")]
+    public async Task<IActionResult> GetRfqReferences()
+    {
+        try
+        {
+            var refs = await _sp.ReadRfqReferencesAsync();
+            return Ok(refs);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to read RFQ References");
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
+    // ── PATCH /api/rfq-references/notes ──────────────────────────────────────
+    /// <summary>
+    /// Updates the Notes field on a single RFQ Reference.
+    /// Body: { "notes": "..." }
+    /// </summary>
+    [HttpPatch("rfq-references/notes")]
+    public async Task<IActionResult> UpdateRfqNotes(
+        [FromQuery] string rfqId,
+        [FromBody]  RfqNotesRequest body)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId query param is required" });
+        try
+        {
+            await _sp.UpdateRfqNotesAsync(rfqId, body.Notes ?? "");
+            return Ok(new { updated = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to update Notes for RFQ '{Id}'", rfqId);
             return StatusCode(500, new { success = false, error = ex.Message });
         }
     }
@@ -192,6 +250,34 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "GetMailAttachment failed for from={From} file={File}", from, filename);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/sp-attachment ────────────────────────────────────────────────
+    /// <summary>
+    /// Returns a PDF/attachment stored directly on a SupplierResponses SP list item.
+    /// Preferred over /api/mail/attachment — does not require mailbox search.
+    /// </summary>
+    [HttpGet("sp-attachment")]
+    public async Task<IActionResult> GetSpAttachment(
+        [FromQuery] string srId,
+        [FromQuery] string filename)
+    {
+        if (string.IsNullOrWhiteSpace(srId) || string.IsNullOrWhiteSpace(filename))
+            return BadRequest(new { error = "srId and filename are required" });
+
+        try
+        {
+            var result = await _sp.GetSpItemAttachmentAsync(srId, filename);
+            if (result is null)
+                return NotFound(new { error = $"Attachment '{filename}' not found on SR item {srId}." });
+
+            return File(result.Value.Bytes, result.Value.ContentType, result.Value.FileName);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetSpAttachment failed for srId={SrId} file={File}", srId, filename);
             return StatusCode(500, new { error = ex.Message });
         }
     }
@@ -291,6 +377,103 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "[Mail] Reset failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-import/scan ─────────────────────────────────────────────
+    /// <summary>
+    /// Scans a named mail folder in the given mailbox and returns raw email data
+    /// (subject, body, recipients) for all "RFQ [JobNo]" messages.
+    /// Shredder parses line items locally.
+    /// </summary>
+    [HttpGet("rfq-import/scan")]
+    public async Task<IActionResult> ScanRfqFolder(
+        [FromQuery] string mailbox,
+        [FromQuery] string folder = "RFQOut")
+    {
+        if (string.IsNullOrWhiteSpace(mailbox))
+            return BadRequest(new { error = "mailbox query param is required" });
+        try
+        {
+            var emails = await _mail.ScanRfqFolderAsync(mailbox, folder);
+            return Ok(emails);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ScanRfqFolder failed for {Mailbox}/{Folder}", mailbox, folder);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-import/existing-ids ─────────────────────────────────────
+    /// <summary>Returns the set of RFQ_ID values already in the RFQ References list.</summary>
+    [HttpGet("rfq-import/existing-ids")]
+    public async Task<IActionResult> GetExistingRfqIds()
+    {
+        try
+        {
+            var ids = await _sp.GetExistingRfqIdsAsync();
+            return Ok(ids.ToArray());
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetExistingRfqIds failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq-import/reference ───────────────────────────────────────
+    /// <summary>Creates one RFQ Reference row. No-op check is the caller's responsibility.</summary>
+    [HttpPost("rfq-import/reference")]
+    public async Task<IActionResult> CreateRfqReference([FromBody] RfqReferenceRequest req)
+    {
+        try
+        {
+            await _sp.CreateRfqReferenceAsync(req);
+            return Ok(new { created = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "CreateRfqReference failed for '{Id}'", req.RfqId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq-import/line-items ──────────────────────────────────────
+    /// <summary>Batch-creates RFQ Line Item rows.</summary>
+    [HttpPost("rfq-import/line-items")]
+    public async Task<IActionResult> CreateRfqLineItems([FromBody] List<RfqLineItemRequest> items)
+    {
+        try
+        {
+            await _sp.CreateRfqLineItemsAsync(items);
+            return Ok(new { created = items.Count });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "CreateRfqLineItems failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── DELETE /api/rfq-import/clean ─────────────────────────────────────────
+    /// <summary>
+    /// Deletes all rows from SupplierResponses and SupplierLineItems.
+    /// Does not touch RFQ References (notes/dates).
+    /// </summary>
+    [HttpDelete("rfq-import/clean")]
+    public async Task<IActionResult> CleanSupplierData()
+    {
+        try
+        {
+            var (srDeleted, sliDeleted) = await _sp.CleanSupplierDataAsync();
+            _log.LogWarning("[Clean] Deleted {Sr} SupplierResponses and {Sli} SupplierLineItems", srDeleted, sliDeleted);
+            return Ok(new { srDeleted, sliDeleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "CleanSupplierData failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }
