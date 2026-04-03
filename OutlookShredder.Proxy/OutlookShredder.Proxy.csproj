@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>OutlookShredder.Proxy</RootNamespace>
     <UserSecretsId>9f91eb69-7caf-41b3-aadb-5fbe0a2b2252</UserSecretsId>
-    <Version>2026.40</Version>
+    <Version>2026.43</Version>
   </PropertyGroup>
 
   <ItemGroup>

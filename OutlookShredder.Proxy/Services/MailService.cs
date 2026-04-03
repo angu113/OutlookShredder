@@ -22,8 +22,21 @@ public class MailService
 
     private const string ProcessedCategory = "RFQ-Processed";
 
+    // Job numbers are always auto-generated as uppercase alphanumeric (e.g. "RFQ [A1B2C3]").
+    // Do NOT broaden this pattern — the strict format is intentional and guaranteed by the generator.
     private static readonly Regex _rfqSubjectRegex = new(
         @"^RFQ\s+\[([A-Za-z0-9]+)\]",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Strips leading reply/forward prefixes (RE:, FW:, FWD:) that Outlook adds when
+    // emails are forwarded into the RFQOut folder. Handles nested prefixes e.g. "RE: FW: RFQ [...]".
+    private static readonly Regex _subjectPrefixRegex = new(
+        @"^(RE|FW|FWD)\s*:\s*",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Strips [EXTERNAL], [EXT], [CAUTION] etc. added by email security gateways.
+    private static readonly Regex _externalTagRegex = new(
+        @"^\[.*?\]\s*",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex _htmlTag    = new(@"<[^>]+>",  RegexOptions.Compiled);
@@ -70,9 +83,9 @@ public class MailService
                 $"Folder \"{folderName}\" not found in mailbox {mailbox}. " +
                 "Create the folder in Outlook and copy RFQ sent emails into it.");
 
-        // Fetch messages — no subject filter in Graph OData (not supported for mailFolders),
-        // so we filter client-side with the subject regex.
-        var messages = await GetGraph().Users[mailbox].MailFolders[folder.Id!].Messages
+        // Fetch all messages across pages — Graph OData subject filter is not supported
+        // on mailFolders, so we fetch all and filter client-side with the subject regex.
+        var firstPage = await GetGraph().Users[mailbox].MailFolders[folder.Id!].Messages
             .GetAsync(req =>
             {
                 req.QueryParameters.Select  = ["subject", "sender", "toRecipients",
@@ -81,13 +94,57 @@ public class MailService
                 req.QueryParameters.Orderby = ["sentDateTime desc"];
             });
 
+        var allMessages = new List<Microsoft.Graph.Models.Message>();
+        var pageIterator = Microsoft.Graph.PageIterator<
+                Microsoft.Graph.Models.Message,
+                Microsoft.Graph.Models.MessageCollectionResponse>
+            .CreatePageIterator(GetGraph(), firstPage!, msg => { allMessages.Add(msg); return true; });
+        await pageIterator.IterateAsync();
+
         var result = new List<RfqScanEmailDto>();
 
-        foreach (var msg in messages?.Value ?? [])
+        _log.LogInformation("[RFQ Scan] {Mailbox}/{Folder}: {Total} messages fetched",
+            mailbox, folderName, allMessages.Count);
+
+        foreach (var msg in allMessages)
         {
-            var subject = msg.Subject ?? "";
+            var rawSubject = msg.Subject ?? "";
+            var sentAt     = msg.SentDateTime?.ToString("yyyy-MM-dd HH:mm") ?? "unknown";
+            var sender     = msg.Sender?.EmailAddress?.Address ?? "unknown";
+
+            // Strip any leading RE:/FW:/FWD: prefixes and [EXTERNAL]/[EXT]/[CAUTION] gateway
+            // tags before matching. Loop handles combinations e.g. "RE: [EXTERNAL] RFQ [...]".
+            var subject = rawSubject;
+            bool stripped;
+            do
+            {
+                stripped = false;
+                if (_subjectPrefixRegex.IsMatch(subject)) { subject = _subjectPrefixRegex.Replace(subject, "", 1); stripped = true; }
+                if (_externalTagRegex.IsMatch(subject))   { subject = _externalTagRegex.Replace(subject, "", 1);   stripped = true; }
+            }
+            while (stripped);
+
             var m = _rfqSubjectRegex.Match(subject);
-            if (!m.Success) continue;
+
+            if (!m.Success)
+            {
+                // Diagnose why the subject didn't match: help identify format variations.
+                string reason;
+                if (string.IsNullOrWhiteSpace(subject))
+                    reason = "empty subject";
+                else if (!subject.StartsWith("RFQ", StringComparison.OrdinalIgnoreCase))
+                    reason = $"does not start with 'RFQ' (starts with '{subject[..Math.Min(20, subject.Length)]}')";
+                else if (!subject.Contains('['))
+                    reason = "missing '[' — expected format: RFQ [JOBNO]";
+                else if (!subject.Contains(']'))
+                    reason = "missing ']' — expected format: RFQ [JOBNO]";
+                else
+                    reason = $"subject has '[...]' but content doesn't match [A-Za-z0-9]+ — actual: '{subject}'";
+
+                _log.LogWarning("[RFQ Scan] SKIP | {Sent} | {Sender} | Subject: {Subject} | Reason: {Reason}",
+                    sentAt, sender, rawSubject, reason);
+                continue;
+            }
 
             var rfqId = m.Groups[1].Value.ToUpperInvariant();
 
