@@ -317,7 +317,7 @@ public class SharePointService
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete)"];
                 req.QueryParameters.Top    = 500;
             });
 
@@ -340,6 +340,7 @@ public class SharePointService
                     ["Requester"]        = FieldStr(d, "Requester"),
                     ["DateCreated"]      = d.TryGetValue("DateCreated", out var dc) ? dc : null,
                     ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
+                    ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
                 };
             })
             .Where(d => d["RFQ_ID"] is not null)
@@ -405,6 +406,43 @@ public class SharePointService
             await GetGraph().Sites[siteId].Lists[listId].Items[dupe.Id!].DeleteAsync();
             _log.LogWarning("[SP] Deleted duplicate RFQ Reference '{Id}' (item {ItemId})", rfqId, dupe.Id);
         }
+    }
+
+    // ── Write: update Complete flag on an RFQ Reference ────────────────────────
+
+    public async Task SetRfqCompleteAsync(string rfqId, bool complete)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
+                req.QueryParameters.Top    = 500;
+            });
+
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            rfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            _log.LogWarning("[SP] SetRfqCompleteAsync: RFQ Reference '{Id}' not found", rfqId);
+            return;
+        }
+
+        var primary = matches[0];
+        await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Complete"] = complete }
+            });
+        _log.LogInformation("[SP] Set Complete={Complete} for RFQ '{Id}'", complete, rfqId);
     }
 
     /// <summary>

@@ -204,6 +204,29 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/rfq-references/complete ───────────────────────────────────
+    /// <summary>
+    /// Sets the Complete boolean on a single RFQ Reference.
+    /// </summary>
+    [HttpPatch("rfq-references/complete")]
+    public async Task<IActionResult> SetRfqComplete(
+        [FromQuery] string rfqId,
+        [FromQuery] bool   complete)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId query param is required" });
+        try
+        {
+            await _sp.SetRfqCompleteAsync(rfqId, complete);
+            return Ok(new { updated = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to set Complete for RFQ '{Id}'", rfqId);
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
     // ── GET /api/mail/body ────────────────────────────────────────────────────
     /// <summary>
     /// Returns the plain-text body and subject of the email identified by sender address
