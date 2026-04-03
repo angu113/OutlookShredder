@@ -217,6 +217,14 @@ public class MailPollerService : BackgroundService
         var fromAddr = msg.From?.EmailAddress?.Address ?? "unknown";
         var received = msg.ReceivedDateTime?.ToString("o") ?? DateTime.UtcNow.ToString("o");
 
+        // Attach email context to every log line emitted while processing this message.
+        using var logScope = _log.BeginScope(new Dictionary<string, object?>
+        {
+            ["EmailSubject"] = subject,
+            ["EmailFrom"]    = fromAddr,
+            ["MessageId"]    = msg.Id,
+        });
+
         var rawBody = msg.Body?.Content ?? string.Empty;
         if (msg.Body?.ContentType == BodyType.Html)
         {

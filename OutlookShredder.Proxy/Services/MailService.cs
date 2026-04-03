@@ -217,7 +217,11 @@ public class MailService
             ["id", "subject", "body", "receivedDateTime"], windowSeconds: 120);
 
         var msg = messages.FirstOrDefault();
-        if (msg is null) return null;
+        if (msg is null)
+        {
+            _log.LogWarning("[Mail] GetBodyAsync: no message found for {From} near {At} (±2 min)", emailFrom, receivedAt);
+            return null;
+        }
 
         // Return the raw body content — Shredder's CleanBody handles HTML stripping
         // and entity decoding so structure (paragraphs, line breaks) is preserved.
@@ -271,6 +275,7 @@ public class MailService
             return (fa.ContentType ?? "application/octet-stream", fa.ContentBytes, fa.Name ?? filename);
         }
 
+        _log.LogWarning("[Mail] GetAttachmentAsync: '{File}' not found for {From} near {At} (±10 min)", filename, emailFrom, receivedAt);
         return null;
     }
 

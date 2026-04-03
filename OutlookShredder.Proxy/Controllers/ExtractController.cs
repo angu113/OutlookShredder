@@ -153,6 +153,14 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/supplier-domains ────────────────────────────────────────────
+    /// <summary>
+    /// Returns a map of { emailDomain → canonicalSupplierName } sourced directly
+    /// from the ContactEmail column of the Suppliers SharePoint list.
+    /// </summary>
+    [HttpGet("supplier-domains")]
+    public IActionResult GetSupplierDomains() => Ok(_suppliers.DomainMap);
+
     // ── GET /api/rfq-references ───────────────────────────────────────────────
     /// <summary>
     /// Returns RFQ References records (RFQ_ID + Notes) for the dashboard header display.

@@ -24,7 +24,7 @@ public class SupplierCacheService : BackgroundService
     private GraphServiceClient? _graph;
 
     // Pre-tokenised entries for lock-free reads — reference swap is atomic.
-    private sealed record Entry(string Name, HashSet<string> Tokens);
+    private sealed record Entry(string Name, HashSet<string> Tokens, string? EmailDomain);
     private volatile IReadOnlyList<Entry> _cache = [];
 
     public SupplierCacheService(IConfiguration config, ILogger<SupplierCacheService> log)
@@ -50,13 +50,10 @@ public class SupplierCacheService : BackgroundService
     {
         try
         {
-            var names = await FetchNamesAsync();
-            _cache = names
-                .Select(n => new Entry(n, Tokenize(n)))
-                .ToList()
-                .AsReadOnly();
+            var entries = await FetchEntriesAsync();
+            _cache = entries.AsReadOnly();
 
-            _log.LogInformation("[Suppliers] Cache refreshed — {Count} supplier(s) loaded", names.Count);
+            _log.LogInformation("[Suppliers] Cache refreshed — {Count} supplier(s) loaded", entries.Count);
         }
         catch (Exception ex)
         {
@@ -66,7 +63,7 @@ public class SupplierCacheService : BackgroundService
 
     // ── Graph fetch ───────────────────────────────────────────────────────────
 
-    private async Task<List<string>> FetchNamesAsync()
+    private async Task<List<Entry>> FetchEntriesAsync()
     {
         var graph = GetGraph();
 
@@ -96,16 +93,32 @@ public class SupplierCacheService : BackgroundService
         var items = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title)"];
+                r.QueryParameters.Expand = ["fields($select=Title,ContactEmail)"];
                 r.QueryParameters.Top    = 1000;
             });
 
         return items?.Value?
-            .Select(i => i.Fields?.AdditionalData != null && i.Fields.AdditionalData.TryGetValue("Title", out var t) ? t?.ToString() : null)
-            .Where(n => !string.IsNullOrWhiteSpace(n))
-            .Select(n => n!)
+            .Where(i => i.Fields?.AdditionalData != null)
+            .Select(i =>
+            {
+                var d = i.Fields!.AdditionalData!;
+                var name  = d.TryGetValue("Title",        out var t) ? t?.ToString() : null;
+                var email = d.TryGetValue("ContactEmail", out var e) ? e?.ToString() : null;
+                if (string.IsNullOrWhiteSpace(name)) return null;
+                var domain = ExtractDomain(email);
+                return new Entry(name, Tokenize(name), domain);
+            })
+            .Where(e => e is not null)
+            .Select(e => e!)
             .ToList()
             ?? [];
+    }
+
+    private static string? ExtractDomain(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        var at = email.IndexOf('@');
+        return at >= 0 ? email[(at + 1)..].ToLowerInvariant() : null;
     }
 
     private GraphServiceClient GetGraph()
@@ -171,6 +184,16 @@ public class SupplierCacheService : BackgroundService
 
     /// <summary>Exposes the current cached supplier names (for API/dashboard use).</summary>
     public IReadOnlyList<string> CachedNames => _cache.Select(e => e.Name).ToList().AsReadOnly();
+
+    /// <summary>
+    /// Returns a map of email domain → canonical supplier name, built from the
+    /// ContactEmail column of the Suppliers list.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> DomainMap =>
+        _cache
+            .Where(e => e.EmailDomain is not null)
+            .GroupBy(e => e.EmailDomain!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.OrdinalIgnoreCase);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

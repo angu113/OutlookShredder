@@ -277,6 +277,32 @@ public class SharePointService
             result.Add(row);
         }
 
+        // ── Deduplicate by (SupplierResponseId, normalised ProductName) ──────
+        // Guards against duplicate SLI rows in SharePoint (e.g. from a failed
+        // lookup on non-indexed fields writing the same product twice with minor
+        // name differences).  Keep the row with the most populated fields.
+        static string NormProd(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return "";
+            s = s.Trim().ToLowerInvariant();
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"(?<!\d)\.(\d)", "0.$1");
+            return System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+        }
+
+        result = result
+            .GroupBy(r => (
+                SrId: r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
+                Prod: NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null)
+            ))
+            .Select(g =>
+            {
+                if (g.Count() == 1) return g.First();
+                _log.LogWarning("[SP] Dedup: {Count} SLI rows with SrId={SrId} product='{Prod}' — keeping most-populated",
+                    g.Count(), g.Key.SrId, g.Key.Prod);
+                return g.OrderByDescending(r => r.Count(kv => kv.Value is not null)).First();
+            })
+            .ToList();
+
         return result;
     }
 
@@ -291,7 +317,7 @@ public class SharePointService
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients)"];
                 req.QueryParameters.Top    = 500;
             });
 
@@ -308,11 +334,12 @@ public class SharePointService
                          ?? FieldStr(d, "RFQ_ID");
                 return new Dictionary<string, object?>
                 {
-                    ["Id"]          = i.Id,
-                    ["RFQ_ID"]      = rfqId,
-                    ["Notes"]       = FieldStr(d, "Notes"),
-                    ["Requester"]   = FieldStr(d, "Requester"),
-                    ["DateCreated"] = d.TryGetValue("DateCreated", out var dc) ? dc : null,
+                    ["Id"]               = i.Id,
+                    ["RFQ_ID"]           = rfqId,
+                    ["Notes"]            = FieldStr(d, "Notes"),
+                    ["Requester"]        = FieldStr(d, "Requester"),
+                    ["DateCreated"]      = d.TryGetValue("DateCreated", out var dc) ? dc : null,
+                    ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
                 };
             })
             .Where(d => d["RFQ_ID"] is not null)
@@ -671,7 +698,7 @@ public class SharePointService
                 }
                 catch (Exception ex)
                 {
-                    _log.LogWarning(ex, "[SP] Attachment upload failed for SR {Id} ('{File}')", srId, emailMeta.FileName);
+                    _log.LogError(ex, "[SP] Attachment upload FAILED for SR {Id} ('{File}') — quote PDF will be missing from SharePoint", srId, emailMeta.FileName);
                 }
             }
 
@@ -835,19 +862,24 @@ public class SharePointService
         string siteId, string listId,
         string supplierResponseId, string productName, HashSet<string> productTokens)
     {
+        // Fetch all SLI rows and filter in memory.
+        // Using an OData filter on the non-indexed SupplierResponseId field causes
+        // "HonorNonIndexedQueriesWarningMayFailRandomly" failures that silently return
+        // empty results, causing duplicate rows to be written.
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Filter = $"fields/SupplierResponseId eq '{EscapeOdata(supplierResponseId)}'";
                 r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName)"];
-                r.QueryParameters.Top    = 100;
-                r.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+                r.QueryParameters.Top    = 2000;
             });
 
         var match = result?.Value?.FirstOrDefault(i =>
         {
             var d = i.Fields?.AdditionalData;
             if (d is null) return false;
+            // Only consider items belonging to the same SupplierResponse
+            var srId = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
+            if (!string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase)) return false;
             var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
             if (NormalizeMatch(spProduct, productName)) return true;
             var spTokens = ProductTokens(spProduct ?? string.Empty);
@@ -1335,7 +1367,11 @@ public class SharePointService
                 await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col);
                 results[name] = "created";
             }
-            catch (Exception ex) { results[name] = $"error: {ex.Message}"; }
+            catch (Exception ex)
+            {
+                results[name] = $"error: {ex.Message}";
+                _log.LogError(ex, "[SP] Failed to create column '{Column}' on list '{List}'", name, listName);
+            }
         }
         return results;
     }
@@ -1366,4 +1402,68 @@ public class SharePointService
             .ToList()
             ?? [];
     }
+
+    // ── QC list ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads the QC SharePoint list and returns the first four user-visible
+    /// columns as display names, plus all rows as jagged string arrays.
+    /// Site URL is read from config key <c>QC:SiteUrl</c>
+    /// (default: https://metalsupermarkets.sharepoint.com/sites/hackensack).
+    /// </summary>
+    public async Task<QcListResult> ReadQcListAsync()
+    {
+        var graph = GetGraph();
+
+        var siteUrl = _config["QC:SiteUrl"]
+            ?? "https://metalsupermarkets.sharepoint.com/sites/hackensack";
+        var uri     = new Uri(siteUrl);
+        var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
+
+        var site = await graph.Sites[siteKey].GetAsync();
+        if (site?.Id is null)
+            throw new Exception($"[QC] Could not resolve site '{siteKey}'");
+
+        var lists = await graph.Sites[site.Id].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'QC'");
+
+        var list = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null)
+            throw new Exception("[QC] List 'QC' not found");
+
+        // ── Columns ────────────────────────────────────────────────────────
+        var colsResp = await graph.Sites[site.Id].Lists[list.Id].Columns.GetAsync();
+
+        var fields = (colsResp?.Value ?? [])
+            .Where(c => c.Hidden != true && c.ReadOnly != true
+                     && !string.IsNullOrEmpty(c.Name)
+                     && !string.IsNullOrEmpty(c.DisplayName))
+            .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
+            .Take(4)
+            .ToArray();
+
+        // ── Items ──────────────────────────────────────────────────────────
+        var selectFields = string.Join(",", fields.Select(f => f.Internal));
+        var items = await graph.Sites[site.Id].Lists[list.Id].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = [$"fields($select={selectFields})"];
+                r.QueryParameters.Top    = 5000;
+            });
+
+        var rows = (items?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i =>
+            {
+                var d = i.Fields!.AdditionalData!;
+                return fields.Select(f =>
+                    d.TryGetValue(f.Internal, out var v) ? v?.ToString() ?? "" : ""
+                ).ToArray();
+            })
+            .ToArray();
+
+        return new QcListResult(fields.Select(f => f.Display).ToArray(), rows);
+    }
 }
+
+public record QcListResult(string[] Columns, string[][] Rows);
