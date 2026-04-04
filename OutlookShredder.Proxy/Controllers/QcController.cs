@@ -12,7 +12,7 @@ public class QcController : ControllerBase
     public QcController(SharePointService sp) => _sp = sp;
 
     /// <summary>
-    /// Returns the QC SharePoint list as { columns: [...], rows: [[...], ...] }.
+    /// Returns the QC SharePoint list as { columns: [...], rows: [[...], ...], lastModified: "..." }.
     /// Uses the same app-only credentials as the rest of the proxy.
     /// </summary>
     [HttpGet]
@@ -20,5 +20,16 @@ public class QcController : ControllerBase
     {
         var result = await _sp.ReadQcListAsync();
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Returns the last-modified UTC timestamp of the QC SharePoint list.
+    /// Response: { lastModified: "2026-04-01T12:34:56Z" } or { lastModified: null }.
+    /// </summary>
+    [HttpGet("last-modified")]
+    public async Task<IActionResult> GetLastModifiedAsync()
+    {
+        var lastModified = await _sp.GetQcLastModifiedAsync();
+        return Ok(new { lastModified = lastModified?.ToString("o") });
     }
 }

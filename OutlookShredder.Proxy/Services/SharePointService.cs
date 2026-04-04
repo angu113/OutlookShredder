@@ -33,6 +33,8 @@ public class SharePointService
     private string? _sliListId;     // SupplierLineItems
     private string? _rfqRefListId;  // RFQ References
     private string? _listId;        // RFQ Line Items (legacy — kept for EnsureColumnsAsync)
+    private string? _qcSiteId;      // QC SP site
+    private string? _qcListId;      // QC list
 
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock"];
@@ -573,7 +575,7 @@ public class SharePointService
     /// Returns all rows from the RFQ Line Items list.
     /// Used by the Shredder dashboard to display requested items under each RFQ group header.
     /// </summary>
-    public async Task<List<(string RfqId, string? Mspc, string? Product, double? Units, string? SizeOfUnits)>> ReadAllRfqLineItemsAsync()
+    public async Task<List<(string RfqId, string? Mspc, string? Product, string? Units, string? SizeOfUnits)>> ReadAllRfqLineItemsAsync()
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqLineItemsListIdAsync();
@@ -586,7 +588,7 @@ public class SharePointService
                 req.QueryParameters.Top    = 5000;
             });
 
-        var result = new List<(string, string?, string?, double?, string?)>();
+        var result = new List<(string, string?, string?, string?, string?)>();
         foreach (var item in items?.Value ?? [])
         {
             if (item.Fields?.AdditionalData is null) continue;
@@ -599,10 +601,9 @@ public class SharePointService
             var mspc    = d.TryGetValue("MSPC",        out var vm) ? vm?.ToString() : null;
             var product = d.TryGetValue("Product",     out var vp) ? vp?.ToString() : null;
             var size    = d.TryGetValue("SizeOfUnits", out var vs) ? vs?.ToString() : null;
-            double? units = null;
-            if (d.TryGetValue("Units", out var vu) && vu is double du) units = du;
-            else if (vu is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.Number)
-                units = je.GetDouble();
+            string? units = null;
+            if (d.TryGetValue("Units", out var vu) && vu is not null)
+                units = vu is System.Text.Json.JsonElement je ? je.ToString() : vu.ToString();
             result.Add((id, mspc, product, units, size));
         }
         return result;
@@ -1444,33 +1445,66 @@ public class SharePointService
     // ── QC list ──────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Resolves and caches the QC SP site + list IDs, returning the list object.
+    /// </summary>
+    private async Task<(string SiteId, string ListId, Microsoft.Graph.Models.List List)> ResolveQcAsync()
+    {
+        var graph = GetGraph();
+
+        if (_qcSiteId is null || _qcListId is null)
+        {
+            var siteUrl = _config["QC:SiteUrl"]
+                ?? "https://metalsupermarkets.sharepoint.com/sites/hackensack";
+            var uri     = new Uri(siteUrl);
+            var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
+
+            var site = await graph.Sites[siteKey].GetAsync();
+            if (site?.Id is null)
+                throw new Exception($"[QC] Could not resolve site '{siteKey}'");
+
+            var lists = await graph.Sites[site.Id].Lists
+                .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'QC'");
+
+            var list = lists?.Value?.FirstOrDefault();
+            if (list?.Id is null)
+                throw new Exception("[QC] List 'QC' not found");
+
+            _qcSiteId = site.Id;
+            _qcListId = list.Id;
+            return (_qcSiteId, _qcListId, list);
+        }
+
+        // Already cached — fetch list object for LastModifiedDateTime
+        var cachedList = await graph.Sites[_qcSiteId].Lists[_qcListId].GetAsync();
+        if (cachedList is null)
+            throw new Exception("[QC] Could not retrieve cached QC list");
+
+        return (_qcSiteId, _qcListId, cachedList);
+    }
+
+    /// <summary>
+    /// Returns the last-modified UTC datetime of the QC SharePoint list.
+    /// </summary>
+    public async Task<DateTime?> GetQcLastModifiedAsync()
+    {
+        var (_, _, list) = await ResolveQcAsync();
+        return list.LastModifiedDateTime?.UtcDateTime;
+    }
+
+    /// <summary>
     /// Reads the QC SharePoint list and returns the first four user-visible
-    /// columns as display names, plus all rows as jagged string arrays.
+    /// columns as display names, plus all rows as jagged string arrays,
+    /// and the list's last-modified timestamp.
     /// Site URL is read from config key <c>QC:SiteUrl</c>
     /// (default: https://metalsupermarkets.sharepoint.com/sites/hackensack).
     /// </summary>
     public async Task<QcListResult> ReadQcListAsync()
     {
+        var (siteId, listId, list) = await ResolveQcAsync();
         var graph = GetGraph();
 
-        var siteUrl = _config["QC:SiteUrl"]
-            ?? "https://metalsupermarkets.sharepoint.com/sites/hackensack";
-        var uri     = new Uri(siteUrl);
-        var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
-
-        var site = await graph.Sites[siteKey].GetAsync();
-        if (site?.Id is null)
-            throw new Exception($"[QC] Could not resolve site '{siteKey}'");
-
-        var lists = await graph.Sites[site.Id].Lists
-            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'QC'");
-
-        var list = lists?.Value?.FirstOrDefault();
-        if (list?.Id is null)
-            throw new Exception("[QC] List 'QC' not found");
-
         // ── Columns ────────────────────────────────────────────────────────
-        var colsResp = await graph.Sites[site.Id].Lists[list.Id].Columns.GetAsync();
+        var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
 
         var fields = (colsResp?.Value ?? [])
             .Where(c => c.Hidden != true && c.ReadOnly != true
@@ -1482,7 +1516,7 @@ public class SharePointService
 
         // ── Items ──────────────────────────────────────────────────────────
         var selectFields = string.Join(",", fields.Select(f => f.Internal));
-        var items = await graph.Sites[site.Id].Lists[list.Id].Items
+        var items = await graph.Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = [$"fields($select={selectFields})"];
@@ -1500,8 +1534,11 @@ public class SharePointService
             })
             .ToArray();
 
-        return new QcListResult(fields.Select(f => f.Display).ToArray(), rows);
+        return new QcListResult(
+            fields.Select(f => f.Display).ToArray(),
+            rows,
+            list.LastModifiedDateTime?.UtcDateTime);
     }
 }
 
-public record QcListResult(string[] Columns, string[][] Rows);
+public record QcListResult(string[] Columns, string[][] Rows, DateTime? LastModified = null);
