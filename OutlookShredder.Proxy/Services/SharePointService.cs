@@ -348,6 +348,168 @@ public class SharePointService
         return result;
     }
 
+    // ── Read: new supplier activity since a timestamp ────────────────────────
+
+    /// <summary>
+    /// Returns SupplierLineItems created after <paramref name="since"/>, grouped into
+    /// per-supplier activities.  Used by the 5-second UI poll to detect new quotes.
+    /// </summary>
+    public async Task<ChangesResult> GetNewResponsesSinceAsync(DateTime since)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var sinceStr  = since.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var serverTime = DateTime.UtcNow;
+
+        // SP OData $filter on createdDateTime is unreliable when combined with $expand.
+        // Instead: fetch the 200 most-recently-created items (by SP id desc) and
+        // filter client-side using the listItem.CreatedDateTime property.
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand  = ["fields"];
+                req.QueryParameters.Orderby = ["id desc"];
+                req.QueryParameters.Top     = 200;
+            });
+
+        static string? Str(object? v) => v switch
+        {
+            string s                                         => s,
+            JsonElement je when je.ValueKind == JsonValueKind.String => je.GetString(),
+            JsonElement je                                   => je.ToString(),
+            null                                             => null,
+            _                                                => v.ToString()
+        };
+
+        var activities = (page?.Value ?? [])
+            .Where(item => item.CreatedDateTime.HasValue &&
+                           item.CreatedDateTime.Value.UtcDateTime > since)
+            .Select(item =>
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) return ((string rfqId, string supplier, string product, decimal price)?)null;
+                var rfqId    = (d.TryGetValue("RFQ_ID",       out var r1) ? Str(r1) : null)
+                            ?? (d.TryGetValue("RFQ_x005F_ID", out var r2) ? Str(r2) : null) ?? "";
+                var supplier = (d.TryGetValue("SupplierName", out var s)  ? Str(s)  : null) ?? "";
+                var product  = (d.TryGetValue("ProductName",  out var p)  ? Str(p)  : null) ?? "";
+                var priceStr = d.TryGetValue("TotalPrice",    out var t)  ? Str(t)  : null;
+                decimal.TryParse(priceStr, System.Globalization.NumberStyles.Any,
+                                 System.Globalization.CultureInfo.InvariantCulture, out var price);
+                return ((string rfqId, string supplier, string product, decimal price)?)
+                       (rfqId, supplier, product, price);
+            })
+            .Where(x => x != null && x!.Value.rfqId.Length > 0 && !string.IsNullOrEmpty(x!.Value.supplier))
+            .GroupBy(x => (x!.Value.rfqId, x!.Value.supplier))
+            .Select(g => new SupplierActivity
+            {
+                SupplierName = g.Key.supplier,
+                RfqId        = g.Key.rfqId,
+                Products     = g.Select(x => new ActivityProduct
+                {
+                    Name       = x!.Value.product,
+                    TotalPrice = x!.Value.price
+                }).ToList()
+            })
+            .ToList();
+
+        _log.LogInformation("[SP] GetNewResponsesSince({Since}): scanned {Total} SLI rows, {New} new → {Groups} activities",
+            sinceStr, page?.Value?.Count ?? 0, activities.Sum(a => a.Products.Count), activities.Count);
+
+        return new ChangesResult { Activities = activities, ServerTime = serverTime };
+    }
+
+    // ── Read: new RFQ References since a timestamp ───────────────────────────
+
+    /// <summary>
+    /// Returns RFQ References created after <paramref name="since"/>, with their
+    /// associated RFQ Line Items (also created after that timestamp).
+    /// Used by the 5-second UI poll to show "Name requested [X] on Date" toasts.
+    /// </summary>
+    public async Task<List<NewRfqActivity>> GetNewRfqReferencesSinceAsync(DateTime since)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var refListId = await GetRfqReferencesListIdAsync();
+        var lirListId = await GetRfqLineItemsListIdAsync();
+        var refCol    = await ResolveRfqIdColumnAsync(siteId, refListId);
+        var lirCol    = await ResolveRfqIdColumnAsync(siteId, lirListId);
+        var sinceStr  = since.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        // Same pattern as GetNewResponsesSinceAsync: $orderby=id desc + $top + client-side date filter.
+        var refsTask = GetGraph().Sites[siteId].Lists[refListId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = ["fields"]; r.QueryParameters.Orderby = ["id desc"]; r.QueryParameters.Top = 50; });
+        var lirTask  = GetGraph().Sites[siteId].Lists[lirListId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = ["fields"]; r.QueryParameters.Orderby = ["id desc"]; r.QueryParameters.Top = 200; });
+
+        await Task.WhenAll(refsTask, lirTask);
+
+        static string? Fld(IDictionary<string, object?> d, string key) =>
+            d.TryGetValue(key, out var v)
+                ? (v is System.Text.Json.JsonElement je ? je.ToString() : v?.ToString())
+                : null;
+
+        // Parse new RFQ References — client-side date filter
+        var newRefs = (refsTask.Result?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null &&
+                        i.CreatedDateTime.HasValue &&
+                        i.CreatedDateTime.Value.UtcDateTime > since)
+            .Select(i =>
+            {
+                var d     = i.Fields!.AdditionalData!;
+                var rfqId = Fld(d, refCol) ?? Fld(d, "RFQ_x005F_ID") ?? Fld(d, "RFQ_ID");
+                if (string.IsNullOrEmpty(rfqId)) return null;
+                var requester = Fld(d, "Requester") ?? "";
+                DateTime? dateSent = null;
+                var dcStr = Fld(d, "DateCreated");
+                if (dcStr is not null && DateTime.TryParse(dcStr, null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                    dateSent = dt;
+                return ((string RfqId, string Requester, DateTime? DateSent)?)(rfqId, requester, dateSent);
+            })
+            .Where(x => x is not null)
+            .ToList();
+
+        if (newRefs.Count == 0) return [];
+
+        // Group new line items by RFQ_ID — client-side date filter
+        var lirByRfq = (lirTask.Result?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null &&
+                        i.CreatedDateTime.HasValue &&
+                        i.CreatedDateTime.Value.UtcDateTime > since)
+            .Select(i =>
+            {
+                var d     = i.Fields!.AdditionalData!;
+                var rfqId = Fld(d, lirCol) ?? Fld(d, "RFQ_x005F_ID") ?? Fld(d, "RFQ_ID");
+                if (string.IsNullOrEmpty(rfqId)) return null;
+                string? units = null;
+                if (d.TryGetValue("Units", out var vu) && vu is not null)
+                    units = vu is System.Text.Json.JsonElement je2 ? je2.ToString() : vu.ToString();
+                return ((string RfqId, RfqLineItemSummary Item)?)(rfqId, new RfqLineItemSummary
+                {
+                    Mspc        = Fld(d, "MSPC"),
+                    Product     = Fld(d, "Product"),
+                    Units       = units,
+                    SizeOfUnits = Fld(d, "SizeOfUnits"),
+                });
+            })
+            .Where(x => x is not null)
+            .GroupBy(x => x!.Value.RfqId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Select(x => x!.Value.Item).ToList(),
+                          StringComparer.OrdinalIgnoreCase);
+
+        var result = newRefs
+            .Select(r => new NewRfqActivity
+            {
+                RfqId     = r!.Value.RfqId,
+                Requester = r!.Value.Requester,
+                DateSent  = r!.Value.DateSent,
+                LineItems = lirByRfq.TryGetValue(r!.Value.RfqId, out var items) ? items : [],
+            })
+            .ToList();
+
+        _log.LogDebug("[SP] GetNewRfqReferencesSince({Since}): {Count} new RFQ(s)", sinceStr, result.Count);
+        return result;
+    }
+
     // ── Read: RFQ References (for Notes) ────────────────────────────────────
 
     public async Task<List<Dictionary<string, object?>>> ReadRfqReferencesAsync()
@@ -578,37 +740,112 @@ public class SharePointService
         return ids;
     }
 
-    /// <summary>Creates one row in the RFQ References list.</summary>
+    /// <summary>
+    /// Upserts one row in the RFQ References list.
+    /// If the row does not exist it is created with all fields.
+    /// If it already exists, any blank Requester / DateCreated / EmailRecipients fields
+    /// are filled in from <paramref name="req"/> — populated fields are left untouched.
+    /// </summary>
     public async Task CreateRfqReferenceAsync(RfqReferenceRequest req)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        // Server-side guard: skip if already exists (prevents race-condition duplicates).
-        var existing = await GetExistingRfqIdsAsync();
-        if (existing.Contains(req.RfqId))
+        // Fetch existing items for this RFQ_ID (same client-side filter approach as UpdateRfqNotesAsync
+        // — OData filter on unindexed columns is unreliable).
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req2 =>
+            {
+                req2.QueryParameters.Expand = [$"fields($select=id,{col},Requester,DateCreated,EmailRecipients)"];
+                req2.QueryParameters.Top    = 500;
+            });
+
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            req.RfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
         {
-            _log.LogInformation("[SP] RFQ Reference '{Id}' already exists — skipping create", req.RfqId);
+            // New — create a full row.
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem
+                {
+                    Fields = new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            [col]               = req.RfqId,
+                            ["Requester"]       = req.Requester,
+                            ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
+                            ["EmailRecipients"] = req.EmailRecipients,
+                        }
+                    }
+                });
+            _log.LogInformation("[SP] Created RFQ Reference '{Id}'", req.RfqId);
             return;
         }
 
-        await GetGraph().Sites[siteId].Lists[listId].Items
-            .PostAsync(new ListItem
+        // Existing — patch only fields that are currently blank.
+        var primary = matches[0];
+        var data    = primary.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+
+        static bool IsBlank(IDictionary<string, object?> d, string key) =>
+            !d.TryGetValue(key, out var v) || v is null || string.IsNullOrWhiteSpace(v.ToString());
+
+        var patch = new Dictionary<string, object?>();
+
+        if (IsBlank(data, "Requester") && !string.IsNullOrWhiteSpace(req.Requester))
+            patch["Requester"] = req.Requester;
+
+        if (IsBlank(data, "DateCreated") && req.DateSent != default)
+            patch["DateCreated"] = req.DateSent.ToUniversalTime().ToString("o");
+
+        if (IsBlank(data, "EmailRecipients") && !string.IsNullOrWhiteSpace(req.EmailRecipients))
+            patch["EmailRecipients"] = req.EmailRecipients;
+
+        if (patch.Count > 0)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = patch });
+            _log.LogInformation("[SP] Updated missing fields for RFQ Reference '{Id}': {Fields}",
+                req.RfqId, string.Join(", ", patch.Keys));
+        }
+        else
+        {
+            _log.LogInformation("[SP] RFQ Reference '{Id}' already complete — no update needed", req.RfqId);
+        }
+    }
+
+    /// <summary>Returns the set of RFQ_ID values that already have at least one row in the RFQ Line Items list.</summary>
+    public async Task<HashSet<string>> GetRfqIdsWithLineItemsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
             {
-                Fields = new FieldValueSet
-                {
-                    AdditionalData = new Dictionary<string, object?>
-                    {
-                        [col]               = req.RfqId,
-                        ["Requester"]       = req.Requester,
-                        ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
-                        ["EmailRecipients"] = req.EmailRecipients,
-                    }
-                }
+                req.QueryParameters.Expand = [$"fields($select={col})"];
+                req.QueryParameters.Top    = 5000;
             });
 
-        _log.LogInformation("[SP] Created RFQ Reference '{Id}'", req.RfqId);
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is null) continue;
+            var d = item.Fields.AdditionalData;
+            string? id = d.TryGetValue(col,            out var v0) ? v0?.ToString()
+                       : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                       : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                       : null;
+            if (!string.IsNullOrEmpty(id)) ids.Add(id);
+        }
+        return ids;
     }
 
     /// <summary>
@@ -757,6 +994,8 @@ public class SharePointService
                 jobRef   = "WHOIS";
                 _log.LogInformation("[SP] Supplier '{Raw}' not in reference list — writing under [WHOIS]", rawSupplier);
             }
+
+            result.SupplierName = supplier;
 
             // ── Upsert SupplierResponses ─────────────────────────────────────
             var srListId  = await GetSupplierResponsesListIdAsync();
@@ -1242,6 +1481,88 @@ public class SharePointService
         var ct    = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         _log.LogInformation("[SP] Fetched attachment '{File}' ({Bytes} bytes) from SR item {Id}", fileName, bytes.Length, srItemId);
         return (ct, bytes, fileName);
+    }
+
+    // ── Publish folder (Graph) ───────────────────────────────────────────────
+
+    // Cached publish site + drive IDs (separate from the RFQ/QC site).
+    private string? _publishSiteId;
+    private string? _publishDriveId;
+
+    private async Task<(string SiteId, string DriveId)> GetPublishDriveAsync()
+    {
+        if (_publishSiteId is not null && _publishDriveId is not null)
+            return (_publishSiteId, _publishDriveId);
+
+        var siteUrl = _config["Publish:SiteUrl"]
+            ?? throw new InvalidOperationException("Publish:SiteUrl is not configured in appsettings.json");
+
+        var uri  = new Uri(siteUrl);
+        var host = uri.Host;
+        var path = uri.AbsolutePath;
+
+        var site = await GetGraph().Sites[$"{host}:{path}"].GetAsync();
+        _publishSiteId = site!.Id ?? throw new Exception($"Could not resolve publish SharePoint site ID for {siteUrl}");
+
+        var drive = await GetGraph().Sites[_publishSiteId].Drive.GetAsync();
+        _publishDriveId = drive!.Id ?? throw new Exception("Could not resolve publish drive ID");
+
+        _log.LogInformation("[Publish] Site: {SiteId}  Drive: {DriveId}", _publishSiteId, _publishDriveId);
+        return (_publishSiteId, _publishDriveId);
+    }
+
+    /// <summary>Reads version.txt from the configured SharePoint publish folder via Graph.</summary>
+    public async Task<string> GetPublishVersionAsync()
+    {
+        var (_, driveId) = await GetPublishDriveAsync();
+        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+        // Graph SDK v5: Drives[id].Items["root:/path/to/file:"].Content
+        var itemKey = $"root:/{folderPath}/version.txt:";
+
+        using var stream = await GetGraph().Drives[driveId].Items[itemKey].Content.GetAsync();
+        if (stream is null) throw new Exception($"version.txt not found at '{folderPath}/version.txt'");
+
+        using var reader = new StreamReader(stream);
+        return (await reader.ReadToEndAsync()).Trim().Split('+')[0].Trim();
+    }
+
+    /// <summary>
+    /// Downloads a file from the configured SharePoint publish folder via Graph.
+    /// Returns (contentType, bytes, fileName).
+    /// Throws if the file is not found or the name is not a simple filename (no path traversal).
+    /// </summary>
+    public async Task<(string ContentType, byte[] Bytes, string FileName)> GetPublishFileAsync(string fileName)
+    {
+        // Guard against path traversal
+        if (string.IsNullOrWhiteSpace(fileName) ||
+            fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            fileName.Contains('/') || fileName.Contains('\\'))
+            throw new ArgumentException($"Invalid file name: '{fileName}'");
+
+        var (_, driveId) = await GetPublishDriveAsync();
+        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+        var itemKey      = $"root:/{folderPath}/{fileName}:";
+
+        using var stream = await GetGraph().Drives[driveId].Items[itemKey].Content.GetAsync();
+        if (stream is null) throw new Exception($"File '{fileName}' not found at '{folderPath}/{fileName}'");
+
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        var bytes = ms.ToArray();
+
+        var ext = Path.GetExtension(fileName).ToLowerInvariant();
+        var contentType = ext switch
+        {
+            ".ps1"  => "text/plain",
+            ".exe"  => "application/octet-stream",
+            ".txt"  => "text/plain",
+            ".json" => "application/json",
+            ".bat"  => "text/plain",
+            _       => "application/octet-stream",
+        };
+
+        _log.LogInformation("[Publish] Served '{File}' ({Bytes} bytes)", fileName, bytes.Length);
+        return (contentType, bytes, fileName);
     }
 
     // ── Diagnostics ──────────────────────────────────────────────────────────

@@ -76,7 +76,20 @@ public class ExtractController : ControllerBase
         }
 
         if (rows.Any(r => r.Success))
-            _notifications.NotifyRfqProcessed();
+        {
+            _notifications.NotifyRfqProcessed(new RfqProcessedNotification
+            {
+                SupplierName = rows.FirstOrDefault(r => r.Success && !r.SupplierUnknown)?.SupplierName,
+                RfqId        = req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
+                Products     = rows.Zip(products)
+                                   .Where(x => x.First.Success)
+                                   .Select(x => new RfqNotificationProduct
+                                   {
+                                       Name       = x.First.ProductName,
+                                       TotalPrice = x.Second.TotalPrice,
+                                   }).ToList(),
+            });
+        }
 
         return Ok(new ExtractResponse
         {
@@ -355,8 +368,14 @@ public class ExtractController : ControllerBase
                     await reader.WaitToReadAsync(waitCts.Token);
 
                     // Drain all events queued since the last flush.
-                    while (reader.TryRead(out var evt))
-                        await Response.WriteAsync($"event: {evt}\ndata: {{}}\n\n", ct);
+                    // Message format: "{eventName}\n{dataJson}" — split on first newline.
+                    while (reader.TryRead(out var msg))
+                    {
+                        var nl   = msg.IndexOf('\n');
+                        var evt  = nl >= 0 ? msg[..nl]    : msg;
+                        var data = nl >= 0 ? msg[(nl+1)..] : "{}";
+                        await Response.WriteAsync($"event: {evt}\ndata: {data}\n\n", ct);
+                    }
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -492,14 +511,20 @@ public class ExtractController : ControllerBase
     }
 
     // ── POST /api/rfq-import/line-items ──────────────────────────────────────
-    /// <summary>Batch-creates RFQ Line Item rows.</summary>
+    /// <summary>
+    /// Batch-creates RFQ Line Item rows.
+    /// Skips any RFQ_ID that already has at least one line item in the list.
+    /// </summary>
     [HttpPost("rfq-import/line-items")]
     public async Task<IActionResult> CreateRfqLineItems([FromBody] List<RfqLineItemRequest> items)
     {
         try
         {
-            await _sp.CreateRfqLineItemsAsync(items);
-            return Ok(new { created = items.Count });
+            var existingRfqIds = await _sp.GetRfqIdsWithLineItemsAsync();
+            var toCreate = items.Where(i => !existingRfqIds.Contains(i.RfqId)).ToList();
+            if (toCreate.Count > 0)
+                await _sp.CreateRfqLineItemsAsync(toCreate);
+            return Ok(new { created = toCreate.Count, skipped = items.Count - toCreate.Count });
         }
         catch (Exception ex)
         {
@@ -546,6 +571,143 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "CleanSupplierData failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/publish/version ─────────────────────────────────────────────
+    /// <summary>
+    /// Returns the version string from version.txt in the SharePoint publish folder.
+    /// Clients use this to detect when a newer build is available.
+    /// </summary>
+    [HttpGet("publish/version")]
+    public async Task<IActionResult> GetPublishVersion()
+    {
+        try
+        {
+            var version = await _sp.GetPublishVersionAsync();
+            return Ok(new { version });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetPublishVersion failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/publish/file ─────────────────────────────────────────────────
+    /// <summary>
+    /// Downloads a named file from the SharePoint publish folder.
+    /// Only simple filenames are accepted — no path separators.
+    /// </summary>
+    [HttpGet("publish/file")]
+    public async Task<IActionResult> GetPublishFile([FromQuery] string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return BadRequest(new { error = "name query param is required" });
+        try
+        {
+            var (contentType, bytes, fileName) = await _sp.GetPublishFileAsync(name);
+            return File(bytes, contentType, fileName);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetPublishFile failed for '{Name}'", name);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq/submit ─────────────────────────────────────────────────
+    /// <summary>
+    /// Called by the Excel VBA macro to submit a new RFQ Reference and its line items
+    /// in a single call.  The proxy writes to SharePoint; no SP credentials are needed
+    /// in the macro.  The Shredder UI polls for changes and will show a toast within ~5 s.
+    /// </summary>
+    [HttpPost("rfq/submit")]
+    public async Task<IActionResult> SubmitRfq([FromBody] RfqSubmitRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.RfqId))
+            return BadRequest(new { error = "rfqId is required" });
+
+        // Parse the supplied date; fall back to today.
+        if (!DateTime.TryParse(req.DateSent, null,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var dateSent))
+            dateSent = DateTime.UtcNow;
+
+        // Upsert the RFQ Reference (CreateRfqReferenceAsync fills blank fields on an
+        // existing row and is a no-op if all fields are already populated).
+        await _sp.CreateRfqReferenceAsync(new RfqReferenceRequest
+        {
+            RfqId           = req.RfqId,
+            Requester       = req.Requester       ?? "",
+            DateSent        = dateSent,
+            EmailRecipients = req.EmailRecipients ?? "",
+        });
+
+        // Create line items — skipped if this RFQ_ID already has any rows.
+        int liCreated = 0, liSkipped = 0;
+        if (req.LineItems.Count > 0)
+        {
+            var existingLiIds = await _sp.GetRfqIdsWithLineItemsAsync();
+            if (!existingLiIds.Contains(req.RfqId))
+            {
+                var items = req.LineItems.Select(li => new RfqLineItemRequest
+                {
+                    RfqId          = req.RfqId,
+                    Mspc           = li.Mspc,
+                    Product        = li.Product,
+                    Units          = li.Units,
+                    SizeOfUnits    = li.SizeOfUnits,
+                    SupplierEmails = li.SupplierEmails,
+                }).ToList();
+                await _sp.CreateRfqLineItemsAsync(items);
+                liCreated = items.Count;
+            }
+            else
+            {
+                liSkipped = req.LineItems.Count;
+            }
+        }
+
+        _log.LogInformation("[RFQ Submit] {Id}: li={LiCreated} created, {LiSkipped} skipped",
+            req.RfqId, liCreated, liSkipped);
+
+        return Ok(new
+        {
+            rfqId            = req.RfqId,
+            lineItemsCreated = liCreated,
+            lineItemsSkipped = liSkipped,
+        });
+    }
+
+    // ── GET /api/rfq/changes ─────────────────────────────────────────────────
+    /// <summary>
+    /// Returns SupplierLineItems created after <paramref name="since"/> (ISO 8601 UTC),
+    /// grouped by supplier.  Used by the Shredder UI 5-second change-poll loop.
+    /// </summary>
+    [HttpGet("rfq/changes")]
+    public async Task<IActionResult> GetRfqChanges([FromQuery] string since)
+    {
+        if (!DateTime.TryParse(since, null, System.Globalization.DateTimeStyles.RoundtripKind, out var sinceUtc))
+            return BadRequest("'since' must be an ISO 8601 UTC datetime string");
+
+        try
+        {
+            var supplierTask = _sp.GetNewResponsesSinceAsync(sinceUtc);
+            var rfqTask      = _sp.GetNewRfqReferencesSinceAsync(sinceUtc);
+            await Task.WhenAll(supplierTask, rfqTask);
+
+            var result     = supplierTask.Result;
+            result.NewRfqs = rfqTask.Result;
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Changes] GetRfqChanges failed for since={Since}", since);
             return StatusCode(500, new { error = ex.Message });
         }
     }
