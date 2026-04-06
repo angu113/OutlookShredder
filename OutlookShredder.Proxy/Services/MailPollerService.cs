@@ -416,7 +416,23 @@ public class MailPollerService : BackgroundService
             }
 
             if (anySuccessful)
-                _notifications.NotifyRfqProcessed();
+            {
+                var notification = new Models.RfqProcessedNotification
+                {
+                    SupplierName = rows.Zip(products)
+                                       .FirstOrDefault(x => x.First.Success && !x.First.SupplierUnknown)
+                                       .First?.SupplierName,
+                    RfqId = req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
+                    Products = rows.Zip(products)
+                                   .Where(x => x.First.Success)
+                                   .Select(x => new Models.RfqNotificationProduct
+                                   {
+                                       Name       = x.First.ProductName,
+                                       TotalPrice = x.Second.TotalPrice,
+                                   }).ToList(),
+                };
+                _notifications.NotifyRfqProcessed(notification);
+            }
 
             return anyUnknown;
         }

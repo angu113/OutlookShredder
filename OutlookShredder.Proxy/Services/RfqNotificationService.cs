@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using System.Threading.Channels;
+using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
 
@@ -8,6 +10,7 @@ namespace OutlookShredder.Proxy.Services;
 /// When an RFQ row is successfully written to SharePoint the poller (or the
 /// add-in taskpane via the extract endpoint) calls <see cref="NotifyRfqProcessed"/>,
 /// which fans the event out to every connected SSE client.
+/// The channel carries "{eventName}\n{dataJson}" strings so clients can parse both fields.
 /// </summary>
 public class RfqNotificationService
 {
@@ -33,13 +36,19 @@ public class RfqNotificationService
             ch.Writer.TryComplete();
     }
 
+    /// <summary>Broadcasts a minimal <c>rfq-processed</c> event with no payload data.</summary>
+    public void NotifyRfqProcessed() => NotifyRfqProcessed(new RfqProcessedNotification());
+
     /// <summary>
-    /// Broadcasts an <c>rfq-processed</c> event to every connected SSE client.
+    /// Broadcasts an <c>rfq-processed</c> SSE event carrying supplier + product data.
     /// Safe to call from any thread.
     /// </summary>
-    public void NotifyRfqProcessed()
+    public void NotifyRfqProcessed(RfqProcessedNotification notification)
     {
+        var json = JsonSerializer.Serialize(notification,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        var msg  = $"rfq-processed\n{json}";
         foreach (var ch in _subscribers.Values)
-            ch.Writer.TryWrite("rfq-processed");
+            ch.Writer.TryWrite(msg);
     }
 }
