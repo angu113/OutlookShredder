@@ -1585,14 +1585,16 @@ public class SharePointService
 
         // ── Discover columns ───────────────────────────────────────────────
         // Metal and Shape are multi-value lookup fields; QC Cut contains notes.
-        var wantedDisplay = new[] { "Metal", "Shape", "QC", "QC Cut", "LQ" };
+        var wantedDisplay = new[] { "Metal", "Shape", "Title", "QC", "QC Cut", "LQ", "LQ Count", "LQ Min", "LQ Max" };
 
         var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
 
         var fields = (colsResp?.Value ?? [])
             .Where(c => !string.IsNullOrEmpty(c.Name)
                      && !string.IsNullOrEmpty(c.DisplayName)
-                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase))
+                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase)
+                     // Exclude SP's auto-generated LinkTitle / LinkTitleNoMenu columns
+                     && !c.Name!.StartsWith("LinkTitle", StringComparison.OrdinalIgnoreCase))
             .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
             .OrderBy(c => Array.FindIndex(wantedDisplay,
                 w => w.Equals(c.Display, StringComparison.OrdinalIgnoreCase)))
@@ -1693,11 +1695,12 @@ public class SharePointService
         }
 
         // ── 1. Fetch QC rows with item IDs ────────────────────────────────────
-        var wantedDisplay = new[] { "Metal", "Shape", "LQ" };
+        var wantedDisplay = new[] { "Metal", "Shape", "Title", "LQ", "LQ Count", "LQ Min", "LQ Max" };
         var colsResp = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
         var fields = (colsResp?.Value ?? [])
             .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
-                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase))
+                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase)
+                     && !c.Name!.StartsWith("LinkTitle", StringComparison.OrdinalIgnoreCase))
             .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
             .ToArray();
 
@@ -1706,12 +1709,35 @@ public class SharePointService
 
         var metalField = ColInternal("Metal") ?? throw new Exception("[QC] 'Metal' column not found");
         var shapeField = ColInternal("Shape") ?? throw new Exception("[QC] 'Shape' column not found");
+        var titleField = ColInternal("Title") ?? "Title";
         var lqField    = ColInternal("LQ")    ?? throw new Exception("[QC] 'LQ' column not found — create it in the QC list first");
+
+        // Auto-create 'LQ Count', 'LQ Min', 'LQ Max' number columns if missing
+        async Task<string> EnsureNumberColumn(string display, string fallback)
+        {
+            var existing = ColInternal(display);
+            if (existing is not null) return existing;
+            _log.LogInformation("[LQ] '{Display}' column not found — creating it", display);
+            var created = await graph.Sites[qcSiteId].Lists[qcListId].Columns
+                .PostAsync(new ColumnDefinition
+                {
+                    Name        = fallback,
+                    DisplayName = display,
+                    Number      = new NumberColumn()
+                });
+            var name = created?.Name ?? fallback;
+            _log.LogInformation("[LQ] Created '{Display}' column (internal: {Name})", display, name);
+            return name;
+        }
+
+        var lqCountField = await EnsureNumberColumn("LQ Count", "LQ_Count");
+        var lqMinField   = await EnsureNumberColumn("LQ Min",   "LQ_Min");
+        var lqMaxField   = await EnsureNumberColumn("LQ Max",   "LQ_Max");
 
         var qcItemsResp = await graph.Sites[qcSiteId].Lists[qcListId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = [$"fields($select={metalField},{shapeField})"];
+                r.QueryParameters.Expand = [$"fields($select={metalField},{shapeField},{titleField})"];
                 r.QueryParameters.Top    = 5000;
             });
 
@@ -1724,7 +1750,10 @@ public class SharePointService
                               .Split(';').Select(m => m.Trim()).Where(m => m.Length > 0).ToArray();
                 var shapes  = (d.TryGetValue(shapeField, out var sv) ? SerializeQcValue(sv) : "")
                               .Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
-                return (Id: i.Id!, Metals: metals, Shapes: shapes);
+                // Title contains pipe-separated extra match terms (e.g. "pipe|tube")
+                var titles  = (d.TryGetValue(titleField, out var tv) ? SerializeQcValue(tv) : "")
+                              .Split('|').Select(t => t.Trim().ToLowerInvariant()).Where(t => t.Length > 0).ToArray();
+                return (Id: i.Id!, Metals: metals, Shapes: shapes, Titles: titles);
             })
             .Where(r => r.Metals.Length > 0 && r.Shapes.Length > 0)
             .ToArray();
@@ -1744,9 +1773,11 @@ public class SharePointService
         {
             if (IsRegret(sli)) continue;
 
-            // Filter by quote date — prefer ReceivedAt, fall back to Modified
+            // Filter by when the data was processed/written to SP (Modified), not when the
+            // email arrived (ReceivedAt) — emails can sit in the inbox for days before
+            // being processed, making ReceivedAt an unreliable freshness indicator.
             DateTime? quoteDate = null;
-            foreach (var key in new[] { "ReceivedAt", "DateOfQuote", "Modified" })
+            foreach (var key in new[] { "Modified", "ProcessedAt", "DateOfQuote", "ReceivedAt" })
             {
                 if (!sli.TryGetValue(key, out var dv) || dv is null) continue;
                 var ds = dv is JsonElement je ? je.ToString() : dv.ToString();
@@ -1804,7 +1835,8 @@ public class SharePointService
                 {
                     bool metalMatch = qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant()));
                     bool shapeMatch = qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant()));
-                    if (metalMatch && shapeMatch)
+                    bool titleMatch = qcRow.Titles.Length == 0 || qcRow.Titles.Any(t => product.Contains(t));
+                    if (metalMatch && shapeMatch && titleMatch)
                     {
                         matchedRfqs.Add(rfqId);
                         matchedPrices.AddRange(pricesByRfq[rfqId]);
@@ -1818,15 +1850,23 @@ public class SharePointService
 
             if (matchedPrices.Count > 0)
             {
-                var lq = matchedPrices.Average();
+                var lq    = matchedPrices.Average();
+                var lqMin = matchedPrices.Min();
+                var lqMax = matchedPrices.Max();
                 await graph.Sites[qcSiteId].Lists[qcListId].Items[qcRow.Id].Fields
                     .PatchAsync(new FieldValueSet
                     {
-                        AdditionalData = new Dictionary<string, object?> { [lqField] = lq }
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            [lqField]      = lq,
+                            [lqCountField] = (double)matchedPrices.Count,
+                            [lqMinField]   = lqMin,
+                            [lqMaxField]   = lqMax
+                        }
                     });
-                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchedPrices.Count));
-                _log.LogInformation("[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} (avg of {N} quotes, last {Days}d) RFQs: {Rfqs}",
-                    metalLabel, shapeLabel, lq, matchedPrices.Count, lookbackDays, string.Join(", ", matchedRfqs));
+                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchedPrices.Count, lqMin, lqMax));
+                _log.LogInformation("[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} min={Min:F4} max={Max:F4} (n={N}, last {Days}d) RFQs: {Rfqs}",
+                    metalLabel, shapeLabel, lq, lqMin, lqMax, matchedPrices.Count, lookbackDays, string.Join(", ", matchedRfqs));
             }
             else
             {
@@ -1841,7 +1881,8 @@ public class SharePointService
         foreach (var product in products)
         {
             if (qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant())) &&
-                qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant())))
+                qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant())) &&
+                (qcRow.Titles.Length == 0 || qcRow.Titles.Any(t => product.Contains(t))))
                 matchedProducts.Add(product);
         }
 
@@ -1901,4 +1942,6 @@ public record LqMatch(
     string Metal,
     string Shape,
     double PricePerPound,
-    int    QuoteCount);
+    int    QuoteCount,
+    double MinPricePerPound,
+    double MaxPricePerPound);
