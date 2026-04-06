@@ -104,6 +104,13 @@ public class ClaudeService
         - unitsRequested: pieces/bars/sheets asked for in the original RFQ.
         - unitsQuoted: what the supplier can actually supply (may be less — "can supply 50 of 100").
         - If the supplier gives no separate quantity, assume unitsQuoted = unitsRequested.
+        - Linear-feet pricing: when quantity is expressed as total linear footage
+          (e.g. "100 LF", "500 linear feet") rather than pieces, set unitsQuoted = that
+          footage number, lengthPerUnit = 1, lengthUnit = "ft".
+        - ALWAYS extract lengthPerUnit when pricing is per foot ($/ft, $/LF) — it is
+          required to compute the line total. Check the product name, the email body, and
+          the original RFQ spec. For standard mill bar/tube/structural lengths (e.g.
+          "20' random lengths", "24' mill lengths") capture that length here.
 
         ── DATES ──────────────────────────────────────────────────────────────────
         - dateOfQuote: the date the supplier issued this quote.

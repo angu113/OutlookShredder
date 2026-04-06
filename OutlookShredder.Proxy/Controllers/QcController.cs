@@ -32,4 +32,16 @@ public class QcController : ControllerBase
         var lastModified = await _sp.GetQcLastModifiedAsync();
         return Ok(new { lastModified = lastModified?.ToString("o") });
     }
+
+    /// <summary>
+    /// Reads recent supplier quotes, derives $/lb for each, matches against QC list
+    /// Metal+Shape rows, and patches the 'LQ' column.
+    /// Returns { updated: [...], misses: [...] }.
+    /// </summary>
+    [HttpPost("update-lq")]
+    public async Task<IActionResult> UpdateLqAsync()
+    {
+        var result = await _sp.UpdateQcLqAsync();
+        return Ok(result);
+    }
 }

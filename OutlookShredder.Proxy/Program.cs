@@ -72,6 +72,7 @@ try
     builder.Services.AddSingleton<RfqNotificationService>();
     builder.Services.AddSingleton<MailPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
+    builder.Services.AddHostedService<LqUpdateService>();
 
     var app = builder.Build();
 

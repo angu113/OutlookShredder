@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Kiota.Abstractions.Serialization;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -280,9 +281,10 @@ public class SharePointService
         }
 
         // ── Deduplicate by (SupplierResponseId, normalised ProductName) ──────
-        // Guards against duplicate SLI rows in SharePoint (e.g. from a failed
-        // lookup on non-indexed fields writing the same product twice with minor
-        // name differences).  Keep the row with the most populated fields.
+        // Pass 1: exact normalised-name dedup (whitespace/case/decimal variants).
+        // Pass 2: fuzzy dedup within each SrId group — catches abbreviation variants
+        //         like "HR Flat Bar" vs "Hot Rolled Flat Bar" that share the same
+        //         numeric tokens and have Jaccard ≥ 0.5.  Keeps the longer name.
         static string NormProd(string? s)
         {
             if (string.IsNullOrWhiteSpace(s)) return "";
@@ -304,6 +306,44 @@ public class SharePointService
                 return g.OrderByDescending(r => r.Count(kv => kv.Value is not null)).First();
             })
             .ToList();
+
+        // Pass 2: fuzzy dedup within each SupplierResponseId group
+        static string GetProd(Dictionary<string, object?> r) =>
+            r.TryGetValue("ProductName", out var p) ? p?.ToString() ?? "" : "";
+
+        var fuzzyResult = new List<Dictionary<string, object?>>();
+        foreach (var srGroup in result.GroupBy(r =>
+            r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : ""))
+        {
+            var rows = srGroup.ToList();
+            if (srGroup.Key.Length == 0 || rows.Count == 1) { fuzzyResult.AddRange(rows); continue; }
+
+            // Greedy cluster: for each row, merge into the first compatible accepted row,
+            // or add as a new representative. Keep the longer product name.
+            var accepted = new List<Dictionary<string, object?>>();
+            foreach (var row in rows)
+            {
+                var rowTok = ProductTokens(GetProd(row));
+                bool merged = false;
+                for (int i = 0; i < accepted.Count; i++)
+                {
+                    var accTok = ProductTokens(GetProd(accepted[i]));
+                    if (NumericTokensCompatible(rowTok, accTok) && ProductJaccard(rowTok, accTok) >= 0.5)
+                    {
+                        _log.LogWarning("[SP] Fuzzy-dedup: merging '{Row}' into '{Acc}' (SrId={SrId})",
+                            GetProd(row), GetProd(accepted[i]), srGroup.Key);
+                        // Keep the row with the longer product name as it is more descriptive
+                        if (GetProd(row).Length > GetProd(accepted[i]).Length)
+                            accepted[i] = row;
+                        merged = true;
+                        break;
+                    }
+                }
+                if (!merged) accepted.Add(row);
+            }
+            fuzzyResult.AddRange(accepted);
+        }
+        result = fuzzyResult;
 
         return result;
     }
@@ -562,7 +602,7 @@ public class SharePointService
                     {
                         [col]               = req.RfqId,
                         ["Requester"]       = req.Requester,
-                        ["DateCreated"]     = req.DateSent.ToUniversalTime().ToString("o"),
+                        ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
                         ["EmailRecipients"] = req.EmailRecipients,
                     }
                 }
@@ -871,7 +911,7 @@ public class SharePointService
             ["PricePerPound"]            = product.PricePerPound,
             ["PricePerFoot"]             = product.PricePerFoot,
             ["PricePerPiece"]            = product.PricePerPiece,
-            ["TotalPrice"]               = product.TotalPrice,
+            ["TotalPrice"]               = product.TotalPrice ?? ComputeTotalPrice(product),
             ["LeadTimeText"]             = product.LeadTimeText,
             ["Certifications"]           = product.Certifications,
             ["SupplierProductComments"]  = product.SupplierProductComments,
@@ -927,6 +967,47 @@ public class SharePointService
         });
 
         return match?.Id;
+    }
+
+    // ── TotalPrice fallback calculation ─────────────────────────────────────
+
+    /// <summary>
+    /// Mirrors the Claude Step-8 forward calculation as a server-side fallback.
+    /// Called when Claude returns a null totalPrice despite having valid unit prices and quantities.
+    /// </summary>
+    private static double? ComputeTotalPrice(ProductLine p)
+    {
+        var qty = (double?)(p.UnitsQuoted ?? p.UnitsRequested);
+
+        // a. piece price × qty
+        if (p.PricePerPiece.HasValue && qty.HasValue)
+            return p.PricePerPiece.Value * qty.Value;
+        // b. foot price × qty × length
+        if (p.PricePerFoot.HasValue && qty.HasValue && p.LengthPerUnit.HasValue)
+        {
+            var ft = (p.LengthUnit ?? "ft").Trim().ToLowerInvariant() switch
+            {
+                "in" => p.LengthPerUnit.Value / 12.0,
+                "m"  => p.LengthPerUnit.Value * 3.28084,
+                "mm" => p.LengthPerUnit.Value / 304.8,
+                "cm" => p.LengthPerUnit.Value / 30.48,
+                _    => p.LengthPerUnit.Value
+            };
+            return p.PricePerFoot.Value * qty.Value * ft;
+        }
+        // c. pound price × qty × weight
+        if (p.PricePerPound.HasValue && qty.HasValue && p.WeightPerUnit.HasValue)
+        {
+            var lb = (p.WeightUnit ?? "lb").Trim().ToLowerInvariant() switch
+            {
+                "kg" => p.WeightPerUnit.Value * 2.20462,
+                "oz" => p.WeightPerUnit.Value / 16.0,
+                "g"  => p.WeightPerUnit.Value / 453.592,
+                _    => p.WeightPerUnit.Value
+            };
+            return p.PricePerPound.Value * qty.Value * lb;
+        }
+        return null;
     }
 
     // ── Regret detection ─────────────────────────────────────────────────────
@@ -1492,29 +1573,32 @@ public class SharePointService
     }
 
     /// <summary>
-    /// Reads the QC SharePoint list and returns the first four user-visible
-    /// columns as display names, plus all rows as jagged string arrays,
-    /// and the list's last-modified timestamp.
-    /// Site URL is read from config key <c>QC:SiteUrl</c>
-    /// (default: https://metalsupermarkets.sharepoint.com/sites/hackensack).
+    /// Reads the QC SharePoint list and returns normalised columns and rows.
+    /// Targets the columns: Metal, Shape, QC, Title (returned as Notes).
+    /// Multi-value choice fields (Metal, Shape) are joined with "; ".
+    /// Site URL is read from config key QC:SiteUrl.
     /// </summary>
     public async Task<QcListResult> ReadQcListAsync()
     {
         var (siteId, listId, list) = await ResolveQcAsync();
         var graph = GetGraph();
 
-        // ── Columns ────────────────────────────────────────────────────────
+        // ── Discover columns ───────────────────────────────────────────────
+        // Metal and Shape are multi-value lookup fields; QC Cut contains notes.
+        var wantedDisplay = new[] { "Metal", "Shape", "QC", "QC Cut", "LQ" };
+
         var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
 
         var fields = (colsResp?.Value ?? [])
-            .Where(c => c.Hidden != true && c.ReadOnly != true
-                     && !string.IsNullOrEmpty(c.Name)
-                     && !string.IsNullOrEmpty(c.DisplayName))
+            .Where(c => !string.IsNullOrEmpty(c.Name)
+                     && !string.IsNullOrEmpty(c.DisplayName)
+                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase))
             .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
-            .Take(4)
+            .OrderBy(c => Array.FindIndex(wantedDisplay,
+                w => w.Equals(c.Display, StringComparison.OrdinalIgnoreCase)))
             .ToArray();
 
-        // ── Items ──────────────────────────────────────────────────────────
+        // ── Fetch items ────────────────────────────────────────────────────
         var selectFields = string.Join(",", fields.Select(f => f.Internal));
         var items = await graph.Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
@@ -1529,16 +1613,292 @@ public class SharePointService
             {
                 var d = i.Fields!.AdditionalData!;
                 return fields.Select(f =>
-                    d.TryGetValue(f.Internal, out var v) ? v?.ToString() ?? "" : ""
+                    d.TryGetValue(f.Internal, out var v) ? SerializeQcValue(v) : ""
                 ).ToArray();
             })
             .ToArray();
 
-        return new QcListResult(
-            fields.Select(f => f.Display).ToArray(),
-            rows,
-            list.LastModifiedDateTime?.UtcDateTime);
+        // Map display names: "QC Cut" -> "Notes" for the client
+        var outputColumns = fields
+            .Select(f => f.Display.Equals("QC Cut", StringComparison.OrdinalIgnoreCase) ? "Notes" : f.Display)
+            .ToArray();
+
+        return new QcListResult(outputColumns, rows, list.LastModifiedDateTime?.UtcDateTime);
+    }
+
+    // ── LQ update ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Joins supplier quotes → RFQ Line Items (canonical product names) → QC Metal+Shape rows,
+    /// derives $/lb for each quote, patches the QC list 'LQ' column, and returns a match/miss log.
+    ///
+    /// Join chain:
+    ///   SupplierLineItem.RFQ_ID → RFQLineItem.RFQ_ID → RFQLineItem.Product
+    ///   RFQLineItem.Product (text-containment) → QC row Metal+Shape
+    /// </summary>
+    public async Task<LqUpdateResult> UpdateQcLqAsync()
+    {
+        var (qcSiteId, qcListId, _) = await ResolveQcAsync();
+        var graph = GetGraph();
+
+        // ── Helper: extract number from an object? that may be JsonElement ────
+        static double? GetNum(Dictionary<string, object?> row, string key)
+        {
+            if (!row.TryGetValue(key, out var v) || v is null) return null;
+            return v switch
+            {
+                double d => d,
+                int    i => (double)i,
+                JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetDouble(),
+                _ => double.TryParse(v.ToString(), out var d) ? d : null
+            };
+        }
+
+        static bool IsRegret(Dictionary<string, object?> row)
+        {
+            if (!row.TryGetValue("IsRegret", out var v) || v is null) return false;
+            return v switch
+            {
+                bool b => b,
+                JsonElement je => je.ValueKind == JsonValueKind.True,
+                _ => false
+            };
+        }
+
+        static double ToPounds(double weight, string? unit) => (unit?.ToLowerInvariant()) switch
+        {
+            "kg" => weight * 2.20462,
+            "oz" => weight / 16.0,
+            "g"  => weight / 453.592,
+            _    => weight
+        };
+
+        // Derive $/lb from a supplier quote row; returns null if not computable.
+        static double? DerivePerPound(Dictionary<string, object?> row)
+        {
+            var ppp = GetNum(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+
+            var total  = GetNum(row, "TotalPrice");
+            var qty    = GetNum(row, "UnitsQuoted") ?? GetNum(row, "UnitsRequested");
+            var weight = GetNum(row, "WeightPerUnit");
+            if (total is > 0 && qty is > 0 && weight is > 0)
+            {
+                var unit    = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null;
+                var totalLb = qty.Value * ToPounds(weight.Value, unit);
+                if (totalLb > 0) return total.Value / totalLb;
+            }
+
+            return null;
+        }
+
+        // ── 1. Fetch QC rows with item IDs ────────────────────────────────────
+        var wantedDisplay = new[] { "Metal", "Shape", "LQ" };
+        var colsResp = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
+        var fields = (colsResp?.Value ?? [])
+            .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
+                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase))
+            .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
+            .ToArray();
+
+        string? ColInternal(string display) =>
+            fields.FirstOrDefault(f => f.Display.Equals(display, StringComparison.OrdinalIgnoreCase)).Internal;
+
+        var metalField = ColInternal("Metal") ?? throw new Exception("[QC] 'Metal' column not found");
+        var shapeField = ColInternal("Shape") ?? throw new Exception("[QC] 'Shape' column not found");
+        var lqField    = ColInternal("LQ")    ?? throw new Exception("[QC] 'LQ' column not found — create it in the QC list first");
+
+        var qcItemsResp = await graph.Sites[qcSiteId].Lists[qcListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = [$"fields($select={metalField},{shapeField})"];
+                r.QueryParameters.Top    = 5000;
+            });
+
+        var qcRows = (qcItemsResp?.Value ?? [])
+            .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+            .Select(i =>
+            {
+                var d       = i.Fields!.AdditionalData!;
+                var metals  = (d.TryGetValue(metalField, out var mv) ? SerializeQcValue(mv) : "")
+                              .Split(';').Select(m => m.Trim()).Where(m => m.Length > 0).ToArray();
+                var shapes  = (d.TryGetValue(shapeField, out var sv) ? SerializeQcValue(sv) : "")
+                              .Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+                return (Id: i.Id!, Metals: metals, Shapes: shapes);
+            })
+            .Where(r => r.Metals.Length > 0 && r.Shapes.Length > 0)
+            .ToArray();
+
+        // ── 2. Fetch priced supplier quotes, group by RFQ_ID ─────────────────
+        var lookbackDays = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 7;
+        var cutoff       = DateTime.UtcNow.AddDays(-lookbackDays);
+
+        var allSli = await ReadSupplierItemsAsync(top: 5000);
+
+        // rfqId → list of $/lb values from priced non-regret quotes within the lookback window
+        var pricesByRfq = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
+        var unpricedCount = 0;
+        var staleCount    = 0;
+
+        foreach (var sli in allSli)
+        {
+            if (IsRegret(sli)) continue;
+
+            // Filter by quote date — prefer ReceivedAt, fall back to Modified
+            DateTime? quoteDate = null;
+            foreach (var key in new[] { "ReceivedAt", "DateOfQuote", "Modified" })
+            {
+                if (!sli.TryGetValue(key, out var dv) || dv is null) continue;
+                var ds = dv is JsonElement je ? je.ToString() : dv.ToString();
+                if (DateTime.TryParse(ds, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                { quoteDate = dt.ToUniversalTime(); break; }
+            }
+            if (quoteDate.HasValue && quoteDate.Value < cutoff) { staleCount++; continue; }
+
+            var rfqId = sli.TryGetValue("JobReference", out var jr) ? jr?.ToString()
+                      : sli.TryGetValue("RFQ_ID",       out var ri) ? ri?.ToString()
+                      : null;
+            if (string.IsNullOrEmpty(rfqId)) continue;
+
+            var ppp = DerivePerPound(sli);
+            if (ppp is null or <= 0) { unpricedCount++; continue; }
+
+            if (!pricesByRfq.TryGetValue(rfqId, out var list))
+                pricesByRfq[rfqId] = list = [];
+            list.Add(ppp.Value);
+        }
+
+        _log.LogInformation("[LQ] {QcRows} QC rows, {RfqCount} RFQs with prices in last {Days}d, {Unpriced} unpriced, {Stale} outside window",
+            qcRows.Length, pricesByRfq.Count, lookbackDays, unpricedCount, staleCount);
+
+        // ── 3. Fetch RFQ Line Items for RFQs that have quotes ────────────────
+        // rfqId → canonical product names (lower-cased)
+        var rfqProducts = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var allRfqLines = await ReadAllRfqLineItemsAsync();
+
+        foreach (var (rfqId, _, product, _, _) in allRfqLines)
+        {
+            if (string.IsNullOrEmpty(rfqId) || string.IsNullOrEmpty(product)) continue;
+            if (!pricesByRfq.ContainsKey(rfqId)) continue;   // no quotes for this RFQ
+            if (!rfqProducts.TryGetValue(rfqId, out var prods))
+                rfqProducts[rfqId] = prods = [];
+            prods.Add(product.ToLowerInvariant());
+        }
+
+        _log.LogInformation("[LQ] {Count} RFQ Line Item products across quoted RFQs", rfqProducts.Values.Sum(v => v.Count));
+
+        // ── 4. Build: QC row → list of prices whose RFQ products match ────────
+        // For each QC row, find RFQs where any product contains Metal AND Shape,
+        // then collect all prices from those RFQs.
+        var updated = new List<LqMatch>();
+        var misses  = new List<string>();
+
+        foreach (var qcRow in qcRows)
+        {
+            var matchedPrices = new List<double>();
+            var matchedRfqs   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (rfqId, products) in rfqProducts)
+            {
+                foreach (var product in products)
+                {
+                    bool metalMatch = qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant()));
+                    bool shapeMatch = qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant()));
+                    if (metalMatch && shapeMatch)
+                    {
+                        matchedRfqs.Add(rfqId);
+                        matchedPrices.AddRange(pricesByRfq[rfqId]);
+                        break; // one match per RFQ is enough
+                    }
+                }
+            }
+
+            var metalLabel = string.Join("; ", qcRow.Metals);
+            var shapeLabel = string.Join("; ", qcRow.Shapes);
+
+            if (matchedPrices.Count > 0)
+            {
+                var lq = matchedPrices.Average();
+                await graph.Sites[qcSiteId].Lists[qcListId].Items[qcRow.Id].Fields
+                    .PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?> { [lqField] = lq }
+                    });
+                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchedPrices.Count));
+                _log.LogInformation("[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} (avg of {N} quotes, last {Days}d) RFQs: {Rfqs}",
+                    metalLabel, shapeLabel, lq, matchedPrices.Count, lookbackDays, string.Join(", ", matchedRfqs));
+            }
+            else
+            {
+                misses.Add($"[QC ROW - NO QUOTES] {metalLabel} / {shapeLabel}");
+            }
+        }
+
+        // ── 5. Log RFQ Line Item products that matched no QC row ──────────────
+        var matchedProducts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var qcRow in qcRows)
+        foreach (var (_, products) in rfqProducts)
+        foreach (var product in products)
+        {
+            if (qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant())) &&
+                qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant())))
+                matchedProducts.Add(product);
+        }
+
+        foreach (var (rfqId, products) in rfqProducts)
+        foreach (var product in products)
+            if (!matchedProducts.Contains(product))
+                misses.Add($"[RFQ PRODUCT - NO QC ROW] {rfqId}: {product}");
+
+        return new LqUpdateResult(updated, misses);
+    }
+
+    /// <summary>
+    /// Converts a SharePoint field value to a display string.
+    /// Multi-value fields (UntypedArray) are joined with "; ".
+    /// </summary>
+    private static string SerializeQcValue(object? v)
+    {
+        return v switch
+        {
+            null                => "",
+            UntypedArray arr    => string.Join("; ", arr.GetValue()
+                                        .Select(ExtractNodeString)
+                                        .Where(s => s.Length > 0)),
+            UntypedString str   => str.GetValue() ?? "",
+            UntypedNull         => "",
+            UntypedDouble dbl   => dbl.GetValue().ToString(),
+            UntypedInteger intV => intV.GetValue().ToString(),
+            UntypedBoolean b    => b.GetValue().ToString(),
+            _                   => v.ToString() ?? ""
+        };
+    }
+
+    /// <summary>
+    /// Extracts a display string from an UntypedNode array element.
+    /// Lookup fields return UntypedObject with a "LookupValue" key.
+    /// </summary>
+    private static string ExtractNodeString(UntypedNode n)
+    {
+        if (n is UntypedString s) return s.GetValue() ?? "";
+        if (n is UntypedObject obj)
+        {
+            var props = obj.GetValue();
+            if (props.TryGetValue("LookupValue", out var lv) && lv is UntypedString ls)
+                return ls.GetValue() ?? "";
+        }
+        return "";
     }
 }
 
 public record QcListResult(string[] Columns, string[][] Rows, DateTime? LastModified = null);
+
+public record LqUpdateResult(
+    List<LqMatch> Updated,
+    List<string>  Misses);
+
+public record LqMatch(
+    string Metal,
+    string Shape,
+    double PricePerPound,
+    int    QuoteCount);
