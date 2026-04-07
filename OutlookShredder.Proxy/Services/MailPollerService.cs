@@ -423,9 +423,16 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
             }
 
-            // Write all product rows concurrently — each is an independent SP upsert.
-            var rows = await Task.WhenAll(
-                products.Select((p, i) => _sp.WriteProductRowAsync(extraction!, p, req, source, fileName, i)));
+            // Write product rows sequentially so they all share one SupplierResponse row.
+            // Concurrent writes caused a race: every call independently found no existing SR
+            // and created its own, producing duplicate SR records per multi-product email.
+            var rowList = new List<SpWriteResult>(products.Count);
+            foreach (var (p, i) in products.Select((p, i) => (p, i)))
+            {
+                if (ct.IsCancellationRequested) break;
+                rowList.Add(await _sp.WriteProductRowAsync(extraction!, p, req, source, fileName, i));
+            }
+            var rows = rowList.ToArray();
 
             bool anyUnknown    = false;
             bool anySuccessful = false;

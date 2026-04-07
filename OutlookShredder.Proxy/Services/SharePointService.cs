@@ -1310,7 +1310,8 @@ public class SharePointService
     {
         if (a is null && b is null) return true;
         if (a is null || b is null) return false;
-        static string N(string s) => _normaliseRegex.Replace(s.Trim().ToLowerInvariant(), " ").Trim();
+        // Strip ALL whitespace and non-word characters so "12 GA" == "12GA", etc.
+        static string N(string s) => _normaliseRegex.Replace(s.Trim().ToLowerInvariant(), "");
         return N(a) == N(b);
     }
 
