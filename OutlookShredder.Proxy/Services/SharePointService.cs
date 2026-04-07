@@ -148,7 +148,7 @@ public class SharePointService
     /// SupplierResponse fields as flat field dictionaries (matches the shape expected
     /// by the Shredder dashboard).
     /// </summary>
-    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsAsync(int top = 500)
+    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsAsync(int top = 5000)
     {
         var siteId   = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
