@@ -183,6 +183,11 @@ public class SharePointService
             .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
             .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
 
+        // Separate lookup: SR item ID → item-level CreatedDateTime (not in Fields)
+        var srCreatedAt = (srTask.Result?.Value ?? [])
+            .Where(i => i.Id is not null && i.CreatedDateTime.HasValue)
+            .ToDictionary(i => i.Id!, i => i.CreatedDateTime!.Value.UtcDateTime);
+
         // Fallback lookup: "RFQ_ID|SupplierName" → (SP item ID, SR fields).
         // Used when SupplierResponseId is missing or stale (e.g. data written before the
         // column existed, or before the upsert logic was corrected).
@@ -238,6 +243,8 @@ public class SharePointService
                 if (srMatch is null)
                     _log.LogDebug("[SP] SLI {SliId}: SupplierResponseId={SrId} not found in srById (keys: {Keys})",
                         sli.Id, srId, string.Join(",", srById.Keys.Take(10)));
+                else if (srCreatedAt.TryGetValue(srId, out var srCa))
+                    row["SrCreatedAt"] = srCa;
             }
 
             // Fallback join: RFQ_ID + SupplierName (handles stale/missing SupplierResponseId)
@@ -251,6 +258,8 @@ public class SharePointService
                     srMatch = fb.Fields;
                     // Correct the stale SupplierResponseId so the client fetches the right SP attachment
                     row["SupplierResponseId"] = fb.SrId;
+                    if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
+                        row["SrCreatedAt"] = srCa;
                     _log.LogDebug("[SP] SLI {SliId} [{Rfq}/{Supplier}]: joined via fallback, corrected SrId {OldId}→{NewId}",
                         sli.Id, sliRfq, sliSn, srId ?? "null", fb.SrId);
                 }
