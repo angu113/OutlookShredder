@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Azure.Identity;
@@ -1565,6 +1566,46 @@ public class SharePointService
         return (contentType, bytes, fileName);
     }
 
+    /// <summary>
+    /// Streams all files in the SharePoint publish folder as a ZIP into
+    /// <paramref name="destination"/>. Preserves the Proxy/ subdirectory.
+    /// </summary>
+    public async Task WritePublishPackageZipAsync(Stream destination)
+    {
+        var (_, driveId) = await GetPublishDriveAsync();
+        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+
+        using var zip = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
+        await AddFolderToZipAsync(zip, driveId, folderPath, "");
+    }
+
+    private async Task AddFolderToZipAsync(ZipArchive zip, string driveId, string spPath, string zipPrefix)
+    {
+        var itemKey = $"root:/{spPath}:";
+        var items   = await GetGraph().Drives[driveId].Items[itemKey].Children.GetAsync();
+
+        foreach (var item in items?.Value ?? [])
+        {
+            var name    = item.Name ?? "";
+            var zipName = zipPrefix == "" ? name : $"{zipPrefix}/{name}";
+
+            if (item.Folder is not null)
+            {
+                await AddFolderToZipAsync(zip, driveId, $"{spPath}/{name}", zipName);
+            }
+            else if (item.File is not null)
+            {
+                var fileKey    = $"root:/{spPath}/{name}:";
+                var fileStream = await GetGraph().Drives[driveId].Items[fileKey].Content.GetAsync();
+                if (fileStream is null) continue;
+                var entry = zip.CreateEntry(zipName, CompressionLevel.NoCompression);
+                using var entryStream = entry.Open();
+                await fileStream.CopyToAsync(entryStream);
+                _log.LogInformation("[Update] Packaged {Name}", zipName);
+            }
+        }
+    }
+
     // ── Diagnostics ──────────────────────────────────────────────────────────
 
     public async Task<object> DiagnoseAsync()
@@ -2251,6 +2292,7 @@ public class SharePointService
         }
         return "";
     }
+
 }
 
 public record QcListResult(string[] Columns, string[][] Rows, DateTime? LastModified = null);
