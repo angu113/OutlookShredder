@@ -1169,10 +1169,11 @@ public class SharePointService
             result.SupplierName = supplier;
 
             // ── Upsert SupplierResponses ─────────────────────────────────────
-            var srListId  = await GetSupplierResponsesListIdAsync();
-            var srId      = await EnsureSupplierResponseAsync(
+            var srListId      = await GetSupplierResponsesListIdAsync();
+            var (srId, srNew) = await EnsureSupplierResponseAsync(
                 siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile);
             result.SpItemId = srId;
+            result.Updated  = !srNew;   // true = existing row updated; false = new insert
 
             // Upload the source attachment as a SharePoint list item attachment.
             if (result.SpItemId is not null &&
@@ -1198,7 +1199,6 @@ public class SharePointService
                 sourceFile, emailMeta.EmailFrom);
 
             result.Success = true;
-            result.Updated = false; // upsert logic handled internally
         }
         catch (Microsoft.Graph.Models.ODataErrors.ODataError odataEx)
         {
@@ -1217,13 +1217,14 @@ public class SharePointService
 
     // ── Upsert SupplierResponses (private) ───────────────────────────────────
 
-    private async Task<string> EnsureSupplierResponseAsync(
+    private async Task<(string Id, bool IsNew)> EnsureSupplierResponseAsync(
         string siteId, string listId,
         string jobRef, string supplier,
         RfqExtraction header, ExtractRequest emailMeta,
         string source, string? sourceFile)
     {
         var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier);
+        bool isNew = existingId is null;
 
         var emailBodyTrunc = (emailMeta.EmailBody ?? emailMeta.BodyContext) is string body
             ? body[..Math.Min(body.Length,
@@ -1254,12 +1255,12 @@ public class SharePointService
             ["IsRegret"]             = blanketRegret,
         };
 
-        if (existingId is not null)
+        if (!isNew)
         {
-            await GetGraph().Sites[siteId].Lists[listId].Items[existingId].Fields
+            await GetGraph().Sites[siteId].Lists[listId].Items[existingId!].Fields
                 .PatchAsync(new FieldValueSet { AdditionalData = fieldData });
             _log.LogInformation("[SP] Updated SupplierResponse {Id} for [{JobRef}] {Supplier}", existingId, jobRef, supplier);
-            return existingId;
+            return (existingId!, false);
         }
         else
         {
@@ -1267,7 +1268,7 @@ public class SharePointService
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = fieldData } });
             var newId = item!.Id!;
             _log.LogInformation("[SP] Created SupplierResponse {Id} for [{JobRef}] {Supplier}", newId, jobRef, supplier);
-            return newId;
+            return (newId, true);
         }
     }
 

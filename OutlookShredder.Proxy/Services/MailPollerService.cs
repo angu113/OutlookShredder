@@ -316,7 +316,7 @@ public class MailPollerService : BackgroundService
             };
             var row = await _sp.WriteProductRowAsync(extraction, placeholder, req, "body", null, 0);
             supplierUnknown = row.SupplierUnknown;
-            if (row.Success) _notifications.NotifyRfqProcessed();
+            if (row.Success && !row.Updated) _notifications.NotifyRfqProcessed();
         }
         else if (!hasAttachment || msg.Id is null)
         {
@@ -434,8 +434,8 @@ public class MailPollerService : BackgroundService
             }
             var rows = rowList.ToArray();
 
-            bool anyUnknown    = false;
-            bool anySuccessful = false;
+            bool anyUnknown  = false;
+            bool anyInserted = false;   // true only for new SP rows, not updates/reprocessing
             for (int i = 0; i < rows.Length; i++)
             {
                 var row = rows[i];
@@ -443,7 +443,7 @@ public class MailPollerService : BackgroundService
                     anyUnknown = true;
                 else if (row.Success)
                 {
-                    anySuccessful = true;
+                    if (!row.Updated) anyInserted = true;
                     _log.LogInformation("[Mail] SP row {Action}: '{Product}' -> {Url}",
                         row.Updated ? "updated" : "inserted", products[i].ProductName, row.SpWebUrl);
                 }
@@ -452,7 +452,10 @@ public class MailPollerService : BackgroundService
                         products[i].ProductName, row.Error);
             }
 
-            if (anySuccessful)
+            // Only publish to the Service Bus (and therefore toast the UI) when a genuinely
+            // new SupplierResponse was created.  Updates from reprocessing or proxy startup
+            // scans are intentionally silent — the data is already known to the UI.
+            if (anyInserted)
             {
                 var notification = new Models.RfqProcessedNotification
                 {
@@ -462,7 +465,7 @@ public class MailPollerService : BackgroundService
                                        .First?.SupplierName,
                     RfqId = req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
                     Products = rows.Zip(products)
-                                   .Where(x => x.First.Success)
+                                   .Where(x => x.First.Success && !x.First.Updated)
                                    .Select(x => new Models.RfqNotificationProduct
                                    {
                                        Name       = x.First.ProductName,
