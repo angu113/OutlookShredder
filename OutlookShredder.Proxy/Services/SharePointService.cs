@@ -1569,14 +1569,30 @@ public class SharePointService
     /// <summary>
     /// Streams all files in the SharePoint publish folder as a ZIP into
     /// <paramref name="destination"/>. Preserves the Proxy/ subdirectory.
+    /// Writes to a temp file first so the central directory is fully finalised
+    /// before any bytes reach the response stream.
     /// </summary>
     public async Task WritePublishPackageZipAsync(Stream destination)
     {
         var (_, driveId) = await GetPublishDriveAsync();
         var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
 
-        using var zip = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
-        await AddFolderToZipAsync(zip, driveId, folderPath, "");
+        var tempPath = Path.Combine(Path.GetTempPath(), $"ShredderPackage_{Guid.NewGuid():N}.zip");
+        try
+        {
+            // Build complete ZIP on disk — Dispose() writes the central directory before we stream
+            using (var tempFile = File.OpenWrite(tempPath))
+            using (var zip = new ZipArchive(tempFile, ZipArchiveMode.Create, leaveOpen: false))
+                await AddFolderToZipAsync(zip, driveId, folderPath, "");
+
+            // Stream the finished file to the caller
+            using var fs = File.OpenRead(tempPath);
+            await fs.CopyToAsync(destination);
+        }
+        finally
+        {
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+        }
     }
 
     private async Task AddFolderToZipAsync(ZipArchive zip, string driveId, string spPath, string zipPrefix)
