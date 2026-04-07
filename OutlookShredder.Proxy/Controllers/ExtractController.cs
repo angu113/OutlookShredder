@@ -79,6 +79,7 @@ public class ExtractController : ControllerBase
         {
             _notifications.NotifyRfqProcessed(new RfqProcessedNotification
             {
+                EventType    = "SR",
                 SupplierName = rows.FirstOrDefault(r => r.Success && !r.SupplierUnknown)?.SupplierName,
                 RfqId        = req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
                 Products     = rows.Zip(products)
@@ -166,6 +167,26 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to read supplier items");
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
+    // ── GET /api/items/by-rfq/{rfqId} ────────────────────────────────────────
+    /// <summary>
+    /// Returns all SupplierLineItems for a specific RFQ ID — used for targeted UI refresh.
+    /// Same flat DTO shape as GET /api/items but scoped to one job.
+    /// </summary>
+    [HttpGet("items/by-rfq/{rfqId}")]
+    public async Task<IActionResult> GetItemsByRfq(string rfqId)
+    {
+        try
+        {
+            var items = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
+            return Ok(new { items, nextLink = (string?)null });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to read supplier items for rfqId={RfqId}", rfqId);
             return StatusCode(500, new { success = false, error = ex.Message });
         }
     }
@@ -536,6 +557,11 @@ public class ExtractController : ControllerBase
         try
         {
             await _sp.CreateRfqReferenceAsync(req);
+            _notifications.NotifyRfqProcessed(new RfqProcessedNotification
+            {
+                EventType = "RFQ",
+                RfqId     = req.RfqId,
+            });
             return Ok(new { created = true });
         }
         catch (Exception ex)

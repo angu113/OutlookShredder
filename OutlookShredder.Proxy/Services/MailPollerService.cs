@@ -456,6 +456,7 @@ public class MailPollerService : BackgroundService
             {
                 var notification = new Models.RfqProcessedNotification
                 {
+                    EventType    = "SR",
                     SupplierName = rows.Zip(products)
                                        .FirstOrDefault(x => x.First.Success && !x.First.SupplierUnknown)
                                        .First?.SupplierName,

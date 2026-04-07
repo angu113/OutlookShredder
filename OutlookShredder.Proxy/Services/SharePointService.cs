@@ -392,6 +392,133 @@ public class SharePointService
         return (result, nextLink);
     }
 
+    // ── Read: all supplier items for one RFQ ID (targeted refresh) ───────────
+
+    /// <summary>
+    /// Fetches all SupplierLineItems for a specific RFQ ID, joined with their parent
+    /// SupplierResponses.  Returns the same flat dict shape as <see cref="ReadSupplierItemsAsync"/>
+    /// but scoped to one job — used for targeted UI refresh after a Service Bus notification.
+    /// </summary>
+    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsByRfqIdAsync(string rfqId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var sliCol    = await ResolveRfqIdColumnAsync(siteId, sliListId);
+
+        // Always fetch all SR rows — needed for the join.
+        var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
+
+        // Fetch only SLI rows for this rfqId via OData $filter.
+        // RFQ_ID is not indexed in SP — the Prefer header allows the query to run anyway.
+        // For best performance, index the RFQ_ID column in the SharePoint list settings.
+        var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Filter = $"fields/{sliCol} eq '{rfqId}'";
+                req.QueryParameters.Top    = 500;
+                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+            });
+
+        await Task.WhenAll(srTask, sliTask);
+
+        static string? Str(object? v) => v switch
+        {
+            string s                                                    => s,
+            JsonElement je when je.ValueKind == JsonValueKind.String    => je.GetString(),
+            JsonElement je                                              => je.ToString(),
+            null                                                        => null,
+            _                                                           => v.ToString()
+        };
+        static string? GetStr(IDictionary<string, object?> d, string key) =>
+            d.TryGetValue(key, out var v) ? Str(v) : null;
+        static string? GetStrRaw(IDictionary<string, object> d, string key) =>
+            d.TryGetValue(key, out var v) ? Str(v) : null;
+
+        var srById = (srTask.Result?.Value ?? [])
+            .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+            .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
+
+        var srCreatedAt = (srTask.Result?.Value ?? [])
+            .Where(i => i.Id is not null && i.CreatedDateTime.HasValue)
+            .ToDictionary(i => i.Id!, i => i.CreatedDateTime!.Value.UtcDateTime);
+
+        var srBySupplierRfq = new Dictionary<string, (string SrId, IDictionary<string, object> Fields)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (srItemId, srRaw) in srById)
+        {
+            var rfq = GetStrRaw(srRaw, "RFQ_ID") ?? GetStrRaw(srRaw, "RFQ_x005F_ID");
+            var sn  = GetStrRaw(srRaw, "SupplierName");
+            if (rfq is not null && sn is not null)
+                srBySupplierRfq.TryAdd($"{rfq}|{sn}", (srItemId, srRaw));
+        }
+
+        static bool IsAppField(string key) =>
+            !key.StartsWith('@') && !key.StartsWith('_') &&
+            key is not ("LinkTitle" or "LinkTitleNoMenu" or "ContentType" or "Edit"
+                     or "Attachments" or "ItemChildCount" or "FolderChildCount"
+                     or "AuthorLookupId" or "EditorLookupId"
+                     or "AppAuthorLookupId" or "AppEditorLookupId");
+
+        string[] parentFields = [
+            "EmailFrom", "ReceivedAt", "ProcessedAt", "ProcessingSource",
+            "SourceFile", "DateOfQuote", "EstimatedDeliveryDate",
+            "QuoteReference", "FreightTerms", "EmailBody", "EmailSubject"
+        ];
+
+        var result = new List<Dictionary<string, object?>>();
+        foreach (var sli in sliTask.Result?.Value ?? [])
+        {
+            if (sli.Fields?.AdditionalData is null) continue;
+
+            var row = sli.Fields.AdditionalData
+                .Where(kv => IsAppField(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+
+            IDictionary<string, object>? srMatch = null;
+            var srId = GetStr(row, "SupplierResponseId");
+            if (srId is not null)
+            {
+                srById.TryGetValue(srId, out srMatch);
+                if (srMatch is not null && srCreatedAt.TryGetValue(srId, out var srCa))
+                    row["SrCreatedAt"] = srCa;
+            }
+            if (srMatch is null)
+            {
+                var sliRfq = GetStr(row, "RFQ_ID") ?? GetStr(row, "RFQ_x005F_ID");
+                var sliSn  = GetStr(row, "SupplierName");
+                if (sliRfq is not null && sliSn is not null &&
+                    srBySupplierRfq.TryGetValue($"{sliRfq}|{sliSn}", out var fb))
+                {
+                    srMatch = fb.Fields;
+                    row["SupplierResponseId"] = fb.SrId;
+                    if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
+                        row["SrCreatedAt"] = srCa;
+                }
+            }
+            if (srMatch is not null)
+            {
+                var rfqIdVal = GetStrRaw(srMatch, "RFQ_ID") ?? GetStrRaw(srMatch, "RFQ_x005F_ID");
+                if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
+                foreach (var f in parentFields)
+                    if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
+                        row[f] = v;
+                if (srMatch.TryGetValue("IsRegret", out var srRegret) &&
+                    srRegret is true or JsonElement { ValueKind: JsonValueKind.True })
+                {
+                    if (!row.ContainsKey("PricePerPound") || row["PricePerPound"] is null)
+                        if (!row.ContainsKey("PricePerFoot") || row["PricePerFoot"] is null)
+                            row["IsRegret"] = true;
+                }
+            }
+            result.Add(row);
+        }
+
+        _log.LogInformation("[SP] ReadSupplierItemsByRfqId({RfqId}): {Count} items", rfqId, result.Count);
+        return result;
+    }
+
     // ── Read: new supplier activity since a timestamp ────────────────────────
 
     /// <summary>

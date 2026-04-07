@@ -16,9 +16,11 @@ public class ExtractResponse
     public string?           Error      { get; set; }
 }
 
-/// <summary>Payload broadcast via SSE when a supplier quote is processed.</summary>
+/// <summary>Payload broadcast via SSE and Azure Service Bus when RFQ data changes.</summary>
 public class RfqProcessedNotification
 {
+    /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference.</summary>
+    public string  EventType   { get; set; } = "SR";
     public string? SupplierName { get; set; }
     public string? RfqId       { get; set; }
     public List<RfqNotificationProduct> Products { get; set; } = [];
