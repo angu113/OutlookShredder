@@ -152,11 +152,11 @@ public class ExtractController : ControllerBase
     /// Shape is flat field dictionaries compatible with the Shredder dashboard DTO.
     /// </summary>
     [HttpGet("items")]
-    public async Task<IActionResult> GetItems([FromQuery] int top = 500)
+    public async Task<IActionResult> GetItems([FromQuery] int top = 5000, [FromQuery] int skip = 0)
     {
         try
         {
-            var items = await _sp.ReadSupplierItemsAsync(top);
+            var items = await _sp.ReadSupplierItemsAsync(top, skip);
             return Ok(items);
         }
         catch (Exception ex)

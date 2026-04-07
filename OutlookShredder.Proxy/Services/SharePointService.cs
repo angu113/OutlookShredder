@@ -148,17 +148,25 @@ public class SharePointService
     /// SupplierResponse fields as flat field dictionaries (matches the shape expected
     /// by the Shredder dashboard).
     /// </summary>
-    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsAsync(int top = 5000)
+    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsAsync(int top = 5000, int skip = 0)
     {
-        var siteId   = await GetSiteIdAsync();
+        var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
-        // Fetch both lists in parallel
-        var srTask  = GetGraph().Sites[siteId].Lists[srListId].Items
-            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = top; });
+        // Always fetch ALL SR rows — every page of SLI needs to be able to join against them.
+        // SR count stays well below 5000 in practice (one row per email/supplier combo).
+        var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
+
+        // SLI is the large list — paginate it with skip.
         var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
-            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = top; });
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = top;
+                req.QueryParameters.Skip   = skip;
+            });
         await Task.WhenAll(srTask, sliTask);
 
         // Extract a string value from an AdditionalData entry, handling JsonElement.
