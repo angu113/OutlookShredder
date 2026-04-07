@@ -431,6 +431,57 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/mail/processed-emails ───────────────────────────────────────
+    /// <summary>
+    /// Returns the most recent inbox messages already tagged "RFQ-Processed".
+    /// Used by the Shredder Reprocess panel to let the user pick emails to re-run.
+    /// </summary>
+    [HttpGet("mail/processed-emails")]
+    public async Task<IActionResult> GetProcessedEmails([FromQuery] int top = 200)
+    {
+        var mailbox = HttpContext.RequestServices
+            .GetRequiredService<IConfiguration>()["Mail:MailboxAddress"];
+        if (string.IsNullOrEmpty(mailbox))
+            return BadRequest(new { error = "Mail:MailboxAddress not configured" });
+
+        try
+        {
+            var emails = await _mail.GetProcessedMessagesAsync(mailbox, top);
+            return Ok(emails);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetProcessedEmails failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/mail/reprocess-selected ────────────────────────────────────
+    /// <summary>
+    /// Fetches each listed message from Graph and re-runs the full extraction pipeline
+    /// (Claude + SharePoint upsert + re-stamp "RFQ-Processed").
+    /// Awaits completion before responding so the client knows when all rows are written.
+    /// </summary>
+    [HttpPost("mail/reprocess-selected")]
+    public async Task<IActionResult> ReprocessSelected(
+        [FromBody] ReprocessRequest req,
+        CancellationToken ct)
+    {
+        if (req.MessageIds.Count == 0)
+            return BadRequest(new { error = "messageIds is required" });
+
+        try
+        {
+            await _poller.ReprocessMessagesAsync(req.MessageIds, ct);
+            return Ok(new { reprocessed = req.MessageIds.Count });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ReprocessSelected failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── GET /api/rfq-import/scan ─────────────────────────────────────────────
     /// <summary>
     /// Scans a named mail folder in the given mailbox and returns raw email data

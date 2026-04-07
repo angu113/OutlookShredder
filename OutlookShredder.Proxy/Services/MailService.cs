@@ -178,6 +178,54 @@ public class MailService
     }
 
     /// <summary>
+    /// Returns inbox messages already tagged with "RFQ-Processed" (newest first).
+    /// Used to populate the Reprocess Supplier Emails scan list.
+    /// </summary>
+    public async Task<List<ProcessedEmailDto>> GetProcessedMessagesAsync(string mailbox, int top = 200)
+    {
+        var result = await GetGraph()
+            .Users[mailbox]
+            .MailFolders["inbox"]
+            .Messages
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Filter  = $"categories/any(c: c eq '{ProcessedCategory}')";
+                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
+                                               "bodyPreview", "categories"];
+                req.QueryParameters.Top     = top;
+                req.QueryParameters.Orderby = ["receivedDateTime desc"];
+            });
+
+        return (result?.Value ?? [])
+            .Select(m => new ProcessedEmailDto
+            {
+                MessageId  = m.Id ?? "",
+                Subject    = m.Subject ?? "(no subject)",
+                From       = m.From?.EmailAddress?.Address ?? "",
+                ReceivedAt = m.ReceivedDateTime?.UtcDateTime ?? DateTime.MinValue,
+                Preview    = m.BodyPreview ?? "",
+                IsUnknown  = m.Categories?.Contains("Unknown", StringComparer.OrdinalIgnoreCase) == true,
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// Fetches a single full message (with body content) by ID.
+    /// Used by the reprocess flow to fetch body + attachment metadata before calling Claude.
+    /// </summary>
+    public async Task<Message?> GetMessageByIdAsync(string mailbox, string messageId)
+    {
+        return await GetGraph()
+            .Users[mailbox]
+            .Messages[messageId]
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Select = ["id", "subject", "from", "receivedDateTime",
+                                              "body", "hasAttachments", "bodyPreview", "categories"];
+            });
+    }
+
+    /// <summary>
     /// Returns inbox messages received at or after <paramref name="since"/> that have NOT
     /// been tagged with the "RFQ-Processed" category. Filtering is done server-side.
     /// </summary>

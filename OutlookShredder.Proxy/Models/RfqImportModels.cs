@@ -57,3 +57,20 @@ public class RfqLineItemRequest
     public string? SizeOfUnits    { get; set; }
     public string? SupplierEmails { get; set; }
 }
+
+/// <summary>One entry returned by GET /api/mail/processed-emails.</summary>
+public class ProcessedEmailDto
+{
+    public string   MessageId  { get; set; } = "";
+    public string   Subject    { get; set; } = "";
+    public string   From       { get; set; } = "";
+    public DateTime ReceivedAt { get; set; }
+    public string   Preview    { get; set; } = "";
+    public bool     IsUnknown  { get; set; }
+}
+
+/// <summary>Body for POST /api/mail/reprocess-selected.</summary>
+public class ReprocessRequest
+{
+    public List<string> MessageIds { get; set; } = [];
+}

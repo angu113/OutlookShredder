@@ -51,6 +51,36 @@ public class MailPollerService : BackgroundService
     private readonly SemaphoreSlim _reprocessTrigger = new(0, 1);
 
     /// <summary>
+    /// Reprocesses a specific set of already-processed messages by fetching each one from
+    /// Graph and running the full extraction pipeline (Claude + SharePoint write + re-stamp).
+    /// Called synchronously by the reprocess-selected endpoint; awaited before responding.
+    /// </summary>
+    public async Task ReprocessMessagesAsync(IEnumerable<string> messageIds, CancellationToken ct)
+    {
+        var mailbox             = _config["Mail:MailboxAddress"]
+            ?? throw new InvalidOperationException("Mail:MailboxAddress not configured");
+        var maxPerMinute        = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 30;
+        var bodyContextChars    = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc             : 2_000;
+        var extractBodyNoJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
+
+        foreach (var messageId in messageIds)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
+            if (msg is null)
+            {
+                _log.LogWarning("[Reprocess] Message {Id} not found — skipping", messageId);
+                continue;
+            }
+
+            _log.LogInformation("[Reprocess] Reprocessing \"{Subject}\" from {From}",
+                msg.Subject, msg.From?.EmailAddress?.Address);
+            await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyNoJobRef, ct);
+        }
+    }
+
+    /// <summary>
     /// Triggers an immediate full scan of all unprocessed inbox messages (no lookback limit).
     /// Returns immediately; the scan runs on the background poller thread.
     /// </summary>
