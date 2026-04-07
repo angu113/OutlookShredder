@@ -148,26 +148,52 @@ public class SharePointService
     /// SupplierResponse fields as flat field dictionaries (matches the shape expected
     /// by the Shredder dashboard).
     /// </summary>
-    public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsAsync(int top = 5000, int skip = 0)
+    /// <summary>
+    /// Fetches one page of SupplierLineItems (joined with SupplierResponses) and returns
+    /// the processed rows together with the Graph <c>@odata.nextLink</c> URL for the next page
+    /// (or <c>null</c> when all data has been returned).
+    ///
+    /// Pass <paramref name="sliNextLink"/> = <c>null</c> for the first page; on subsequent calls
+    /// pass back the value returned in the previous response.  Graph SharePoint list items do not
+    /// support <c>$skip</c> — cursor-based pagination via <c>@odata.nextLink</c> is the only
+    /// supported approach.
+    /// </summary>
+    public async Task<(List<Dictionary<string, object?>> Items, string? NextLink)>
+        ReadSupplierItemsAsync(int top = 5000, string? sliNextLink = null)
     {
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
         // Always fetch ALL SR rows — every page of SLI needs to be able to join against them.
-        // SR count stays well below 5000 in practice (one row per email/supplier combo).
         var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
 
-        // SLI is the large list — paginate it with skip.
-        var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields"];
-                req.QueryParameters.Top    = top;
-                req.QueryParameters.Skip   = skip;
-            });
+        // SLI: first page uses standard request; subsequent pages follow the @odata.nextLink.
+        // Graph SharePoint list items don't support $skip — cursor pagination only.
+        Task<Microsoft.Graph.Models.ListItemCollectionResponse?> sliTask;
+        if (sliNextLink is null)
+        {
+            sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields"];
+                    req.QueryParameters.Top    = top;
+                });
+        }
+        else
+        {
+            // Construct a request builder from the raw nextLink URL — the SDK injects auth
+            // automatically and the URL already carries all required query parameters.
+            var nextBuilder = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                sliNextLink, GetGraph().RequestAdapter);
+            sliTask = nextBuilder.GetAsync();
+        }
+
         await Task.WhenAll(srTask, sliTask);
+
+        var sliResponse = sliTask.Result;
+        var nextLink    = sliResponse?.OdataNextLink;   // null on last page
 
         // Extract a string value from an AdditionalData entry, handling JsonElement.
         // Graph SDK deserialises all field values as JsonElement; calling .GetString() on a
@@ -213,7 +239,7 @@ public class SharePointService
         }
 
         _log.LogDebug("[SP] ReadSupplierItems: {SrCount} SR rows, {SliCount} SLI rows",
-            srById.Count, sliTask.Result?.Value?.Count ?? 0);
+            srById.Count, sliResponse?.Value?.Count ?? 0);
 
         static bool IsAppField(string key) =>
             !key.StartsWith('@') &&
@@ -232,7 +258,7 @@ public class SharePointService
 
         var result = new List<Dictionary<string, object?>>();
 
-        foreach (var sli in sliTask.Result?.Value ?? [])
+        foreach (var sli in sliResponse?.Value ?? [])
         {
             if (sli.Fields?.AdditionalData is null) continue;
 
@@ -363,7 +389,7 @@ public class SharePointService
         }
         result = fuzzyResult;
 
-        return result;
+        return (result, nextLink);
     }
 
     // ── Read: new supplier activity since a timestamp ────────────────────────
@@ -2157,7 +2183,7 @@ public class SharePointService
         var lookbackDays = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 7;
         var cutoff       = DateTime.UtcNow.AddDays(-lookbackDays);
 
-        var allSli = await ReadSupplierItemsAsync(top: 5000);
+        var (allSli, _) = await ReadSupplierItemsAsync(top: 5000);
 
         // rfqId → list of $/lb values from priced non-regret quotes within the lookback window
         var pricesByRfq = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
