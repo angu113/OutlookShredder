@@ -714,6 +714,7 @@ public class SharePointService
                     ["Notes"]            = FieldStr(d, "Notes"),
                     ["Requester"]        = FieldStr(d, "Requester"),
                     ["DateCreated"]      = d.TryGetValue("DateCreated", out var dc) ? dc : null,
+                    ["Created"]          = i.CreatedDateTime?.UtcDateTime.ToString("o"),
                     ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
                     ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
                 };
@@ -1255,15 +1256,73 @@ public class SharePointService
             ["IsRegret"]             = blanketRegret,
         };
 
+        // Build an NDJSON log entry for this Claude response — always appended, never
+        // overwritten, so every extraction is preserved for auditing and smart merging.
+        var logEntry = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Ts  = DateTime.UtcNow.ToString("o"),
+            Src = source,
+            Ext = header,
+        }, new System.Text.Json.JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        });
+
         if (!isNew)
         {
+            // Fetch the precious Claude-extracted fields that already exist on this row.
+            // We only overwrite them when the current value is blank — a good extraction
+            // from an earlier pass (e.g. the attachment run) should never be clobbered by
+            // a weaker body-only re-run that returns nulls or less detail.
+            // ProcessingSource/SourceFile are also protected: attachment beats body.
+            var precious = new[] { "QuoteReference", "DateOfQuote", "EstimatedDeliveryDate",
+                                   "FreightTerms", "ProcessingSource", "SourceFile",
+                                   "ClaudeResponseLog" };
+            var currentItem = await GetGraph().Sites[siteId].Lists[listId].Items[existingId!]
+                .GetAsync(r => r.QueryParameters.Expand =
+                    [$"fields($select={string.Join(",", precious)})"]);
+            var cur = currentItem?.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+
+            var update = new Dictionary<string, object?>(fieldData);
+            foreach (var key in precious.Where(k => k != "ClaudeResponseLog"))
+            {
+                if (!update.TryGetValue(key, out var newVal)) continue;
+                cur.TryGetValue(key, out var curVal);
+                var curStr = curVal is JsonElement cje ? cje.GetString() : curVal?.ToString();
+                var newStr = newVal is JsonElement nje ? nje.GetString() : newVal?.ToString();
+                // Keep existing value when it is populated and the new value adds nothing
+                if (!string.IsNullOrWhiteSpace(curStr) && string.IsNullOrWhiteSpace(newStr))
+                    update.Remove(key);
+                // Never downgrade attachment → body
+                if (key == "ProcessingSource" &&
+                    string.Equals(curStr, "attachment", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(newStr, "attachment", StringComparison.OrdinalIgnoreCase))
+                    update.Remove(key);
+            }
+
+            // Append to the log — keep the last 50 entries so the field stays within SP limits
+            cur.TryGetValue("ClaudeResponseLog", out var existingLog);
+            var existingLogStr = existingLog is JsonElement lje ? lje.GetString() : existingLog?.ToString();
+            var logLines = string.IsNullOrWhiteSpace(existingLogStr)
+                ? []
+                : existingLogStr!.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
+            if (logLines.Count >= 50)
+                logLines = logLines.TakeLast(49).ToList();
+            logLines.Add(logEntry);
+            update["ClaudeResponseLog"] = string.Join("\n", logLines);
+
+            // Strip any remaining null-valued keys — no point patching fields to null
+            foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
+                update.Remove(key);
+
             await GetGraph().Sites[siteId].Lists[listId].Items[existingId!].Fields
-                .PatchAsync(new FieldValueSet { AdditionalData = fieldData });
+                .PatchAsync(new FieldValueSet { AdditionalData = update });
             _log.LogInformation("[SP] Updated SupplierResponse {Id} for [{JobRef}] {Supplier}", existingId, jobRef, supplier);
             return (existingId!, false);
         }
         else
         {
+            fieldData["ClaudeResponseLog"] = logEntry;
             var item = await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = fieldData } });
             var newId = item!.Id!;
@@ -1278,16 +1337,26 @@ public class SharePointService
         if (string.IsNullOrEmpty(jobRef) || string.IsNullOrEmpty(supplierName))
             return null;
 
+        // Fetch all SR rows and filter client-side.
+        // OData filter on non-indexed columns with HonorNonIndexedQueriesWarningMayFailRandomly
+        // can silently return empty results, causing a new SR to be inserted instead of updating
+        // the existing one — producing duplicate supplier response rows.
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Filter = $"fields/RFQ_ID eq '{EscapeOdata(jobRef)}' and fields/SupplierName eq '{EscapeOdata(supplierName)}'";
                 r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,SupplierName)"];
-                r.QueryParameters.Top    = 5;
-                r.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+                r.QueryParameters.Top    = 2000;
             });
 
-        return result?.Value?.FirstOrDefault()?.Id;
+        return result?.Value?.FirstOrDefault(i =>
+        {
+            var d = i.Fields?.AdditionalData;
+            if (d is null) return false;
+            var itemJobRef   = d.TryGetValue("RFQ_ID",       out var jv) ? jv?.ToString() : null;
+            var itemSupplier = d.TryGetValue("SupplierName", out var sv) ? sv?.ToString() : null;
+            return string.Equals(itemJobRef,   jobRef,       StringComparison.OrdinalIgnoreCase)
+                && string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase);
+        })?.Id;
     }
 
     // ── Write SupplierLineItems (private) ────────────────────────────────────
@@ -1329,16 +1398,34 @@ public class SharePointService
             ["IsRegret"]                 = HasRegretPhrase(product.SupplierProductComments),
         };
 
-        var existingId = await FindExistingSupplierLineItemAsync(
+        var existing = await FindExistingSupplierLineItemAsync(
             siteId, listId, supplierResponseId, prodName, prodTokens);
 
-        if (existingId is not null)
+        if (existing is not null)
         {
             var update = new Dictionary<string, object?>(fieldData);
             update.Remove("ProductName"); // preserve canonical name from first write
-            await GetGraph().Sites[siteId].Lists[listId].Items[existingId].Fields
+
+            // Preserve SupplierProductComments: Claude's commentary is cumulative.
+            // Only overwrite when the existing row has no comment and the new run does.
+            // If both have values and they differ, keep the existing one (first good extraction wins).
+            var curComments = existing.Fields?.AdditionalData is { } d &&
+                              d.TryGetValue("SupplierProductComments", out var cv)
+                              ? (cv is JsonElement je ? je.GetString() : cv?.ToString())
+                              : null;
+            var newComments = product.SupplierProductComments;
+            if (!string.IsNullOrWhiteSpace(curComments))
+                update.Remove("SupplierProductComments"); // keep existing
+            else if (string.IsNullOrWhiteSpace(newComments))
+                update.Remove("SupplierProductComments"); // nothing to write
+
+            // Strip null values — don't null out fields that are already populated
+            foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
+                update.Remove(key);
+
+            await GetGraph().Sites[siteId].Lists[listId].Items[existing.Id!].Fields
                 .PatchAsync(new FieldValueSet { AdditionalData = update });
-            _log.LogInformation("[SP] Updated SupplierLineItem {Id} for '{Name}'", existingId, prodName);
+            _log.LogInformation("[SP] Updated SupplierLineItem {Id} for '{Name}'", existing.Id, prodName);
         }
         else
         {
@@ -1348,7 +1435,7 @@ public class SharePointService
         }
     }
 
-    private async Task<string?> FindExistingSupplierLineItemAsync(
+    private async Task<ListItem?> FindExistingSupplierLineItemAsync(
         string siteId, string listId,
         string supplierResponseId, string productName, HashSet<string> productTokens)
     {
@@ -1356,14 +1443,16 @@ public class SharePointService
         // Using an OData filter on the non-indexed SupplierResponseId field causes
         // "HonorNonIndexedQueriesWarningMayFailRandomly" failures that silently return
         // empty results, causing duplicate rows to be written.
+        // SupplierProductComments is included so the caller can apply fill-blanks without
+        // a second round-trip.
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName,SupplierProductComments)"];
                 r.QueryParameters.Top    = 2000;
             });
 
-        var match = result?.Value?.FirstOrDefault(i =>
+        return result?.Value?.FirstOrDefault(i =>
         {
             var d = i.Fields?.AdditionalData;
             if (d is null) return false;
@@ -1376,8 +1465,6 @@ public class SharePointService
             return NumericTokensCompatible(productTokens, spTokens)
                 && ProductJaccard(spTokens, productTokens) >= 0.5;
         });
-
-        return match?.Id;
     }
 
     // ── TotalPrice fallback calculation ─────────────────────────────────────
@@ -1496,9 +1583,19 @@ public class SharePointService
 
         if (dimA.Count > 0 && dimB.Count > 0)
         {
-            if (!dimA.SetEquals(dimB)) return false;
-            var gradeA = numA.Where(t => !IsDimToken(t)).ToHashSet();
-            var gradeB = numB.Where(t => !IsDimToken(t)).ToHashSet();
+            // Compare the underlying numeric values in the dim tokens rather than the
+            // raw token strings.  "MC6 × 18" and "MC 6 x 18" tokenise differently:
+            // the former produces dim={6x3d5x0d475} + plain=18, the latter produces
+            // dim={6x18, 6x3d5x0d475}.  Extracting digits from dim tokens and combining
+            // with standalone plain-digit tokens gives the same number set for both.
+            var plainDigitA = numA.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            var plainDigitB = numB.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            var allNumsA = ExtractDimNumbers(dimA).Union(plainDigitA).ToHashSet();
+            var allNumsB = ExtractDimNumbers(dimB).Union(plainDigitB).ToHashSet();
+            if (!allNumsA.SetEquals(allNumsB)) return false;
+
+            var gradeA = numA.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
+            var gradeB = numB.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
             return gradeA.IsSubsetOf(gradeB) || gradeB.IsSubsetOf(gradeA);
         }
         if (dimA.Count > 0) return false;
@@ -1506,6 +1603,21 @@ public class SharePointService
         var gA = numA.Where(t => !IsDimToken(t)).ToHashSet();
         var gB = numB.Where(t => !IsDimToken(t)).ToHashSet();
         return gA.IsSubsetOf(gB) || gB.IsSubsetOf(gA);
+    }
+
+    /// <summary>
+    /// Splits dim tokens on the dimension separators (x, f, d) used by
+    /// <see cref="PreprocessProduct"/> and returns the individual digit strings.
+    /// e.g. "6x3d5x0d475" → {"6","3","5","0","475"}
+    /// </summary>
+    private static HashSet<string> ExtractDimNumbers(HashSet<string> dimTokens)
+    {
+        var result = new HashSet<string>();
+        foreach (var tok in dimTokens)
+            foreach (var part in tok.Split(new[] { 'x', 'f', 'd' }, StringSplitOptions.RemoveEmptyEntries))
+                if (part.Length > 0 && part.All(char.IsDigit))
+                    result.Add(part);
+        return result;
     }
 
     // ── Attachment upload (SharePoint REST API) ──────────────────────────────
@@ -1614,6 +1726,447 @@ public class SharePointService
 
         _log.LogInformation("[SP] Finished cleaning {List}: {Total} items deleted", listName, deleted);
         return deleted;
+    }
+
+    // ── Deduplicate SupplierResponses ────────────────────────────────────────
+
+    // Report models — populated in both live and dry-run modes
+    public record DedupeReportSli(
+        string Action,            // "delete" | "reparent"
+        string SliId,
+        string ProductName,
+        bool   WouldRescueComments);
+
+    public record DedupeReportRetiring(
+        string   SrId,
+        int      Score,
+        string   ProcessingSource,
+        string?  SourceFile,
+        string[] FieldsToMerge,
+        DedupeReportSli[] Slis);
+
+    public record DedupeReportGroup(
+        string   RfqId,
+        string   Supplier,
+        string   KeeperSrId,
+        int      KeeperScore,
+        string   KeeperProcessingSource,
+        DedupeReportRetiring[] Retiring);
+
+    public record DedupeReportSliDupe(
+        string SliId,
+        string ProductName,
+        bool   WouldRescueComments);
+
+    public record DedupeReportSliDupeGroup(
+        string   SrId,
+        string   RfqId,
+        string   Supplier,
+        string   KeeperSliId,
+        string   KeeperProductName,
+        DedupeReportSliDupe[] Retiring);
+
+    public record DedupeSupplierResponsesResult(
+        bool     DryRun,
+        int      DuplicateGroups,
+        int      SrDeleted,
+        int      SliReparented,
+        int      SliDeleted,
+        List<DedupeReportGroup> Groups,
+        int      SliDuplicateGroups,
+        int      SliWithinSrDeleted,
+        List<DedupeReportSliDupeGroup> SliGroups);
+
+    /// <summary>
+    /// Finds SupplierResponse rows that share the same (RFQ_ID, SupplierName) and merges
+    /// each duplicate group into a single canonical row.
+    ///
+    /// For each duplicate group:
+    ///   • Keep the SR with the best data: attachment rows beat body rows; priced SLIs beat
+    ///     unpriceds; newest DateCreated breaks ties.
+    ///   • For each SLI under a duplicate SR:
+    ///       – If the keeper already has an SLI for the same product → delete the duplicate SLI.
+    ///       – Otherwise → re-parent the SLI to the keeper.
+    ///   • Delete the duplicate SR.
+    /// </summary>
+    public async Task<DedupeSupplierResponsesResult> DedupeSupplierResponsesAsync(bool dryRun = false)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        // ── Fetch all SR rows ─────────────────────────────────────────────────
+        // RFQ_x005F_ID is the SP internal column name in some list configurations;
+        // select both so the fallback in FldRfqId always finds a value.
+        var srResponse = await GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName," +
+                    "ProcessingSource,SourceFile,QuoteReference,DateOfQuote," +
+                    "EstimatedDeliveryDate,FreightTerms,EmailBody)"];
+                r.QueryParameters.Top = 5000;
+            });
+        var srItems = srResponse?.Value ?? [];
+        if (srItems.Count >= 5000)
+            _log.LogWarning("[Dedupe-SR] SR fetch hit the 5 000-row limit — re-run to catch any remaining duplicates");
+
+        // ── Fetch all SLI rows ────────────────────────────────────────────────
+        // SupplierProductComments included so we can rescue Claude commentary
+        // before deleting a duplicate SLI that covers the same product.
+        var sliResponse = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName," +
+                    "PricePerPound,PricePerFoot,PricePerPiece,TotalPrice,SupplierProductComments)"];
+                r.QueryParameters.Top = 5000;
+            });
+        var sliItems = sliResponse?.Value ?? [];
+        if (sliItems.Count >= 5000)
+            _log.LogWarning("[Dedupe-SR] SLI fetch hit the 5 000-row limit — re-run to catch any remaining duplicates");
+
+        // ── Helpers ────────────────────────────────────────────────────────
+        static string? Fld(ListItem item, string key)
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null || !d.TryGetValue(key, out var v)) return null;
+            return v is JsonElement je
+                ? (je.ValueKind == JsonValueKind.String ? je.GetString() : je.ToString())
+                : v?.ToString();
+        }
+
+        // RFQ_ID may be stored under either name depending on list creation history
+        static string? FldRfqId(ListItem sr) =>
+            Fld(sr, "RFQ_ID") ?? Fld(sr, "RFQ_x005F_ID");
+
+        static bool SliHasPrice(ListItem sli)
+        {
+            var d = sli.Fields?.AdditionalData;
+            if (d is null) return false;
+            foreach (var key in (string[])["PricePerPound", "PricePerFoot", "PricePerPiece", "TotalPrice"])
+            {
+                if (!d.TryGetValue(key, out var v) || v is null) continue;
+                var n = v is JsonElement je && je.ValueKind == JsonValueKind.Number
+                    ? je.GetDouble() : (double?)null;
+                if (n.HasValue && n.Value > 0) return true;
+            }
+            return false;
+        }
+
+        static bool ProductsMatch(HashSet<string> tokA, HashSet<string> tokB) =>
+            NumericTokensCompatible(tokA, tokB) && ProductJaccard(tokA, tokB) >= 0.5;
+
+        // Index SLIs by SupplierResponseId
+        var slisBySrId = sliItems
+            .GroupBy(sli => Fld(sli, "SupplierResponseId") ?? "")
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        // ── Find duplicate groups ──────────────────────────────────────────
+        var duplicateGroups = srItems
+            .GroupBy(sr => (
+                RfqId:    (FldRfqId(sr) ?? "").ToUpperInvariant(),
+                Supplier: (Fld(sr, "SupplierName") ?? "").ToLowerInvariant()))
+            .Where(g => g.Key.RfqId.Length > 0 && g.Key.Supplier.Length > 0 && g.Count() > 1)
+            .ToList();
+
+        _log.LogInformation("[Dedupe-SR] Found {G} duplicate group(s) across {T} total SR rows",
+            duplicateGroups.Count, srItems.Count);
+
+        int srDeleted = 0, sliDeleted = 0, sliReparented = 0;
+        var reportGroups = new List<DedupeReportGroup>();
+        var dryTag = dryRun ? "[DRY] " : "";
+
+        foreach (var group in duplicateGroups)
+        {
+            var srsInGroup = group.ToList();
+
+            // Score: attachment > has priced SLI > newest DateCreated (tiebreak)
+            int Score(ListItem sr)
+            {
+                int s    = 0;
+                var src  = Fld(sr, "ProcessingSource") ?? "";
+                var file = Fld(sr, "SourceFile")       ?? "";
+                if (src.Equals("attachment", StringComparison.OrdinalIgnoreCase) || file.Length > 0)
+                    s += 2;
+                if (slisBySrId.GetValueOrDefault(sr.Id ?? "", []).Any(SliHasPrice))
+                    s += 1;
+                return s;
+            }
+
+            var keeper = srsInGroup
+                .OrderByDescending(Score)
+                .ThenByDescending(sr => sr.CreatedDateTime)
+                .First();
+
+            // keeper's SLIs as a mutable list — entries are added as SLIs are re-parented
+            // so subsequent dupes in the same group see the updated coverage.
+            var keeperSlis = slisBySrId.GetValueOrDefault(keeper.Id ?? "", []).ToList();
+
+            _log.LogInformation("{Tag}[Dedupe-SR] Group [{Rfq}] {Supplier}: keeping SR {Keep}, retiring {Dupes}",
+                dryTag, group.Key.RfqId, group.Key.Supplier, keeper.Id,
+                string.Join(", ", srsInGroup.Where(s => s.Id != keeper.Id).Select(s => s.Id)));
+
+            var reportRetiring = new List<DedupeReportRetiring>();
+
+            foreach (var dupe in srsInGroup.Where(sr => sr.Id != keeper.Id))
+            {
+                // ── Merge SR-level Claude content into keeper ──────────────────
+                // Only fill blank keeper fields. Update the in-memory dict after each
+                // merge so subsequent dupes in the same group see the updated values
+                // and don't try to merge the same field twice.
+                var mergeFields = new[] { "QuoteReference", "DateOfQuote",
+                                          "EstimatedDeliveryDate", "FreightTerms", "EmailBody" };
+                var toMerge = new Dictionary<string, object?>();
+                foreach (var mf in mergeFields)
+                {
+                    var keeperVal = Fld(keeper, mf);
+                    var dupeVal   = Fld(dupe,   mf);
+                    if (string.IsNullOrWhiteSpace(keeperVal) && !string.IsNullOrWhiteSpace(dupeVal))
+                        toMerge[mf] = dupeVal;
+                }
+                if (toMerge.Count > 0)
+                {
+                    if (!dryRun)
+                    {
+                        await GetGraph().Sites[siteId].Lists[srListId].Items[keeper.Id!].Fields
+                            .PatchAsync(new FieldValueSet { AdditionalData = toMerge! });
+                        // Reflect in-memory so subsequent dupes don't re-merge the same field
+                        if (keeper.Fields?.AdditionalData is { } keeperDict)
+                            foreach (var (k, v) in toMerge)
+                                keeperDict[k] = v;
+                    }
+                    _log.LogInformation("{Tag}[Dedupe-SR] Merged {Fields} from retiring SR {From} → keeper {To}",
+                        dryTag, string.Join(", ", toMerge.Keys), dupe.Id, keeper.Id);
+                }
+
+                // ── Handle this dupe's SLIs ────────────────────────────────────
+                var dupeSlis = slisBySrId.GetValueOrDefault(dupe.Id ?? "", []);
+                var reportSlis = new List<DedupeReportSli>();
+
+                foreach (var sli in dupeSlis)
+                {
+                    var prodName     = Fld(sli, "ProductName") ?? "";
+                    var prodTok      = ProductTokens(prodName);
+                    var dupeComments = Fld(sli, "SupplierProductComments");
+
+                    // Match against keeper SLIs by original name (NormalizeMatch) or
+                    // token Jaccard — avoids the broken "join tokens → NormalizeMatch" pattern.
+                    var coveringKeeperSli = keeperSlis.FirstOrDefault(k =>
+                    {
+                        var kName = Fld(k, "ProductName") ?? "";
+                        return NormalizeMatch(prodName, kName)
+                            || ProductsMatch(prodTok, ProductTokens(kName));
+                    });
+
+                    if (coveringKeeperSli is not null)
+                    {
+                        // Product already covered by keeper.
+                        // Rescue SupplierProductComments before deleting if the keeper SLI has none.
+                        bool wouldRescue = !string.IsNullOrWhiteSpace(dupeComments) &&
+                            string.IsNullOrWhiteSpace(Fld(coveringKeeperSli, "SupplierProductComments"));
+                        if (wouldRescue)
+                        {
+                            if (!dryRun)
+                            {
+                                await GetGraph().Sites[siteId].Lists[sliListId]
+                                    .Items[coveringKeeperSli.Id!].Fields
+                                    .PatchAsync(new FieldValueSet
+                                    {
+                                        AdditionalData = new Dictionary<string, object?>
+                                            { ["SupplierProductComments"] = dupeComments }
+                                    });
+                                // Reflect in-memory so subsequent dupes see the rescued value
+                                if (coveringKeeperSli.Fields?.AdditionalData is { } sliDict)
+                                    sliDict["SupplierProductComments"] = dupeComments;
+                            }
+                            _log.LogInformation(
+                                "{Tag}[Dedupe-SR] Rescued comments from SLI {From} → keeper SLI {To} ('{Product}')",
+                                dryTag, sli.Id, coveringKeeperSli.Id, prodName);
+                        }
+
+                        if (!dryRun)
+                            await GetGraph().Sites[siteId].Lists[sliListId].Items[sli.Id!].DeleteAsync();
+                        sliDeleted++;
+                        reportSlis.Add(new DedupeReportSli("delete", sli.Id!, prodName, wouldRescue));
+                        _log.LogInformation("{Tag}[Dedupe-SR] Deleted duplicate SLI {Id} ('{Product}') from retiring SR {Sr}",
+                            dryTag, sli.Id, prodName, dupe.Id);
+                    }
+                    else
+                    {
+                        // Not covered — re-parent to keeper and track in-memory
+                        if (!dryRun)
+                        {
+                            await GetGraph().Sites[siteId].Lists[sliListId].Items[sli.Id!].Fields
+                                .PatchAsync(new FieldValueSet
+                                {
+                                    AdditionalData = new Dictionary<string, object?>
+                                        { ["SupplierResponseId"] = keeper.Id }
+                                });
+                            keeperSlis.Add(sli); // track so subsequent dupes see this product as covered
+                        }
+                        sliReparented++;
+                        reportSlis.Add(new DedupeReportSli("reparent", sli.Id!, prodName, false));
+                        _log.LogInformation("{Tag}[Dedupe-SR] Re-parented SLI {Id} ('{Product}') from SR {From} → {To}",
+                            dryTag, sli.Id, prodName, dupe.Id, keeper.Id);
+                    }
+                }
+
+                if (!dryRun)
+                    await GetGraph().Sites[siteId].Lists[srListId].Items[dupe.Id!].DeleteAsync();
+                srDeleted++;
+                reportRetiring.Add(new DedupeReportRetiring(
+                    dupe.Id!,
+                    Score(dupe),
+                    Fld(dupe, "ProcessingSource") ?? "",
+                    Fld(dupe, "SourceFile"),
+                    [.. toMerge.Keys],
+                    [.. reportSlis]));
+                _log.LogInformation("{Tag}[Dedupe-SR] Deleted duplicate SR {Id} for [{Rfq}] {Supplier}",
+                    dryTag, dupe.Id, group.Key.RfqId, group.Key.Supplier);
+            }
+
+            reportGroups.Add(new DedupeReportGroup(
+                group.Key.RfqId,
+                group.Key.Supplier,
+                keeper.Id!,
+                Score(keeper),
+                Fld(keeper, "ProcessingSource") ?? "",
+                [.. reportRetiring]));
+        }
+
+        _log.LogInformation("{Tag}[Dedupe-SR] Done — {G} groups, {Sr} SR deleted, {SliR} SLI re-parented, {SliD} SLI deleted",
+            dryTag, duplicateGroups.Count, srDeleted, sliReparented, sliDeleted);
+
+        // ── Pass 2: SLI-level dedup within each SR ────────────────────────────
+        // Catches the case where the same attachment was processed multiple times
+        // in a single run (SP write-lag means the just-written SLI isn't visible
+        // to subsequent FindExistingSupplierLineItemAsync calls), producing several
+        // SLI rows with slightly different product name wording but identical pricing
+        // all under the same SR.
+        int sliWithinSrDeleted = 0;
+        var reportSliGroups    = new List<DedupeReportSliDupeGroup>();
+
+        // Reverse index: SR ID → SR item (for RFQ_ID / SupplierName in report)
+        var srById = srItems.ToDictionary(sr => sr.Id ?? "", sr => sr);
+
+        int SliScore(ListItem sli)
+        {
+            var d = sli.Fields?.AdditionalData;
+            if (d is null) return 0;
+            int s = 0;
+            foreach (var key in (string[])["PricePerPound", "PricePerFoot", "PricePerPiece", "TotalPrice"])
+            {
+                if (!d.TryGetValue(key, out var v) || v is null) continue;
+                var n = v is JsonElement je && je.ValueKind == JsonValueKind.Number ? je.GetDouble() : (double?)null;
+                if (n.HasValue && n.Value > 0) s += 4;
+            }
+            foreach (var key in (string[])["UnitsQuoted", "WeightPerUnit", "LengthPerUnit", "Certifications"])
+                if (d.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v?.ToString())) s += 1;
+            return s;
+        }
+
+        foreach (var (srId, slis) in slisBySrId)
+        {
+            if (slis.Count <= 1) continue;
+
+            // Greedy clustering: each SLI joins the first cluster whose representative
+            // it matches. Three criteria (any one is sufficient):
+            //   1. Exact-normalised product name, OR
+            //   2. NumericTokensCompatible + Jaccard ≥ 0.5 (standard ProductsMatch), OR
+            //   3. Same non-zero TotalPrice with Jaccard ≥ 0.3 — catches the case where
+            //      Claude adds extra descriptive dimensions (e.g. "0.379\" web") that shift
+            //      the numeric token set, making (2) fail despite identical pricing.
+            static double? SliTotalPrice(ListItem sli)
+            {
+                var d = sli.Fields?.AdditionalData;
+                if (d is null || !d.TryGetValue("TotalPrice", out var v) || v is null) return null;
+                return v is JsonElement je && je.ValueKind == JsonValueKind.Number ? je.GetDouble() : null;
+            }
+
+            var clusters = new List<List<ListItem>>();
+            foreach (var sli in slis)
+            {
+                var prodName = Fld(sli, "ProductName") ?? "";
+                var prodTok  = ProductTokens(prodName);
+                var sliPrice = SliTotalPrice(sli);
+                var cluster  = clusters.FirstOrDefault(c =>
+                {
+                    var repName  = Fld(c[0], "ProductName") ?? "";
+                    var repTok   = ProductTokens(repName);
+                    var repPrice = SliTotalPrice(c[0]);
+                    if (NormalizeMatch(prodName, repName)) return true;
+                    if (ProductsMatch(prodTok, repTok)) return true;
+                    if (sliPrice.HasValue && sliPrice > 0 && sliPrice == repPrice
+                        && ProductJaccard(prodTok, repTok) >= 0.3) return true;
+                    return false;
+                });
+                if (cluster is not null) cluster.Add(sli);
+                else clusters.Add([sli]);
+            }
+
+            foreach (var cluster in clusters.Where(c => c.Count > 1))
+            {
+                var sliKeeper = cluster
+                    .OrderByDescending(SliScore)
+                    .ThenByDescending(s => s.CreatedDateTime)
+                    .First();
+
+                var sr       = srById.GetValueOrDefault(srId);
+                var rfqId    = sr is not null ? (FldRfqId(sr) ?? "") : "";
+                var supplier = sr is not null ? (Fld(sr, "SupplierName") ?? "") : "";
+                var reportDupes = new List<DedupeReportSliDupe>();
+
+                _log.LogInformation("{Tag}[Dedupe-SLI] SR {Sr} [{Rfq}] {Supplier}: keeping SLI {Keep}, retiring {Dupes}",
+                    dryTag, srId, rfqId, supplier, sliKeeper.Id,
+                    string.Join(", ", cluster.Where(s => s.Id != sliKeeper.Id).Select(s => s.Id)));
+
+                foreach (var dupe in cluster.Where(s => s.Id != sliKeeper.Id))
+                {
+                    var dupeComments = Fld(dupe, "SupplierProductComments");
+                    bool wouldRescue = !string.IsNullOrWhiteSpace(dupeComments) &&
+                        string.IsNullOrWhiteSpace(Fld(sliKeeper, "SupplierProductComments"));
+
+                    if (wouldRescue)
+                    {
+                        if (!dryRun)
+                        {
+                            await GetGraph().Sites[siteId].Lists[sliListId]
+                                .Items[sliKeeper.Id!].Fields
+                                .PatchAsync(new FieldValueSet
+                                {
+                                    AdditionalData = new Dictionary<string, object?>
+                                        { ["SupplierProductComments"] = dupeComments }
+                                });
+                            if (sliKeeper.Fields?.AdditionalData is { } kd)
+                                kd["SupplierProductComments"] = dupeComments;
+                        }
+                        _log.LogInformation(
+                            "{Tag}[Dedupe-SLI] Rescued comments from SLI {From} → keeper SLI {To}",
+                            dryTag, dupe.Id, sliKeeper.Id);
+                    }
+
+                    if (!dryRun)
+                        await GetGraph().Sites[siteId].Lists[sliListId].Items[dupe.Id!].DeleteAsync();
+                    sliWithinSrDeleted++;
+                    reportDupes.Add(new DedupeReportSliDupe(
+                        dupe.Id!, Fld(dupe, "ProductName") ?? "", wouldRescue));
+                    _log.LogInformation(
+                        "{Tag}[Dedupe-SLI] Deleted duplicate SLI {Id} ('{Product}') within SR {Sr}",
+                        dryTag, dupe.Id, Fld(dupe, "ProductName"), srId);
+                }
+
+                reportSliGroups.Add(new DedupeReportSliDupeGroup(
+                    srId, rfqId, supplier,
+                    sliKeeper.Id!, Fld(sliKeeper, "ProductName") ?? "",
+                    [.. reportDupes]));
+            }
+        }
+
+        _log.LogInformation("{Tag}[Dedupe-SLI] Done — {G} within-SR duplicate groups, {D} SLI deleted",
+            dryTag, reportSliGroups.Count, sliWithinSrDeleted);
+
+        return new DedupeSupplierResponsesResult(
+            dryRun, duplicateGroups.Count, srDeleted, sliReparented, sliDeleted, reportGroups,
+            reportSliGroups.Count, sliWithinSrDeleted, reportSliGroups);
     }
 
     // ── Fetch SP list item attachment (SupplierResponses PDF) ────────────────
@@ -1877,6 +2430,7 @@ public class SharePointService
                 ("EstimatedDeliveryDate","dateTime"),
                 ("FreightTerms",         "text"),
                 ("IsRegret",             "boolean"),
+                ("ClaudeResponseLog",    "note"),
             ]),
             ["SupplierLineItems"] = await EnsureListColumnsAsync(siteId, "SupplierLineItems",
             [

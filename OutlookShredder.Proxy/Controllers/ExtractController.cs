@@ -14,6 +14,7 @@ public class ExtractController : ControllerBase
     private readonly MailPollerService        _poller;
     private readonly SupplierCacheService     _suppliers;
     private readonly RfqNotificationService   _notifications;
+    private readonly IConfiguration           _config;
     private readonly ILogger<ExtractController> _log;
 
     public ExtractController(
@@ -23,6 +24,7 @@ public class ExtractController : ControllerBase
         MailPollerService         poller,
         SupplierCacheService      suppliers,
         RfqNotificationService    notifications,
+        IConfiguration            config,
         ILogger<ExtractController> log)
     {
         _claude        = claude;
@@ -31,6 +33,7 @@ public class ExtractController : ControllerBase
         _poller        = poller;
         _suppliers     = suppliers;
         _notifications = notifications;
+        _config        = config;
         _log           = log;
     }
 
@@ -90,6 +93,26 @@ public class ExtractController : ControllerBase
                                        TotalPrice = x.Second.TotalPrice,
                                    }).ToList(),
             });
+
+            // Stamp "RFQ-Processed" on the mailbox message so the background poller
+            // skips it on its next cycle.  Without this stamp the poller would re-run
+            // Claude on the same email and write a second (duplicate) SR row.
+            var mailbox = _config["Mail:MailboxAddress"];
+            if (!string.IsNullOrEmpty(mailbox) && !string.IsNullOrEmpty(req.ItemId))
+            {
+                try
+                {
+                    var extra = rows.Any(r => r.SupplierUnknown) ? "Unknown" : null;
+                    await _mail.MarkProcessedAsync(mailbox, req.ItemId, extra);
+                    _log.LogInformation("[Extract] Stamped RFQ-Processed on message {Id}", req.ItemId);
+                }
+                catch (Exception ex)
+                {
+                    // Non-fatal — the row is already written; poller will upsert (not duplicate)
+                    // now that FindExistingSupplierResponseAsync uses client-side filtering.
+                    _log.LogWarning(ex, "[Extract] Could not stamp RFQ-Processed on message {Id}", req.ItemId);
+                }
+            }
         }
 
         return Ok(new ExtractResponse
@@ -610,6 +633,41 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "CreateRfqLineItems failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq-import/dedupe-supplier-responses ──────────────────────
+    /// <summary>
+    /// Merges duplicate SupplierResponse rows that share the same (RFQ_ID, SupplierName).
+    /// Keeps the row with the best data (attachment > priced SLI > newest), re-parents or
+    /// deletes orphaned SupplierLineItems, then deletes the duplicate SR rows.
+    /// Safe to call repeatedly — idempotent once all duplicates are resolved.
+    /// </summary>
+    [HttpPost("rfq-import/dedupe-supplier-responses")]
+    public async Task<IActionResult> DedupeSupplierResponses([FromQuery] bool dryRun = false)
+    {
+        try
+        {
+            var result = await _sp.DedupeSupplierResponsesAsync(dryRun);
+            _log.LogInformation("[Dedupe-SR] Endpoint complete — dryRun={DryRun}, {G} groups, {Sr} SR deleted, {SliR} SLI re-parented, {SliD} SLI deleted",
+                dryRun, result.DuplicateGroups, result.SrDeleted, result.SliReparented, result.SliDeleted);
+            return Ok(new
+            {
+                dryRun             = result.DryRun,
+                duplicateGroups    = result.DuplicateGroups,
+                srDeleted          = result.SrDeleted,
+                sliReparented      = result.SliReparented,
+                sliDeleted         = result.SliDeleted,
+                groups             = result.Groups,
+                sliDuplicateGroups = result.SliDuplicateGroups,
+                sliWithinSrDeleted = result.SliWithinSrDeleted,
+                sliGroups          = result.SliGroups,
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DedupeSupplierResponses failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }
