@@ -1370,6 +1370,8 @@ public class SharePointService
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
 
+        var catalogMatch = _catalog.ResolveProduct(prodName);
+
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
@@ -1380,6 +1382,8 @@ public class SharePointService
             ["RFQ_ID"]                   = string.IsNullOrEmpty(jobRef) ? null : jobRef,
             ["SupplierName"]             = supplier,
             ["ProductName"]              = prodName,
+            ["CatalogProductName"]       = catalogMatch?.Name,
+            ["ProductSearchKey"]         = catalogMatch?.SearchKey,
             ["SourceFile"]               = sourceFile,
             ["EmailFrom"]                = emailFrom,
             ["UnitsRequested"]           = product.UnitsRequested,
@@ -1676,6 +1680,69 @@ public class SharePointService
             _log.LogWarning("[SP] Failed to upload attachment '{File}': {Status} {Body}",
                 fileName, addResp.StatusCode, err[..Math.Min(err.Length, 400)]);
         }
+    }
+
+    // ── Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows ─────
+
+    /// <summary>
+    /// Iterates every SupplierLineItem and writes the current catalog match result
+    /// to <c>CatalogProductName</c> and <c>ProductSearchKey</c>.
+    /// Safe to run repeatedly — idempotent patch, no rows created or deleted.
+    /// Returns (total rows visited, rows updated, rows with a match).
+    /// </summary>
+    public async Task<(int Total, int Updated, int Matched)> BackfillCatalogMatchesAsync(
+        CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        int total = 0, updated = 0, matched = 0;
+
+        // Page through all SLI rows, reading only the fields we need.
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,ProductName,CatalogProductName,ProductSearchKey)"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                ct.ThrowIfCancellationRequested();
+                total++;
+
+                var data    = item.Fields?.AdditionalData;
+                var itemId  = item.Id;
+                if (data is null || itemId is null) continue;
+
+                var prodName = data.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null;
+                if (string.IsNullOrWhiteSpace(prodName)) continue;
+
+                var match = _catalog.ResolveProduct(prodName);
+                if (match is not null) matched++;
+
+                // Always patch — clears stale values when catalog changes remove a match.
+                var patch = new Dictionary<string, object?>
+                {
+                    ["CatalogProductName"] = match?.Name,
+                    ["ProductSearchKey"]   = match?.SearchKey,
+                };
+                await GetGraph().Sites[siteId].Lists[sliListId].Items[itemId].Fields
+                    .PatchAsync(new FieldValueSet { AdditionalData = patch }, cancellationToken: ct);
+                updated++;
+            }
+
+            // Follow nextLink for the next page.
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[SP] Backfill complete: {Total} rows, {Updated} patched, {Matched} matched",
+            total, updated, matched);
+        return (total, updated, matched);
     }
 
     // ── Clean: delete all derived email-processing data ──────────────────────

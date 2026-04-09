@@ -5,7 +5,7 @@ namespace OutlookShredder.Proxy.Controllers;
 
 [ApiController]
 [Route("api/catalog")]
-public class CatalogController(ProductCatalogService catalog) : ControllerBase
+public class CatalogController(ProductCatalogService catalog, SharePointService sp) : ControllerBase
 {
     /// <summary>
     /// GET /api/catalog — lists the products currently loaded in the in-memory cache,
@@ -33,6 +33,18 @@ public class CatalogController(ProductCatalogService catalog) : ControllerBase
             lastError = catalog.LastError,
             diag      = catalog.LastDiag,
         });
+    }
+
+    /// <summary>
+    /// POST /api/catalog/backfill — patches CatalogProductName + ProductSearchKey on every
+    /// existing SupplierLineItem using the current in-memory catalog.
+    /// Safe to run repeatedly (idempotent). Runs synchronously; expect ~1 s per 10 rows.
+    /// </summary>
+    [HttpPost("backfill")]
+    public async Task<IActionResult> Backfill(CancellationToken ct)
+    {
+        var (total, updated, matched) = await sp.BackfillCatalogMatchesAsync(ct);
+        return Ok(new { total, updated, matched });
     }
 
     /// <summary>
