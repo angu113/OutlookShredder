@@ -693,6 +693,25 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── DELETE /api/sli/{itemId} ─────────────────────────────────────────────
+    /// <summary>
+    /// Deletes a single SupplierLineItem by its SharePoint item ID.
+    /// </summary>
+    [HttpDelete("sli/{itemId}")]
+    public async Task<IActionResult> DeleteSli(string itemId)
+    {
+        try
+        {
+            await _sp.DeleteSliAsync(itemId);
+            return Ok(new { deleted = itemId });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DeleteSli failed for item {Id}", itemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── DELETE /api/rfq-import/clean ─────────────────────────────────────────
     /// <summary>
     /// Deletes all rows from SupplierResponses and SupplierLineItems.

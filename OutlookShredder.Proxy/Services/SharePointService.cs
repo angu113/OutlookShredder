@@ -1748,6 +1748,17 @@ public class SharePointService
     // ── Clean: delete all derived email-processing data ──────────────────────
 
     /// <summary>
+    /// Deletes a single SupplierLineItem row by its SharePoint item ID.
+    /// </summary>
+    public async Task DeleteSliAsync(string itemId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        await GetGraph().Sites[siteId].Lists[sliListId].Items[itemId].DeleteAsync();
+        _log.LogInformation("[SP] Deleted SLI item {Id}", itemId);
+    }
+
+    /// <summary>
     /// Deletes every item in SupplierResponses and SupplierLineItems.
     /// Returns counts of items deleted from each list.
     /// Does NOT touch RFQ References (notes / dates).
