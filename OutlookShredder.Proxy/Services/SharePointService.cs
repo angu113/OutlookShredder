@@ -1895,7 +1895,7 @@ public class SharePointService
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName," +
-                    "PricePerPound,PricePerFoot,PricePerPiece,TotalPrice,SupplierProductComments)"];
+                    "PricePerPound,PricePerFoot,PricePerPiece,TotalPrice,SupplierProductComments,MSPCMatch)"];
                 r.QueryParameters.Top = 5000;
             });
         var sliItems = sliResponse?.Value ?? [];
@@ -2038,27 +2038,38 @@ public class SharePointService
                     if (coveringKeeperSli is not null)
                     {
                         // Product already covered by keeper.
-                        // Rescue SupplierProductComments before deleting if the keeper SLI has none.
-                        bool wouldRescue = !string.IsNullOrWhiteSpace(dupeComments) &&
-                            string.IsNullOrWhiteSpace(Fld(coveringKeeperSli, "SupplierProductComments"));
-                        if (wouldRescue)
+                        // Rescue SupplierProductComments and MSPCMatch before deleting
+                        // if the keeper SLI has none.
+                        var rescueFields = new Dictionary<string, object?>();
+                        bool wouldRescue = false;
+
+                        if (!string.IsNullOrWhiteSpace(dupeComments) &&
+                            string.IsNullOrWhiteSpace(Fld(coveringKeeperSli, "SupplierProductComments")))
+                        {
+                            rescueFields["SupplierProductComments"] = dupeComments;
+                            wouldRescue = true;
+                        }
+
+                        var dupeMspc   = Fld(sli, "MSPCMatch");
+                        var keeperMspc = Fld(coveringKeeperSli, "MSPCMatch");
+                        if (!string.IsNullOrWhiteSpace(dupeMspc) && string.IsNullOrWhiteSpace(keeperMspc))
+                            rescueFields["MSPCMatch"] = dupeMspc;
+
+                        if (rescueFields.Count > 0)
                         {
                             if (!dryRun)
                             {
                                 await GetGraph().Sites[siteId].Lists[sliListId]
                                     .Items[coveringKeeperSli.Id!].Fields
-                                    .PatchAsync(new FieldValueSet
-                                    {
-                                        AdditionalData = new Dictionary<string, object?>
-                                            { ["SupplierProductComments"] = dupeComments }
-                                    });
-                                // Reflect in-memory so subsequent dupes see the rescued value
+                                    .PatchAsync(new FieldValueSet { AdditionalData = rescueFields! });
+                                // Reflect in-memory so subsequent dupes see the rescued values
                                 if (coveringKeeperSli.Fields?.AdditionalData is { } sliDict)
-                                    sliDict["SupplierProductComments"] = dupeComments;
+                                    foreach (var (k, v) in rescueFields)
+                                        sliDict[k] = v;
                             }
                             _log.LogInformation(
-                                "{Tag}[Dedupe-SR] Rescued comments from SLI {From} → keeper SLI {To} ('{Product}')",
-                                dryTag, sli.Id, coveringKeeperSli.Id, prodName);
+                                "{Tag}[Dedupe-SR] Rescued {Fields} from SLI {From} → keeper SLI {To} ('{Product}')",
+                                dryTag, string.Join(", ", rescueFields.Keys), sli.Id, coveringKeeperSli.Id, prodName);
                         }
 
                         if (!dryRun)
@@ -2139,6 +2150,9 @@ public class SharePointService
             }
             foreach (var key in (string[])["UnitsQuoted", "WeightPerUnit", "LengthPerUnit", "Certifications"])
                 if (d.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v?.ToString())) s += 1;
+            // Prefer rows that have a confirmed catalog match
+            if (d.TryGetValue("MSPCMatch", out var mspc) && !string.IsNullOrWhiteSpace(mspc?.ToString()))
+                s += 4;
             return s;
         }
 
@@ -2200,26 +2214,35 @@ public class SharePointService
                 foreach (var dupe in cluster.Where(s => s.Id != sliKeeper.Id))
                 {
                     var dupeComments = Fld(dupe, "SupplierProductComments");
-                    bool wouldRescue = !string.IsNullOrWhiteSpace(dupeComments) &&
-                        string.IsNullOrWhiteSpace(Fld(sliKeeper, "SupplierProductComments"));
+                    var rescueFields = new Dictionary<string, object?>();
+                    bool wouldRescue = false;
 
-                    if (wouldRescue)
+                    if (!string.IsNullOrWhiteSpace(dupeComments) &&
+                        string.IsNullOrWhiteSpace(Fld(sliKeeper, "SupplierProductComments")))
+                    {
+                        rescueFields["SupplierProductComments"] = dupeComments;
+                        wouldRescue = true;
+                    }
+
+                    var dupeMspc   = Fld(dupe, "MSPCMatch");
+                    var keeperMspc = Fld(sliKeeper, "MSPCMatch");
+                    if (!string.IsNullOrWhiteSpace(dupeMspc) && string.IsNullOrWhiteSpace(keeperMspc))
+                        rescueFields["MSPCMatch"] = dupeMspc;
+
+                    if (rescueFields.Count > 0)
                     {
                         if (!dryRun)
                         {
                             await GetGraph().Sites[siteId].Lists[sliListId]
                                 .Items[sliKeeper.Id!].Fields
-                                .PatchAsync(new FieldValueSet
-                                {
-                                    AdditionalData = new Dictionary<string, object?>
-                                        { ["SupplierProductComments"] = dupeComments }
-                                });
+                                .PatchAsync(new FieldValueSet { AdditionalData = rescueFields! });
                             if (sliKeeper.Fields?.AdditionalData is { } kd)
-                                kd["SupplierProductComments"] = dupeComments;
+                                foreach (var (k, v) in rescueFields)
+                                    kd[k] = v;
                         }
                         _log.LogInformation(
-                            "{Tag}[Dedupe-SLI] Rescued comments from SLI {From} → keeper SLI {To}",
-                            dryTag, dupe.Id, sliKeeper.Id);
+                            "{Tag}[Dedupe-SLI] Rescued {Fields} from SLI {From} → keeper SLI {To}",
+                            dryTag, string.Join(", ", rescueFields.Keys), dupe.Id, sliKeeper.Id);
                     }
 
                     if (!dryRun)
