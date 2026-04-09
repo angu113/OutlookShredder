@@ -1068,11 +1068,15 @@ public class SharePointService
         foreach (var req in items)
         {
             var data = new Dictionary<string, object?> { [col] = req.RfqId };
-            if (req.Mspc          is not null) data["MSPC"]           = req.Mspc;
-            if (req.Product       is not null) data["Product"]        = req.Product;
-            if (req.Units         is not null) data["Units"]          = req.Units;
-            if (req.SizeOfUnits   is not null) data["SizeOfUnits"]    = req.SizeOfUnits;
-            if (req.SupplierEmails is not null) data["SupplierEmails"] = req.SupplierEmails;
+            if (req.Mspc            is not null) data["MSPC"]             = req.Mspc;
+            if (req.Product         is not null) data["Product"]          = req.Product;
+            if (req.Units           is not null) data["Units"]            = req.Units;
+            if (req.SizeOfUnits     is not null) data["SizeOfUnits"]      = req.SizeOfUnits;
+            if (req.SupplierEmails  is not null) data["SupplierEmails"]   = req.SupplierEmails;
+            if (req.ProductCategory is not null) data["ProductCategory"]  = req.ProductCategory;
+            if (req.ProductShape    is not null) data["ProductShape"]     = req.ProductShape;
+            if (req.JobReference    is not null) data["JobReference"]     = req.JobReference;
+            if (req.ProcessingSource is not null) data["ProcessingSource"] = req.ProcessingSource;
 
             await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
@@ -3134,6 +3138,346 @@ public class SharePointService
                 return ls.GetValue() ?? "";
         }
         return "";
+    }
+
+    // ── Read: Product Catalog ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all rows from the "Product Catalog" SP list.
+    /// Tries common internal-name variants for each field so the list column names
+    /// don't need to exactly match hard-coded strings.
+    /// </summary>
+    public async Task<List<ProductCatalogDto>> ReadProductCatalogAsync()
+    {
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await ResolveListIdAsync(listName);
+
+        _log.LogInformation("[SP] ReadProductCatalog: list='{Name}'", listName);
+
+        // Fetch catalog items + lookup tables for Category and Shape in parallel.
+        var itemsTask = GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        // Category lookup: Metals list item-id → category name
+        var categoryMapTask = BuildLookupMapAsync(siteId, ["Metals", "Metal", "Product Categories"], "Title");
+
+        // Shape lookup: Shapes list item-id → shape name
+        var shapeMapTask = BuildLookupMapAsync(siteId, ["Shapes", "Shape"], "ProductShape", "Title");
+
+        await Task.WhenAll(itemsTask, categoryMapTask, shapeMapTask);
+
+        var raw         = itemsTask.Result?.Value ?? [];
+        var categoryMap = categoryMapTask.Result;
+        var shapeMap    = shapeMapTask.Result;
+
+        return raw
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i =>
+            {
+                var d = i.Fields!.AdditionalData!;
+
+                // Resolve lookup IDs → text values via the maps built above.
+                var catId   = RfqField(d, "Product_x0020_CategoryLookupId");
+                var shapeId = RfqField(d, "Product_x0020_ShapeLookupId");
+                var cat     = catId   is not null && categoryMap.TryGetValue(catId,   out var c) ? c : null;
+                var shape   = shapeId is not null && shapeMap.TryGetValue(shapeId,    out var s) ? s : null;
+
+                return new ProductCatalogDto
+                {
+                    // "Line_x0020_No" = "Line No" / MSPC equivalent
+                    Mspc             = RfqField(d, "Line_x0020_No", "MSPC", "mspc", "Mspc"),
+                    // "Product_x0020_SearchKey" = "Product SearchKey" column
+                    ProductSearchKey = RfqField(d, "Product_x0020_SearchKey", "ProductSearchKey", "SearchKey"),
+                    // "Product" is the internal field name for the product name column
+                    ProductName      = RfqField(d, "Product", "ProductName", "Title"),
+                    Category         = cat ?? RfqField(d, "Product_x0020_Category", "Metal", "ProductCategory", "Category"),
+                    Shape            = shape ?? RfqField(d, "Product_x0020_Shape", "ProductShape", "Shape"),
+                };
+            })
+            .Where(p => !string.IsNullOrWhiteSpace(p.ProductName))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Reads items from the first matching list name and returns a map of item-ID → text value
+    /// (tries each field key in order; used to resolve SharePoint lookup column IDs).
+    /// </summary>
+    private async Task<Dictionary<string, string>> BuildLookupMapAsync(
+        string siteId, string[] listNames, params string[] fieldKeys)
+    {
+        foreach (var name in listNames)
+        {
+            try
+            {
+                var lid   = await ResolveListIdAsync(name);
+                var items = await GetGraph().Sites[siteId].Lists[lid].Items
+                    .GetAsync(req =>
+                    {
+                        req.QueryParameters.Expand = ["fields"];
+                        req.QueryParameters.Top    = 500;
+                    });
+
+                return (items?.Value ?? [])
+                    .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+                    .Select(i => (Id: i.Id!, Val: RfqField(i.Fields!.AdditionalData!, fieldKeys)))
+                    .Where(x => x.Val is not null)
+                    .ToDictionary(x => x.Id, x => x.Val!);
+            }
+            catch { /* try next list name */ }
+        }
+
+        return [];
+    }
+
+    // ── Read: Metal Categories ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all ProductCategory values from the "Metals" SP list, sorted alphabetically.
+    /// Falls back to Title if ProductCategory column is absent.
+    /// </summary>
+    public async Task<List<string>> ReadMetalCategoriesAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+
+        // Try several possible list names; fall through to product-catalog derivation if none found.
+        string? listId = null;
+        foreach (var name in new[] { "Metals", "Metal", "Product Categories", "ProductCategories" })
+        {
+            try { listId = await ResolveListIdAsync(name); break; }
+            catch { /* list not found — try next */ }
+        }
+
+        if (listId is not null)
+        {
+            _log.LogInformation("[SP] ReadMetalCategories from list");
+
+            var items = await GetGraph().Sites[siteId].Lists[listId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields"];
+                    req.QueryParameters.Top    = 1000;
+                });
+
+            if (items?.Value?.Count > 0)
+            {
+                var sampleKeys = string.Join(", ", items.Value[0].Fields?.AdditionalData?.Keys ?? []);
+                _log.LogInformation("[SP] Metals first-item fields: [{Keys}]", sampleKeys);
+            }
+
+            var vals = (items?.Value ?? [])
+                .Where(i => i.Fields?.AdditionalData is not null)
+                .Select(i => RfqField(i.Fields!.AdditionalData!, "Title", "ProductCategory", "Metal", "Category"))
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (vals.Count > 0) return vals;
+        }
+
+        // Fallback: derive distinct Metal/Category values from the Product Catalog.
+        _log.LogInformation("[SP] ReadMetalCategories — Metals list not found, deriving from Product Catalog");
+        var catalogListName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var catalogListId   = await ResolveListIdAsync(catalogListName);
+        var catalogItems = await GetGraph().Sites[siteId].Lists[catalogListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        return (catalogItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i => RfqField(i.Fields!.AdditionalData!, "Metal", "ProductCategory", "Category"))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    // ── Read: Product Shapes ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all ProductShape values from the "Shapes" SP list, sorted alphabetically.
+    /// Falls back to Title if ProductShape column is absent.
+    /// </summary>
+    public async Task<List<string>> ReadProductShapesAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync("Shapes");
+
+        _log.LogInformation("[SP] ReadProductShapes");
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = 1000;
+            });
+
+        return (items?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i => RfqField(i.Fields!.AdditionalData!, "ProductShape", "Title"))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    // ── Read: Supplier Relationships ──────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all rows from the "Supplier Relationships" SP list.
+    /// Metal is the primary lookup key; Shape is secondary (null = match any shape for this metal).
+    /// Rows missing an email or metal are excluded.
+    /// </summary>
+    public async Task<List<SupplierRelationshipDto>> ReadSupplierRelationshipsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+
+        // ── Step 1: read Supplier Relationships rows (lookup IDs only) ────────
+        var relListId = await ResolveListIdAsync("Supplier Relationships");
+        _log.LogInformation("[SP] ReadSupplierRelationships");
+
+        var relItems = await GetGraph().Sites[siteId].Lists[relListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var relRaw = relItems?.Value ?? [];
+        if (relRaw.Count == 0) return [];
+
+        if (relRaw.Count > 0)
+        {
+            var sampleKeys = string.Join(", ", relRaw[0].Fields?.AdditionalData?.Keys ?? []);
+            _log.LogInformation("[SP] SupplierRelationships first-item fields: [{Keys}]", sampleKeys);
+        }
+
+        // ── Step 2: build Suppliers map id→(name,email) ─────────────────────
+        var suppListId = await ResolveListIdAsync("Suppliers");
+        var suppItems  = await GetGraph().Sites[siteId].Lists[suppListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=Title,ContactEmail)"];
+                req.QueryParameters.Top    = 1000;
+            });
+
+        var suppMap = (suppItems?.Value ?? [])
+            .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+            .ToDictionary(
+                i => i.Id!,
+                i => (
+                    Name:  i.Fields!.AdditionalData!.TryGetValue("Title",        out var t) ? t?.ToString() ?? "" : "",
+                    Email: i.Fields!.AdditionalData!.TryGetValue("ContactEmail", out var e) ? e?.ToString() ?? "" : ""
+                )
+            );
+
+        // ── Step 3: build Metals map id→name ─────────────────────────────────
+        string? metalListId = null;
+        foreach (var n in new[] { "Metals", "Metal", "Product Categories", "ProductCategories" })
+        {
+            try { metalListId = await ResolveListIdAsync(n); break; }
+            catch { /* try next */ }
+        }
+
+        var metalMap = new Dictionary<string, string>();
+        if (metalListId is not null)
+        {
+            var metalItems = await GetGraph().Sites[siteId].Lists[metalListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=Title)"];
+                    req.QueryParameters.Top    = 200;
+                });
+
+            metalMap = (metalItems?.Value ?? [])
+                .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+                .ToDictionary(
+                    i => i.Id!,
+                    i => i.Fields!.AdditionalData!.TryGetValue("Title", out var t) ? t?.ToString() ?? "" : ""
+                );
+        }
+
+        // ── Step 4: build Shapes map id→name (optional — list may not exist) ─
+        Dictionary<string, string> shapeMap = [];
+        try
+        {
+            var shapeListId = await ResolveListIdAsync("Shapes");
+            var shapeItems  = await GetGraph().Sites[siteId].Lists[shapeListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=Title,ProductShape)"];
+                    req.QueryParameters.Top    = 200;
+                });
+
+            shapeMap = (shapeItems?.Value ?? [])
+                .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+                .ToDictionary(
+                    i => i.Id!,
+                    i =>
+                    {
+                        var d = i.Fields!.AdditionalData!;
+                        return (d.TryGetValue("ProductShape", out var ps) ? ps?.ToString() : null)
+                            ?? (d.TryGetValue("Title",        out var tt) ? tt?.ToString() : null)
+                            ?? "";
+                    }
+                );
+        }
+        catch { /* Shapes list is optional */ }
+
+        // ── Step 5: join ──────────────────────────────────────────────────────
+        return relRaw
+            .Where(i => i.Fields?.AdditionalData is not null)
+            .Select(i =>
+            {
+                var d = i.Fields!.AdditionalData!;
+
+                // Lookup ID fields: "SKLookupId" → supplier item ID, "MetalLookupId" → metal item ID
+                var suppId   = RfqField(d, "SKLookupId",    "SupplierLookupId");
+                var metalId  = RfqField(d, "MetalLookupId", "Metal_x0020_CategoryLookupId");
+                var shapeId  = RfqField(d, "ShapeLookupId", "Product_x0020_ShapeLookupId");
+
+                var supp  = suppId  is not null && suppMap.TryGetValue(suppId,  out var s) ? s : default;
+                var metal = metalId is not null && metalMap.TryGetValue(metalId, out var m) ? m : "";
+                var shape = shapeId is not null && shapeMap.TryGetValue(shapeId, out var sh) ? sh : null;
+
+                // Fallback: try direct text fields in case the list is configured differently
+                if (string.IsNullOrEmpty(supp.Name))
+                    supp = (Name: RfqField(d, "Title", "SupplierName", "Supplier") ?? "", Email: RfqField(d, "Email", "SupplierEmail", "ContactEmail") ?? "");
+                if (string.IsNullOrEmpty(metal))
+                    metal = RfqField(d, "Metal", "ProductCategory", "Category") ?? "";
+
+                return new SupplierRelationshipDto
+                {
+                    SupplierName = supp.Name,
+                    Email        = supp.Email,
+                    Metal        = metal,
+                    Shape        = string.IsNullOrEmpty(shape) ? null : shape,
+                };
+            })
+            .Where(r => !string.IsNullOrWhiteSpace(r.Metal) && !string.IsNullOrWhiteSpace(r.Email))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Tries each key in order; returns the first non-empty string value found in the field dictionary.
+    /// </summary>
+    private static string? RfqField(IDictionary<string, object?> d, params string[] keys)
+    {
+        foreach (var k in keys)
+            if (d.TryGetValue(k, out var v) && v?.ToString() is string s && s.Length > 0)
+                return s;
+        return null;
     }
 
 }

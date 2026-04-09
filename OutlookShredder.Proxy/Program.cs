@@ -22,7 +22,13 @@ try
 {
     Log.Information("ShredderProxy starting — logs: {LogPath}", logPath);
 
+    // Use the exe directory as the base for config files so that appsettings files are found
+    // whether the process runs as a Windows service (working dir = System32) or from a terminal.
+    var exeDir = Path.GetDirectoryName(Environment.ProcessPath)
+              ?? AppContext.BaseDirectory;
+
     var builder = WebApplication.CreateBuilder(args);
+    builder.Configuration.SetBasePath(exeDir);
 
     // Secrets file: gitignored, deployed alongside the exe.
     // Overrides appsettings.json values — put real API keys and credentials here.

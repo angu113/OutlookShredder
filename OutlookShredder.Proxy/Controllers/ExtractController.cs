@@ -627,7 +627,32 @@ public class ExtractController : ControllerBase
             var existingRfqIds = await _sp.GetRfqIdsWithLineItemsAsync();
             var toCreate = items.Where(i => !existingRfqIds.Contains(i.RfqId)).ToList();
             if (toCreate.Count > 0)
+            {
                 await _sp.CreateRfqLineItemsAsync(toCreate);
+
+                // Fire one "RFQ" event per newly-created RFQ so Service Bus consumers
+                // (other Shredder instances, downstream systems) know the full RFQ is ready.
+                foreach (var grp in toCreate.GroupBy(i => i.RfqId, StringComparer.OrdinalIgnoreCase))
+                {
+                    _notifications.NotifyRfqProcessed(new RfqProcessedNotification
+                    {
+                        EventType = "RFQ",
+                        RfqId     = grp.Key,
+                        Products  = grp
+                            .Where(li => li.Product is not null)
+                            .Select(li => new RfqNotificationProduct
+                            {
+                                Name = string.IsNullOrWhiteSpace(li.Mspc)
+                                    ? li.Product
+                                    : $"{li.Mspc} | {li.Product}",
+                            })
+                            .ToList(),
+                    });
+                    _log.LogInformation("[RfqNew] Fired RFQ event for {RfqId} ({Count} line items)",
+                        grp.Key, grp.Count());
+                }
+            }
+
             return Ok(new { created = toCreate.Count, skipped = items.Count - toCreate.Count });
         }
         catch (Exception ex)
@@ -866,6 +891,89 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "[Changes] GetRfqChanges failed for since={Since}", since);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-new/product-catalog ────────────────────────────────────
+    /// <summary>
+    /// Returns all rows from the Product Catalog SP list.
+    /// Cached by the Shredder client for the lifetime of the app session.
+    /// </summary>
+    [HttpGet("rfq-new/product-catalog")]
+    public async Task<IActionResult> GetRfqNewProductCatalog()
+    {
+        try
+        {
+            var items = await _sp.ReadProductCatalogAsync();
+            _log.LogInformation("[RfqNew] ProductCatalog: {Count} items", items.Count);
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[RfqNew] GetProductCatalog failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-new/product-categories ──────────────────────────────────
+    /// <summary>
+    /// Returns all ProductCategory values from the Metals SP list, sorted.
+    /// </summary>
+    [HttpGet("rfq-new/product-categories")]
+    public async Task<IActionResult> GetRfqNewProductCategories()
+    {
+        try
+        {
+            var cats = await _sp.ReadMetalCategoriesAsync();
+            _log.LogInformation("[RfqNew] ProductCategories: {Count} values", cats.Count);
+            return Ok(cats);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[RfqNew] GetProductCategories failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-new/product-shapes ──────────────────────────────────────
+    /// <summary>
+    /// Returns all ProductShape values from the Shapes SP list, sorted.
+    /// </summary>
+    [HttpGet("rfq-new/product-shapes")]
+    public async Task<IActionResult> GetRfqNewProductShapes()
+    {
+        try
+        {
+            var shapes = await _sp.ReadProductShapesAsync();
+            _log.LogInformation("[RfqNew] ProductShapes: {Count} values", shapes.Count);
+            return Ok(shapes);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[RfqNew] GetProductShapes failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── GET /api/rfq-new/supplier-relationships ───────────────────────────────
+    /// <summary>
+    /// Returns all rows from the Supplier Relationships SP list.
+    /// Each row has SupplierName, Email, Metal (primary), Shape (secondary; null = any shape).
+    /// The Shredder client uses these to resolve BCC recipients per product metal+shape.
+    /// </summary>
+    [HttpGet("rfq-new/supplier-relationships")]
+    public async Task<IActionResult> GetRfqNewSupplierRelationships()
+    {
+        try
+        {
+            var rels = await _sp.ReadSupplierRelationshipsAsync();
+            _log.LogInformation("[RfqNew] SupplierRelationships: {Count} rows", rels.Count);
+            return Ok(rels);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[RfqNew] GetSupplierRelationships failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }

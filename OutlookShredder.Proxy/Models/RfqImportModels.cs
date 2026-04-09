@@ -50,12 +50,17 @@ public class RfqReferenceRequest
 /// <summary>One entry in POST /api/rfq-import/line-items array.</summary>
 public class RfqLineItemRequest
 {
-    public string  RfqId          { get; set; } = "";
-    public string? Mspc           { get; set; }
-    public string? Product        { get; set; }
-    public double? Units          { get; set; }
-    public string? SizeOfUnits    { get; set; }
-    public string? SupplierEmails { get; set; }
+    public string  RfqId            { get; set; } = "";
+    /// <summary>Product Search Key — written to the SP "MSPC" column.</summary>
+    public string? Mspc             { get; set; }
+    public string? Product          { get; set; }
+    public double? Units            { get; set; }
+    public string? SizeOfUnits      { get; set; }
+    public string? SupplierEmails   { get; set; }
+    public string? ProductCategory  { get; set; }
+    public string? ProductShape     { get; set; }
+    public string? JobReference     { get; set; }
+    public string? ProcessingSource { get; set; }
 }
 
 /// <summary>One entry returned by GET /api/mail/processed-emails.</summary>
@@ -73,4 +78,25 @@ public class ProcessedEmailDto
 public class ReprocessRequest
 {
     public List<string> MessageIds { get; set; } = [];
+}
+
+// ── RFQ New DTOs ─────────────────────────────────────────────────────────────
+
+/// <summary>One row returned by GET /api/rfq-new/product-catalog.</summary>
+public class ProductCatalogDto
+{
+    public string? Mspc             { get; set; }
+    public string? ProductSearchKey { get; set; }
+    public string? ProductName      { get; set; }
+    public string? Category         { get; set; }
+    public string? Shape            { get; set; }
+}
+
+/// <summary>One row returned by GET /api/rfq-new/supplier-relationships.</summary>
+public class SupplierRelationshipDto
+{
+    public string  SupplierName { get; set; } = "";
+    public string  Email        { get; set; } = "";
+    public string  Metal        { get; set; } = "";
+    public string? Shape        { get; set; }
 }
