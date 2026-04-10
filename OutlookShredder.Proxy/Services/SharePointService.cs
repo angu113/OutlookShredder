@@ -1341,26 +1341,40 @@ public class SharePointService
         if (string.IsNullOrEmpty(jobRef) || string.IsNullOrEmpty(supplierName))
             return null;
 
-        // Fetch all SR rows and filter client-side.
+        // Fetch all SR rows and filter client-side, following nextLink to cover lists > 2000 rows.
         // OData filter on non-indexed columns with HonorNonIndexedQueriesWarningMayFailRandomly
         // can silently return empty results, causing a new SR to be inserted instead of updating
         // the existing one — producing duplicate supplier response rows.
-        var result = await GetGraph().Sites[siteId].Lists[listId].Items
+        // $select includes both RFQ_ID and RFQ_x005F_ID because SharePoint may return the
+        // underscore column under either internal name depending on how the list was created.
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,SupplierName)"];
+                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName)"];
                 r.QueryParameters.Top    = 2000;
             });
 
-        return result?.Value?.FirstOrDefault(i =>
+        while (page is not null)
         {
-            var d = i.Fields?.AdditionalData;
-            if (d is null) return false;
-            var itemJobRef   = d.TryGetValue("RFQ_ID",       out var jv) ? jv?.ToString() : null;
-            var itemSupplier = d.TryGetValue("SupplierName", out var sv) ? sv?.ToString() : null;
-            return string.Equals(itemJobRef,   jobRef,       StringComparison.OrdinalIgnoreCase)
-                && string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase);
-        })?.Id;
+            var hit = page.Value?.FirstOrDefault(i =>
+            {
+                var d = i.Fields?.AdditionalData;
+                if (d is null) return false;
+                var itemJobRef = (d.TryGetValue("RFQ_ID",       out var jv)  ? jv?.ToString()  : null)
+                              ?? (d.TryGetValue("RFQ_x005F_ID", out var jv2) ? jv2?.ToString() : null);
+                var itemSupplier = d.TryGetValue("SupplierName", out var sv) ? sv?.ToString() : null;
+                return string.Equals(itemJobRef,   jobRef,       StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase);
+            });
+            if (hit is not null) return hit.Id;
+
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        return null;
     }
 
     // ── Write SupplierLineItems (private) ────────────────────────────────────
@@ -1447,32 +1461,42 @@ public class SharePointService
         string siteId, string listId,
         string supplierResponseId, string productName, HashSet<string> productTokens)
     {
-        // Fetch all SLI rows and filter in memory.
-        // Using an OData filter on the non-indexed SupplierResponseId field causes
-        // "HonorNonIndexedQueriesWarningMayFailRandomly" failures that silently return
-        // empty results, causing duplicate rows to be written.
+        // Fetch all SLI rows and filter in memory, following nextLink so lists > 2000 rows
+        // don't silently miss existing items and create duplicates.
+        // OData filter on the non-indexed SupplierResponseId field is avoided here because
+        // "HonorNonIndexedQueriesWarningMayFailRandomly" can silently return empty results.
         // SupplierProductComments is included so the caller can apply fill-blanks without
         // a second round-trip.
-        var result = await GetGraph().Sites[siteId].Lists[listId].Items
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName,SupplierProductComments)"];
                 r.QueryParameters.Top    = 2000;
             });
 
-        return result?.Value?.FirstOrDefault(i =>
+        while (page is not null)
         {
-            var d = i.Fields?.AdditionalData;
-            if (d is null) return false;
-            // Only consider items belonging to the same SupplierResponse
-            var srId = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
-            if (!string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase)) return false;
-            var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
-            if (NormalizeMatch(spProduct, productName)) return true;
-            var spTokens = ProductTokens(spProduct ?? string.Empty);
-            return NumericTokensCompatible(productTokens, spTokens)
-                && ProductJaccard(spTokens, productTokens) >= 0.5;
-        });
+            var hit = page.Value?.FirstOrDefault(i =>
+            {
+                var d = i.Fields?.AdditionalData;
+                if (d is null) return false;
+                var srId = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
+                if (!string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase)) return false;
+                var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
+                if (NormalizeMatch(spProduct, productName)) return true;
+                var spTokens = ProductTokens(spProduct ?? string.Empty);
+                return NumericTokensCompatible(productTokens, spTokens)
+                    && ProductJaccard(spTokens, productTokens) >= 0.5;
+            });
+            if (hit is not null) return hit;
+
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        return null;
     }
 
     // ── TotalPrice fallback calculation ─────────────────────────────────────
