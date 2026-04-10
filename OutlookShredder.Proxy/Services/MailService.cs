@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Users.Item.SendMail;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -59,6 +60,40 @@ public class MailService
         var credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
         _graph = new GraphServiceClient(credential, ["https://graph.microsoft.com/.default"]);
         return _graph;
+    }
+
+    // ── RFQ Send ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends an RFQ email via Microsoft Graph using app-only auth.
+    /// Requires Mail.Send application permission on the Azure AD app.
+    /// </summary>
+    public async Task SendRfqEmailAsync(
+        string subject,
+        string body,
+        IEnumerable<string> bccAddresses)
+    {
+        var from    = _config["Mail:FromAddress"]    ?? throw new InvalidOperationException("Mail:FromAddress not configured");
+        var replyTo = _config["Mail:ReplyToAddress"] ?? throw new InvalidOperationException("Mail:ReplyToAddress not configured");
+
+        var bcc = bccAddresses
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Select(a => new Recipient { EmailAddress = new EmailAddress { Address = a } })
+            .ToList();
+
+        await GetGraph().Users[from].SendMail.PostAsync(new()
+        {
+            Message = new Message
+            {
+                Subject     = subject,
+                Body        = new ItemBody { ContentType = BodyType.Text, Content = body },
+                From        = new Recipient { EmailAddress = new EmailAddress { Address = from } },
+                ReplyTo     = [new Recipient { EmailAddress = new EmailAddress { Address = replyTo } }],
+                BccRecipients = bcc,
+            }
+        });
+
+        _log.LogInformation("[RFQ Send] Sent '{Subject}' BCC to {Count} recipient(s)", subject, bcc.Count);
     }
 
     // ── RFQ Import: scan a named folder ──────────────────────────────────────
