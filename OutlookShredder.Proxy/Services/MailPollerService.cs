@@ -405,6 +405,8 @@ public class MailPollerService : BackgroundService
     {
         await AcquireRateSlotAsync(maxPerMinute, ct);
 
+        bool dedupDryRun = bool.TryParse(_config["Dedup:DryRun"], out var dr) && dr;
+
         try
         {
             var extraction = await _claude.ExtractAsync(req);
@@ -421,6 +423,7 @@ public class MailPollerService : BackgroundService
             else
             {
                 _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
+                products = ProductDeduplicator.Deduplicate(products, source, dedupDryRun, _log);
             }
 
             // Write product rows sequentially so they all share one SupplierResponse row.
