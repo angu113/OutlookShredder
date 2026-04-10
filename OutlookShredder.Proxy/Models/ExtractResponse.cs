@@ -93,6 +93,9 @@ public class SpWriteResult
     /// <summary>Resolved canonical supplier name (populated after SP write).</summary>
     public string? SupplierName     { get; set; }
 
+    /// <summary>Resolved RFQ ID from the matched SupplierResponse row (may differ from req.JobRefs when the email subject has no bracket reference).</summary>
+    public string? RfqId            { get; set; }
+
     /// <summary>True when the supplier name could not be matched to the reference list — no row was written.</summary>
     public bool    SupplierUnknown { get; set; }
 

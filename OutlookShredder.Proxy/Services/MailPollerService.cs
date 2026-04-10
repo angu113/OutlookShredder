@@ -455,10 +455,11 @@ public class MailPollerService : BackgroundService
                         products[i].ProductName, row.Error);
             }
 
-            // Only publish to the Service Bus (and therefore toast the UI) when a genuinely
-            // new SupplierResponse was created.  Updates from reprocessing or proxy startup
-            // scans are intentionally silent — the data is already known to the UI.
-            if (anyInserted)
+            // Notify the UI whenever a supplier response was successfully written — either
+            // a new insert or an update to an existing row.  Startup rescans that produce
+            // no changes (anyInserted=false, no successful updates) remain silent.
+            var anyUpdated = rows.Any(r => r.Success && r.Updated && !r.SupplierUnknown);
+            if (anyInserted || anyUpdated)
             {
                 var notification = new Models.RfqProcessedNotification
                 {
@@ -466,9 +467,12 @@ public class MailPollerService : BackgroundService
                     SupplierName = rows.Zip(products)
                                        .FirstOrDefault(x => x.First.Success && !x.First.SupplierUnknown)
                                        .First?.SupplierName,
-                    RfqId = req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
+                    // Prefer the SP-resolved RFQ ID (populated even when email subject has no bracket ref).
+                    // Fall back to req.JobRefs for robustness.
+                    RfqId = rows.FirstOrDefault(r => r.Success && !string.IsNullOrEmpty(r.RfqId))?.RfqId
+                            ?? req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
                     Products = rows.Zip(products)
-                                   .Where(x => x.First.Success && !x.First.Updated)
+                                   .Where(x => x.First.Success && !x.First.SupplierUnknown)
                                    .Select(x => new Models.RfqNotificationProduct
                                    {
                                        Name       = x.First.ProductName,

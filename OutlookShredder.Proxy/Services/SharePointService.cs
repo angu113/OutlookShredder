@@ -31,12 +31,13 @@ public class SharePointService
     private string? _siteId;
 
     // Cached list IDs (lazy-resolved)
-    private string? _srListId;      // SupplierResponses
-    private string? _sliListId;     // SupplierLineItems
-    private string? _rfqRefListId;  // RFQ References
-    private string? _listId;        // RFQ Line Items (legacy — kept for EnsureColumnsAsync)
-    private string? _qcSiteId;      // QC SP site
-    private string? _qcListId;      // QC list
+    private string? _srListId;            // SupplierResponses
+    private string? _sliListId;           // SupplierLineItems
+    private string? _rfqRefListId;        // RFQ References
+    private string? _listId;              // RFQ Line Items (legacy — kept for EnsureColumnsAsync)
+    private string? _qcSiteId;            // QC SP site
+    private string? _qcListId;            // QC list
+    private string? _shredderConfigListId; // ShredderConfig
 
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock"];
@@ -1179,6 +1180,7 @@ public class SharePointService
                 siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile);
             result.SpItemId = srId;
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
+            result.RfqId    = jobRef;   // resolved RFQ ID — may differ from req.JobRefs when email subject has no bracket ref
 
             // Upload the source attachment as a SharePoint list item attachment.
             if (result.SpItemId is not null &&
@@ -1319,19 +1321,61 @@ public class SharePointService
             foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
                 update.Remove(key);
 
-            await GetGraph().Sites[siteId].Lists[listId].Items[existingId!].Fields
-                .PatchAsync(new FieldValueSet { AdditionalData = update });
+            await PatchFieldsAsync(siteId, listId, existingId!, update);
             _log.LogInformation("[SP] Updated SupplierResponse {Id} for [{JobRef}] {Supplier}", existingId, jobRef, supplier);
             return (existingId!, false);
         }
         else
         {
             fieldData["ClaudeResponseLog"] = logEntry;
-            var item = await GetGraph().Sites[siteId].Lists[listId].Items
-                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = fieldData } });
+            var item = await PostListItemAsync(siteId, listId, fieldData);
             var newId = item!.Id!;
             _log.LogInformation("[SP] Created SupplierResponse {Id} for [{JobRef}] {Supplier}", newId, jobRef, supplier);
             return (newId, true);
+        }
+    }
+
+    /// <summary>
+    /// PATCH a SP list item's fields, retrying without ClaudeResponseLog if the field
+    /// doesn't exist in this list (avoids breaking all upserts when the column is absent).
+    /// </summary>
+    private async Task PatchFieldsAsync(string siteId, string listId, string itemId,
+        Dictionary<string, object?> data)
+    {
+        try
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = data });
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
+            when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
+        {
+            _log.LogDebug("[SP] ClaudeResponseLog field absent — retrying PATCH without it");
+            data.Remove("ClaudeResponseLog");
+            await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = data });
+        }
+    }
+
+    /// <summary>
+    /// POST a new SP list item, retrying without ClaudeResponseLog if the field
+    /// doesn't exist in this list.
+    /// </summary>
+    private async Task<ListItem?> PostListItemAsync(string siteId, string listId,
+        Dictionary<string, object?> data)
+    {
+        try
+        {
+            return await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
+            when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
+        {
+            _log.LogDebug("[SP] ClaudeResponseLog field absent — retrying POST without it");
+            data.Remove("ClaudeResponseLog");
+            return await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
         }
     }
 
@@ -3502,6 +3546,150 @@ public class SharePointService
             if (d.TryGetValue(k, out var v) && v?.ToString() is string s && s.Length > 0)
                 return s;
         return null;
+    }
+
+    // ── ShredderConfig list ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the ShredderConfig list ID, creating the list and its columns
+    /// (Value, Comments) on first call if they do not exist.
+    /// </summary>
+    private async Task<string> GetOrCreateShredderConfigListIdAsync()
+    {
+        if (_shredderConfigListId is not null) return _shredderConfigListId;
+
+        var siteId = await GetSiteIdAsync();
+        const string listName = "ShredderConfig";
+
+        var lists = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault() is null)
+        {
+            _log.LogInformation("[SP] Creating ShredderConfig list…");
+            var newList = await GetGraph().Sites[siteId].Lists.PostAsync(new List
+            {
+                DisplayName = listName,
+                ListProp    = new ListInfo { Template = "genericList" },
+            });
+            listId = newList?.Id ?? throw new Exception("Failed to create ShredderConfig list");
+            _log.LogInformation("[SP] Created ShredderConfig list -> {Id}", listId);
+
+            // Add Value and Comments columns (Title = Name already exists)
+            foreach (var (col, typ) in new[] { ("Value", "text"), ("Comments", "note") })
+            {
+                var def = typ == "note"
+                    ? new ColumnDefinition { Name = col, Text = new TextColumn { AllowMultipleLines = true } }
+                    : new ColumnDefinition { Name = col, Text = new TextColumn() };
+                await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def);
+                _log.LogInformation("[SP] Created ShredderConfig column '{Col}'", col);
+            }
+        }
+        else
+        {
+            listId = lists.Value.First().Id!;
+        }
+
+        // Ensure Value and Comments columns exist (idempotent — skips already-present columns).
+        var existing = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
+        var existingNames = existing?.Value?
+            .Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        foreach (var (col, isNote) in new[] { ("Value", false), ("Comments", true) })
+        {
+            if (existingNames.Contains(col)) continue;
+            var def = isNote
+                ? new ColumnDefinition { Name = col, Text = new TextColumn { AllowMultipleLines = true } }
+                : new ColumnDefinition { Name = col, Text = new TextColumn() };
+            await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def);
+            _log.LogInformation("[SP] Created ShredderConfig column '{Col}'", col);
+        }
+
+        _shredderConfigListId = listId;
+        return listId;
+    }
+
+    /// <summary>
+    /// Returns the Value field for the ShredderConfig row with the given name,
+    /// or null if the row does not exist or the list does not exist.
+    /// </summary>
+    public async Task<(string? Value, string? Comments)?> GetShredderConfigAsync(string name)
+    {
+        try
+        {
+            var siteId = await GetSiteIdAsync();
+            var listId = await GetOrCreateShredderConfigListIdAsync();
+
+            // Fetch all rows (config list is always tiny) and filter client-side.
+            // SP OData filter on Title fails unless the column is indexed.
+            var items = await GetGraph().Sites[siteId].Lists[listId].Items
+                .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 100; });
+
+            var item = items?.Value?
+                .FirstOrDefault(i => string.Equals(
+                    i.Fields?.AdditionalData.TryGetValue("Title", out var t) == true ? t?.ToString() : null,
+                    name, StringComparison.OrdinalIgnoreCase));
+            if (item?.Fields?.AdditionalData is null) return null;
+
+            var d        = item.Fields.AdditionalData;
+            var value    = d.TryGetValue("Value",    out var v) ? v?.ToString() : null;
+            var comments = d.TryGetValue("Comments", out var c) ? c?.ToString() : null;
+            return (value, comments);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SP] GetShredderConfig('{Name}') failed", name);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Creates or updates the ShredderConfig row with the given name (upsert by Title).
+    /// </summary>
+    public async Task UpsertShredderConfigAsync(string name, string value, string comments)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateShredderConfigListIdAsync();
+
+        // Fetch all rows and filter client-side (avoids unindexed-column OData filter error).
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 100; });
+
+        var existing = items?.Value?
+            .FirstOrDefault(i => string.Equals(
+                i.Fields?.AdditionalData.TryGetValue("Title", out var t) == true ? t?.ToString() : null,
+                name, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem
+                {
+                    Fields = new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["Title"]    = name,
+                            ["Value"]    = value,
+                            ["Comments"] = comments,
+                        }
+                    }
+                });
+            _log.LogInformation("[SP] Created ShredderConfig '{Name}' = '{Value}'", name, value);
+        }
+        else
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[existing.Id!].Fields
+                .PatchAsync(new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["Value"]    = value,
+                        ["Comments"] = comments,
+                    }
+                });
+            _log.LogInformation("[SP] Updated ShredderConfig '{Name}' = '{Value}'", name, value);
+        }
     }
 
 }
