@@ -19,7 +19,7 @@ public class ExtractResponse
 /// <summary>Payload broadcast via SSE and Azure Service Bus when RFQ data changes.</summary>
 public class RfqProcessedNotification
 {
-    /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference.</summary>
+    /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference; "PO" = purchase order received.</summary>
     public string  EventType    { get; set; } = "SR";
     public string? SupplierName { get; set; }
     public string? RfqId        { get; set; }
@@ -36,6 +36,10 @@ public class RfqNotificationProduct
 {
     public string? Name       { get; set; }
     public double? TotalPrice { get; set; }
+    /// <summary>MSPC code — populated for PO events only.</summary>
+    public string? Mspc       { get; set; }
+    /// <summary>Size/dimensions — populated for PO events only.</summary>
+    public string? Size       { get; set; }
 }
 
 /// <summary>Response for GET /api/rfq/changes — new supplier activity since a given timestamp.</summary>
@@ -76,6 +80,18 @@ public class ActivityProduct
 {
     public string  Name       { get; set; } = "";
     public decimal TotalPrice { get; set; }
+}
+
+/// <summary>A purchase order record as stored in the PurchaseOrders SharePoint list.</summary>
+public class PurchaseOrderRecord
+{
+    public string  RfqId        { get; set; } = "";
+    public string  SupplierName { get; set; } = "";
+    public string? PoNumber     { get; set; }
+    public string? ReceivedAt   { get; set; }
+    public string? MessageId    { get; set; }
+    /// <summary>JSON array of { mspc, product, quantity, size } objects.</summary>
+    public string  LineItems    { get; set; } = "[]";
 }
 
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>

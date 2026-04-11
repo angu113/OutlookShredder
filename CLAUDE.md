@@ -88,7 +88,10 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `UpdateQcLqAsync()` → `(updated count, misses list)` — derives $/lb from quote rows, updates QC 'LQ' column
 - `UpdateQcRowAsync(itemId, qc, qcCut)` — patches QC and QC Cut fields on a single SP item; resolves internal column names automatically
 - `GetPublishVersionAsync()` → version string
-- `EnsureSupplierListsAsync()` — idempotent list creation
+- `EnsureSupplierListsAsync()` — idempotent list creation (provisions SupplierResponses, SupplierLineItems, PurchaseOrders)
+- `WritePurchaseOrderAsync(rfqId, supplierName, poNumber, receivedAt, messageId, lineItemsJson)` → deduped by MessageId
+- `ReadPurchaseOrdersAsync()` → `List<PurchaseOrderRecord>` — all PO rows
+- `GET /api/purchase-orders` controller endpoint — Shredder loads this on startup
 
 **`MailService`** (singleton)
 - Graph API for mailbox (app-only, `Mail.ReadWrite` + `Mail.Send`)
@@ -100,8 +103,10 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 
 **`MailPollerService`** (hosted service — background)
 - Polls inbox every `Mail:PollIntervalSeconds` (default 30s) for messages without "RFQ-Processed"
-- Per message: fetch → Claude → SharePoint write → stamp processed → publish notification
-- `ReprocessMessagesAsync(messageIds[])` — manual re-extraction
+- Per message: strips FW:/RE:/[EXTERNAL] prefixes, then routes:
+  - Subject starts with `"Purchase Order #HSK-PO"` → `ProcessPurchaseOrderAsync` (extracts PDF via Claude, writes to `PurchaseOrders` SP list, publishes `EventType="PO"` to Service Bus, stamps "RFQ-Processed"+"PO-Processed")
+  - Everything else → normal RFQ pipeline (Claude extract → SharePoint → notify)
+- `ReprocessMessagesAsync(messageIds[])` — manual re-extraction (routes POs correctly too)
 - Config: `Mail:MailboxAddress`, `Mail:LookbackHours` (default 24), `Mail:MaxEmailsPerMinute`, `Mail:BodyContextChars`
 
 **`RfqNotificationService`** (singleton pub/sub)

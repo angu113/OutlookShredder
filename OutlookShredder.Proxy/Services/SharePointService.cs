@@ -38,6 +38,7 @@ public class SharePointService
     private string? _qcSiteId;            // QC SP site
     private string? _qcListId;            // QC list
     private string? _shredderConfigListId; // ShredderConfig
+    private string? _poListId;            // PurchaseOrders
 
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock"];
@@ -2648,7 +2649,23 @@ public class SharePointService
                 ("SupplierProductComments",  "note"),
                 ("IsRegret",                 "boolean"),
             ]),
+            ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
+            [
+                ("RFQ_ID",       "text"),
+                ("SupplierName", "text"),
+                ("PoNumber",     "text"),
+                ("ReceivedAt",   "dateTime"),
+                ("MessageId",    "text"),
+                ("LineItems",    "note"),
+            ]),
         };
+        if (results.TryGetValue("PurchaseOrders", out var poMap) &&
+            poMap is Dictionary<string, string> poDict &&
+            poDict.TryGetValue("RFQ_ID", out _))
+        {
+            // Cache list ID so we don't resolve again immediately
+            _poListId = null; // will be lazy-resolved on next use
+        }
         return results;
     }
 
@@ -3751,6 +3768,109 @@ public class SharePointService
                 });
             _log.LogInformation("[SP] Updated ShredderConfig '{Name}' = '{Value}'", name, value);
         }
+    }
+
+    // ── PurchaseOrders list ──────────────────────────────────────────────────
+
+    private async Task<string> GetPurchaseOrdersListIdAsync()
+    {
+        if (_poListId is not null) return _poListId;
+        _poListId = await ResolveListIdAsync("PurchaseOrders");
+        return _poListId;
+    }
+
+    /// <summary>
+    /// Writes a purchase order row to the PurchaseOrders SharePoint list.
+    /// Skips the write if a row with the same MessageId already exists (dedup).
+    /// Returns true if a new row was written, false if skipped as a duplicate.
+    /// </summary>
+    public async Task<bool> WritePurchaseOrderAsync(
+        string rfqId, string supplierName, string? poNumber,
+        string receivedAt, string? messageId, string lineItemsJson)
+    {
+        var siteId  = await GetSiteIdAsync();
+        var listId  = await GetPurchaseOrdersListIdAsync();
+
+        // Dedup: skip if this exact email was already processed
+        if (!string.IsNullOrEmpty(messageId))
+        {
+            var existing = await GetGraph().Sites[siteId].Lists[listId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=MessageId)"];
+                    req.QueryParameters.Top    = 1;
+                    req.QueryParameters.Filter = $"fields/MessageId eq '{messageId.Replace("'", "''")}'";
+                });
+            if (existing?.Value?.Count > 0)
+            {
+                _log.LogInformation("[PO] Skipping duplicate PO — MessageId already in SP: {Id}", messageId);
+                return false;
+            }
+        }
+
+        var title = $"[{rfqId}] {supplierName} PO";
+        var data  = new Dictionary<string, object?>
+        {
+            ["Title"]        = title[..Math.Min(title.Length, 255)],
+            ["RFQ_ID"]       = rfqId,
+            ["SupplierName"] = supplierName,
+            ["PoNumber"]     = poNumber,
+            ["ReceivedAt"]   = receivedAt,
+            ["MessageId"]    = messageId,
+            ["LineItems"]    = lineItemsJson,
+        };
+
+        await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+
+        _log.LogInformation("[PO] Wrote PurchaseOrder to SP: [{RfqId}] {Supplier}", rfqId, supplierName);
+        return true;
+    }
+
+    /// <summary>
+    /// Returns all rows from the PurchaseOrders SharePoint list.
+    /// </summary>
+    public async Task<List<PurchaseOrderRecord>> ReadPurchaseOrdersAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+
+        var results = new List<PurchaseOrderRecord>();
+        var page    = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var f = item.Fields?.AdditionalData;
+                if (f is null) continue;
+                var rfq      = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID") ?? "";
+                var supplier = GetStr(f, "SupplierName") ?? "";
+                if (string.IsNullOrEmpty(rfq) || string.IsNullOrEmpty(supplier)) continue;
+
+                results.Add(new PurchaseOrderRecord
+                {
+                    RfqId        = rfq,
+                    SupplierName = supplier,
+                    PoNumber     = GetStr(f, "PoNumber"),
+                    ReceivedAt   = GetStr(f, "ReceivedAt"),
+                    MessageId    = GetStr(f, "MessageId"),
+                    LineItems    = GetStr(f, "LineItems") ?? "[]",
+                });
+            }
+
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync();
+        }
+
+        return results;
     }
 
 }

@@ -999,6 +999,26 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/purchase-orders ─────────────────────────────────────────────
+    /// <summary>
+    /// Returns all purchase order records from the PurchaseOrders SharePoint list.
+    /// Shredder loads these on startup to restore purchase-marker state across sessions.
+    /// </summary>
+    [HttpGet("purchase-orders")]
+    public async Task<IActionResult> GetPurchaseOrders()
+    {
+        try
+        {
+            var records = await _sp.ReadPurchaseOrdersAsync();
+            return Ok(records);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetPurchaseOrders failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── GET /api/health ──────────────────────────────────────────────────────
     [HttpGet("health")]
     public IActionResult Health() =>

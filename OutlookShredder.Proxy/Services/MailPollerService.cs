@@ -31,6 +31,10 @@ public class MailPollerService : BackgroundService
     private static readonly Regex JobRefRegex =
         new(@"\[([A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Subject prefixes to strip before PO detection (RE:, FW:, [EXTERNAL], etc.)
+    private static readonly Regex SubjectPrefixRegex =
+        new(@"^(\s*(RE|FW|FWD)\s*:\s*|\s*\[.*?\]\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex HtmlLineBreakRegex =
         new(@"<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
@@ -255,6 +259,15 @@ public class MailPollerService : BackgroundService
             ["MessageId"]    = msg.Id,
         });
 
+        // ── Purchase Order routing ────────────────────────────────────────────
+        // Strip reply/forward/external-tag prefixes before matching the PO subject pattern.
+        var cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
+        if (cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
+        {
+            await ProcessPurchaseOrderAsync(mailbox, msg, subject, ct);
+            return;
+        }
+
         var rawBody = msg.Body?.Content ?? string.Empty;
         if (msg.Body?.ContentType == BodyType.Html)
         {
@@ -395,6 +408,108 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Supplier unrecognised in \"{Subject}\" — stamping 'Unknown' category", subject);
             await _mail.MarkProcessedAsync(mailbox, msg.Id, extra);
         }
+    }
+
+    // ── Purchase Order processing ─────────────────────────────────────────────
+
+    private async Task ProcessPurchaseOrderAsync(
+        string mailbox, Message msg, string subject, CancellationToken ct)
+    {
+        var fromAddr = msg.From?.EmailAddress?.Address ?? "unknown";
+        var received = msg.ReceivedDateTime?.ToString("o") ?? DateTime.UtcNow.ToString("o");
+
+        _log.LogInformation("[PO] Processing purchase order: \"{Subject}\" from {From}", subject, fromAddr);
+
+        // Strip HTML from body for job-ref scan and context snippet
+        var rawBody = msg.Body?.Content ?? string.Empty;
+        if (msg.Body?.ContentType == BodyType.Html)
+        {
+            rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
+            rawBody = HtmlTagRegex     .Replace(rawBody, " ");
+            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+            rawBody = HorizontalWhitespaceRegex.Replace(rawBody, " ");
+            rawBody = ExcessiveNewlineRegex    .Replace(rawBody, "\n\n");
+        }
+        else rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+        var body = rawBody.Trim();
+
+        var jobRefs = JobRefRegex.Matches(subject + " " + body)
+            .Select(m => m.Groups[1].Value.ToUpperInvariant())
+            .Distinct()
+            .ToList();
+
+        // Find the first PDF attachment
+        PoExtraction? extraction = null;
+        if (msg.HasAttachments == true && msg.Id is not null)
+        {
+            var attachments = await _mail.GetAttachmentsAsync(mailbox, msg.Id);
+            foreach (var att in attachments)
+            {
+                if (att is not FileAttachment fa) continue;
+                if (fa.ContentBytes is null) continue;
+                var ct2 = (fa.ContentType ?? "").ToLowerInvariant();
+                if (!ct2.Contains("pdf")) continue;
+
+                _log.LogInformation("[PO] Sending PDF '{File}' to Claude for extraction", fa.Name);
+                var bodySnippet = body[..Math.Min(body.Length, 1_000)];
+                extraction = await _claude.ExtractPurchaseOrderAsync(
+                    Convert.ToBase64String(fa.ContentBytes),
+                    fa.Name ?? "po.pdf",
+                    bodySnippet,
+                    subject,
+                    jobRefs,
+                    ct);
+                break;
+            }
+        }
+
+        if (extraction is null)
+        {
+            _log.LogWarning("[PO] No PDF or extraction failed for \"{Subject}\" — stamping and skipping", subject);
+            if (msg.Id is not null)
+                await _mail.MarkProcessedAsync(mailbox, msg.Id, "PO-NoExtract");
+            return;
+        }
+
+        // Resolve job reference: prefer Claude's extraction, fall back to regex scan
+        var rfqId = !string.IsNullOrWhiteSpace(extraction.JobReference)
+            ? extraction.JobReference!.Trim().ToUpperInvariant()
+            : jobRefs.FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(rfqId))
+            _log.LogWarning("[PO] No job reference found in \"{Subject}\" — PO will be written without RFQ link", subject);
+
+        var supplierName = extraction.SupplierName ?? fromAddr;
+        var lineItemsJson = System.Text.Json.JsonSerializer.Serialize(
+            extraction.LineItems,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+        // Persist to SharePoint (deduped by MessageId)
+        await _sp.WritePurchaseOrderAsync(
+            rfqId ?? "UNKNOWN", supplierName, extraction.PoNumber,
+            received, msg.Id, lineItemsJson);
+
+        // Publish to Service Bus so all connected Shredder instances update immediately
+        var notification = new Models.RfqProcessedNotification
+        {
+            EventType    = "PO",
+            RfqId        = rfqId,
+            SupplierName = supplierName,
+            MessageId    = msg.Id,
+            Products     = extraction.LineItems.Select(li => new Models.RfqNotificationProduct
+            {
+                Name = li.Product,
+                Mspc = li.Mspc,
+                Size = li.Size,
+            }).ToList(),
+        };
+        _notifications.NotifyRfqProcessed(notification);
+
+        _log.LogInformation("[PO] Processed: RfqId={RfqId}, Supplier={Supplier}, {Count} line item(s)",
+            rfqId ?? "UNKNOWN", supplierName, extraction.LineItems.Count);
+
+        if (msg.Id is not null)
+            await _mail.MarkProcessedAsync(mailbox, msg.Id, "PO-Processed");
     }
 
     // ── Claude → SharePoint ───────────────────────────────────────────────────

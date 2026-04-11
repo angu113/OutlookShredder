@@ -389,4 +389,149 @@ public class ClaudeService
 
         return sb.ToString();
     }
+
+    // ── Purchase Order extraction ─────────────────────────────────────────────
+
+    private const string PoSystemPromptText = """
+        You are a purchase order data extraction assistant for a metals distribution company.
+        Extract structured data from this purchase order PDF. The document is an outbound PO
+        sent by Metal Supermarkets to a supplier.
+
+        ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
+        Look for a 6-character alphanumeric code in [XXXXXX] brackets anywhere in the
+        document (subject line, PO header, line item descriptions, or email body context).
+        Extract just the 6 characters without brackets.
+
+        ── SUPPLIER NAME ──────────────────────────────────────────────────────────
+        The company this PO is addressed TO (the vendor/supplier receiving the order).
+        Look in: "To:", "Vendor:", "Supplier:", PO header, or the "Ship To / Bill To" block.
+        Use the company name only, not a person's name.
+
+        ── PO NUMBER ──────────────────────────────────────────────────────────────
+        The purchase order number assigned by Metal Supermarkets, typically formatted as
+        HSK-PO-XXXXX or similar. Extract exactly as printed on the document.
+
+        ── LINE ITEMS ─────────────────────────────────────────────────────────────
+        For each ordered line item extract:
+        - mspc: the internal product code (may be labelled MSPC, Item #, Part #, SKU, or similar)
+        - product: full product description including grade, form, dimensions
+        - quantity: numeric quantity ordered
+        - size: dimensions or size description if not already embedded in product name
+        Return one entry per line item. If no MSPC is visible, return null for that field.
+        """;
+
+    private static readonly JsonElement _poToolJson = JsonDocument.Parse("""
+        {
+          "name": "extract_po",
+          "description": "Extract structured data from a purchase order document. Always call this exactly once.",
+          "cache_control": { "type": "ephemeral" },
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "jobReference": { "type": ["string","null"], "description": "6-char alphanumeric from [XXXXXX] pattern, no brackets" },
+              "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
+              "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
+              "lineItems": {
+                "type": "array",
+                "description": "One entry per ordered line item",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "mspc":     { "type": ["string","null"], "description": "Internal product code / MSPC / item number" },
+                    "product":  { "type": ["string","null"], "description": "Full product description" },
+                    "quantity": { "type": ["number","null"], "description": "Quantity ordered" },
+                    "size":     { "type": ["string","null"], "description": "Size/dimensions if separate from product name" }
+                  }
+                }
+              }
+            },
+            "required": ["lineItems"]
+          }
+        }
+        """).RootElement;
+
+    /// <summary>
+    /// Extracts supplier name, job reference, PO number, and line items from a purchase order PDF.
+    /// </summary>
+    public async Task<PoExtraction?> ExtractPurchaseOrderAsync(
+        string base64Pdf, string fileName, string emailBodyContext, string emailSubject,
+        List<string> jobRefs, CancellationToken ct = default)
+    {
+        var apiKey = _config["Anthropic:ApiKey"]
+            ?? throw new InvalidOperationException("Anthropic:ApiKey is not configured.");
+
+        var maxTokens  = int.TryParse(_config["Claude:MaxTokens"],  out var mt) ? mt  : 4096;
+        var maxRetries = int.TryParse(_config["Claude:MaxRetries"], out var mr) ? mr  : 3;
+        var model      = _config["Claude:Model"] ?? "claude-sonnet-4-6";
+
+        var jobHint = jobRefs.Count > 0
+            ? $"Job reference(s) found in email subject/body: {string.Join(", ", jobRefs)}. Confirm jobReference from the document."
+            : null;
+
+        var contextSb = new StringBuilder();
+        if (jobHint is not null) { contextSb.AppendLine(jobHint); contextSb.AppendLine(); }
+        if (!string.IsNullOrWhiteSpace(emailSubject))
+        {
+            contextSb.AppendLine($"Email subject: {emailSubject}");
+            contextSb.AppendLine();
+        }
+        if (!string.IsNullOrWhiteSpace(emailBodyContext))
+        {
+            contextSb.AppendLine("Email body context:");
+            contextSb.AppendLine(emailBodyContext[..Math.Min(emailBodyContext.Length, 1_000)]);
+        }
+
+        var userContent = new object[]
+        {
+            new {
+                type   = "document",
+                source = new { type = "base64", media_type = "application/pdf", data = base64Pdf },
+                title  = fileName
+            },
+            new { type = "text", text = contextSb.ToString() }
+        };
+
+        var body = new
+        {
+            model,
+            max_tokens  = maxTokens,
+            system      = new object[] { new { type = "text", text = PoSystemPromptText, cache_control = new { type = "ephemeral" } } },
+            tools       = new[] { _poToolJson },
+            tool_choice = new { type = "tool", name = "extract_po" },
+            messages    = new[] { new { role = "user", content = userContent } }
+        };
+
+        var bodyJson = JsonSerializer.Serialize(body);
+        HttpResponseMessage response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries);
+        var raw = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _log.LogError("[PO] Claude API error {Status}: {Body}", response.StatusCode, raw);
+            throw new HttpRequestException($"Claude API returned {response.StatusCode}");
+        }
+
+        using var doc  = JsonDocument.Parse(raw);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty("content", out var content))
+        {
+            _log.LogError("[PO] Claude response has no 'content' field: {Raw}", raw);
+            return null;
+        }
+
+        foreach (var block in content.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type",  out var typeEl) || typeEl.GetString() != "tool_use") continue;
+            if (!block.TryGetProperty("name",  out var nameEl) || nameEl.GetString() != "extract_po") continue;
+            if (!block.TryGetProperty("input", out var inputEl)) continue;
+
+            return JsonSerializer.Deserialize<PoExtraction>(
+                inputEl.GetRawText(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+
+        _log.LogError("[PO] Claude response contained no extract_po tool_use block: {Raw}", raw);
+        return null;
+    }
 }
