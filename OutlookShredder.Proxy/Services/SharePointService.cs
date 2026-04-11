@@ -2849,23 +2849,66 @@ public class SharePointService
                 r.QueryParameters.Top    = 5000;
             });
 
-        var rows = (items?.Value ?? [])
+        var itemData = (items?.Value ?? [])
             .Where(i => i.Fields?.AdditionalData is not null)
             .Select(i =>
             {
                 var d = i.Fields!.AdditionalData!;
-                return fields.Select(f =>
+                var row = fields.Select(f =>
                     d.TryGetValue(f.Internal, out var v) ? SerializeQcValue(v) : ""
                 ).ToArray();
+                return (Id: i.Id ?? "", Row: row);
             })
             .ToArray();
+
+        var rows    = itemData.Select(x => x.Row).ToArray();
+        var itemIds = itemData.Select(x => x.Id).ToArray();
 
         // Map display names: "QC Cut" -> "Notes" for the client
         var outputColumns = fields
             .Select(f => f.Display.Equals("QC Cut", StringComparison.OrdinalIgnoreCase) ? "Notes" : f.Display)
             .ToArray();
 
-        return new QcListResult(outputColumns, rows, list.LastModifiedDateTime?.UtcDateTime);
+        return new QcListResult(outputColumns, rows, itemIds, list.LastModifiedDateTime?.UtcDateTime);
+    }
+
+    // ── QC row update ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Patches the QC and QC Cut fields of a single QC list item by SP item ID.
+    /// </summary>
+    public async Task UpdateQcRowAsync(string itemId, string? qc, string? qcCut)
+    {
+        var (siteId, listId, _) = await ResolveQcAsync();
+        var graph = GetGraph();
+
+        var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
+
+        string? qcInternal    = null;
+        string? qcCutInternal = null;
+
+        foreach (var col in colsResp?.Value ?? [])
+        {
+            if (string.IsNullOrEmpty(col.Name) || string.IsNullOrEmpty(col.DisplayName)) continue;
+            if (col.Name.StartsWith("LinkTitle", StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (col.DisplayName.Equals("QC", StringComparison.OrdinalIgnoreCase))
+                qcInternal = col.Name;
+            else if (col.DisplayName.Equals("QC Cut", StringComparison.OrdinalIgnoreCase))
+                qcCutInternal = col.Name;
+        }
+
+        var patch = new Dictionary<string, object?>();
+        if (qcInternal    is not null) patch[qcInternal]    = qc    ?? "";
+        if (qcCutInternal is not null) patch[qcCutInternal] = qcCut ?? "";
+
+        if (patch.Count == 0)
+            throw new InvalidOperationException("[QC] Could not resolve QC or QC Cut column internal names");
+
+        await graph.Sites[siteId].Lists[listId].Items[itemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = patch });
+
+        _log.LogInformation("[QC] Patched item {ItemId}: QC={Qc} QcCut={QcCut}", itemId, qc, qcCut);
     }
 
     // ── LQ update ─────────────────────────────────────────────────────────────
@@ -3657,7 +3700,7 @@ public class SharePointService
 
 }
 
-public record QcListResult(string[] Columns, string[][] Rows, DateTime? LastModified = null);
+public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds, DateTime? LastModified = null);
 
 public record LqUpdateResult(
     List<LqMatch> Updated,

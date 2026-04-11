@@ -14,7 +14,8 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 | Controller | Prefix | Purpose |
 |-----------|--------|---------|
 | `ExtractController` | `/api` | Office.js calls `POST /api/extract` to extract one email/attachment via Claude |
-| `QcController` | `/api/qc` | Read QC list, check last-modified, trigger LQ update |
+| `QcController` | `/api/qc` | Read QC list, check last-modified, trigger LQ update, patch single row |
+| `ServiceBusController` | `/api/service-bus` | Serves Service Bus connection string + topic to Shredder clients |
 | `CatalogController` | `/api/catalog` | Read/refresh product catalog, backfill, fuzzy-resolve vendor names |
 | `RfqNewController` | `/api/rfq-new` | Send RFQ emails via Graph; served product/supplier data for RfqNew tab |
 | `UpdateController` | `/api/update` | Version check + download publish package ZIP |
@@ -24,9 +25,13 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `POST /api/setup-supplier-lists` — idempotent: creates SupplierResponses + SupplierLineItems SP lists
 
 **QcController endpoints:**
-- `GET /api/qc` → `{ columns[], rows[][], lastModified }`
+- `GET /api/qc` → `{ columns[], rows[][], itemIds[], lastModified }`
 - `GET /api/qc/last-modified` → `{ lastModified }`
 - `POST /api/qc/update-lq` → `{ updated[], misses[] }`
+- `PATCH /api/qc/update-row` body: `{ itemId, qc, qcCut }` → patches QC and QC Cut columns on a single SharePoint item
+
+**ServiceBusController endpoints:**
+- `GET /api/service-bus/config` → `{ configured: bool, connectionString: string|null, topicName: string }` — Shredder fetches this on startup instead of maintaining its own copy of the connection string
 
 **CatalogController endpoints:**
 - `GET /api/catalog` → catalog items + cache status
@@ -71,9 +76,10 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `WriteProductRowAsync(extraction, productLine, request, source, sourceFile, index)` → `SpWriteResult`
   - Deduplicates by email+product; prefers attachment source over body
   - OOF detection; resolves supplier via `SupplierCacheService`
-- `ReadQcListAsync()` → `{ columns, rows, lastModified }`
+- `ReadQcListAsync()` → `{ columns, rows, itemIds, lastModified }` — itemIds are SharePoint item IDs, parallel-indexed with rows[]
 - `GetQcLastModifiedAsync()` → `DateTime?`
 - `UpdateQcLqAsync()` → `(updated count, misses list)` — derives $/lb from quote rows, updates QC 'LQ' column
+- `UpdateQcRowAsync(itemId, qc, qcCut)` — patches QC and QC Cut fields on a single SP item; resolves internal column names automatically
 - `GetPublishVersionAsync()` → version string
 - `EnsureSupplierListsAsync()` — idempotent list creation
 
@@ -141,8 +147,9 @@ TotalPrice, LeadTimeText, Certifications, SupplierProductComments
 
 **`RfqProcessedNotification`** / **`RfqBusMessage`** (Service Bus wire format)
 ```
-EventType ("SR"|"RFQ"), RfqId, SupplierName, Products[]: { Name, TotalPrice }
+EventType ("SR"|"RFQ"), RfqId, SupplierName, MessageId, Products[]: { Name, TotalPrice }
 ```
+`MessageId` = Graph message ID of the source email. Shredder uses it as the dedup key so two distinct emails from the same supplier each trigger their own toast (while SSE + Service Bus delivering the same event are still collapsed to one).
 
 ### SharePoint Lists
 
@@ -157,22 +164,34 @@ EventType ("SR"|"RFQ"), RfqId, SupplierName, Products[]: { Name, TotalPrice }
 
 ### Configuration
 
-Secrets go in `appsettings.secrets.json` (gitignored) or environment variables.
+Secrets go in `appsettings.secrets.json` (gitignored) — copy from `appsettings.secrets.template.json` and fill in values. Can also be set via environment variables.
+
+**Required secrets** (app will not work without these):
 
 | Key | Purpose |
 |-----|---------|
-| `SharePoint:TenantId/ClientId/ClientSecret` | Azure AD app-only credentials |
-| `SharePoint:SiteUrl` | SharePoint site URL |
-| `Anthropic:ApiKey` | Claude API key |
-| `Claude:Model` | Model ID (default `claude-sonnet-4-6`) |
-| `Claude:MaxTokens` | Max output tokens per call (default 4096; raise if truncation warnings appear in logs) |
-| `Claude:MaxRetries` | Retry count on 429/5xx/network errors (default 3) |
-| `Claude:TimeoutSeconds` | HTTP timeout (default 60) |
-| `Claude:MaxContentChars` | Text truncation limit (default 12000; warns in log when hit) |
-| `ServiceBus:ConnectionString`, `ServiceBus:TopicName` | Azure Service Bus |
-| `Mail:MailboxAddress`, `Mail:FromAddress`, `Mail:ReplyToAddress` | Mailbox config |
-| `Mail:PollIntervalSeconds`, `Mail:LookbackHours` | Poller tuning |
-| `Proxy:AllowedOrigin` | CORS origin for AddinHost (default `https://localhost:3000`) |
+| `SharePoint:TenantId` | Azure AD tenant ID |
+| `SharePoint:ClientId` | Azure AD app registration client ID |
+| `SharePoint:ClientSecret` | Azure AD app registration client secret (`Sites.FullControl.All`, `Mail.ReadWrite`, `Mail.Send`) |
+| `Anthropic:ApiKey` | Claude API key (from console.anthropic.com) |
+| `Mail:MailboxAddress` | UPN of the mailbox to monitor (e.g. `store@mithrilmetals.com`) |
+| `ServiceBus:ConnectionString` | Azure Service Bus namespace connection string (send+listen policy on the `rfq-updates` topic) |
+
+**Optional / tuning** (have defaults in `appsettings.json`):
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `ServiceBus:TopicName` | `rfq-updates` | Topic name |
+| `Claude:Model` | `claude-sonnet-4-6` | Model ID |
+| `Claude:MaxTokens` | `4096` | Max output tokens; raise if truncation warnings appear in logs |
+| `Claude:MaxRetries` | `3` | Retry count on 429/5xx/network errors |
+| `Claude:TimeoutSeconds` | `60` | HTTP timeout per call |
+| `Claude:MaxContentChars` | `12000` | Text truncation limit sent to Claude |
+| `Mail:FromAddress` | `store@mithrilmetals.com` | Sender address on RFQ emails |
+| `Mail:ReplyToAddress` | `hackensack@metalsupermarkets.com` | Reply-To on RFQ emails |
+| `Mail:PollIntervalSeconds` | `30` | How often the poller checks for new mail |
+| `Mail:LookbackHours` | `24` | Rolling window of messages considered per poll |
+| `Proxy:AllowedOrigin` | `https://localhost:3000` | CORS origin for AddinHost |
 
 ### Logging
 Serilog — console + rolling daily file at `Logs/proxy-.log`.

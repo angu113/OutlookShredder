@@ -44,4 +44,17 @@ public class QcController : ControllerBase
         var result = await _sp.UpdateQcLqAsync();
         return Ok(result);
     }
+
+    /// <summary>
+    /// Patches the QC and QC Cut fields of a single QC list item.
+    /// Body: { itemId, qc, qcCut }
+    /// </summary>
+    [HttpPatch("update-row")]
+    public async Task<IActionResult> UpdateRowAsync([FromBody] QcRowUpdateRequest req)
+    {
+        await _sp.UpdateQcRowAsync(req.ItemId, req.Qc, req.QcCut);
+        return Ok();
+    }
 }
+
+public record QcRowUpdateRequest(string ItemId, string? Qc, string? QcCut);

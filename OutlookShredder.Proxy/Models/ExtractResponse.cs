@@ -20,9 +20,15 @@ public class ExtractResponse
 public class RfqProcessedNotification
 {
     /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference.</summary>
-    public string  EventType   { get; set; } = "SR";
+    public string  EventType    { get; set; } = "SR";
     public string? SupplierName { get; set; }
-    public string? RfqId       { get; set; }
+    public string? RfqId        { get; set; }
+    /// <summary>
+    /// Graph message ID of the source email.  Used by Shredder as the dedup key so that
+    /// SSE and Service Bus delivering the same event never double-toast, while two distinct
+    /// emails from the same supplier still each produce their own toast.
+    /// </summary>
+    public string? MessageId    { get; set; }
     public List<RfqNotificationProduct> Products { get; set; } = [];
 }
 

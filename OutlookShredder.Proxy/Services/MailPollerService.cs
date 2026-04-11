@@ -331,7 +331,7 @@ public class MailPollerService : BackgroundService
                 EmailFrom     = fromAddr,
                 ReceivedAt    = received,
                 HasAttachment = false,
-            }, "body", null, maxPerMinute, ct);
+            }, "body", null, maxPerMinute, ct, msg.Id);
         }
         else
         {
@@ -366,7 +366,7 @@ public class MailPollerService : BackgroundService
                     EmailFrom    = fromAddr,
                     ReceivedAt   = received,
                     HasAttachment = true,
-                }, "attachment", fa.Name, maxPerMinute, ct);
+                }, "attachment", fa.Name, maxPerMinute, ct, msg.Id);
 
                 processedAny = true;
             }
@@ -384,7 +384,7 @@ public class MailPollerService : BackgroundService
                     EmailFrom     = fromAddr,
                     ReceivedAt    = received,
                     HasAttachment = true,
-                }, "body", null, maxPerMinute, ct);
+                }, "body", null, maxPerMinute, ct, msg.Id);
             }
         }
 
@@ -401,7 +401,8 @@ public class MailPollerService : BackgroundService
 
     // Returns true if the supplier was not found in the reference list.
     private async Task<bool> RunExtractionAsync(
-        ExtractRequest req, string source, string? fileName, int maxPerMinute, CancellationToken ct)
+        ExtractRequest req, string source, string? fileName, int maxPerMinute, CancellationToken ct,
+        string? messageId = null)
     {
         await AcquireRateSlotAsync(maxPerMinute, ct);
 
@@ -471,6 +472,7 @@ public class MailPollerService : BackgroundService
                     // Fall back to req.JobRefs for robustness.
                     RfqId = rows.FirstOrDefault(r => r.Success && !string.IsNullOrEmpty(r.RfqId))?.RfqId
                             ?? req.JobRefs.FirstOrDefault()?.Trim('[', ']'),
+                    MessageId = messageId,
                     Products = rows.Zip(products)
                                    .Where(x => x.First.Success && !x.First.SupplierUnknown)
                                    .Select(x => new Models.RfqNotificationProduct
