@@ -3800,6 +3800,7 @@ public class SharePointService
                     req.QueryParameters.Expand = ["fields($select=MessageId)"];
                     req.QueryParameters.Top    = 1;
                     req.QueryParameters.Filter = $"fields/MessageId eq '{messageId.Replace("'", "''")}'";
+                    req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
                 });
             if (existing?.Value?.Count > 0)
             {
