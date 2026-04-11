@@ -42,6 +42,53 @@ public class SharePointService
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock"];
 
+    // ── Shared SP read helpers ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Coerces a SharePoint AdditionalData value to string.
+    /// Graph SDK deserialises field values as JsonElement; this handles that plus plain strings.
+    /// </summary>
+    private static string? Str(object? v) => v switch
+    {
+        string s                                                       => s,
+        JsonElement je when je.ValueKind == JsonValueKind.String       => je.GetString(),
+        JsonElement je                                                 => je.ToString(),
+        null                                                           => null,
+        _                                                              => v.ToString()
+    };
+
+    private static string? GetStr(IDictionary<string, object?> d, string key) =>
+        d.TryGetValue(key, out var v) ? Str(v) : null;
+
+    private static string? GetStrRaw(IDictionary<string, object> d, string key) =>
+        d.TryGetValue(key, out var v) ? Str(v) : null;
+
+    /// <summary>
+    /// Reads the RFQ ID from a field dictionary, handling both the logical name
+    /// "RFQ_ID" and SharePoint's URL-encoded internal name "RFQ_x005F_ID".
+    /// </summary>
+    private static string? RfqId(IDictionary<string, object?> d) =>
+        GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID");
+
+    private static string? RfqIdRaw(IDictionary<string, object> d) =>
+        GetStrRaw(d, "RFQ_ID") ?? GetStrRaw(d, "RFQ_x005F_ID");
+
+    /// <summary>Fields lifted from SupplierResponses into each SupplierLineItems read row.</summary>
+    private static readonly string[] ParentFields =
+    [
+        "EmailFrom", "ReceivedAt", "ProcessedAt", "ProcessingSource",
+        "SourceFile", "DateOfQuote", "EstimatedDeliveryDate",
+        "QuoteReference", "FreightTerms", "EmailBody", "EmailSubject"
+    ];
+
+    private static bool IsAppField(string key) =>
+        !key.StartsWith('@') &&
+        !key.StartsWith('_') &&
+        key is not ("LinkTitle" or "LinkTitleNoMenu" or "ContentType"
+                 or "Edit" or "Attachments" or "ItemChildCount" or "FolderChildCount"
+                 or "AuthorLookupId" or "EditorLookupId"
+                 or "AppAuthorLookupId" or "AppEditorLookupId");
+
     public SharePointService(IConfiguration config, ILogger<SharePointService> log,
         SupplierCacheService suppliers, ProductCatalogService catalog)
     {
@@ -196,23 +243,6 @@ public class SharePointService
         var sliResponse = sliTask.Result;
         var nextLink    = sliResponse?.OdataNextLink;   // null on last page
 
-        // Extract a string value from an AdditionalData entry, handling JsonElement.
-        // Graph SDK deserialises all field values as JsonElement; calling .GetString() on a
-        // String-kind element returns the raw string without quotes.
-        // Accepts both object and object? via the nullable-erased object? parameter.
-        static string? Str(object? v) => v switch
-        {
-            string s => s,
-            JsonElement je when je.ValueKind == JsonValueKind.String => je.GetString(),
-            JsonElement je => je.ToString(),   // numbers, bools, etc.
-            null => null,
-            _ => v.ToString()
-        };
-        static string? GetStr(IDictionary<string, object?> d, string key) =>
-            d.TryGetValue(key, out var v) ? Str(v) : null;
-        static string? GetStrRaw(IDictionary<string, object> d, string key) =>
-            d.TryGetValue(key, out var v) ? Str(v) : null;
-
         // Build lookup: SupplierResponse SP item ID → its fields
         var srById = (srTask.Result?.Value ?? [])
             .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
@@ -224,38 +254,19 @@ public class SharePointService
             .ToDictionary(i => i.Id!, i => i.CreatedDateTime!.Value.UtcDateTime);
 
         // Fallback lookup: "RFQ_ID|SupplierName" → (SP item ID, SR fields).
-        // Used when SupplierResponseId is missing or stale (e.g. data written before the
-        // column existed, or before the upsert logic was corrected).
-        // Stores the SR item ID so we can correct row["SupplierResponseId"] on a fallback hit,
-        // which lets the client fetch the right SP attachment.
+        // Used when SupplierResponseId is missing or stale.
+        // RfqIdRaw() handles both "RFQ_ID" and the SP-encoded "RFQ_x005F_ID" column names.
         var srBySupplierRfq = new Dictionary<string, (string SrId, IDictionary<string, object> Fields)>(StringComparer.OrdinalIgnoreCase);
         foreach (var (srItemId, srRaw) in srById)
         {
-            // SR list may return RFQ_ID as "RFQ_ID" or "RFQ_x005F_ID" depending on how
-            // the column was originally created.
-            var rfq = GetStrRaw(srRaw, "RFQ_ID") ?? GetStrRaw(srRaw, "RFQ_x005F_ID");
+            var rfq = RfqIdRaw(srRaw);
             var sn  = GetStrRaw(srRaw, "SupplierName");
             if (rfq is not null && sn is not null)
-                srBySupplierRfq.TryAdd($"{rfq}|{sn}", (srItemId, srRaw));  // first-wins; dedup
+                srBySupplierRfq.TryAdd($"{rfq}|{sn}", (srItemId, srRaw));
         }
 
         _log.LogDebug("[SP] ReadSupplierItems: {SrCount} SR rows, {SliCount} SLI rows",
             srById.Count, sliResponse?.Value?.Count ?? 0);
-
-        static bool IsAppField(string key) =>
-            !key.StartsWith('@') &&
-            !key.StartsWith('_') &&
-            key is not ("LinkTitle" or "LinkTitleNoMenu" or "ContentType"
-                     or "Edit" or "Attachments" or "ItemChildCount" or "FolderChildCount"
-                     or "AuthorLookupId" or "EditorLookupId"
-                     or "AppAuthorLookupId" or "AppEditorLookupId");
-
-        // Parent fields to promote into each line-item dict
-        string[] parentFields = [
-            "EmailFrom", "ReceivedAt", "ProcessedAt", "ProcessingSource",
-            "SourceFile", "DateOfQuote", "EstimatedDeliveryDate",
-            "QuoteReference", "FreightTerms", "EmailBody", "EmailSubject"
-        ];
 
         var result = new List<Dictionary<string, object?>>();
 
@@ -285,13 +296,12 @@ public class SharePointService
             // Fallback join: RFQ_ID + SupplierName (handles stale/missing SupplierResponseId)
             if (srMatch is null)
             {
-                var sliRfq = GetStr(row, "RFQ_ID") ?? GetStr(row, "RFQ_x005F_ID");
+                var sliRfq = RfqId(row);
                 var sliSn  = GetStr(row, "SupplierName");
                 if (sliRfq is not null && sliSn is not null &&
                     srBySupplierRfq.TryGetValue($"{sliRfq}|{sliSn}", out var fb))
                 {
                     srMatch = fb.Fields;
-                    // Correct the stale SupplierResponseId so the client fetches the right SP attachment
                     row["SupplierResponseId"] = fb.SrId;
                     if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
                         row["SrCreatedAt"] = srCa;
@@ -302,13 +312,10 @@ public class SharePointService
 
             if (srMatch is not null)
             {
-                // Rename RFQ_ID → JobReference for backward compat with the Shredder DTO.
-                // Handle both possible internal column names.
-                var rfqIdVal = GetStrRaw(srMatch, "RFQ_ID") ?? GetStrRaw(srMatch, "RFQ_x005F_ID");
+                var rfqIdVal = RfqIdRaw(srMatch);
                 if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
 
-                // Lift email-level fields if not already on the line item
-                foreach (var f in parentFields)
+                foreach (var f in ParentFields)
                     if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
                         row[f] = v;
 
@@ -425,19 +432,6 @@ public class SharePointService
 
         await Task.WhenAll(srTask, sliTask);
 
-        static string? Str(object? v) => v switch
-        {
-            string s                                                    => s,
-            JsonElement je when je.ValueKind == JsonValueKind.String    => je.GetString(),
-            JsonElement je                                              => je.ToString(),
-            null                                                        => null,
-            _                                                           => v.ToString()
-        };
-        static string? GetStr(IDictionary<string, object?> d, string key) =>
-            d.TryGetValue(key, out var v) ? Str(v) : null;
-        static string? GetStrRaw(IDictionary<string, object> d, string key) =>
-            d.TryGetValue(key, out var v) ? Str(v) : null;
-
         var srById = (srTask.Result?.Value ?? [])
             .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
             .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
@@ -449,24 +443,11 @@ public class SharePointService
         var srBySupplierRfq = new Dictionary<string, (string SrId, IDictionary<string, object> Fields)>(StringComparer.OrdinalIgnoreCase);
         foreach (var (srItemId, srRaw) in srById)
         {
-            var rfq = GetStrRaw(srRaw, "RFQ_ID") ?? GetStrRaw(srRaw, "RFQ_x005F_ID");
+            var rfq = RfqIdRaw(srRaw);
             var sn  = GetStrRaw(srRaw, "SupplierName");
             if (rfq is not null && sn is not null)
                 srBySupplierRfq.TryAdd($"{rfq}|{sn}", (srItemId, srRaw));
         }
-
-        static bool IsAppField(string key) =>
-            !key.StartsWith('@') && !key.StartsWith('_') &&
-            key is not ("LinkTitle" or "LinkTitleNoMenu" or "ContentType" or "Edit"
-                     or "Attachments" or "ItemChildCount" or "FolderChildCount"
-                     or "AuthorLookupId" or "EditorLookupId"
-                     or "AppAuthorLookupId" or "AppEditorLookupId");
-
-        string[] parentFields = [
-            "EmailFrom", "ReceivedAt", "ProcessedAt", "ProcessingSource",
-            "SourceFile", "DateOfQuote", "EstimatedDeliveryDate",
-            "QuoteReference", "FreightTerms", "EmailBody", "EmailSubject"
-        ];
 
         var result = new List<Dictionary<string, object?>>();
         foreach (var sli in sliTask.Result?.Value ?? [])
@@ -487,7 +468,7 @@ public class SharePointService
             }
             if (srMatch is null)
             {
-                var sliRfq = GetStr(row, "RFQ_ID") ?? GetStr(row, "RFQ_x005F_ID");
+                var sliRfq = RfqId(row);
                 var sliSn  = GetStr(row, "SupplierName");
                 if (sliRfq is not null && sliSn is not null &&
                     srBySupplierRfq.TryGetValue($"{sliRfq}|{sliSn}", out var fb))
@@ -500,9 +481,9 @@ public class SharePointService
             }
             if (srMatch is not null)
             {
-                var rfqIdVal = GetStrRaw(srMatch, "RFQ_ID") ?? GetStrRaw(srMatch, "RFQ_x005F_ID");
+                var rfqIdVal = RfqIdRaw(srMatch);
                 if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
-                foreach (var f in parentFields)
+                foreach (var f in ParentFields)
                     if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
                         row[f] = v;
                 if (srMatch.TryGetValue("IsRegret", out var srRegret) &&
@@ -544,15 +525,6 @@ public class SharePointService
                 req.QueryParameters.Top     = 200;
             });
 
-        static string? Str(object? v) => v switch
-        {
-            string s                                         => s,
-            JsonElement je when je.ValueKind == JsonValueKind.String => je.GetString(),
-            JsonElement je                                   => je.ToString(),
-            null                                             => null,
-            _                                                => v.ToString()
-        };
-
         var activities = (page?.Value ?? [])
             .Where(item => item.CreatedDateTime.HasValue &&
                            item.CreatedDateTime.Value.UtcDateTime > since)
@@ -560,11 +532,10 @@ public class SharePointService
             {
                 var d = item.Fields?.AdditionalData;
                 if (d is null) return ((string rfqId, string supplier, string product, decimal price)?)null;
-                var rfqId    = (d.TryGetValue("RFQ_ID",       out var r1) ? Str(r1) : null)
-                            ?? (d.TryGetValue("RFQ_x005F_ID", out var r2) ? Str(r2) : null) ?? "";
-                var supplier = (d.TryGetValue("SupplierName", out var s)  ? Str(s)  : null) ?? "";
-                var product  = (d.TryGetValue("ProductName",  out var p)  ? Str(p)  : null) ?? "";
-                var priceStr = d.TryGetValue("TotalPrice",    out var t)  ? Str(t)  : null;
+                var rfqId    = RfqId(d!) ?? "";
+                var supplier = GetStr(d!, "SupplierName") ?? "";
+                var product  = GetStr(d!, "ProductName")  ?? "";
+                var priceStr = GetStr(d!, "TotalPrice");
                 decimal.TryParse(priceStr, System.Globalization.NumberStyles.Any,
                                  System.Globalization.CultureInfo.InvariantCulture, out var price);
                 return ((string rfqId, string supplier, string product, decimal price)?)
@@ -614,11 +585,6 @@ public class SharePointService
 
         await Task.WhenAll(refsTask, lirTask);
 
-        static string? Fld(IDictionary<string, object?> d, string key) =>
-            d.TryGetValue(key, out var v)
-                ? (v is System.Text.Json.JsonElement je ? je.ToString() : v?.ToString())
-                : null;
-
         // Parse new RFQ References — client-side date filter
         var newRefs = (refsTask.Result?.Value ?? [])
             .Where(i => i.Fields?.AdditionalData is not null &&
@@ -627,11 +593,11 @@ public class SharePointService
             .Select(i =>
             {
                 var d     = i.Fields!.AdditionalData!;
-                var rfqId = Fld(d, refCol) ?? Fld(d, "RFQ_x005F_ID") ?? Fld(d, "RFQ_ID");
+                var rfqId = GetStr(d, refCol) ?? RfqId(d);
                 if (string.IsNullOrEmpty(rfqId)) return null;
-                var requester = Fld(d, "Requester") ?? "";
+                var requester = GetStr(d, "Requester") ?? "";
                 DateTime? dateSent = null;
-                var dcStr = Fld(d, "DateCreated");
+                var dcStr = GetStr(d, "DateCreated");
                 if (dcStr is not null && DateTime.TryParse(dcStr, null,
                         System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
                     dateSent = dt;
@@ -650,17 +616,14 @@ public class SharePointService
             .Select(i =>
             {
                 var d     = i.Fields!.AdditionalData!;
-                var rfqId = Fld(d, lirCol) ?? Fld(d, "RFQ_x005F_ID") ?? Fld(d, "RFQ_ID");
+                var rfqId = GetStr(d, lirCol) ?? RfqId(d);
                 if (string.IsNullOrEmpty(rfqId)) return null;
-                string? units = null;
-                if (d.TryGetValue("Units", out var vu) && vu is not null)
-                    units = vu is System.Text.Json.JsonElement je2 ? je2.ToString() : vu.ToString();
                 return ((string RfqId, RfqLineItemSummary Item)?)(rfqId, new RfqLineItemSummary
                 {
-                    Mspc        = Fld(d, "MSPC"),
-                    Product     = Fld(d, "Product"),
-                    Units       = units,
-                    SizeOfUnits = Fld(d, "SizeOfUnits"),
+                    Mspc        = GetStr(d, "MSPC"),
+                    Product     = GetStr(d, "Product"),
+                    Units       = GetStr(d, "Units"),
+                    SizeOfUnits = GetStr(d, "SizeOfUnits"),
                 });
             })
             .Where(x => x is not null)
@@ -1256,8 +1219,8 @@ public class SharePointService
             ["ProcessingSource"]     = source,
             ["SourceFile"]           = sourceFile,
             ["QuoteReference"]       = header.QuoteReference,
-            ["DateOfQuote"]          = header.DateOfQuote,
-            ["EstimatedDeliveryDate"]= header.EstimatedDeliveryDate,
+            // DateOfQuote / EstimatedDeliveryDate intentionally omitted —
+            // dates come from the RFQ Reference record, not from extraction.
             ["FreightTerms"]         = header.FreightTerms,
             ["IsRegret"]             = blanketRegret,
         };
