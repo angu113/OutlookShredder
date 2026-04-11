@@ -58,7 +58,14 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `POST /api/rfq-import/import` body: `RfqEmailCandidate`
 - `GET /api/rfq-import/processed?top=N` → `ProcessedEmailItem[]`
 - `POST /api/rfq-import/reprocess` body: `{ messageIds[] }`
+- `POST /api/rfq-import/dedupe-supplier-responses?dryRun=true` — dedup SR-level and within-SR SLI duplicates using name normalisation + Jaccard ≥ 0.5
 - `DELETE /api/rfq-import/clean` — wipe SupplierResponses + SupplierLineItems
+
+**Supplier data endpoints:**
+- `GET /api/items?top=N&raw=true` — all SLI items merged with SR fields; `raw=true` skips the in-memory Jaccard dedup (exposes all SP rows with `SpItemId` populated — useful for admin cleanup)
+- `GET /api/items/by-rfq/{rfqId}` — SLI items for one RFQ (always includes `SpItemId`)
+- `DELETE /api/sr/{srId}` — delete all SLIs under an SR then the SR itself
+- `DELETE /api/sli/{itemId}` — delete a single SLI by its SP item ID
 
 ### Services
 
@@ -156,7 +163,7 @@ EventType ("SR"|"RFQ"), RfqId, SupplierName, MessageId, Products[]: { Name, Tota
 | List | Key columns |
 |------|-------------|
 | `SupplierResponses` | EmailFrom, Subject, ReceivedAt, SourceType, FileName, SupplierName, IsOutOfOffice, IsSupplierUnknown |
-| `SupplierLineItems` | JobReference, QuoteReference, ProductName, CatalogProductName, CatalogProductSearchKey, Mspc, pricing fields (PricePerPound/Foot/Piece, TotalPrice), IsRegret |
+| `SupplierLineItems` | JobReference, QuoteReference, ProductName, SupplierProductName, CatalogProductName, CatalogProductSearchKey, Mspc, pricing fields (PricePerPound/Foot/Piece, TotalPrice), IsRegret |
 | `RFQ References` | RfqId, Requester, DateSent, EmailRecipients, ProductLineCount, Notes |
 | `QC` | Dynamic columns — Metal, Shape, LQ (Last Quote $/lb), and product name columns |
 | `Catalog` | Mspc, Name, SearchKey, Category, Shape |

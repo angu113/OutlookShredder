@@ -178,11 +178,12 @@ public class ExtractController : ControllerBase
     [HttpGet("items")]
     public async Task<IActionResult> GetItems(
         [FromQuery] int     top      = 5000,
-        [FromQuery] string? nextLink = null)
+        [FromQuery] string? nextLink = null,
+        [FromQuery] bool    raw      = false)
     {
         try
         {
-            var (items, next) = await _sp.ReadSupplierItemsAsync(top, nextLink);
+            var (items, next) = await _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw);
             // Return a wrapper so clients can detect whether more pages exist.
             // nextLink is null when this is the last (or only) page.
             return Ok(new { items, nextLink = next });
@@ -714,6 +715,26 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "DedupeRfqReferences failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── DELETE /api/sr/{srId} ───────────────────────────────────────────────
+    /// <summary>
+    /// Deletes a SupplierResponse row and all of its child SupplierLineItem rows.
+    /// Use this to fully remove one supplier's data for an RFQ so the email can be reprocessed cleanly.
+    /// </summary>
+    [HttpDelete("sr/{srId}")]
+    public async Task<IActionResult> DeleteSr(string srId)
+    {
+        try
+        {
+            var (sliDeleted, srDeleted) = await _sp.DeleteSrAsync(srId);
+            return Ok(new { srId, srDeleted, sliDeleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DeleteSr failed for SR {Id}", srId);
             return StatusCode(500, new { error = ex.Message });
         }
     }

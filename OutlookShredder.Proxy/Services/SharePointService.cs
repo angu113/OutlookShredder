@@ -207,7 +207,7 @@ public class SharePointService
     /// supported approach.
     /// </summary>
     public async Task<(List<Dictionary<string, object?>> Items, string? NextLink)>
-        ReadSupplierItemsAsync(int top = 5000, string? sliNextLink = null)
+        ReadSupplierItemsAsync(int top = 5000, string? sliNextLink = null, bool skipDedup = false)
     {
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
@@ -278,6 +278,8 @@ public class SharePointService
                 .Where(kv => IsAppField(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
 
+            if (sli.Id is not null) row["SpItemId"] = sli.Id;
+
             // ── Resolve parent SupplierResponse record ─────────────────────
             IDictionary<string, object>? srMatch = null;
 
@@ -331,6 +333,8 @@ public class SharePointService
 
             result.Add(row);
         }
+
+        if (skipDedup) return (result, nextLink);
 
         // ── Deduplicate by (SupplierResponseId, normalised ProductName) ──────
         // Pass 1: exact normalised-name dedup (whitespace/case/decimal variants).
@@ -457,6 +461,8 @@ public class SharePointService
             var row = sli.Fields.AdditionalData
                 .Where(kv => IsAppField(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+
+            if (sli.Id is not null) row["SpItemId"] = sli.Id;
 
             IDictionary<string, object>? srMatch = null;
             var srId = GetStr(row, "SupplierResponseId");
@@ -1407,6 +1413,7 @@ public class SharePointService
             ["RFQ_ID"]                   = string.IsNullOrEmpty(jobRef) ? null : jobRef,
             ["SupplierName"]             = supplier,
             ["ProductName"]              = prodName,
+            ["SupplierProductName"]      = prodName,
             ["CatalogProductName"]       = catalogMatch?.Name,
             ["ProductSearchKey"]         = catalogMatch?.SearchKey,
             ["SourceFile"]               = sourceFile,
@@ -1433,7 +1440,8 @@ public class SharePointService
         if (existing is not null)
         {
             var update = new Dictionary<string, object?>(fieldData);
-            update.Remove("ProductName"); // preserve canonical name from first write
+            update.Remove("ProductName");         // preserve canonical name from first write
+            update.Remove("SupplierProductName"); // preserve original supplier name from first write
 
             // Preserve SupplierProductComments: Claude's commentary is cumulative.
             // Only overwrite when the existing row has no comment and the new run does.
@@ -1791,6 +1799,53 @@ public class SharePointService
         var sliListId = await GetSupplierLineItemsListIdAsync();
         await GetGraph().Sites[siteId].Lists[sliListId].Items[itemId].DeleteAsync();
         _log.LogInformation("[SP] Deleted SLI item {Id}", itemId);
+    }
+
+    /// <summary>
+    /// Deletes a SupplierResponse row and all SupplierLineItem rows that reference it.
+    /// Returns (sliDeleted, srDeleted) counts.
+    /// </summary>
+    public async Task<(int SliDeleted, int SrDeleted)> DeleteSrAsync(string srId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+
+        // Find all SLI rows that reference this SR
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        var sliIds = new List<string>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null || item.Id is null) continue;
+                var refId = d.TryGetValue("SupplierResponseId", out var v) ? v?.ToString() : null;
+                if (string.Equals(refId, srId, StringComparison.OrdinalIgnoreCase))
+                    sliIds.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        foreach (var id in sliIds)
+        {
+            await GetGraph().Sites[siteId].Lists[sliListId].Items[id].DeleteAsync();
+            _log.LogInformation("[SP] Deleted SLI {Id} (child of SR {Sr})", id, srId);
+        }
+
+        await GetGraph().Sites[siteId].Lists[srListId].Items[srId].DeleteAsync();
+        _log.LogInformation("[SP] Deleted SR {Id} ({SliCount} SLIs removed)", srId, sliIds.Count);
+
+        return (sliIds.Count, 1);
     }
 
     /// <summary>
