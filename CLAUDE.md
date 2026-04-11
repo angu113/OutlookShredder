@@ -59,8 +59,12 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 
 **`ClaudeService`** (singleton)
 - `ExtractAsync(ExtractRequest)` → `RfqExtraction`
-- Posts to `https://api.anthropic.com/v1/messages`; sends text body or base64-encoded PDF/DOCX
-- Returns structured JSON: `{ jobReference, quoteReference, supplierName, dateOfQuote, products[] }`
+- Uses **tool_use** (`extract_rfq` tool) for schema-enforced output — no free-text JSON parsing
+- Static system prompt + tool definition sent with **prompt caching** (`anthropic-beta: prompt-caching-2024-07-31`)
+- Retries 429/5xx/network errors up to `Claude:MaxRetries` with randomised jitter
+- Logs warning when `stop_reason == "max_tokens"` or content is truncated at `Claude:MaxContentChars`
+- Extraction fields: jobReference, quoteReference, supplierName, freightTerms, products[]
+  (dateOfQuote/estimatedDeliveryDate removed — dates come from the RFQ Reference record, not extraction)
 
 **`SharePointService`** (singleton)
 - All Graph API calls. Uses `ClientSecretCredential` (app-only, `Sites.FullControl.All`).
@@ -160,6 +164,11 @@ Secrets go in `appsettings.secrets.json` (gitignored) or environment variables.
 | `SharePoint:TenantId/ClientId/ClientSecret` | Azure AD app-only credentials |
 | `SharePoint:SiteUrl` | SharePoint site URL |
 | `Anthropic:ApiKey` | Claude API key |
+| `Claude:Model` | Model ID (default `claude-sonnet-4-6`) |
+| `Claude:MaxTokens` | Max output tokens per call (default 4096; raise if truncation warnings appear in logs) |
+| `Claude:MaxRetries` | Retry count on 429/5xx/network errors (default 3) |
+| `Claude:TimeoutSeconds` | HTTP timeout (default 60) |
+| `Claude:MaxContentChars` | Text truncation limit (default 12000; warns in log when hit) |
 | `ServiceBus:ConnectionString`, `ServiceBus:TopicName` | Azure Service Bus |
 | `Mail:MailboxAddress`, `Mail:FromAddress`, `Mail:ReplyToAddress` | Mailbox config |
 | `Mail:PollIntervalSeconds`, `Mail:LookbackHours` | Poller tuning |
