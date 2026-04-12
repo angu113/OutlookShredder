@@ -85,6 +85,168 @@ public class MailPollerService : BackgroundService
     }
 
     /// <summary>
+    /// Re-runs Claude extraction on each PO record that has a stored MessageId, updates the
+    /// LineItems JSON in SharePoint, uploads the PDF if not already stored, then re-runs the
+    /// RLI matching logic.
+    /// <para>
+    /// <paramref name="comFetcher"/> is required for PO records that were sourced from Outlook COM
+    /// (their MessageId is a MAPI EntryID, not a Graph message ID). Pass
+    /// <see cref="OutlookComPollerService.FetchByEntryIdAsync"/> when available.
+    /// </para>
+    /// </summary>
+    public async Task<(int Updated, int Skipped)> ReextractPoLineItemsAsync(
+        Func<string, Task<OutlookPoMessage?>>? comFetcher,
+        CancellationToken ct)
+    {
+        var mailbox = _config["Mail:MailboxAddress"]
+            ?? throw new InvalidOperationException("Mail:MailboxAddress not configured");
+
+        var records = await _sp.ReadPurchaseOrdersAsync();
+        int updated = 0, skipped = 0;
+
+        foreach (var po in records)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            if (string.IsNullOrEmpty(po.MessageId) || string.IsNullOrEmpty(po.SpItemId))
+            {
+                _log.LogInformation("[POReextract] Skipping PO {PoNumber} — no MessageId or SpItemId", po.PoNumber);
+                skipped++;
+                continue;
+            }
+
+            // MAPI EntryIDs (from Outlook COM) are long uppercase hex strings; Graph IDs are base64url.
+            bool isComRecord = IsMApiEntryId(po.MessageId);
+
+            string body;
+            string subject;
+            List<(string Name, byte[] Bytes)> pdfAttachments;
+
+            if (isComRecord)
+            {
+                if (comFetcher is null)
+                {
+                    _log.LogWarning("[POReextract] COM-sourced PO {PoNumber} but Outlook COM is unavailable — skipping", po.PoNumber);
+                    skipped++;
+                    continue;
+                }
+
+                var comMsg = await comFetcher(po.MessageId);
+                if (comMsg is null)
+                {
+                    _log.LogWarning("[POReextract] Could not fetch COM message for PO {PoNumber} — Outlook may not be running", po.PoNumber);
+                    skipped++;
+                    continue;
+                }
+
+                subject        = comMsg.Subject;
+                body           = comMsg.PlainBody;
+                pdfAttachments = comMsg.PdfAttachments;
+            }
+            else
+            {
+                var msg = await _mail.GetMessageByIdAsync(mailbox, po.MessageId);
+                if (msg is null)
+                {
+                    _log.LogWarning("[POReextract] Graph message {MessageId} not found for PO {PoNumber} — skipping", po.MessageId, po.PoNumber);
+                    skipped++;
+                    continue;
+                }
+
+                var rawBody = msg.Body?.Content ?? string.Empty;
+                if (msg.Body?.ContentType == BodyType.Html)
+                {
+                    rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
+                    rawBody = HtmlTagRegex     .Replace(rawBody, " ");
+                    rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+                }
+                body    = rawBody.Trim();
+                subject = msg.Subject ?? "";
+
+                pdfAttachments = [];
+                if (msg.HasAttachments == true)
+                {
+                    var attachments = await _mail.GetAttachmentsAsync(mailbox, po.MessageId);
+                    foreach (var att in attachments)
+                    {
+                        if (att is not FileAttachment fa) continue;
+                        if (fa.ContentBytes is null) continue;
+                        if (!(fa.ContentType ?? "").ToLowerInvariant().Contains("pdf")) continue;
+                        pdfAttachments.Add((fa.Name ?? "po.pdf", fa.ContentBytes));
+                        break;
+                    }
+                }
+            }
+
+            var jobRefs = JobRefRegex.Matches(subject + " " + body)
+                .Select(m => m.Groups[1].Value.ToUpperInvariant())
+                .Distinct()
+                .ToList();
+
+            // Re-run Claude extraction on the first PDF attachment
+            PoExtraction? extraction = null;
+            foreach (var (name, bytes) in pdfAttachments)
+            {
+                extraction = await _claude.ExtractPurchaseOrderAsync(
+                    Convert.ToBase64String(bytes),
+                    name,
+                    body[..Math.Min(body.Length, 1_000)],
+                    subject,
+                    jobRefs,
+                    ct);
+                if (extraction is not null) break;
+            }
+
+            if (extraction is null)
+            {
+                _log.LogWarning("[POReextract] No PDF or extraction failed for PO {PoNumber} — skipping", po.PoNumber);
+                skipped++;
+                continue;
+            }
+
+            var lineItemsJson = System.Text.Json.JsonSerializer.Serialize(
+                extraction.LineItems,
+                new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+            await _sp.UpdatePurchaseOrderLineItemsAsync(po.SpItemId, lineItemsJson);
+            _log.LogInformation("[POReextract] Updated LineItems for PO {PoNumber} ({Count} items)", po.PoNumber, extraction.LineItems.Count);
+
+            // Upload the PDF to SharePoint if not already stored
+            if (pdfAttachments.Count > 0 && string.IsNullOrEmpty(po.PdfUrl))
+            {
+                var (pdfName, pdfBytes) = pdfAttachments[0];
+                var pdfUrl = await _sp.UploadPoAttachmentAsync(
+                    po.SpItemId,
+                    extraction.PoNumber ?? po.PoNumber ?? po.SpItemId,
+                    pdfName,
+                    pdfBytes);
+                _log.LogInformation("[POReextract] Uploaded PDF for PO {PoNumber}: {Url}", po.PoNumber, pdfUrl);
+            }
+
+            // Re-run RLI matching with fresh line items
+            var rfqId = po.RfqId is "UNKNOWN" or "" ? null : po.RfqId;
+            if (!string.IsNullOrEmpty(rfqId))
+                await _sp.UpdateRliPurchaseStatusAsync(rfqId, po.SupplierName, po.SpItemId, extraction.LineItems);
+            else
+                await _sp.MatchAndMarkRliByMspcAsync(po.SupplierName, po.PoNumber, extraction.LineItems);
+
+            updated++;
+        }
+
+        return (updated, skipped);
+    }
+
+    /// <summary>
+    /// Returns true if <paramref name="messageId"/> looks like a MAPI EntryID (Outlook COM source)
+    /// rather than a Microsoft Graph message ID.
+    /// MAPI EntryIDs are long (64+ chars) strings composed entirely of hexadecimal digits.
+    /// Graph IDs are base64url strings that typically start with letters and contain hyphens/underscores.
+    /// </summary>
+    private static bool IsMApiEntryId(string messageId) =>
+        messageId.Length >= 64 &&
+        messageId.All(c => (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'));
+
+    /// <summary>
     /// Triggers an immediate full scan of all unprocessed inbox messages (no lookback limit).
     /// Returns immediately; the scan runs on the background poller thread.
     /// </summary>
@@ -259,6 +421,10 @@ public class MailPollerService : BackgroundService
             ["MessageId"]    = msg.Id,
         });
 
+        // Claim this message immediately so other proxy instances skip it on their next poll.
+        if (msg.Id is not null)
+            await _mail.MarkClaimingAsync(mailbox, msg.Id);
+
         // ── Purchase Order routing ────────────────────────────────────────────
         // Strip reply/forward/external-tag prefixes before matching the PO subject pattern.
         var cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
@@ -327,7 +493,7 @@ public class MailPollerService : BackgroundService
             {
                 SupplierProductComments = "Email recorded without extraction — no job reference or quote attachment detected."
             };
-            var row = await _sp.WriteProductRowAsync(extraction, placeholder, req, "body", null, 0);
+            var row = await _sp.WriteProductRowAsync(extraction, placeholder, req, "body", null, 0, msg.Id);
             supplierUnknown = row.SupplierUnknown;
             if (row.Success && !row.Updated) _notifications.NotifyRfqProcessed();
         }
@@ -418,9 +584,7 @@ public class MailPollerService : BackgroundService
         var fromAddr = msg.From?.EmailAddress?.Address ?? "unknown";
         var received = msg.ReceivedDateTime?.ToString("o") ?? DateTime.UtcNow.ToString("o");
 
-        _log.LogInformation("[PO] Processing purchase order: \"{Subject}\" from {From}", subject, fromAddr);
-
-        // Strip HTML from body for job-ref scan and context snippet
+        // Strip HTML from body
         var rawBody = msg.Body?.Content ?? string.Empty;
         if (msg.Body?.ContentType == BodyType.Html)
         {
@@ -431,15 +595,9 @@ public class MailPollerService : BackgroundService
             rawBody = ExcessiveNewlineRegex    .Replace(rawBody, "\n\n");
         }
         else rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
-        var body = rawBody.Trim();
 
-        var jobRefs = JobRefRegex.Matches(subject + " " + body)
-            .Select(m => m.Groups[1].Value.ToUpperInvariant())
-            .Distinct()
-            .ToList();
-
-        // Find the first PDF attachment
-        PoExtraction? extraction = null;
+        // Fetch PDF attachments via Graph
+        var pdfs = new List<(string Name, byte[] Bytes)>();
         if (msg.HasAttachments == true && msg.Id is not null)
         {
             var attachments = await _mail.GetAttachmentsAsync(mailbox, msg.Id);
@@ -447,31 +605,60 @@ public class MailPollerService : BackgroundService
             {
                 if (att is not FileAttachment fa) continue;
                 if (fa.ContentBytes is null) continue;
-                var ct2 = (fa.ContentType ?? "").ToLowerInvariant();
-                if (!ct2.Contains("pdf")) continue;
-
-                _log.LogInformation("[PO] Sending PDF '{File}' to Claude for extraction", fa.Name);
-                var bodySnippet = body[..Math.Min(body.Length, 1_000)];
-                extraction = await _claude.ExtractPurchaseOrderAsync(
-                    Convert.ToBase64String(fa.ContentBytes),
-                    fa.Name ?? "po.pdf",
-                    bodySnippet,
-                    subject,
-                    jobRefs,
-                    ct);
+                if (!(fa.ContentType ?? "").ToLowerInvariant().Contains("pdf")) continue;
+                pdfs.Add((fa.Name ?? "po.pdf", fa.ContentBytes));
                 break;
             }
         }
 
-        if (extraction is null)
+        var processed = await ProcessPurchaseOrderCoreAsync(
+            subject, rawBody.Trim(), pdfs, msg.Id, received, fromAddr, ct);
+
+        if (msg.Id is not null)
+            await _mail.MarkProcessedAsync(mailbox, msg.Id, processed ? "PO-Processed" : "PO-NoExtract");
+    }
+
+    /// <summary>
+    /// Core PO processing logic shared by the Graph poller and the Outlook COM poller.
+    /// Accepts plain-data inputs so it has no dependency on Microsoft.Graph types.
+    /// Returns true if extraction succeeded and the record was written.
+    /// </summary>
+    internal async Task<bool> ProcessPurchaseOrderCoreAsync(
+        string subject,
+        string plainTextBody,
+        List<(string Name, byte[] Bytes)> pdfAttachments,
+        string? messageId,
+        string receivedAt,
+        string senderHint,
+        CancellationToken ct)
+    {
+        _log.LogInformation("[PO] Processing purchase order: \"{Subject}\" from {From}", subject, senderHint);
+
+        var jobRefs = JobRefRegex.Matches(subject + " " + plainTextBody)
+            .Select(m => m.Groups[1].Value.ToUpperInvariant())
+            .Distinct()
+            .ToList();
+
+        PoExtraction? extraction = null;
+        foreach (var (name, bytes) in pdfAttachments)
         {
-            _log.LogWarning("[PO] No PDF or extraction failed for \"{Subject}\" — stamping and skipping", subject);
-            if (msg.Id is not null)
-                await _mail.MarkProcessedAsync(mailbox, msg.Id, "PO-NoExtract");
-            return;
+            _log.LogInformation("[PO] Sending PDF '{File}' to Claude for extraction", name);
+            extraction = await _claude.ExtractPurchaseOrderAsync(
+                Convert.ToBase64String(bytes),
+                name,
+                plainTextBody[..Math.Min(plainTextBody.Length, 1_000)],
+                subject,
+                jobRefs,
+                ct);
+            break;
         }
 
-        // Resolve job reference: prefer Claude's extraction, fall back to regex scan
+        if (extraction is null)
+        {
+            _log.LogWarning("[PO] No PDF or extraction failed for \"{Subject}\" — skipping", subject);
+            return false;
+        }
+
         var rfqId = !string.IsNullOrWhiteSpace(extraction.JobReference)
             ? extraction.JobReference!.Trim().ToUpperInvariant()
             : jobRefs.FirstOrDefault();
@@ -479,23 +666,34 @@ public class MailPollerService : BackgroundService
         if (string.IsNullOrWhiteSpace(rfqId))
             _log.LogWarning("[PO] No job reference found in \"{Subject}\" — PO will be written without RFQ link", subject);
 
-        var supplierName = extraction.SupplierName ?? fromAddr;
+        var supplierName = extraction.SupplierName ?? senderHint;
         var lineItemsJson = System.Text.Json.JsonSerializer.Serialize(
             extraction.LineItems,
             new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
 
-        // Persist to SharePoint (deduped by MessageId)
-        await _sp.WritePurchaseOrderAsync(
+        var poSpItemId = await _sp.WritePurchaseOrderAsync(
             rfqId ?? "UNKNOWN", supplierName, extraction.PoNumber,
-            received, msg.Id, lineItemsJson);
+            receivedAt, messageId, lineItemsJson);
 
-        // Publish to Service Bus so all connected Shredder instances update immediately
+        if (poSpItemId is not null)
+        {
+            // Upload the source PDF to SharePoint drive and store the URL on the PO record
+            var firstPdf = pdfAttachments.FirstOrDefault();
+            if (firstPdf != default)
+                await _sp.UploadPoAttachmentAsync(poSpItemId, extraction.PoNumber ?? poSpItemId, firstPdf.Name, firstPdf.Bytes);
+
+            if (!string.IsNullOrWhiteSpace(rfqId))
+                await _sp.UpdateRliPurchaseStatusAsync(rfqId, supplierName, poSpItemId, extraction.LineItems);
+            else
+                await _sp.MatchAndMarkRliByMspcAsync(supplierName, extraction.PoNumber, extraction.LineItems);
+        }
+
         var notification = new Models.RfqProcessedNotification
         {
             EventType    = "PO",
             RfqId        = rfqId,
             SupplierName = supplierName,
-            MessageId    = msg.Id,
+            MessageId    = messageId,
             Products     = extraction.LineItems.Select(li => new Models.RfqNotificationProduct
             {
                 Name = li.Product,
@@ -508,8 +706,7 @@ public class MailPollerService : BackgroundService
         _log.LogInformation("[PO] Processed: RfqId={RfqId}, Supplier={Supplier}, {Count} line item(s)",
             rfqId ?? "UNKNOWN", supplierName, extraction.LineItems.Count);
 
-        if (msg.Id is not null)
-            await _mail.MarkProcessedAsync(mailbox, msg.Id, "PO-Processed");
+        return true;
     }
 
     // ── Claude → SharePoint ───────────────────────────────────────────────────
@@ -549,7 +746,7 @@ public class MailPollerService : BackgroundService
             foreach (var (p, i) in products.Select((p, i) => (p, i)))
             {
                 if (ct.IsCancellationRequested) break;
-                rowList.Add(await _sp.WriteProductRowAsync(extraction!, p, req, source, fileName, i));
+                rowList.Add(await _sp.WriteProductRowAsync(extraction!, p, req, source, fileName, i, messageId));
             }
             var rows = rowList.ToArray();
 

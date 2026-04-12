@@ -61,6 +61,11 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `POST /api/rfq-import/dedupe-supplier-responses?dryRun=true` — dedup SR-level and within-SR SLI duplicates using name normalisation + Jaccard ≥ 0.5
 - `DELETE /api/rfq-import/clean` — wipe SupplierResponses + SupplierLineItems
 
+**MessageId maintenance endpoints:**
+- `POST /api/mail/backfill-message-ids?days=7` — scans SR rows within the window that are missing MessageId; matches them to Graph messages by sender+time (±5 min), patches MessageId on matched rows and their child SLIs
+- `POST /api/mail/deduplicate?days=7` — deletes SR rows with no MessageId AND collapses duplicate rows sharing the same MessageId (keeps highest-scoring: attachment source > priced SLI > has QuoteReference); also deletes child SLI rows for deleted SRs
+- Run order: `setup-supplier-lists` first (creates the column), then `backfill-message-ids`, then `deduplicate`
+
 **Supplier data endpoints:**
 - `GET /api/items?top=N&raw=true` — all SLI items merged with SR fields; `raw=true` skips the in-memory Jaccard dedup (exposes all SP rows with `SpItemId` populated — useful for admin cleanup)
 - `GET /api/items/by-rfq/{rfqId}` — SLI items for one RFQ (always includes `SpItemId`)
@@ -80,9 +85,12 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 
 **`SharePointService`** (singleton)
 - All Graph API calls. Uses `ClientSecretCredential` (app-only, `Sites.FullControl.All`).
-- `WriteProductRowAsync(extraction, productLine, request, source, sourceFile, index)` → `SpWriteResult`
+- `WriteProductRowAsync(extraction, productLine, request, source, sourceFile, index, messageId?)` → `SpWriteResult`
   - Deduplicates by email+product; prefers attachment source over body
   - OOF detection; resolves supplier via `SupplierCacheService`
+  - `messageId` stored on both SR and SLI rows for dedup keying
+- `BackfillMessageIdsAsync(mail, days, ct)` → `(Patched, Skipped)` — post-hoc MessageId population for older rows
+- `DeduplicateSupplierResponsesAsync(days, ct)` → `(SrDeleted, SliDeleted)` — removes no-MessageId orphans and duplicate-MessageId extras
 - `ReadQcListAsync()` → `{ columns, rows, itemIds, lastModified }` — itemIds are SharePoint item IDs, parallel-indexed with rows[]
 - `GetQcLastModifiedAsync()` → `DateTime?`
 - `UpdateQcLqAsync()` → `(updated count, misses list)` — derives $/lb from quote rows, updates QC 'LQ' column

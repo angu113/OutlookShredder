@@ -8,29 +8,32 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api")]
 public class ExtractController : ControllerBase
 {
-    private readonly ClaudeService            _claude;
-    private readonly SharePointService        _sp;
-    private readonly MailService              _mail;
-    private readonly MailPollerService        _poller;
-    private readonly SupplierCacheService     _suppliers;
-    private readonly RfqNotificationService   _notifications;
-    private readonly IConfiguration           _config;
+    private readonly ClaudeService              _claude;
+    private readonly SharePointService          _sp;
+    private readonly MailService                _mail;
+    private readonly MailPollerService          _poller;
+    private readonly OutlookComPollerService    _comPoller;
+    private readonly SupplierCacheService       _suppliers;
+    private readonly RfqNotificationService     _notifications;
+    private readonly IConfiguration             _config;
     private readonly ILogger<ExtractController> _log;
 
     public ExtractController(
-        ClaudeService             claude,
-        SharePointService         sp,
-        MailService               mail,
-        MailPollerService         poller,
-        SupplierCacheService      suppliers,
-        RfqNotificationService    notifications,
-        IConfiguration            config,
-        ILogger<ExtractController> log)
+        ClaudeService               claude,
+        SharePointService           sp,
+        MailService                 mail,
+        MailPollerService           poller,
+        OutlookComPollerService     comPoller,
+        SupplierCacheService        suppliers,
+        RfqNotificationService      notifications,
+        IConfiguration              config,
+        ILogger<ExtractController>  log)
     {
         _claude        = claude;
         _sp            = sp;
         _mail          = mail;
         _poller        = poller;
+        _comPoller     = comPoller;
         _suppliers     = suppliers;
         _notifications = notifications;
         _config        = config;
@@ -605,7 +608,7 @@ public class ExtractController : ControllerBase
         try
         {
             var items  = await _sp.ReadAllRfqLineItemsAsync();
-            var result = items.Select(x => new { rfqId = x.RfqId, mspc = x.Mspc, product = x.Product, units = x.Units, sizeOfUnits = x.SizeOfUnits }).ToList();
+            var result = items.Select(x => new { rfqId = x.RfqId, mspc = x.Mspc, product = x.Product, units = x.Units, sizeOfUnits = x.SizeOfUnits, isPurchased = x.IsPurchased, poNumber = x.PoNumber }).ToList();
             return Ok(result);
         }
         catch (Exception ex)
@@ -1015,6 +1018,117 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "GetPurchaseOrders failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/purchase-orders/backfill-rli ───────────────────────────────
+    /// <summary>
+    /// Reads every PurchaseOrders row and runs UpdateRliPurchaseStatus + completion check
+    /// for each one with a known RFQ ID.  Idempotent — already-marked SLI rows are skipped.
+    /// </summary>
+    [HttpPost("purchase-orders/backfill-rli")]
+    public async Task<IActionResult> BackfillRliPurchaseStatus(
+        [FromQuery] int? days,
+        CancellationToken ct)
+    {
+        try
+        {
+            var (processed, skipped) = await _sp.BackfillRliPurchaseStatusAsync(days, ct);
+            return Ok(new { processed, skipped });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Cancelled" });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "BackfillRliPurchaseStatus failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/purchase-orders/reextract ──────────────────────────────────
+    /// <summary>
+    /// Re-runs Claude extraction on each PO record's original email, updates the stored
+    /// LineItems JSON in SharePoint, then re-runs RLI matching. Use this when the extraction
+    /// prompt has been updated and existing records need to be refreshed.
+    /// </summary>
+    [HttpPost("purchase-orders/reextract")]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public IActionResult ReextractPoLineItems()
+    {
+        // Fire-and-forget on a background thread so the HTTP client can disconnect
+        // without cancelling the (potentially long-running) extraction loop.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var (updated, skipped) = await _poller.ReextractPoLineItemsAsync(
+                    _comPoller.FetchByEntryIdAsync, CancellationToken.None);
+                _log.LogInformation("[POReextract] Background run complete — updated={Updated}, skipped={Skipped}",
+                    updated, skipped);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "[POReextract] Background run failed");
+            }
+        });
+        return Accepted(new { started = true, note = "Running in background — check proxy logs for progress" });
+    }
+
+    // ── POST /api/mail/backfill-message-ids ──────────────────────────────────
+    /// <summary>
+    /// Scans SupplierResponse rows from the last <paramref name="days"/> days that are
+    /// missing a MessageId and attempts to match them to Graph messages by sender+time.
+    /// Patches MessageId on matched SR rows and their child SLI rows.
+    /// </summary>
+    [HttpPost("mail/backfill-message-ids")]
+    public async Task<IActionResult> BackfillMessageIds(
+        [FromQuery] int days = 7,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var (patched, skipped) = await _sp.BackfillMessageIdsAsync(_mail, days, ct);
+            _log.LogInformation("[BackfillMessageIds] patched={Patched} skipped={Skipped}", patched, skipped);
+            return Ok(new { patched, skipped });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Cancelled" });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "BackfillMessageIds failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/mail/deduplicate ────────────────────────────────────────────
+    /// <summary>
+    /// Removes orphan SupplierResponse rows (no MessageId) and collapses duplicate rows
+    /// that share the same MessageId.  For duplicate groups keeps the highest-scoring row
+    /// (attachment source scores highest).  Deletes child SLI rows for doomed SRs.
+    /// </summary>
+    [HttpPost("mail/deduplicate")]
+    public async Task<IActionResult> DeduplicateSupplierResponses(
+        [FromQuery] int days = 7,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var (srDeleted, sliDeleted) = await _sp.DeduplicateSupplierResponsesAsync(days, ct);
+            _log.LogInformation("[Deduplicate] srDeleted={SrDeleted} sliDeleted={SliDeleted}", srDeleted, sliDeleted);
+            return Ok(new { srDeleted, sliDeleted });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Cancelled" });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DeduplicateSupplierResponses failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }

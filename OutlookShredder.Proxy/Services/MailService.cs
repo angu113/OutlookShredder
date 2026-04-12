@@ -22,6 +22,7 @@ public class MailService
     private GraphServiceClient? _graph;
 
     private const string ProcessedCategory = "RFQ-Processed";
+    private const string ClaimingCategory  = "RFQ-Claiming";
 
     // Job numbers are always auto-generated as uppercase alphanumeric (e.g. "RFQ [A1B2C3]").
     // Do NOT broaden this pattern — the strict format is intentional and guaranteed by the generator.
@@ -267,7 +268,8 @@ public class MailService
     public async Task<List<Message>> GetMessagesAsync(string mailbox, DateTimeOffset since)
     {
         var filter = $"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}" +
-                     $" and not (categories/any(c: c eq '{ProcessedCategory}'))";
+                     $" and not (categories/any(c: c eq '{ProcessedCategory}'))" +
+                     $" and not (categories/any(c: c eq '{ClaimingCategory}'))";
 
         _log.LogDebug("[Mail] Querying inbox for {Mailbox} since {Since}", mailbox, since);
 
@@ -364,6 +366,17 @@ public class MailService
 
     // ── Shared message search ─────────────────────────────────────────────────
 
+    /// <summary>
+    /// Finds the Graph message ID for an email identified by sender address and received time.
+    /// Uses a ±5-minute window. Returns null if no match is found or Outlook is not configured.
+    /// </summary>
+    public async Task<string?> FindMessageIdAsync(string emailFrom, DateTimeOffset receivedAt)
+    {
+        var messages = await FindMessagesAsync(emailFrom, receivedAt,
+            ["id", "receivedDateTime"], windowSeconds: 300);
+        return messages.FirstOrDefault()?.Id;
+    }
+
     private string GetMailbox() =>
         _config["Mail:MailboxAddress"]
         ?? throw new InvalidOperationException("Mail:MailboxAddress not configured in appsettings / User Secrets");
@@ -459,6 +472,29 @@ public class MailService
         }
 
         return unmarkCount;
+    }
+
+    /// <summary>
+    /// Stamps "RFQ-Claiming" on a message immediately so other proxy instances skip it
+    /// during concurrent polls. The claim is replaced by "RFQ-Processed" once done.
+    /// Errors are swallowed — a missed claim just means another proxy may duplicate work,
+    /// which is acceptable since the SharePoint dedup prevents duplicate writes.
+    /// </summary>
+    public async Task MarkClaimingAsync(string mailbox, string messageId)
+    {
+        try
+        {
+            await GetGraph()
+                .Users[mailbox]
+                .Messages[messageId]
+                .PatchAsync(new Message { Categories = [ClaimingCategory] });
+
+            _log.LogDebug("[Mail] Claimed message {Id}", messageId);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "[Mail] Could not claim message {Id} — another proxy may process it concurrently", messageId);
+        }
     }
 
     /// <summary>

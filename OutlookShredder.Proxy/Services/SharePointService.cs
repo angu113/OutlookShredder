@@ -995,7 +995,7 @@ public class SharePointService
     /// Returns all rows from the RFQ Line Items list.
     /// Used by the Shredder dashboard to display requested items under each RFQ group header.
     /// </summary>
-    public async Task<List<(string RfqId, string? Mspc, string? Product, string? Units, string? SizeOfUnits)>> ReadAllRfqLineItemsAsync()
+    public async Task<List<(string RfqId, string? Mspc, string? Product, string? Units, string? SizeOfUnits, bool IsPurchased, string? PoNumber)>> ReadAllRfqLineItemsAsync()
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqLineItemsListIdAsync();
@@ -1004,11 +1004,11 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits)"];
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,IsPurchased,PoNumber)"];
                 req.QueryParameters.Top    = 5000;
             });
 
-        var result = new List<(string, string?, string?, string?, string?)>();
+        var result = new List<(string, string?, string?, string?, string?, bool, string?)>();
         foreach (var item in items?.Value ?? [])
         {
             if (item.Fields?.AdditionalData is null) continue;
@@ -1024,7 +1024,10 @@ public class SharePointService
             string? units = null;
             if (d.TryGetValue("Units", out var vu) && vu is not null)
                 units = vu is System.Text.Json.JsonElement je ? je.ToString() : vu.ToString();
-            result.Add((id, mspc, product, units, size));
+            var isPurchased = d.TryGetValue("IsPurchased", out var ip) &&
+                              ip is true or JsonElement { ValueKind: JsonValueKind.True };
+            var poNumber = d.TryGetValue("PoNumber", out var vpo) ? vpo?.ToString() : null;
+            result.Add((id, mspc, product, units, size, isPurchased, poNumber));
         }
         return result;
     }
@@ -1106,7 +1109,8 @@ public class SharePointService
         ExtractRequest emailMeta,
         string         source,
         string?        sourceFile,
-        int            rowIndex)
+        int            rowIndex,
+        string?        messageId = null)
     {
         var result = new SpWriteResult { ProductName = product.ProductName };
         try
@@ -1147,7 +1151,7 @@ public class SharePointService
             // ── Upsert SupplierResponses ─────────────────────────────────────
             var srListId      = await GetSupplierResponsesListIdAsync();
             var (srId, srNew) = await EnsureSupplierResponseAsync(
-                siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile);
+                siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile, messageId);
             result.SpItemId = srId;
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
             result.RfqId    = jobRef;   // resolved RFQ ID — may differ from req.JobRefs when email subject has no bracket ref
@@ -1173,7 +1177,7 @@ public class SharePointService
             var sliListId = await GetSupplierLineItemsListIdAsync();
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
-                sourceFile, emailMeta.EmailFrom);
+                sourceFile, emailMeta.EmailFrom, messageId);
 
             result.Success = true;
         }
@@ -1198,7 +1202,8 @@ public class SharePointService
         string siteId, string listId,
         string jobRef, string supplier,
         RfqExtraction header, ExtractRequest emailMeta,
-        string source, string? sourceFile)
+        string source, string? sourceFile,
+        string? messageId = null)
     {
         var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier);
         bool isNew = existingId is null;
@@ -1225,6 +1230,7 @@ public class SharePointService
             ["ProcessedAt"]          = DateTime.UtcNow.ToString("o"),
             ["ProcessingSource"]     = source,
             ["SourceFile"]           = sourceFile,
+            ["MessageId"]            = messageId,
             ["QuoteReference"]       = header.QuoteReference,
             // DateOfQuote / EstimatedDeliveryDate intentionally omitted —
             // dates come from the RFQ Reference record, not from extraction.
@@ -1397,7 +1403,7 @@ public class SharePointService
         string siteId, string listId,
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
-        string? sourceFile, string? emailFrom)
+        string? sourceFile, string? emailFrom, string? messageId = null)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -1419,6 +1425,7 @@ public class SharePointService
             ["ProductSearchKey"]         = catalogMatch?.SearchKey,
             ["SourceFile"]               = sourceFile,
             ["EmailFrom"]                = emailFrom,
+            ["MessageId"]                = messageId,
             ["UnitsRequested"]           = product.UnitsRequested,
             ["UnitsQuoted"]              = product.UnitsQuoted,
             ["LengthPerUnit"]            = product.LengthPerUnit,
@@ -1646,7 +1653,24 @@ public class SharePointService
             var gradeB = numB.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
             return gradeA.IsSubsetOf(gradeB) || gradeB.IsSubsetOf(gradeA);
         }
-        if (dimA.Count > 0) return false;
+        // One side has dim tokens, the other doesn't — e.g. "A500 Pipe 6 SCH 40 (6.625 OD x 0.280 wall) x 21'"
+        // vs the simplified re-extraction "A500 Pipe 6 SCH 40 x 21'".
+        // Treat as compatible when the simpler side's plain numbers are a subset of the
+        // richer side's expanded numbers (the nominal size is still represented).
+        if (dimA.Count > 0)
+        {
+            var pA       = numA.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            var allNumsA = ExtractDimNumbers(dimA).Union(pA).ToHashSet();
+            var plainB   = numB.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            return plainB.IsSubsetOf(allNumsA);
+        }
+        if (dimB.Count > 0)
+        {
+            var pB       = numB.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            var allNumsB = ExtractDimNumbers(dimB).Union(pB).ToHashSet();
+            var plainA   = numA.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
+            return plainA.IsSubsetOf(allNumsB);
+        }
 
         var gA = numA.Where(t => !IsDimToken(t)).ToHashSet();
         var gB = numB.Where(t => !IsDimToken(t)).ToHashSet();
@@ -2617,6 +2641,7 @@ public class SharePointService
                 ("ProcessedAt",          "dateTime"),
                 ("ProcessingSource",     "text"),
                 ("SourceFile",           "text"),
+                ("MessageId",            "text"),
                 ("QuoteReference",       "text"),
                 ("DateOfQuote",          "dateTime"),
                 ("EstimatedDeliveryDate","dateTime"),
@@ -2631,6 +2656,7 @@ public class SharePointService
                 ("SupplierName",             "text"),
                 ("SourceFile",               "text"),
                 ("EmailFrom",                "text"),
+                ("MessageId",                "text"),
                 ("ProductName",              "text"),
                 ("CatalogProductName",       "text"),
                 ("ProductSearchKey",         "text"),
@@ -2648,6 +2674,14 @@ public class SharePointService
                 ("Certifications",           "text"),
                 ("SupplierProductComments",  "note"),
                 ("IsRegret",                 "boolean"),
+                ("IsPurchased",              "boolean"),
+                ("PurchaseRecordId",         "text"),
+            ]),
+            ["RFQ Line Items"] = await EnsureListColumnsAsync(siteId,
+                _config["SharePoint:ListName"] ?? "RFQ Line Items",
+            [
+                ("IsPurchased", "boolean"),
+                ("PoNumber",    "text"),
             ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [
@@ -2657,6 +2691,7 @@ public class SharePointService
                 ("ReceivedAt",   "dateTime"),
                 ("MessageId",    "text"),
                 ("LineItems",    "note"),
+                ("PdfUrl",       "text"),
             ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
@@ -3162,7 +3197,7 @@ public class SharePointService
         var rfqProducts = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var allRfqLines = await ReadAllRfqLineItemsAsync();
 
-        foreach (var (rfqId, _, product, _, _) in allRfqLines)
+        foreach (var (rfqId, _, product, _, _, _, _) in allRfqLines)
         {
             if (string.IsNullOrEmpty(rfqId) || string.IsNullOrEmpty(product)) continue;
             if (!pricesByRfq.ContainsKey(rfqId)) continue;   // no quotes for this RFQ
@@ -3782,9 +3817,9 @@ public class SharePointService
     /// <summary>
     /// Writes a purchase order row to the PurchaseOrders SharePoint list.
     /// Skips the write if a row with the same MessageId already exists (dedup).
-    /// Returns true if a new row was written, false if skipped as a duplicate.
+    /// Returns the new SP item ID if written, null if skipped as a duplicate.
     /// </summary>
-    public async Task<bool> WritePurchaseOrderAsync(
+    public async Task<string?> WritePurchaseOrderAsync(
         string rfqId, string supplierName, string? poNumber,
         string receivedAt, string? messageId, string lineItemsJson)
     {
@@ -3805,7 +3840,7 @@ public class SharePointService
             if (existing?.Value?.Count > 0)
             {
                 _log.LogInformation("[PO] Skipping duplicate PO — MessageId already in SP: {Id}", messageId);
-                return false;
+                return null;
             }
         }
 
@@ -3821,11 +3856,26 @@ public class SharePointService
             ["LineItems"]    = lineItemsJson,
         };
 
-        await GetGraph().Sites[siteId].Lists[listId].Items
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
 
         _log.LogInformation("[PO] Wrote PurchaseOrder to SP: [{RfqId}] {Supplier}", rfqId, supplierName);
-        return true;
+        return item?.Id;
+    }
+
+    /// <summary>
+    /// Patches the LineItems JSON field on an existing PurchaseOrders row.
+    /// </summary>
+    public async Task UpdatePurchaseOrderLineItemsAsync(string spItemId, string lineItemsJson)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["LineItems"] = lineItemsJson }
+            });
     }
 
     /// <summary>
@@ -3840,7 +3890,7 @@ public class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -3856,12 +3906,14 @@ public class SharePointService
 
                 results.Add(new PurchaseOrderRecord
                 {
+                    SpItemId     = item.Id ?? "",
                     RfqId        = rfq,
                     SupplierName = supplier,
                     PoNumber     = GetStr(f, "PoNumber"),
                     ReceivedAt   = GetStr(f, "ReceivedAt"),
                     MessageId    = GetStr(f, "MessageId"),
                     LineItems    = GetStr(f, "LineItems") ?? "[]",
+                    PdfUrl       = GetStr(f, "PdfUrl"),
                 });
             }
 
@@ -3872,6 +3924,787 @@ public class SharePointService
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Uploads a PO PDF to the SharePoint site's default drive under PurchaseOrders/{poNumber}.pdf,
+    /// then patches the PurchaseOrders list item with the resulting web URL.
+    /// Returns the web URL, or null if the upload fails.
+    /// </summary>
+    public async Task<string?> UploadPoAttachmentAsync(
+        string spItemId, string poNumber, string fileName, byte[] pdfBytes)
+    {
+        try
+        {
+            var siteId = await GetSiteIdAsync();
+            // Sanitise filename — keep PO number as the primary name
+            var safeName = $"{poNumber}.pdf";
+
+            // Resolve the default drive for the site
+            var drive   = await GetGraph().Sites[siteId].Drive.GetAsync();
+            var driveId = drive?.Id ?? throw new Exception("Could not resolve site drive ID");
+
+            // Upload to the default document library under a PurchaseOrders subfolder
+            // Graph SDK v5 path-based item key: "root:/folder/file:"
+            var itemKey   = $"root:/PurchaseOrders/{safeName}:";
+            var driveItem = await GetGraph().Drives[driveId].Items[itemKey].Content
+                .PutAsync(new MemoryStream(pdfBytes));
+
+            var webUrl = driveItem?.WebUrl;
+            if (string.IsNullOrEmpty(webUrl))
+            {
+                _log.LogWarning("[PO] Upload succeeded but no WebUrl returned for {PoNumber}", poNumber);
+                return null;
+            }
+
+            // Patch the PO list item with the URL
+            var listId = await GetPurchaseOrdersListIdAsync();
+            await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+                .PatchAsync(new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?> { ["PdfUrl"] = webUrl }
+                });
+
+            _log.LogInformation("[PO] PDF uploaded for {PoNumber} → {Url}", poNumber, webUrl);
+            return webUrl;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[PO] Failed to upload PDF for {PoNumber} — continuing without attachment", poNumber);
+            return null;
+        }
+    }
+
+    // ── RLI purchase status update ────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if the RFQ Reference for <paramref name="rfqId"/> has Complete = true.
+    /// Fetches all RFQ References and filters in memory (OData filter on non-indexed columns
+    /// is unreliable in SharePoint).
+    /// </summary>
+    private async Task<bool> IsRfqCompleteAsync(string siteId, string rfqId)
+    {
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var all = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},Complete)"];
+                req.QueryParameters.Top    = 500;
+            });
+
+        return (all?.Value ?? []).Any(i =>
+        {
+            var d = i.Fields?.AdditionalData;
+            if (d is null) return false;
+            var itemRfqId = d.TryGetValue(col, out var v) ? v?.ToString()
+                          : d.TryGetValue("RFQ_x005F_ID", out var v2) ? v2?.ToString() : null;
+            if (!string.Equals(itemRfqId, rfqId, StringComparison.OrdinalIgnoreCase)) return false;
+            return d.TryGetValue("Complete", out var c) &&
+                   c is true or JsonElement { ValueKind: JsonValueKind.True };
+        });
+    }
+
+    /// <summary>
+    /// Marks SupplierLineItems as purchased by patching <c>IsPurchased = true</c> and
+    /// <c>PurchaseRecordId</c> on SLI rows that match the given PO's rfqId + supplierName +
+    /// MSPC (ProductSearchKey).  If the PO has no MSPC data all matching SLI rows are marked.
+    /// Skips the update entirely when the parent RFQ Reference has <c>Complete = true</c>.
+    /// </summary>
+    public async Task UpdateRliPurchaseStatusAsync(
+        string rfqId, string supplierName, string poSpItemId, List<PoLineItem> poLineItems)
+    {
+        var siteId = await GetSiteIdAsync();
+
+        if (await IsRfqCompleteAsync(siteId, rfqId))
+        {
+            _log.LogInformation("[PO] Skipping RLI update for [{RfqId}] — RFQ is marked Complete", rfqId);
+            return;
+        }
+
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        // Build MSPC set from PO line items; empty means no MSPC data → mark all supplier rows
+        var mspcSet = poLineItems
+            .Select(li => li.Mspc?.Trim())
+            .Where(m => !string.IsNullOrEmpty(m))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool matchOnMspc = mspcSet.Count > 0;
+
+        int patched = 0;
+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,RFQ_ID,SupplierName,ProductSearchKey,IsPurchased)"];
+                req.QueryParameters.Top    = 2000;
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+
+                var itemRfqId    = GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID") ?? "";
+                var itemSupplier = GetStr(d, "SupplierName") ?? "";
+
+                if (!string.Equals(itemRfqId,    rfqId,        StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Skip rows already marked to avoid redundant writes
+                if (d.TryGetValue("IsPurchased", out var existing) &&
+                    existing is true or JsonElement { ValueKind: JsonValueKind.True }) continue;
+
+                var searchKey = GetStr(d, "ProductSearchKey");
+                bool matches = !matchOnMspc ||
+                               (searchKey is not null && mspcSet.Contains(searchKey));
+                if (!matches) continue;
+
+                await GetGraph().Sites[siteId].Lists[sliListId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["IsPurchased"]     = true,
+                            ["PurchaseRecordId"] = poSpItemId,
+                        }
+                    });
+
+                patched++;
+                _log.LogInformation("[PO] Marked SLI {SliId} purchased (MSPC={Key}, PO={PoId})",
+                    item.Id, searchKey ?? "n/a", poSpItemId);
+            }
+
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync();
+        }
+
+        _log.LogInformation("[PO] Updated {Count} SLI item(s) as purchased for [{RfqId}] {Supplier}",
+            patched, rfqId, supplierName);
+
+        await CheckAndCompleteRfqAsync(siteId, rfqId);
+    }
+
+    /// <summary>
+    /// Checks whether all RFQ Line Items for <paramref name="rfqId"/> are fully covered by
+    /// purchase orders (total PO quantity >= requested quantity per MSPC). If so, marks the
+    /// RFQ Reference as Complete.
+    /// </summary>
+    private async Task CheckAndCompleteRfqAsync(string siteId, string rfqId)
+    {
+        // ── 1. Read RFQ Line Items for this rfqId ────────────────────────────
+        var rliListId = await GetRfqLineItemsListIdAsync();
+        var rliCol    = await ResolveRfqIdColumnAsync(siteId, rliListId);
+
+        var rliPage = await GetGraph().Sites[siteId].Lists[rliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={rliCol},MSPC,Units)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var rliItems = new List<(string Mspc, double Units)>();
+        foreach (var item in rliPage?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is not { } d) continue;
+            var itemRfqId = d.TryGetValue(rliCol,         out var v0) ? v0?.ToString()
+                          : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                          : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                          : null;
+            if (!string.Equals(itemRfqId, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var mspc = d.TryGetValue("MSPC", out var vm) ? vm?.ToString() : null;
+            if (string.IsNullOrEmpty(mspc)) continue;
+
+            double units = 0;
+            if (d.TryGetValue("Units", out var vu) && vu is not null)
+            {
+                var s = vu is JsonElement je ? je.ToString() : vu.ToString() ?? "";
+                double.TryParse(s,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out units);
+            }
+            rliItems.Add((mspc, units));
+        }
+
+        if (rliItems.Count == 0)
+        {
+            _log.LogInformation("[PO] No RFQ Line Items found for [{RfqId}] — skipping completion check", rfqId);
+            return;
+        }
+
+        // ── 2. Aggregate PO quantities per MSPC for this rfqId ───────────────
+        var poListId = await GetPurchaseOrdersListIdAsync();
+        var poQtyByMspc = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+        var poPage = await GetGraph().Sites[siteId].Lists[poListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,LineItems)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        while (poPage?.Value is not null)
+        {
+            foreach (var item in poPage.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var poRfqId = GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID") ?? "";
+                if (!string.Equals(poRfqId, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var lineItemsJson = GetStr(d, "LineItems") ?? "[]";
+                try
+                {
+                    var lineItems = JsonSerializer.Deserialize<List<PoLineItem>>(lineItemsJson, jsonOpts) ?? [];
+                    foreach (var li in lineItems)
+                    {
+                        if (string.IsNullOrEmpty(li.Mspc)) continue;
+                        poQtyByMspc.TryGetValue(li.Mspc, out var existing);
+                        poQtyByMspc[li.Mspc] = existing + (li.Quantity ?? 0);
+                    }
+                }
+                catch { /* malformed LineItems JSON — skip */ }
+            }
+
+            if (poPage.OdataNextLink is null) break;
+            poPage = await GetGraph().Sites[siteId].Lists[poListId].Items
+                .WithUrl(poPage.OdataNextLink).GetAsync();
+        }
+
+        // ── 3. Check every RLI item is fully covered ─────────────────────────
+        foreach (var (mspc, requestedQty) in rliItems)
+        {
+            poQtyByMspc.TryGetValue(mspc, out var poQty);
+            bool covered = requestedQty > 0 ? poQty >= requestedQty : poQty > 0;
+            if (!covered)
+            {
+                _log.LogInformation(
+                    "[PO] [{RfqId}] not complete — MSPC {Mspc} needs {Required}, POs have {Covered}",
+                    rfqId, mspc, requestedQty, poQty);
+                return;
+            }
+        }
+
+        _log.LogInformation("[PO] All RFQ Line Items covered — marking [{RfqId}] Complete", rfqId);
+        await SetRfqCompleteAsync(rfqId, true);
+    }
+
+    /// <summary>
+    /// Matches PO line items to RFQ Line Items by MSPC when the PO has no RFQ ID.
+    /// Patches matched RLI rows with <c>IsPurchased=true</c> and <c>PoNumber</c>.
+    /// Skips RLIs whose parent RFQ Reference is already Complete.
+    /// After patching, runs a completion check on each affected RFQ.
+    /// </summary>
+    public async Task MatchAndMarkRliByMspcAsync(
+        string supplierName, string? poNumber, List<PoLineItem> poLineItems)
+    {
+        // Only valid MSPC codes contain a forward slash (e.g. ASH3003/040).
+        // Filter out supplier codes, part numbers, or other non-MSPC values.
+        var mspcSet = poLineItems
+            .Select(li => li.Mspc?.Trim())
+            .Where(m => !string.IsNullOrEmpty(m) && m!.Contains('/'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (mspcSet.Count == 0)
+        {
+            _log.LogInformation("[PO] No valid MSPC codes (containing '/') — skipping RLI MSPC match for {Supplier}", supplierName);
+            return;
+        }
+
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        // Read all RFQ Line Items, collect candidates matching the MSPC set.
+        // Also track already-purchased RLI items so their rfqId+mspc can drive SLI updates
+        // when SLI never got stamped (e.g. PO was processed before this logic existed).
+        var candidates    = new List<(string ItemId, string RfqId, string? Mspc)>();
+        var alreadyPurchased = new List<(string RfqId, string? Mspc)>(); // RLI rows already marked
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col},MSPC,IsPurchased)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+
+                var mspc = d.TryGetValue("MSPC", out var vm) ? vm?.ToString() : null;
+                if (string.IsNullOrEmpty(mspc) || !mspcSet.Contains(mspc)) continue;
+
+                var rfqId = d.TryGetValue(col,            out var v0) ? v0?.ToString()
+                          : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                          : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                          : null;
+                if (string.IsNullOrEmpty(rfqId)) continue;
+
+                // Track already-purchased separately so SLI can still be stamped
+                if (d.TryGetValue("IsPurchased", out var ip) &&
+                    ip is true or JsonElement { ValueKind: JsonValueKind.True })
+                {
+                    alreadyPurchased.Add((rfqId, mspc));
+                    continue;
+                }
+
+                candidates.Add((item.Id, rfqId, mspc));
+            }
+
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        if (candidates.Count == 0 && alreadyPurchased.Count == 0)
+        {
+            _log.LogInformation("[PO] No matching RLI items found for MSPCs [{Mspc}]",
+                string.Join(", ", mspcSet));
+            return;
+        }
+
+        if (candidates.Count == 0)
+        {
+            _log.LogInformation("[PO] No unmatched RLI items found for MSPCs [{Mspc}] — all already purchased; checking SLI",
+                string.Join(", ", mspcSet));
+        }
+
+        // Cache complete-RFQ checks to avoid repeated full-list reads
+        var completeCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        async Task<bool> IsComplete(string id)
+        {
+            if (!completeCache.TryGetValue(id, out var v))
+                completeCache[id] = v = await IsRfqCompleteAsync(siteId, id);
+            return v;
+        }
+
+        int patched = 0;
+        var affectedRfqIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (itemId, rfqId, mspc) in candidates)
+        {
+            if (await IsComplete(rfqId)) continue;
+
+            await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
+                .PatchAsync(new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["IsPurchased"] = true,
+                        ["PoNumber"]    = poNumber,
+                    }
+                });
+
+            affectedRfqIds.Add(rfqId);
+            patched++;
+            _log.LogInformation("[PO] Marked RLI {Id} purchased (MSPC={Mspc}, PO={PoNum}, RFQ={Rfq})",
+                itemId, mspc, poNumber ?? "n/a", rfqId);
+        }
+
+        _log.LogInformation("[PO] MSPC match: {Count} RLI item(s) marked purchased for {Supplier}",
+            patched, supplierName);
+
+        // Also stamp matching SLI rows so Shredder can show the PO badge on group headers.
+        // Covers both freshly-patched RLI items AND already-purchased RLI items whose
+        // corresponding SLI rows may never have been stamped (backfill scenario).
+        {
+            // Build rfqId → mspc set from all matching RLI rows (patched now + already purchased)
+            var sliTargets = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+            void AddToSliTargets(string rfqId, string? mspc)
+            {
+                if (string.IsNullOrEmpty(mspc)) return;
+                if (!sliTargets.TryGetValue(rfqId, out var set))
+                    sliTargets[rfqId] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                set.Add(mspc);
+            }
+
+            foreach (var c in candidates.Where(c => affectedRfqIds.Contains(c.RfqId)))
+                AddToSliTargets(c.RfqId, c.Mspc);
+            foreach (var (rfqId, mspc) in alreadyPurchased)
+                AddToSliTargets(rfqId, mspc);
+
+            if (sliTargets.Count > 0)
+            {
+                var sliListId  = await GetSupplierLineItemsListIdAsync();
+                int sliPatched = 0;
+
+                var sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                    .GetAsync(req =>
+                    {
+                        req.QueryParameters.Expand = ["fields($select=id,RFQ_ID,SupplierName,ProductSearchKey,IsPurchased)"];
+                        req.QueryParameters.Top    = 2000;
+                    });
+
+                while (sliPage?.Value is not null)
+                {
+                    foreach (var item in sliPage.Value)
+                    {
+                        if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+
+                        var itemRfqId = GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID") ?? "";
+                        if (!sliTargets.TryGetValue(itemRfqId, out var targetMspcs)) continue;
+
+                        var searchKey = GetStr(d, "ProductSearchKey");
+                        if (searchKey is null || !targetMspcs.Contains(searchKey)) continue;
+
+                        // Skip rows already marked
+                        if (d.TryGetValue("IsPurchased", out var existing) &&
+                            existing is true or JsonElement { ValueKind: JsonValueKind.True }) continue;
+
+                        await GetGraph().Sites[siteId].Lists[sliListId].Items[item.Id].Fields
+                            .PatchAsync(new FieldValueSet
+                            {
+                                AdditionalData = new Dictionary<string, object?>
+                                {
+                                    ["IsPurchased"]      = true,
+                                    ["PurchaseRecordId"] = poNumber,
+                                }
+                            });
+
+                        sliPatched++;
+                        _log.LogInformation("[PO] Marked SLI {SliId} purchased via MSPC match (MSPC={Key}, PO={PoNum}, RFQ={Rfq})",
+                            item.Id, searchKey, poNumber ?? "n/a", itemRfqId);
+                    }
+
+                    if (sliPage.OdataNextLink is null) break;
+                    sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                        .WithUrl(sliPage.OdataNextLink).GetAsync();
+                }
+
+                _log.LogInformation("[PO] MSPC match: {Count} SLI item(s) marked purchased for {Supplier}",
+                    sliPatched, supplierName);
+            }
+        }
+
+        foreach (var rfqId in affectedRfqIds)
+            await CheckRliAllPurchasedAsync(siteId, rfqId);
+    }
+
+    /// <summary>
+    /// Marks the RFQ Reference as Complete when every RFQ Line Item for
+    /// <paramref name="rfqId"/> has <c>IsPurchased = true</c>.
+    /// Used after MSPC-based PO matching where quantity data is unavailable.
+    /// </summary>
+    private async Task CheckRliAllPurchasedAsync(string siteId, string rfqId)
+    {
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},IsPurchased)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        bool hasItems = false;
+        bool allPurchased = true;
+
+        foreach (var item in page?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is not { } d) continue;
+            var itemRfqId = d.TryGetValue(col,            out var v0) ? v0?.ToString()
+                          : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                          : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                          : null;
+            if (!string.Equals(itemRfqId, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            hasItems = true;
+            if (!d.TryGetValue("IsPurchased", out var ip) ||
+                ip is not (true or JsonElement { ValueKind: JsonValueKind.True }))
+            {
+                allPurchased = false;
+                break;
+            }
+        }
+
+        if (hasItems && allPurchased)
+        {
+            _log.LogInformation("[PO] All RLI items purchased — marking [{RfqId}] Complete", rfqId);
+            await SetRfqCompleteAsync(rfqId, true);
+        }
+    }
+
+    // ── MessageId backfill ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans SupplierResponses rows from the last <paramref name="days"/> days that have no MessageId,
+    /// finds the matching Graph email by sender + received time, and patches MessageId onto the SR
+    /// and all linked SLI rows.
+    /// Returns (patched, skipped) counts.
+    /// </summary>
+    public async Task<(int Patched, int Skipped)> BackfillMessageIdsAsync(
+        MailService mail, int days = 7, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var cutoff    = DateTimeOffset.UtcNow.AddDays(-days);
+
+        // Load all SR rows within the window
+        var srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,EmailFrom,ReceivedAt,MessageId)"];
+                req.QueryParameters.Top    = 2000;
+            });
+
+        var candidates = new List<(string SpId, string EmailFrom, DateTimeOffset ReceivedAt)>();
+        while (srPage?.Value is not null)
+        {
+            foreach (var item in srPage.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                // Skip rows that already have a MessageId
+                var existing = GetStr(d, "MessageId");
+                if (!string.IsNullOrWhiteSpace(existing)) continue;
+
+                var from = GetStr(d, "EmailFrom");
+                if (string.IsNullOrWhiteSpace(from)) continue;
+
+                var recStr = GetStr(d, "ReceivedAt");
+                if (!DateTimeOffset.TryParse(recStr, out var rec)) continue;
+                if (rec < cutoff) continue;
+
+                candidates.Add((item.Id, from, rec));
+            }
+            if (srPage.OdataNextLink is null) break;
+            srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+                .WithUrl(srPage.OdataNextLink).GetAsync();
+        }
+
+        _log.LogInformation("[Backfill] {Count} SR row(s) in last {Days} days missing MessageId", candidates.Count, days);
+        int patched = 0, skipped = 0;
+
+        foreach (var (srSpId, emailFrom, receivedAt) in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var msgId = await mail.FindMessageIdAsync(emailFrom, receivedAt);
+            if (msgId is null)
+            {
+                _log.LogDebug("[Backfill] No Graph message found for SR {Id} ({From} ~{At})", srSpId, emailFrom, receivedAt);
+                skipped++;
+                continue;
+            }
+
+            // Patch SR with MessageId
+            await GetGraph().Sites[siteId].Lists[srListId].Items[srSpId].Fields
+                .PatchAsync(new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?> { ["MessageId"] = msgId }
+                });
+
+            // Patch all linked SLI rows
+            var sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,MessageId)"];
+                    req.QueryParameters.Top    = 500;
+                });
+            while (sliPage?.Value is not null)
+            {
+                foreach (var sliItem in sliPage.Value)
+                {
+                    if (sliItem.Id is null || sliItem.Fields?.AdditionalData is not { } sd) continue;
+                    var srId = GetStr(sd, "SupplierResponseId");
+                    if (!string.Equals(srId, srSpId, StringComparison.OrdinalIgnoreCase)) continue;
+                    var existingMsgId = GetStr(sd, "MessageId");
+                    if (!string.IsNullOrWhiteSpace(existingMsgId)) continue;
+
+                    await GetGraph().Sites[siteId].Lists[sliListId].Items[sliItem.Id].Fields
+                        .PatchAsync(new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?> { ["MessageId"] = msgId }
+                        });
+                }
+                if (sliPage.OdataNextLink is null) break;
+                sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                    .WithUrl(sliPage.OdataNextLink).GetAsync();
+            }
+
+            patched++;
+            _log.LogInformation("[Backfill] Patched MessageId on SR {Id} ({From})", srSpId, emailFrom);
+        }
+
+        _log.LogInformation("[Backfill] MessageId backfill complete — patched={Patched}, skipped={Skipped}", patched, skipped);
+        return (patched, skipped);
+    }
+
+    // ── Deduplication ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Removes duplicate SupplierResponse + SupplierLineItem rows:
+    /// 1. SR rows with no MessageId (within <paramref name="days"/> days) — deleted with their SLIs.
+    /// 2. SR rows sharing the same MessageId — keep the one with the most populated fields,
+    ///    delete the rest with their SLIs.
+    /// Returns counts of deleted SR and SLI rows.
+    /// </summary>
+    public async Task<(int SrDeleted, int SliDeleted)> DeduplicateSupplierResponsesAsync(
+        int days = 7, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var cutoff    = DateTimeOffset.UtcNow.AddDays(-days);
+
+        // Load all SR rows in window with key fields
+        var srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,EmailFrom,ReceivedAt,MessageId,RFQ_ID,SupplierName,ProcessingSource,QuoteReference)"];
+                req.QueryParameters.Top    = 2000;
+            });
+
+        // srId → (messageId, receivedAt, score)
+        var allSr = new List<(string SpId, string? MessageId, DateTimeOffset ReceivedAt, int Score)>();
+        while (srPage?.Value is not null)
+        {
+            foreach (var item in srPage.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var recStr = GetStr(d, "ReceivedAt");
+                if (!DateTimeOffset.TryParse(recStr, out var rec)) continue;
+                if (rec < cutoff) continue;
+
+                var msgId  = GetStr(d, "MessageId");
+                var source = GetStr(d, "ProcessingSource");
+                var qref   = GetStr(d, "QuoteReference");
+                // Score: prefer rows with MessageId, attachment source, and quote reference
+                int score = (string.IsNullOrWhiteSpace(msgId)  ? 0 : 4)
+                          + (source?.Equals("attachment", StringComparison.OrdinalIgnoreCase) == true ? 2 : 0)
+                          + (string.IsNullOrWhiteSpace(qref)   ? 0 : 1);
+                allSr.Add((item.Id, msgId, rec, score));
+            }
+            if (srPage.OdataNextLink is null) break;
+            srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+                .WithUrl(srPage.OdataNextLink).GetAsync();
+        }
+
+        var toDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Mark no-MessageId rows for deletion
+        foreach (var (spId, msgId, _, _) in allSr)
+            if (string.IsNullOrWhiteSpace(msgId))
+                toDelete.Add(spId);
+
+        // 2. For rows sharing a MessageId, keep the highest-scoring one
+        foreach (var grp in allSr
+            .Where(r => !string.IsNullOrWhiteSpace(r.MessageId))
+            .GroupBy(r => r.MessageId!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1))
+        {
+            var keep = grp.OrderByDescending(r => r.Score).First();
+            foreach (var dup in grp.Where(r => r.SpId != keep.SpId))
+                toDelete.Add(dup.SpId);
+        }
+
+        _log.LogInformation("[Dedup] {Count} SR row(s) marked for deletion", toDelete.Count);
+        int srDeleted = 0, sliDeleted = 0;
+
+        // Delete SLI rows linked to doomed SRs
+        var sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,SupplierResponseId)"];
+                req.QueryParameters.Top    = 2000;
+            });
+
+        while (sliPage?.Value is not null)
+        {
+            foreach (var item in sliPage.Value)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var srId = GetStr(d, "SupplierResponseId");
+                if (srId is null || !toDelete.Contains(srId)) continue;
+
+                await GetGraph().Sites[siteId].Lists[sliListId].Items[item.Id]
+                    .DeleteAsync();
+                sliDeleted++;
+            }
+            if (sliPage.OdataNextLink is null) break;
+            sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(sliPage.OdataNextLink).GetAsync();
+        }
+
+        // Delete the SR rows themselves
+        foreach (var spId in toDelete)
+        {
+            ct.ThrowIfCancellationRequested();
+            await GetGraph().Sites[siteId].Lists[srListId].Items[spId].DeleteAsync();
+            srDeleted++;
+            _log.LogInformation("[Dedup] Deleted SR {Id}", spId);
+        }
+
+        _log.LogInformation("[Dedup] Complete — SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
+        return (srDeleted, sliDeleted);
+    }
+
+    /// <summary>
+    /// Reads every row from the PurchaseOrders list and runs <see cref="UpdateRliPurchaseStatusAsync"/>
+    /// for each one that has a known RFQ ID.  Use this to backfill <c>IsPurchased</c> /
+    /// <c>PurchaseRecordId</c> on SLI rows that were written before the purchase-status feature existed.
+    /// Returns (processed, skipped) counts.
+    /// </summary>
+    public async Task<(int Processed, int Skipped)> BackfillRliPurchaseStatusAsync(
+        int? days = null,
+        CancellationToken ct = default)
+    {
+        var records = await ReadPurchaseOrdersAsync();
+
+        if (days is > 0)
+        {
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-days.Value);
+            records = records.Where(r =>
+                DateTimeOffset.TryParse(r.ReceivedAt, out var dt) ? dt >= cutoff : true).ToList();
+            _log.LogInformation("[PO] Backfill scoped to last {Days} days — {Count} record(s) in window",
+                days.Value, records.Count);
+        }
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        int processed = 0, skipped = 0;
+
+        foreach (var rec in records)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (string.IsNullOrWhiteSpace(rec.SpItemId))
+            {
+                skipped++;
+                continue;
+            }
+
+            List<PoLineItem> lineItems;
+            try { lineItems = JsonSerializer.Deserialize<List<PoLineItem>>(rec.LineItems, jsonOpts) ?? []; }
+            catch { lineItems = []; }
+
+            if (string.IsNullOrWhiteSpace(rec.RfqId) ||
+                rec.RfqId.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
+            {
+                // No RFQ ID — match by MSPC directly against RFQ Line Items
+                await MatchAndMarkRliByMspcAsync(rec.SupplierName, rec.PoNumber, lineItems);
+            }
+            else
+            {
+                await UpdateRliPurchaseStatusAsync(rec.RfqId, rec.SupplierName, rec.SpItemId, lineItems);
+            }
+            processed++;
+        }
+
+        _log.LogInformation("[PO] Backfill complete — processed={Processed}, skipped={Skipped}",
+            processed, skipped);
+        return (processed, skipped);
     }
 
 }
