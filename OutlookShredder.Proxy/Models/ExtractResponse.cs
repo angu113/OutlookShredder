@@ -85,6 +85,7 @@ public class ActivityProduct
 /// <summary>A purchase order record as stored in the PurchaseOrders SharePoint list.</summary>
 public class PurchaseOrderRecord
 {
+    public string  SpItemId     { get; set; } = "";
     public string  RfqId        { get; set; } = "";
     public string  SupplierName { get; set; } = "";
     public string? PoNumber     { get; set; }
@@ -92,6 +93,8 @@ public class PurchaseOrderRecord
     public string? MessageId    { get; set; }
     /// <summary>JSON array of { mspc, product, quantity, size } objects.</summary>
     public string  LineItems    { get; set; } = "[]";
+    /// <summary>SharePoint web URL of the uploaded PO PDF attachment, if available.</summary>
+    public string? PdfUrl       { get; set; }
 }
 
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>

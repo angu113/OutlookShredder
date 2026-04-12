@@ -413,11 +413,14 @@ public class ClaudeService
 
         ── LINE ITEMS ─────────────────────────────────────────────────────────────
         For each ordered line item extract:
-        - mspc: the internal product code (may be labelled MSPC, Item #, Part #, SKU, or similar)
+        - mspc: the Mithril internal catalog code. These are explicitly labelled "MSPC" on the
+          document and are alphanumeric strings that always contain at least one forward slash
+          (e.g. ASH3003/040, HR/750, GACQ/64313). Do NOT use Item #, Part #, SKU, supplier codes,
+          or any code that does not contain a forward slash. If no MSPC field is visible, return null.
         - product: full product description including grade, form, dimensions
         - quantity: numeric quantity ordered
         - size: dimensions or size description if not already embedded in product name
-        Return one entry per line item. If no MSPC is visible, return null for that field.
+        Return one entry per line item. If no MSPC is visible on a line, return null for that field.
         """;
 
     private static readonly JsonElement _poToolJson = JsonDocument.Parse("""
