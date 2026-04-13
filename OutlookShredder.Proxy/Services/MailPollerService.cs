@@ -226,7 +226,7 @@ public class MailPollerService : BackgroundService
             // Re-run RLI matching with fresh line items
             var rfqId = po.RfqId is "UNKNOWN" or "" ? null : po.RfqId;
             if (!string.IsNullOrEmpty(rfqId))
-                await _sp.UpdateRliPurchaseStatusAsync(rfqId, po.SupplierName, po.SpItemId, extraction.LineItems);
+                await _sp.UpdateRliPurchaseStatusAsync(rfqId, po.SupplierName, po.SpItemId, extraction.LineItems, extraction.PoNumber ?? po.PoNumber);
             else
                 await _sp.MatchAndMarkRliByMspcAsync(po.SupplierName, po.PoNumber, extraction.LineItems);
 
@@ -694,7 +694,7 @@ public class MailPollerService : BackgroundService
                 await _sp.UploadPoAttachmentAsync(poSpItemId, extraction.PoNumber ?? poSpItemId, firstPdf.Name, firstPdf.Bytes);
 
             if (!string.IsNullOrWhiteSpace(rfqId))
-                await _sp.UpdateRliPurchaseStatusAsync(rfqId, supplierName, poSpItemId, extraction.LineItems);
+                await _sp.UpdateRliPurchaseStatusAsync(rfqId, supplierName, poSpItemId, extraction.LineItems, extraction.PoNumber);
             else
                 await _sp.MatchAndMarkRliByMspcAsync(supplierName, extraction.PoNumber, extraction.LineItems);
         }

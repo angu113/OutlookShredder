@@ -4242,7 +4242,8 @@ public class SharePointService
     /// Skips the update entirely when the parent RFQ Reference has <c>Complete = true</c>.
     /// </summary>
     public async Task UpdateRliPurchaseStatusAsync(
-        string rfqId, string supplierName, string poSpItemId, List<PoLineItem> poLineItems)
+        string rfqId, string supplierName, string poSpItemId, List<PoLineItem> poLineItems,
+        string? poNumber = null)
     {
         var siteId = await GetSiteIdAsync();
 
@@ -4314,6 +4315,61 @@ public class SharePointService
 
         _log.LogInformation("[PO] Updated {Count} SLI item(s) as purchased for [{RfqId}] {Supplier}",
             patched, rfqId, supplierName);
+
+        // Also update matching RLI rows so Shredder can show the PO badge on the group header.
+        // UpdateRliPurchaseStatusAsync previously only patched SLI, leaving RfqLineItemData.IsPurchased
+        // and RfqLineItemData.PoNumber blank — causing the PO badge to never appear.
+        if (!string.IsNullOrWhiteSpace(poNumber))
+        {
+            var rliListId = await GetRfqLineItemsListIdAsync();
+            var rliCol    = await ResolveRfqIdColumnAsync(siteId, rliListId);
+
+            var rliPage = await GetGraph().Sites[siteId].Lists[rliListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = [$"fields($select=id,{rliCol},MSPC,IsPurchased)"];
+                    req.QueryParameters.Top    = 5000;
+                });
+
+            while (rliPage?.Value is not null)
+            {
+                foreach (var item in rliPage.Value)
+                {
+                    if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+
+                    var itemRfqId = d.TryGetValue(rliCol,         out var v0) ? v0?.ToString()
+                                  : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                                  : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                                  : null;
+                    if (!string.Equals(itemRfqId, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // Skip if already marked
+                    if (d.TryGetValue("IsPurchased", out var ip) &&
+                        ip is true or JsonElement { ValueKind: JsonValueKind.True }) continue;
+
+                    var rliMspc = d.TryGetValue("MSPC", out var vm) ? vm?.ToString() : null;
+                    bool rliMatches = !matchOnMspc ||
+                                     (rliMspc is not null && mspcSet.Contains(rliMspc));
+                    if (!rliMatches) continue;
+
+                    await GetGraph().Sites[siteId].Lists[rliListId].Items[item.Id].Fields
+                        .PatchAsync(new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?>
+                            {
+                                ["IsPurchased"] = true,
+                                ["PoNumber"]    = poNumber,
+                            }
+                        });
+                    _log.LogInformation("[PO] Marked RLI {Id} purchased (MSPC={Mspc}, PO={PoNum}, RFQ={Rfq})",
+                        item.Id, rliMspc ?? "n/a", poNumber, rfqId);
+                }
+
+                if (rliPage.OdataNextLink is null) break;
+                rliPage = await GetGraph().Sites[siteId].Lists[rliListId].Items
+                    .WithUrl(rliPage.OdataNextLink).GetAsync();
+            }
+        }
 
         await CheckAndCompleteRfqAsync(siteId, rfqId);
     }
@@ -4926,7 +4982,7 @@ public class SharePointService
             }
             else
             {
-                await UpdateRliPurchaseStatusAsync(rec.RfqId, rec.SupplierName, rec.SpItemId, lineItems);
+                await UpdateRliPurchaseStatusAsync(rec.RfqId, rec.SupplierName, rec.SpItemId, lineItems, rec.PoNumber);
             }
             processed++;
         }
