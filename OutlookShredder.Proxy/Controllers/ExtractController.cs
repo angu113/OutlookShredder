@@ -809,6 +809,28 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── DELETE /api/rfq-import/purge-old?days=N ──────────────────────────────
+    /// <summary>
+    /// Deletes SupplierLineItems and SupplierResponses older than <paramref name="days"/> days.
+    /// Default: 7 days.
+    /// </summary>
+    [HttpDelete("rfq-import/purge-old")]
+    public async Task<IActionResult> PurgeOldSupplierData([FromQuery] int days = 7)
+    {
+        try
+        {
+            var (srDeleted, sliDeleted) = await _sp.PurgeOldSupplierDataAsync(days);
+            _log.LogWarning("[Purge] Deleted {Sr} SupplierResponses and {Sli} SupplierLineItems older than {Days} days",
+                srDeleted, sliDeleted, days);
+            return Ok(new { srDeleted, sliDeleted, days });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "PurgeOldSupplierData failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── DELETE /api/rfq-import/clean-all ─────────────────────────────────────
     /// <summary>
     /// Deletes all rows from all four RFQ lists:
