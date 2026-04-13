@@ -1948,59 +1948,78 @@ public class SharePointService
     }
 
     /// <summary>
-    /// Deletes SupplierLineItems and SupplierResponses older than <paramref name="days"/> days.
-    /// SLI rows are deleted first so parents are never left with missing children.
+    /// Deletes SupplierResponses (and their child SLIs) where the email ReceivedAt date
+    /// is older than <paramref name="days"/> days.
     /// </summary>
     public async Task<(int SrDeleted, int SliDeleted)> PurgeOldSupplierDataAsync(int days)
     {
-        var cutoff    = DateTime.UtcNow.AddDays(-days);
+        var cutoff    = DateTimeOffset.UtcNow.AddDays(-days);
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
-        // Delete children first to avoid orphaned SLI rows
-        var sliDeleted = await DeleteItemsOlderThanAsync(siteId, sliListId, cutoff, "SupplierLineItems");
-        var srDeleted  = await DeleteItemsOlderThanAsync(siteId, srListId,  cutoff, "SupplierResponses");
+        // Collect SR item IDs where ReceivedAt < cutoff
+        var oldSrIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,ReceivedAt)"];
+                req.QueryParameters.Top    = 2000;
+            });
 
-        return (srDeleted, sliDeleted);
-    }
-
-    private async Task<int> DeleteItemsOlderThanAsync(
-        string siteId, string listId, DateTime cutoff, string listName)
-    {
-        int deleted = 0;
-
-        // Graph doesn't support $filter on createdDateTime for list items — fetch pages
-        // from the start and filter client-side.  Items are returned in creation order so
-        // old items appear first; we keep looping until a full page contains no old items.
-        while (true)
+        while (srPage?.Value is not null)
         {
-            var page = await GetGraph().Sites[siteId].Lists[listId].Items
-                .GetAsync(req =>
-                {
-                    req.QueryParameters.Top    = 100;
-                    req.QueryParameters.Select = ["id", "createdDateTime"];
-                });
-
-            var items = page?.Value ?? [];
-            var old   = items
-                .Where(i => i.Id is not null &&
-                            i.CreatedDateTime.HasValue &&
-                            i.CreatedDateTime.Value.UtcDateTime < cutoff)
-                .ToList();
-
-            if (old.Count == 0) break; // no old items left in this page — done
-
-            await Task.WhenAll(
-                old.Select(i => GetGraph().Sites[siteId].Lists[listId].Items[i.Id!].DeleteAsync()));
-
-            deleted += old.Count;
-            _log.LogInformation("[SP] Purged {Count} items from {List} (total: {Total})",
-                old.Count, listName, deleted);
+            foreach (var item in srPage.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var recStr = GetStr(d, "ReceivedAt");
+                if (DateTimeOffset.TryParse(recStr, out var rec) && rec < cutoff)
+                    oldSrIds.Add(item.Id);
+            }
+            if (srPage.OdataNextLink is null) break;
+            srPage = await GetGraph().Sites[siteId].Lists[srListId].Items
+                .WithUrl(srPage.OdataNextLink).GetAsync();
         }
 
-        _log.LogInformation("[SP] Finished purging {List}: {Total} old items deleted", listName, deleted);
-        return deleted;
+        _log.LogInformation("[SP] Purge: {Count} SR row(s) with ReceivedAt older than {Days} days",
+            oldSrIds.Count, days);
+
+        if (oldSrIds.Count == 0) return (0, 0);
+
+        // Delete child SLI rows first
+        int sliDeleted = 0;
+        var sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,SupplierResponseId)"];
+                req.QueryParameters.Top    = 2000;
+            });
+
+        while (sliPage?.Value is not null)
+        {
+            foreach (var item in sliPage.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var srId = GetStr(d, "SupplierResponseId");
+                if (srId is null || !oldSrIds.Contains(srId)) continue;
+                await GetGraph().Sites[siteId].Lists[sliListId].Items[item.Id].DeleteAsync();
+                sliDeleted++;
+            }
+            if (sliPage.OdataNextLink is null) break;
+            sliPage = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(sliPage.OdataNextLink).GetAsync();
+        }
+
+        // Delete SR rows
+        int srDeleted = 0;
+        foreach (var spId in oldSrIds)
+        {
+            await GetGraph().Sites[siteId].Lists[srListId].Items[spId].DeleteAsync();
+            srDeleted++;
+        }
+
+        _log.LogInformation("[SP] Purge complete — SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
+        return (srDeleted, sliDeleted);
     }
 
     private async Task<int> DeleteAllItemsAsync(string siteId, string listId, string listName)
