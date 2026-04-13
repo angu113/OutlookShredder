@@ -1566,13 +1566,4 @@ public class ExtractController : ControllerBase
     public IActionResult Health() =>
         Ok(new { status = "ok", utc = DateTime.UtcNow });
 
-    // ── GET /api/version ─────────────────────────────────────────────────────
-    [HttpGet("version")]
-    public IActionResult Version()
-    {
-        var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        var attr = (System.Reflection.AssemblyInformationalVersionAttribute?)
-            System.Attribute.GetCustomAttribute(asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
-        return Ok(new { version = attr?.InformationalVersion ?? "unknown" });
-    }
 }
