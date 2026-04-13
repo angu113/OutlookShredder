@@ -498,11 +498,19 @@ public class MailService
     /// </summary>
     public async Task<int> UnmarkPoEmailsAsync(string mailbox, int days)
     {
-        // Fetch all RFQ-Processed emails from the window — Graph doesn't reliably support
-        // contains() in $filter on the messages endpoint, so we filter by subject client-side.
-        var since  = DateTimeOffset.UtcNow.AddDays(-days);
-        var filter = $"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}" +
-                     $" and categories/any(c: c eq '{ProcessedCategory}')";
+        // Unmark from both inbox (replies received) and sentitems (outbound POs).
+        var inbox = await UnmarkPoEmailsInFolderAsync(mailbox, "inbox",     days, useReceivedDateTime: true);
+        var sent  = await UnmarkPoEmailsInFolderAsync(mailbox, "sentitems", days, useReceivedDateTime: false);
+        return inbox + sent;
+    }
+
+    private async Task<int> UnmarkPoEmailsInFolderAsync(
+        string mailbox, string folder, int days, bool useReceivedDateTime)
+    {
+        var since      = DateTimeOffset.UtcNow.AddDays(-days);
+        var dateField  = useReceivedDateTime ? "receivedDateTime" : "sentDateTime";
+        var filter     = $"{dateField} ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}" +
+                         $" and categories/any(c: c eq '{ProcessedCategory}')";
 
         var unmarkCount = 0;
         string? nextLink = null;
@@ -514,7 +522,7 @@ public class MailService
             {
                 result = await GetGraph()
                     .Users[mailbox]
-                    .MailFolders["inbox"]
+                    .MailFolders[folder]
                     .Messages
                     .GetAsync(req =>
                     {
@@ -537,9 +545,11 @@ public class MailService
                 if (msg.Id is null) continue;
 
                 // Client-side subject filter — only unmark actual PO emails
-                var subject = msg.Subject ?? "";
+                var subject      = msg.Subject ?? "";
                 var cleanSubject = System.Text.RegularExpressions.Regex
-                    .Replace(subject, @"^(RE:|FW:|FWD:|\[EXTERNAL\])\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled).Trim();
+                    .Replace(subject, @"^(RE:|FW:|FWD:|\[EXTERNAL\])\s*", "",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+                        System.Text.RegularExpressions.RegexOptions.Compiled).Trim();
                 if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -556,17 +566,53 @@ public class MailService
                         .Messages[msg.Id]
                         .PatchAsync(new Message { Categories = stripped });
                     unmarkCount++;
-                    _log.LogInformation("[Mail] Un-marked PO email {Id}: {Subject}", msg.Id, msg.Subject);
+                    _log.LogInformation("[Mail] Un-marked PO email {Id} in {Folder}: {Subject}", msg.Id, folder, msg.Subject);
                 }
                 catch (Exception ex)
                 {
-                    _log.LogWarning(ex, "[Mail] Could not un-mark PO message {Id}", msg.Id);
+                    _log.LogWarning(ex, "[Mail] Could not un-mark PO message {Id} in {Folder}", msg.Id, folder);
                 }
             }
         }
         while (nextLink is not null);
 
         return unmarkCount;
+    }
+
+    /// <summary>
+    /// Returns Sent Items messages sent at or after <paramref name="since"/> whose subject
+    /// starts with "Purchase Order #HSK-PO" and have NOT yet been tagged with "RFQ-Processed".
+    /// Used by the mail poller to pick up outbound POs for extraction.
+    /// </summary>
+    public async Task<List<Message>> GetUnprocessedSentPoMessagesAsync(string mailbox, DateTimeOffset since)
+    {
+        var filter = $"sentDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}" +
+                     $" and not (categories/any(c: c eq '{ProcessedCategory}'))" +
+                     $" and not (categories/any(c: c eq '{ClaimingCategory}'))";
+
+        var result = await GetGraph()
+            .Users[mailbox]
+            .MailFolders["sentitems"]
+            .Messages
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Filter  = filter;
+                req.QueryParameters.Select  = ["id", "subject", "from", "sentDateTime",
+                                               "body", "hasAttachments", "bodyPreview", "categories"];
+                req.QueryParameters.Top     = 50;
+                req.QueryParameters.Orderby = ["sentDateTime desc"];
+            });
+
+        // Client-side filter for PO subject — sentitems may contain many outbound emails.
+        return (result?.Value ?? [])
+            .Where(m =>
+            {
+                var s = System.Text.RegularExpressions.Regex
+                    .Replace(m.Subject ?? "", @"^(RE:|FW:|FWD:|\[EXTERNAL\])\s*", "",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+                return s.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase);
+            })
+            .ToList();
     }
 
     /// <summary>

@@ -330,17 +330,28 @@ public class MailPollerService : BackgroundService
         var messages = await _mail.GetMessagesAsync(mailbox, since);
 
         if (messages.Count == 0)
+            _log.LogDebug("[Mail] No unprocessed inbox messages");
+        else
         {
-            _log.LogDebug("[Mail] No unprocessed messages");
-            return;
+            _log.LogInformation("[Mail] {Count} unprocessed inbox message(s) found", messages.Count);
+            foreach (var msg in messages)
+            {
+                if (ct.IsCancellationRequested) break;
+                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
+            }
         }
 
-        _log.LogInformation("[Mail] {Count} unprocessed message(s) found", messages.Count);
-
-        foreach (var msg in messages)
+        // Also scan Sent Items for outbound PO emails not yet processed.
+        if (ct.IsCancellationRequested) return;
+        var sentPo = await _mail.GetUnprocessedSentPoMessagesAsync(mailbox, since);
+        if (sentPo.Count > 0)
         {
-            if (ct.IsCancellationRequested) break;
-            await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
+            _log.LogInformation("[Mail] {Count} unprocessed sent PO email(s) found", sentPo.Count);
+            foreach (var msg in sentPo)
+            {
+                if (ct.IsCancellationRequested) break;
+                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
+            }
         }
     }
 
