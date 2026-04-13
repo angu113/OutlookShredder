@@ -833,6 +833,40 @@ public class SharePointService
     /// Keeps the entry with Notes (if any), otherwise the oldest item.
     /// Returns the number of rows deleted.
     /// </summary>
+    public record SrRawRow(string SpId, string? RfqId, string? EmailFrom, string? ReceivedAt);
+
+    public async Task<List<SrRawRow>> ReadSupplierResponsesRawAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierResponsesListIdAsync();
+        var rows   = new List<SrRawRow>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,EmailFrom,ReceivedAt)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null) continue;
+                var d      = item.Fields?.AdditionalData;
+                var rfqId  = d is not null ? (GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID")) : null;
+                var from   = d is not null ? GetStr(d, "EmailFrom")  : null;
+                var recAt  = d is not null ? GetStr(d, "ReceivedAt") : null;
+                rows.Add(new SrRawRow(item.Id, rfqId, from, recAt));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        return rows;
+    }
+
     public async Task<int> DedupeRfqReferencesAsync()
     {
         var siteId = await GetSiteIdAsync();

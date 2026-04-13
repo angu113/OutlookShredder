@@ -603,6 +603,23 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── GET /api/rfq-import/supplier-responses-raw ───────────────────────────
+    /// <summary>Returns raw SR rows: RFQ_ID, EmailFrom, ReceivedAt. Used for backfill analysis.</summary>
+    [HttpGet("rfq-import/supplier-responses-raw")]
+    public async Task<IActionResult> GetSupplierResponsesRaw()
+    {
+        try
+        {
+            var rows = await _sp.ReadSupplierResponsesRawAsync();
+            return Ok(rows);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "GetSupplierResponsesRaw failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── POST /api/rfq-import/reference ───────────────────────────────────────
     /// <summary>Creates one RFQ Reference row. No-op check is the caller's responsibility.</summary>
     [HttpPost("rfq-import/reference")]
