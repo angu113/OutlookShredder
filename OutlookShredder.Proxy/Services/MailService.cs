@@ -104,7 +104,7 @@ public class MailService
     /// data for all messages whose subject matches "RFQ [JobNo]".
     /// Shredder parses the body locally into line items.
     /// </summary>
-    public async Task<List<RfqScanEmailDto>> ScanRfqFolderAsync(string mailbox, string folderName)
+    public async Task<List<RfqScanEmailDto>> ScanRfqFolderAsync(string mailbox, string folderName, int days = 0)
     {
         // Resolve folder ID from display name.
         var folders = await GetGraph().Users[mailbox].MailFolders
@@ -119,22 +119,36 @@ public class MailService
                 $"Folder \"{folderName}\" not found in mailbox {mailbox}. " +
                 "Create the folder in Outlook and copy RFQ sent emails into it.");
 
-        // Fetch all messages across pages — Graph OData subject filter is not supported
-        // on mailFolders, so we fetch all and filter client-side with the subject regex.
+        // Build optional date filter — Graph supports $filter on sentDateTime for messages.
+        var since = days > 0 ? DateTimeOffset.UtcNow.AddDays(-days) : (DateTimeOffset?)null;
+        var dateFilter = since.HasValue
+            ? $"sentDateTime ge {since.Value:yyyy-MM-ddTHH:mm:ssZ}"
+            : null;
+
+        // Fetch messages — filter by date server-side when possible; subject filter client-side.
         var firstPage = await GetGraph().Users[mailbox].MailFolders[folder.Id!].Messages
             .GetAsync(req =>
             {
                 req.QueryParameters.Select  = ["subject", "sender", "toRecipients",
-                                               "ccRecipients", "sentDateTime", "body"];
+                                               "ccRecipients", "bccRecipients", "sentDateTime", "body"];
                 req.QueryParameters.Top     = 500;
                 req.QueryParameters.Orderby = ["sentDateTime desc"];
+                if (dateFilter is not null)
+                    req.QueryParameters.Filter = dateFilter;
             });
 
         var allMessages = new List<Microsoft.Graph.Models.Message>();
         var pageIterator = Microsoft.Graph.PageIterator<
                 Microsoft.Graph.Models.Message,
                 Microsoft.Graph.Models.MessageCollectionResponse>
-            .CreatePageIterator(GetGraph(), firstPage!, msg => { allMessages.Add(msg); return true; });
+            .CreatePageIterator(GetGraph(), firstPage!, msg =>
+            {
+                // Stop paging once we pass the date window (messages are ordered newest-first)
+                if (since.HasValue && msg.SentDateTime.HasValue && msg.SentDateTime.Value < since.Value)
+                    return false;
+                allMessages.Add(msg);
+                return true;
+            });
         await pageIterator.IterateAsync();
 
         var result = new List<RfqScanEmailDto>();
@@ -192,6 +206,8 @@ public class MailService
             foreach (var r in msg.ToRecipients ?? [])
                 if (r.EmailAddress?.Address is string a) recipients.Add(a);
             foreach (var r in msg.CcRecipients ?? [])
+                if (r.EmailAddress?.Address is string a) recipients.Add(a);
+            foreach (var r in msg.BccRecipients ?? [])
                 if (r.EmailAddress?.Address is string a) recipients.Add(a);
 
             var bodyText    = msg.Body?.Content ?? "";
@@ -470,6 +486,85 @@ public class MailService
                 }
             }
         }
+
+        return unmarkCount;
+    }
+
+    /// <summary>
+    /// Removes "RFQ-Processed" (and PO-specific categories) from inbox messages in
+    /// <paramref name="mailbox"/> that were received within the last <paramref name="days"/> days
+    /// and have a PO-related subject ("Purchase Order #HSK-PO").
+    /// This lets the next poll cycle re-run PO extraction on those emails.
+    /// </summary>
+    public async Task<int> UnmarkPoEmailsAsync(string mailbox, int days)
+    {
+        // Fetch all RFQ-Processed emails from the window — Graph doesn't reliably support
+        // contains() in $filter on the messages endpoint, so we filter by subject client-side.
+        var since  = DateTimeOffset.UtcNow.AddDays(-days);
+        var filter = $"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}" +
+                     $" and categories/any(c: c eq '{ProcessedCategory}')";
+
+        var unmarkCount = 0;
+        string? nextLink = null;
+
+        do
+        {
+            MessageCollectionResponse? result;
+            if (nextLink is null)
+            {
+                result = await GetGraph()
+                    .Users[mailbox]
+                    .MailFolders["inbox"]
+                    .Messages
+                    .GetAsync(req =>
+                    {
+                        req.QueryParameters.Filter = filter;
+                        req.QueryParameters.Select = ["id", "subject", "categories"];
+                        req.QueryParameters.Top    = 50;
+                    });
+            }
+            else
+            {
+                result = await new Microsoft.Graph.Users.Item.MailFolders.Item.Messages.MessagesRequestBuilder(
+                    nextLink, GetGraph().RequestAdapter).GetAsync();
+            }
+
+            var messages = result?.Value ?? [];
+            nextLink     = result?.OdataNextLink;
+
+            foreach (var msg in messages)
+            {
+                if (msg.Id is null) continue;
+
+                // Client-side subject filter — only unmark actual PO emails
+                var subject = msg.Subject ?? "";
+                var cleanSubject = System.Text.RegularExpressions.Regex
+                    .Replace(subject, @"^(RE:|FW:|FWD:|\[EXTERNAL\])\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled).Trim();
+                if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var stripped = (msg.Categories ?? [])
+                    .Where(c => !string.Equals(c, ProcessedCategory,  StringComparison.OrdinalIgnoreCase)
+                             && !string.Equals(c, "PO-Processed",     StringComparison.OrdinalIgnoreCase)
+                             && !string.Equals(c, "PO-NoExtract",     StringComparison.OrdinalIgnoreCase)
+                             && !string.Equals(c, ClaimingCategory,   StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                try
+                {
+                    await GetGraph()
+                        .Users[mailbox]
+                        .Messages[msg.Id]
+                        .PatchAsync(new Message { Categories = stripped });
+                    unmarkCount++;
+                    _log.LogInformation("[Mail] Un-marked PO email {Id}: {Subject}", msg.Id, msg.Subject);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Mail] Could not un-mark PO message {Id}", msg.Id);
+                }
+            }
+        }
+        while (nextLink is not null);
 
         return unmarkCount;
     }

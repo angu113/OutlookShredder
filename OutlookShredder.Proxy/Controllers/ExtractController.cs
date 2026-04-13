@@ -14,6 +14,7 @@ public class ExtractController : ControllerBase
     private readonly MailPollerService          _poller;
     private readonly OutlookComPollerService    _comPoller;
     private readonly SupplierCacheService       _suppliers;
+    private readonly ProductCatalogService      _catalog;
     private readonly RfqNotificationService     _notifications;
     private readonly IConfiguration             _config;
     private readonly ILogger<ExtractController> _log;
@@ -25,6 +26,7 @@ public class ExtractController : ControllerBase
         MailPollerService           poller,
         OutlookComPollerService     comPoller,
         SupplierCacheService        suppliers,
+        ProductCatalogService       catalog,
         RfqNotificationService      notifications,
         IConfiguration              config,
         ILogger<ExtractController>  log)
@@ -35,6 +37,7 @@ public class ExtractController : ControllerBase
         _poller        = poller;
         _comPoller     = comPoller;
         _suppliers     = suppliers;
+        _catalog       = catalog;
         _notifications = notifications;
         _config        = config;
         _log           = log;
@@ -265,6 +268,30 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to update Notes for RFQ '{Id}'", rfqId);
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
+    // ── PATCH /api/rfq-references/requester ──────────────────────────────────
+    /// <summary>
+    /// Sets the Requester field on a single RFQ Reference (claim / assign owner).
+    /// Body: { "requester": "..." }
+    /// </summary>
+    [HttpPatch("rfq-references/requester")]
+    public async Task<IActionResult> UpdateRfqRequester(
+        [FromQuery] string rfqId,
+        [FromBody]  RfqRequesterRequest body)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId query param is required" });
+        try
+        {
+            await _sp.UpdateRfqRequesterAsync(rfqId, body.Requester ?? "");
+            return Ok(new { updated = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to update Requester for RFQ '{Id}'", rfqId);
             return StatusCode(500, new { success = false, error = ex.Message });
         }
     }
@@ -782,6 +809,356 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── DELETE /api/rfq-import/clean-all ─────────────────────────────────────
+    /// <summary>
+    /// Deletes all rows from all four RFQ lists:
+    /// RFQ References, RFQ Line Items, SupplierResponses, SupplierLineItems.
+    /// </summary>
+    [HttpDelete("rfq-import/clean-all")]
+    public async Task<IActionResult> CleanAllData()
+    {
+        try
+        {
+            var (refsDeleted, rliDeleted, srDeleted, sliDeleted) = await _sp.CleanAllDataAsync();
+            _log.LogWarning("[Clean] Deleted {Refs} RFQ References, {Rli} RFQ Line Items, {Sr} SupplierResponses, {Sli} SupplierLineItems",
+                refsDeleted, rliDeleted, srDeleted, sliDeleted);
+            return Ok(new { refsDeleted, rliDeleted, srDeleted, sliDeleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "CleanAllData failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/rfq-import/com-scan-and-import ──────────────────────────────
+    /// <summary>
+    /// Scans hackensack@metalsupermarkets.com (or any configured mailbox) Sent Items
+    /// via Outlook COM automation, parses RFQ line items from the email body, and
+    /// writes RFQ References + Line Items to SharePoint.
+    /// Requires Outlook to be running on this machine with the account open.
+    /// </summary>
+    [HttpPost("rfq-import/com-scan-and-import")]
+    public async Task<IActionResult> ComScanAndImport(
+        [FromQuery] string mailbox,
+        [FromQuery] int    days = 90)
+    {
+        if (string.IsNullOrWhiteSpace(mailbox))
+            return BadRequest(new { error = "mailbox query param is required" });
+
+        List<RfqScanEmailDto> emails;
+        try
+        {
+#pragma warning disable CA1416 // proxy runs Windows-only
+            emails = await _comPoller.ScanRfqSentItemsAsync(mailbox, days);
+#pragma warning restore CA1416
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "COM scan failed for {Mailbox}", mailbox);
+            return StatusCode(500, new { error = ex.Message });
+        }
+
+        if (emails.Count == 0)
+            return Ok(new { scanned = 0, imported = 0, skipped = 0, message = "No RFQ emails found. Ensure Outlook is running with the account open." });
+
+        var existingIds = await _sp.GetExistingRfqIdsAsync();
+        var existingLiIds = await _sp.GetRfqIdsWithLineItemsAsync();
+
+        int imported = 0, skipped = 0;
+
+        foreach (var email in emails)
+        {
+            try
+            {
+                if (!existingIds.Contains(email.RfqId))
+                {
+                    var requester = ParseRequesterName(email.BodyText) ?? email.Requester;
+                    await _sp.CreateRfqReferenceAsync(new RfqReferenceRequest
+                    {
+                        RfqId           = email.RfqId,
+                        Requester       = requester,
+                        DateSent        = email.SentAt,
+                        EmailRecipients = email.EmailRecipients,
+                    });
+                    existingIds.Add(email.RfqId);
+                }
+
+                if (!existingLiIds.Contains(email.RfqId))
+                {
+                    var lineItems = ParseRfqLineItems(email.RfqId, email.BodyText);
+                    if (lineItems.Count > 0)
+                    {
+                        await _sp.CreateRfqLineItemsAsync(lineItems);
+                        existingLiIds.Add(email.RfqId);
+                    }
+                }
+
+                imported++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Failed to import RFQ {Id}", email.RfqId);
+                skipped++;
+            }
+        }
+
+        _log.LogInformation("[COM Import] {Mailbox}: scanned={Scanned} imported={Imported} skipped={Skipped}",
+            mailbox, emails.Count, imported, skipped);
+
+        return Ok(new { scanned = emails.Count, imported, skipped });
+    }
+
+    // ── POST /api/rfq-import/graph-scan-and-import ────────────────────────────
+    /// <summary>
+    /// Same as com-scan-and-import but uses Microsoft Graph (for mailboxes in the
+    /// mithrilmetals.com tenant, e.g. store@mithrilmetals.com).
+    /// Scans the Sent Items folder for outbound "RFQ [XXXXXX]" emails.
+    /// </summary>
+    [HttpPost("rfq-import/graph-scan-and-import")]
+    public async Task<IActionResult> GraphScanAndImport(
+        [FromQuery] string mailbox,
+        [FromQuery] int    days = 7)
+    {
+        if (string.IsNullOrWhiteSpace(mailbox))
+            return BadRequest(new { error = "mailbox query param is required" });
+
+        List<RfqScanEmailDto> emails;
+        try
+        {
+            emails = await _mail.ScanRfqFolderAsync(mailbox, "Sent Items", days);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Graph RFQ scan failed for {Mailbox}", mailbox);
+            return StatusCode(500, new { error = ex.Message });
+        }
+
+        if (emails.Count == 0)
+            return Ok(new { scanned = 0, imported = 0, skipped = 0 });
+
+        var existingIds   = await _sp.GetExistingRfqIdsAsync();
+        var existingLiIds = await _sp.GetRfqIdsWithLineItemsAsync();
+        int imported = 0, skipped = 0;
+
+        foreach (var email in emails)
+        {
+            try
+            {
+                if (!existingIds.Contains(email.RfqId))
+                {
+                    var requester = ParseRequesterName(email.BodyText) ?? email.Requester;
+                    await _sp.CreateRfqReferenceAsync(new RfqReferenceRequest
+                    {
+                        RfqId           = email.RfqId,
+                        Requester       = requester,
+                        DateSent        = email.SentAt,
+                        EmailRecipients = email.EmailRecipients,
+                    });
+                    existingIds.Add(email.RfqId);
+                }
+
+                if (!existingLiIds.Contains(email.RfqId))
+                {
+                    var lineItems = ParseRfqLineItems(email.RfqId, email.BodyText);
+                    if (lineItems.Count > 0)
+                    {
+                        await _sp.CreateRfqLineItemsAsync(lineItems);
+                        existingLiIds.Add(email.RfqId);
+                    }
+                }
+
+                imported++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Failed to import RFQ {Id}", email.RfqId);
+                skipped++;
+            }
+        }
+
+        _log.LogInformation("[Graph Import] {Mailbox}: scanned={Scanned} imported={Imported} skipped={Skipped}",
+            mailbox, emails.Count, imported, skipped);
+
+        return Ok(new { scanned = emails.Count, imported, skipped });
+    }
+
+    // ── RFQ email parsing helpers ─────────────────────────────────────────────
+
+    private static readonly System.Text.RegularExpressions.Regex _rliRegex = new(
+        @"^([A-Za-z0-9/\-]+)\s*\|\s*(.+?)\s*\|\s*Qty:\s*(\d+(?:\.\d+)?)\s*\|\s*Size:\s*(.+?)\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Multiline  |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex _rliLegacyRegex = new(
+        @"^(.+?)\s*\|\s*Qty:\s*(\d+(?:\.\d+)?)\s*\|\s*Size:\s*(.+?)\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Multiline  |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Matches valediction line: "Thank you," / "Regards," / "Best regards," etc.
+    private static readonly System.Text.RegularExpressions.Regex _valedictionRegex = new(
+        @"^(thank\s+you|thanks|best\s+regards?|kind\s+regards?|regards?|sincerely|cheers)[,.]?\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Multiline  |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Matches inline valediction: "Thank you, Angus." or "Thank you, Jay M."
+    private static readonly System.Text.RegularExpressions.Regex _valedictionInlineRegex = new(
+        @"^(?:thank\s+you|thanks|best\s+regards?|kind\s+regards?|regards?|sincerely|cheers)[,\s]+([A-Za-z][A-Za-z.\s]{1,30}?)\.?\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Multiline  |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Lines that look like company/address info rather than a person name
+    private static readonly System.Text.RegularExpressions.Regex _companyLineRegex = new(
+        @"metal\s+super|mithril|franchis|phone|fax|www\.|http|@|\d{3,}|inc\b|corp\b|llc\b|ltd\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Extracts the sender's name from an RFQ email body by finding the valediction
+    /// ("Thank you," / "Regards," etc.) and reading the name on the following line,
+    /// or inline on the same line.  Returns null if no name can be found.
+    /// </summary>
+    private static string? ParseRequesterName(string bodyText)
+    {
+        // Strategy 1: valediction on its own line, name on next non-empty line
+        var valedMatch = _valedictionRegex.Match(bodyText);
+        if (valedMatch.Success)
+        {
+            var afterValediction = bodyText[(valedMatch.Index + valedMatch.Length)..];
+            foreach (var line in afterValediction.Split('\n'))
+            {
+                var candidate = line.Trim('\r', '\n', ' ', '\t');
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                if (candidate.Length > 40) break;          // too long to be a name
+                if (_companyLineRegex.IsMatch(candidate)) break;  // looks like company line
+                return candidate;
+            }
+        }
+
+        // Strategy 2: valediction with name inline ("Thank you, Angus.")
+        var inlineMatch = _valedictionInlineRegex.Match(bodyText);
+        if (inlineMatch.Success)
+        {
+            var candidate = inlineMatch.Groups[1].Value.Trim();
+            if (!_companyLineRegex.IsMatch(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Parses RFQ line items from the email body.
+    /// For items without an MSPC code (legacy format), looks up the catalog to find it.
+    /// </summary>
+    private List<RfqLineItemRequest> ParseRfqLineItems(string rfqId, string bodyText)
+    {
+        var results = new List<RfqLineItemRequest>();
+
+        // Full format: MSPC | Product | Qty: N | Size: S
+        foreach (System.Text.RegularExpressions.Match m in _rliRegex.Matches(bodyText))
+        {
+            var mspc    = m.Groups[1].Value.Trim();
+            var product = m.Groups[2].Value.Trim();
+
+            // Attempt catalog resolution to get canonical name + search key
+            var resolved = _catalog.ResolveProduct(product);
+            results.Add(new RfqLineItemRequest
+            {
+                RfqId            = rfqId,
+                Mspc             = resolved?.SearchKey ?? mspc,
+                Product          = resolved?.Name      ?? product,
+                Units            = double.TryParse(m.Groups[3].Value, out var q) ? q : null,
+                SizeOfUnits      = m.Groups[4].Value.Trim(),
+                ProcessingSource = "import",
+            });
+        }
+
+        // Legacy format: Product | Qty: N | Size: S  (no MSPC prefix)
+        if (results.Count == 0)
+        {
+            foreach (System.Text.RegularExpressions.Match m in _rliLegacyRegex.Matches(bodyText))
+            {
+                var product  = m.Groups[1].Value.Trim();
+                var resolved = _catalog.ResolveProduct(product);
+                results.Add(new RfqLineItemRequest
+                {
+                    RfqId            = rfqId,
+                    Mspc             = resolved?.SearchKey,
+                    Product          = resolved?.Name ?? product,
+                    Units            = double.TryParse(m.Groups[2].Value, out var q) ? q : null,
+                    SizeOfUnits      = m.Groups[3].Value.Trim(),
+                    ProcessingSource = "import",
+                });
+            }
+        }
+
+        return results;
+    }
+
+    // ── POST /api/rfq-import/preview-import ──────────────────────────────────
+    /// <summary>
+    /// Dry-run: scans both mailboxes and shows what would be written without
+    /// touching SharePoint.  source=graph uses Graph API (store@); source=com uses
+    /// Outlook COM (hackensack@).  Returns first N results.
+    /// </summary>
+    [HttpGet("rfq-import/preview-import")]
+    public async Task<IActionResult> PreviewImport(
+        [FromQuery] string mailbox,
+        [FromQuery] string source = "graph",
+        [FromQuery] int    days   = 7,
+        [FromQuery] int    top    = 5)
+    {
+        if (string.IsNullOrWhiteSpace(mailbox))
+            return BadRequest(new { error = "mailbox query param is required" });
+
+        List<RfqScanEmailDto> emails;
+        try
+        {
+            if (source.Equals("com", StringComparison.OrdinalIgnoreCase))
+            {
+#pragma warning disable CA1416
+                emails = await _comPoller.ScanRfqSentItemsAsync(mailbox, days);
+#pragma warning restore CA1416
+            }
+            else
+            {
+                emails = await _mail.ScanRfqFolderAsync(mailbox, "Sent Items", days);
+            }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+
+        var preview = emails.Take(top).Select(e =>
+        {
+            var requester = ParseRequesterName(e.BodyText);
+            var lineItems = ParseRfqLineItems(e.RfqId, e.BodyText);
+            return new
+            {
+                rfqId            = e.RfqId,
+                sentAt           = e.SentAt,
+                mailbox          = e.MailboxSource,
+                requester_parsed = requester ?? e.Requester,
+                emailRecipients  = e.EmailRecipients,
+                lineItems        = lineItems.Select(li => new
+                {
+                    mspc        = li.Mspc,
+                    product     = li.Product,
+                    units       = li.Units,
+                    sizeOfUnits = li.SizeOfUnits,
+                }),
+            };
+        });
+
+        return Ok(new { scanned = emails.Count, showing = Math.Min(top, emails.Count), preview });
+    }
+
     // ── GET /api/publish/version ─────────────────────────────────────────────
     /// <summary>
     /// Returns the version string from version.txt in the SharePoint publish folder.
@@ -1018,6 +1395,57 @@ public class ExtractController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "GetPurchaseOrders failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
+    /// <summary>
+    /// Deletes all rows from the PurchaseOrders SharePoint list.
+    /// Use before reprocessing PO emails to avoid duplicate records.
+    /// </summary>
+    [HttpDelete("purchase-orders/clean")]
+    public async Task<IActionResult> CleanPurchaseOrders()
+    {
+        try
+        {
+            var deleted = await _sp.CleanPurchaseOrdersAsync();
+            _log.LogWarning("[Clean] Deleted {Count} PurchaseOrder row(s)", deleted);
+            return Ok(new { deleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "CleanPurchaseOrders failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/mail/reset-po ───────────────────────────────────────────────
+    /// <summary>
+    /// Removes "RFQ-Processed" and PO-specific categories from PO emails in
+    /// the given mailbox's inbox for the last <paramref name="days"/> days.
+    /// After this call the next poll cycle will re-run PO extraction on those emails.
+    /// </summary>
+    [HttpPost("mail/reset-po")]
+    public async Task<IActionResult> ResetPoMailCategories(
+        [FromQuery] string? mailbox,
+        [FromQuery] int     days = 7)
+    {
+        var mb = mailbox
+            ?? HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Mail:MailboxAddress"];
+        if (string.IsNullOrEmpty(mb))
+            return BadRequest(new { error = "mailbox query param or Mail:MailboxAddress config required" });
+
+        try
+        {
+            var unmarked = await _mail.UnmarkPoEmailsAsync(mb, days);
+            _log.LogInformation("[Mail] reset-po: unmarked {Count} PO email(s) in {Mailbox} (last {Days} days)",
+                unmarked, mb, days);
+            return Ok(new { unmarked, mailbox = mb, days });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ResetPoMailCategories failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }

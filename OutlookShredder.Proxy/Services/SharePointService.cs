@@ -755,6 +755,42 @@ public class SharePointService
         }
     }
 
+    // ── Write: update Requester on an RFQ Reference ───────────────────────────
+
+    public async Task UpdateRfqRequesterAsync(string rfqId, string requester)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
+                req.QueryParameters.Top    = 500;
+            });
+
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            rfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            _log.LogWarning("[SP] RFQ Reference '{Id}' not found — cannot update Requester", rfqId);
+            return;
+        }
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[matches[0].Id!].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Requester"] = requester }
+            });
+        _log.LogInformation("[SP] Updated Requester for RFQ '{Id}' → '{Requester}'", rfqId, requester);
+    }
+
     // ── Write: update Complete flag on an RFQ Reference ────────────────────────
 
     public async Task SetRfqCompleteAsync(string rfqId, bool complete)
@@ -1878,6 +1914,27 @@ public class SharePointService
     /// Returns counts of items deleted from each list.
     /// Does NOT touch RFQ References (notes / dates).
     /// </summary>
+    /// <summary>
+    /// Deletes all rows from all four RFQ lists: RFQ References, RFQ Line Items,
+    /// SupplierResponses, and SupplierLineItems.  Order: SLI → SR → RLI → RR
+    /// (child before parent to respect any referential integrity).
+    /// </summary>
+    public async Task<(int RefsDeleted, int RliDeleted, int SrDeleted, int SliDeleted)> CleanAllDataAsync()
+    {
+        var siteId    = await GetSiteIdAsync();
+        var rrListId  = await GetRfqReferencesListIdAsync();
+        var rliListId = await GetRfqLineItemsListIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        var sliDeleted = await DeleteAllItemsAsync(siteId, sliListId, "SupplierLineItems");
+        var srDeleted  = await DeleteAllItemsAsync(siteId, srListId,  "SupplierResponses");
+        var rliDeleted = await DeleteAllItemsAsync(siteId, rliListId, "RFQ Line Items");
+        var rrDeleted  = await DeleteAllItemsAsync(siteId, rrListId,  "RFQ References");
+
+        return (rrDeleted, rliDeleted, srDeleted, sliDeleted);
+    }
+
     public async Task<(int SrDeleted, int SliDeleted)> CleanSupplierDataAsync()
     {
         var siteId    = await GetSiteIdAsync();
@@ -3876,6 +3933,16 @@ public class SharePointService
             {
                 AdditionalData = new Dictionary<string, object?> { ["LineItems"] = lineItemsJson }
             });
+    }
+
+    /// <summary>
+    /// Deletes all rows from the PurchaseOrders SharePoint list.
+    /// </summary>
+    public async Task<int> CleanPurchaseOrdersAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+        return await DeleteAllItemsAsync(siteId, listId, "PurchaseOrders");
     }
 
     /// <summary>

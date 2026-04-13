@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text.RegularExpressions;
+using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
 
@@ -111,6 +112,136 @@ public class OutlookComPollerService : BackgroundService
             var category = processed ? processedCategory : "PO-COM-NoExtract";
             await RunOnStaThreadAsync(() => StampMessage(msg.EntryId, category));
         }
+    }
+
+    // ── Public RFQ scan API ───────────────────────────────────────────────────
+
+    private static readonly Regex _rfqSubjectRegex =
+        new(@"^RFQ\s+\[([A-Za-z0-9]+)\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Scans the Sent Items of <paramref name="mailbox"/> (matched by store display name or SMTP)
+    /// via COM automation and returns outbound RFQ emails as <see cref="RfqScanEmailDto"/> objects.
+    /// Requires Outlook to be running with the account open.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public async Task<List<RfqScanEmailDto>> ScanRfqSentItemsAsync(string mailbox, int days = 90)
+    {
+        try
+        {
+            return await RunOnStaThreadAsync(() => CollectRfqSentItems(mailbox, days));
+        }
+        catch (COMException ex) when (ex.HResult == unchecked((int)0x800401E3))
+        {
+            _log.LogWarning("[OutlookCOM] Outlook not running — cannot scan RFQ Sent Items");
+            return [];
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[OutlookCOM] ScanRfqSentItemsAsync failed for {Mailbox}", mailbox);
+            return [];
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private List<RfqScanEmailDto> CollectRfqSentItems(string mailbox, int days)
+    {
+        dynamic outlook = GetActiveComObject("Outlook.Application");
+        dynamic session = outlook.Session;
+
+        dynamic? store = null;
+        foreach (dynamic s in session.Stores)
+        {
+            string displayName = s.DisplayName ?? "";
+            if (displayName.Equals(mailbox, StringComparison.OrdinalIgnoreCase))
+            { store = s; break; }
+            try
+            {
+                dynamic? account = s.ExchangeAccount;
+                string smtpAddress = account?.SmtpAddress ?? "";
+                if (smtpAddress.Equals(mailbox, StringComparison.OrdinalIgnoreCase))
+                { store = s; break; }
+            }
+            catch { }
+        }
+
+        if (store is null)
+        {
+            _log.LogWarning("[OutlookCOM] Store '{Mailbox}' not found for RFQ scan", mailbox);
+            return [];
+        }
+
+        // olFolderSentMail = 5
+        dynamic sentItems = store.GetDefaultFolder(5);
+        var cutoff = DateTime.Now.AddDays(-days);
+        var result = new List<RfqScanEmailDto>();
+
+        // Pre-filter at Outlook level — far faster than iterating every sent item.
+        // Subjects are always exactly "RFQ [XXXXXX]" (no RE:/FW: on outbound sent items).
+        var cutoffStr = cutoff.ToString("yyyy-MM-dd HH:mm");
+        dynamic filtered;
+        try
+        {
+            filtered = sentItems.Items.Restrict(
+                $"[Subject] >= 'RFQ [' AND [Subject] < 'RFQ ]' AND [SentOn] >= '{cutoffStr}'");
+        }
+        catch
+        {
+            // Fallback: no restrict support — iterate all
+            filtered = sentItems.Items;
+        }
+
+        foreach (dynamic item in filtered)
+        {
+            try
+            {
+                if ((int)item.Class != 43) continue; // olMail = 43
+                try { if ((DateTime)item.SentOn < cutoff) continue; } catch { continue; }
+
+                string rawSubject = item.Subject ?? "";
+                // Outbound sent items have clean subjects — no RE:/FW: stripping needed.
+                var m = _rfqSubjectRegex.Match(rawSubject.Trim());
+                if (!m.Success) continue;
+
+                var rfqId = m.Groups[1].Value.ToUpperInvariant();
+
+                var recipientList = new List<string>();
+                dynamic recips = item.Recipients;
+                for (int i = 1; i <= (int)recips.Count; i++)
+                {
+                    try
+                    {
+                        dynamic r = recips[i];
+                        string addr = r.Address ?? "";
+                        if (!string.IsNullOrWhiteSpace(addr)) recipientList.Add(addr);
+                    }
+                    catch { }
+                }
+
+                DateTime sentOnDt;
+                try { sentOnDt = ((DateTime)item.SentOn).ToUniversalTime(); }
+                catch { sentOnDt = DateTime.UtcNow; }
+
+                result.Add(new RfqScanEmailDto
+                {
+                    RfqId           = rfqId,
+                    Subject         = rawSubject.Trim(),
+                    SentAt          = sentOnDt,
+                    Requester       = mailbox,
+                    EmailRecipients = string.Join(";", recipientList),
+                    MailboxSource   = mailbox,
+                    BodyText        = item.Body ?? "",
+                    ContentType     = "text",
+                });
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[OutlookCOM] Error reading Sent Item — skipping");
+            }
+        }
+
+        _log.LogInformation("[OutlookCOM] RFQ scan of {Mailbox} Sent Items: {Count} RFQ emails found", mailbox, result.Count);
+        return result;
     }
 
     // ── Public fetch API ─────────────────────────────────────────────────────

@@ -1,5 +1,13 @@
 # OutlookShredder — Developer Hints
 
+## Repo Coordination
+
+The proxy and its Shredder client live in **two separate repos** that must stay API-version compatible:
+- **Proxy** (this repo): `C:\Users\angus\source\repos\angu113\OutlookShredder`
+- **Shredder** (companion repo): `C:\Users\angus\source\repos\angu113\Shredder`
+
+**Unless a command explicitly targets only one project, always apply git operations (pull, push, fetch, merge, status, log) to both repos.** Breaking API changes in one without updating the other will cause runtime failures.
+
 Two projects in one repo:
 - **OutlookShredder.Proxy** — ASP.NET Core 8 Windows Service; all business logic, Graph API, Claude API
 - **OutlookShredder.AddinHost** — Static file host for the Office.js Outlook taskpane add-in
