@@ -1245,6 +1245,16 @@ public class SharePointService
 
             // ── Upsert SupplierLineItems ─────────────────────────────────────
             var sliListId = await GetSupplierLineItemsListIdAsync();
+
+            // On the first product of a MessageId-bearing reprocess, purge any existing SLI
+            // rows for this SR that have no MessageId.  These are stale rows from an earlier
+            // extraction whose product names may differ enough to fail the fuzzy match, causing
+            // the new extraction to insert duplicates instead of replacing them.
+            // We only reach here after Claude has already returned ≥1 product, so purging first
+            // is safe — the new rows are about to be written immediately after.
+            if (messageId is not null && rowIndex == 0)
+                await PurgeNoMessageIdSliForSrAsync(siteId, sliListId, srId);
+
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
                 sourceFile, emailMeta.EmailFrom, messageId);
@@ -1590,6 +1600,49 @@ public class SharePointService
         }
 
         return null;
+    }
+
+    // ── Purge stale no-MessageId SLI rows ───────────────────────────────────
+
+    /// <summary>
+    /// Deletes all SupplierLineItems rows for the given SR that have no MessageId.
+    /// Called before inserting a new batch when the incoming email carries a MessageId,
+    /// so stale rows from an earlier extraction (which lacked a MessageId and may have
+    /// different product names) don't survive as duplicates.
+    /// </summary>
+    private async Task PurgeNoMessageIdSliForSrAsync(string siteId, string listId, string srId)
+    {
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,MessageId)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        var toDelete = new List<string>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null || item.Id is null) continue;
+                var itemSrId = d.TryGetValue("SupplierResponseId", out var s) ? s?.ToString() : null;
+                if (!string.Equals(itemSrId, srId, StringComparison.OrdinalIgnoreCase)) continue;
+                var msgId = d.TryGetValue("MessageId", out var m) ? m?.ToString() : null;
+                if (string.IsNullOrEmpty(msgId))
+                    toDelete.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        foreach (var id in toDelete)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[id].DeleteAsync();
+            _log.LogInformation("[SP] Purged stale no-MessageId SLI {Id} for SR {SrId}", id, srId);
+        }
     }
 
     // ── TotalPrice fallback calculation ─────────────────────────────────────
