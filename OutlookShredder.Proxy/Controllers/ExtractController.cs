@@ -1489,6 +1489,36 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/mail/reset-po-com ──────────────────────────────────────────
+    /// <summary>
+    /// Removes "PO-COM-Processed" / "PO-COM-NoExtract" from PO emails in the COM mailbox
+    /// (hackensack) Sent Items for the last <paramref name="days"/> days via Outlook COM,
+    /// then triggers an immediate poll cycle to re-extract them.
+    /// Requires Outlook to be running with the hackensack account open.
+    /// </summary>
+    [HttpPost("mail/reset-po-com")]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task<IActionResult> ResetPoComCategories([FromQuery] int days = 7)
+    {
+        var mailbox = _config["OutlookCom:Mailbox"];
+        if (string.IsNullOrEmpty(mailbox))
+            return BadRequest(new { error = "OutlookCom:Mailbox not configured" });
+
+        try
+        {
+            var unstamped = await _comPoller.UnstampPoMessagesAsync(mailbox, days);
+            _comPoller.TriggerReprocess();
+            _log.LogInformation("[OutlookCOM] reset-po-com: unstamped {Count} PO email(s) in {Mailbox} (last {Days} days)",
+                unstamped, mailbox, days);
+            return Ok(new { unstamped, mailbox, days });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ResetPoComCategories failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── POST /api/purchase-orders/backfill-rli ───────────────────────────────
     /// <summary>
     /// Reads every PurchaseOrders row and runs UpdateRliPurchaseStatus + completion check

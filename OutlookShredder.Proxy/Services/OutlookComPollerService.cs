@@ -21,6 +21,9 @@ public class OutlookComPollerService : BackgroundService
     private readonly IConfiguration                     _config;
     private readonly ILogger<OutlookComPollerService>   _log;
 
+    // Signalled by TriggerReprocess() to request an immediate poll cycle.
+    private readonly SemaphoreSlim _reprocessTrigger = new(0, 1);
+
     // Matches RE:, FW:, FWD:, [EXTERNAL] etc.
     private static readonly Regex SubjectPrefixRegex =
         new(@"^(\s*(RE|FW|FWD)\s*:\s*|\s*\[.*?\]\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -63,8 +66,18 @@ public class OutlookComPollerService : BackgroundService
                 _log.LogError(ex, "[OutlookCOM] Poll error");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(interval), ct);
+            // Wait for the normal interval OR an early trigger from TriggerReprocess().
+            await Task.WhenAny(
+                Task.Delay(TimeSpan.FromSeconds(interval), ct),
+                _reprocessTrigger.WaitAsync(ct));
         }
+    }
+
+    /// <summary>Signals an immediate poll cycle, bypassing the normal interval.</summary>
+    public void TriggerReprocess()
+    {
+        if (_reprocessTrigger.CurrentCount == 0)
+            _reprocessTrigger.Release();
     }
 
     [SupportedOSPlatform("windows")]
@@ -242,6 +255,104 @@ public class OutlookComPollerService : BackgroundService
 
         _log.LogInformation("[OutlookCOM] RFQ scan of {Mailbox} Sent Items: {Count} RFQ emails found", mailbox, result.Count);
         return result;
+    }
+
+    // ── Public reprocess API ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Removes "PO-COM-Processed" and "PO-COM-NoExtract" categories from PO emails
+    /// in the mailbox's Sent Items for the last <paramref name="days"/> days,
+    /// so the next poll cycle will re-extract them.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public async Task<int> UnstampPoMessagesAsync(string mailbox, int days)
+    {
+        try
+        {
+            return await RunOnStaThreadAsync(() => UnstampPoMessages(mailbox, days));
+        }
+        catch (COMException ex) when (ex.HResult == unchecked((int)0x800401E3))
+        {
+            _log.LogWarning("[OutlookCOM] Outlook not running — cannot unstamp PO emails");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[OutlookCOM] UnstampPoMessagesAsync failed");
+            return 0;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private int UnstampPoMessages(string mailbox, int days)
+    {
+        dynamic outlook = GetActiveComObject("Outlook.Application");
+        dynamic session = outlook.Session;
+
+        dynamic? store = null;
+        foreach (dynamic s in session.Stores)
+        {
+            string displayName = s.DisplayName ?? "";
+            if (displayName.Equals(mailbox, StringComparison.OrdinalIgnoreCase))
+            { store = s; break; }
+            try
+            {
+                dynamic? account = s.ExchangeAccount;
+                string smtpAddress = account?.SmtpAddress ?? "";
+                if (smtpAddress.Equals(mailbox, StringComparison.OrdinalIgnoreCase))
+                { store = s; break; }
+            }
+            catch { }
+        }
+
+        if (store is null)
+        {
+            _log.LogWarning("[OutlookCOM] Store '{Mailbox}' not found — cannot unstamp", mailbox);
+            return 0;
+        }
+
+        dynamic sentItems = store.GetDefaultFolder(5); // olFolderSentMail = 5
+        var cutoff  = DateTime.Now.AddDays(-days);
+        int cleared = 0;
+
+        foreach (dynamic item in sentItems.Items)
+        {
+            try
+            {
+                if ((int)item.Class != 43) continue;
+                try { if ((DateTime)item.SentOn < cutoff) continue; } catch { continue; }
+
+                string subject      = item.Subject ?? "";
+                var    cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
+                if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string current = item.Categories ?? "";
+                if (!current.Contains("PO-COM-Processed",  StringComparison.OrdinalIgnoreCase) &&
+                    !current.Contains("PO-COM-NoExtract",   StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Strip the PO-COM-* categories, preserve any others
+                var remaining = current
+                    .Split(';')
+                    .Select(c => c.Trim())
+                    .Where(c => !string.Equals(c, "PO-COM-Processed", StringComparison.OrdinalIgnoreCase)
+                             && !string.Equals(c, "PO-COM-NoExtract",  StringComparison.OrdinalIgnoreCase)
+                             && !string.IsNullOrEmpty(c))
+                    .ToList();
+
+                item.Categories = string.Join("; ", remaining);
+                item.Save();
+                cleared++;
+                _log.LogInformation("[OutlookCOM] Unstamped PO email: {Subject}", subject);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[OutlookCOM] Error unstamping item — skipping");
+            }
+        }
+
+        return cleared;
     }
 
     // ── Public fetch API ─────────────────────────────────────────────────────
