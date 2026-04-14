@@ -734,6 +734,8 @@ public class MailPollerService : BackgroundService
         try
         {
             var extraction = await _claude.ExtractAsync(req);
+            _log.LogInformation("[Mail] Extracted: supplier={Supplier} quoteRef={QuoteRef}",
+                extraction?.SupplierName, extraction?.QuoteReference ?? "(none)");
 
             // Always write at least one row — even when nothing useful could be extracted —
             // so every processed email has a visible record in SharePoint.
