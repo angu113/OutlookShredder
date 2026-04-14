@@ -53,7 +53,7 @@ public class ClaudeService
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number for this quote, distinct from the
         [XXXXXX] job reference which belongs to Metal Supermarkets.
-        Look for: "Quote #", "Our Ref:", "Ref:", "Quote No.", "QP", "Q-", or similar prefixes
+        Look for: "Quote #", "Quotation No.", "Our Ref:", "Ref:", "Quote No.", "QP", "Q-", or similar prefixes
         in the subject line, document header, or body.
         Strip any prefix label and store only the value itself (e.g. "QP60600").
         If no supplier quote reference is present, use null.
