@@ -51,12 +51,15 @@ public class ClaudeService
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
-        The supplier's own internal reference number for this quote, distinct from the
+        The supplier's own internal reference number assigned to this quote — NOT the
         [XXXXXX] job reference which belongs to Metal Supermarkets.
-        Look for: "Quote #", "Quotation No.", "Our Ref:", "Ref:", "Quote No.", "QP", "Q-", or similar prefixes
-        in the subject line, document header, or body.
-        Strip any prefix label and store only the value itself (e.g. "QP60600").
-        If no supplier quote reference is present, use null.
+        This is any code, number, or alphanumeric identifier that the supplier uses to
+        track this specific quote in their own system. It may appear anywhere in the
+        document or subject line and can be labelled in any way the supplier chooses
+        (e.g. "Quotation No. 628058", "Quote #QP60600", "Our Ref: Q-2024-001", "Ref:",
+        a document number printed in the header, etc.).
+        Store only the identifier value itself, stripping any label prefix.
+        If no such supplier-assigned reference is present, use null.
 
         ── PRICING ── work through ALL steps; leave a field null only if no path yields a value ──
         Step 1 - Direct: use $/lb, $/ft, $/piece if stated outright. Also capture totalPrice
