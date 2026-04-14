@@ -1102,6 +1102,42 @@ public class SharePointService
         return result;
     }
 
+    /// <summary>
+    /// Returns the RFQ Line Items for a specific RFQ ID — used to inject requested-item
+    /// context into the Claude extraction prompt (RLI anchoring).
+    /// </summary>
+    public async Task<List<RliContextItem>> ReadRfqLineItemsByRfqIdAsync(string rfqId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product)"];
+                req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
+                req.QueryParameters.Top    = 100;
+            });
+
+        var result = new List<RliContextItem>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is null) continue;
+            var d = item.Fields.AdditionalData;
+            string? id = d.TryGetValue(col,            out var v0) ? v0?.ToString()
+                       : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                       : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
+                       : null;
+            if (!string.Equals(id, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+            var mspc    = d.TryGetValue("MSPC",    out var vm) ? vm?.ToString() : null;
+            var product = d.TryGetValue("Product", out var vp) ? vp?.ToString() : null;
+            if (!string.IsNullOrEmpty(product) || !string.IsNullOrEmpty(mspc))
+                result.Add(new RliContextItem { Mspc = mspc, ProductName = product });
+        }
+        return result;
+    }
+
     /// <summary>Creates one row per entry in <paramref name="items"/> in the RFQ Line Items list.</summary>
     public async Task CreateRfqLineItemsAsync(IEnumerable<RfqLineItemRequest> items)
     {
@@ -1522,7 +1558,24 @@ public class SharePointService
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
 
-        var catalogMatch = _catalog.ResolveProduct(prodName);
+        // If Claude resolved an MSPC directly from the RLI requested-items list, use it.
+        // Otherwise fall back to the fuzzy catalog matcher on the supplier's product name.
+        string? productSearchKey;
+        string? catalogProductName;
+        if (!string.IsNullOrEmpty(product.ProductSearchKey))
+        {
+            productSearchKey  = product.ProductSearchKey;
+            var byKey         = _catalog.FindBySearchKey(product.ProductSearchKey);
+            catalogProductName = byKey?.Name;
+            _log.LogDebug("[SP] RLI-anchored MSPC '{Key}' for '{Name}' → catalog='{Catalog}'",
+                productSearchKey, prodName, catalogProductName ?? "(not in catalog)");
+        }
+        else
+        {
+            var catalogMatch   = _catalog.ResolveProduct(prodName);
+            productSearchKey   = catalogMatch?.SearchKey;
+            catalogProductName = catalogMatch?.Name;
+        }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
@@ -1536,8 +1589,8 @@ public class SharePointService
             ["QuoteReference"]           = quoteReference,
             ["ProductName"]              = prodName,
             ["SupplierProductName"]      = prodName,
-            ["CatalogProductName"]       = catalogMatch?.Name,
-            ["ProductSearchKey"]         = catalogMatch?.SearchKey,
+            ["CatalogProductName"]       = catalogProductName,
+            ["ProductSearchKey"]         = productSearchKey,
             ["SourceFile"]               = sourceFile,
             ["EmailFrom"]                = emailFrom,
             ["MessageId"]                = messageId,
@@ -1558,7 +1611,7 @@ public class SharePointService
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
-            siteId, listId, supplierResponseId, prodName, prodTokens, quoteReference, catalogMatch?.SearchKey);
+            siteId, listId, supplierResponseId, prodName, prodTokens, quoteReference, productSearchKey);
 
         if (existing is not null)
         {

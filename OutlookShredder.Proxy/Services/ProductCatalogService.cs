@@ -259,6 +259,20 @@ public class ProductCatalogService : BackgroundService
     /// <summary>Cached product names, for API use.</summary>
     public IReadOnlyList<string> CachedNames => _cache.Select(e => e.Name).ToList().AsReadOnly();
 
+    /// <summary>
+    /// Looks up a catalog entry by its SearchKey (MSPC).
+    /// Used when Claude has already resolved the MSPC via RLI anchoring and we
+    /// just need the canonical catalog name for CatalogProductName.
+    /// Returns null when the key is not found in the current cache.
+    /// </summary>
+    public (string Name, string? SearchKey)? FindBySearchKey(string? searchKey)
+    {
+        if (string.IsNullOrWhiteSpace(searchKey)) return null;
+        var entry = _cache.FirstOrDefault(e =>
+            string.Equals(e.SearchKey, searchKey, StringComparison.OrdinalIgnoreCase));
+        return entry is null ? null : (entry.Name, entry.SearchKey);
+    }
+
     // ── Service item detection ────────────────────────────────────────────────
 
     // Products that are services/processing — never a catalog match.

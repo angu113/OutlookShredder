@@ -731,6 +731,37 @@ public class MailPollerService : BackgroundService
 
         bool dedupDryRun = bool.TryParse(_config["Dedup:DryRun"], out var dr) && dr;
 
+        // Inject RLI requested-items context so Claude can anchor each extracted supplier
+        // product to the nearest requested item and return its MSPC as productSearchKey.
+        if (req.RliItems.Count == 0)
+        {
+            var validJobRef = req.JobRefs
+                .Select(r => r.Trim('[', ']'))
+                .FirstOrDefault(r => !string.IsNullOrEmpty(r) && r != "000000" && r != "WHOIS");
+
+            if (validJobRef is not null)
+            {
+                try
+                {
+                    var rliItems = await _sp.ReadRfqLineItemsByRfqIdAsync(validJobRef);
+                    if (rliItems.Count > 0)
+                    {
+                        req.RliItems = rliItems;
+                        _log.LogInformation("[Mail] RLI anchoring: {Count} item(s) for [{RfqId}]",
+                            rliItems.Count, validJobRef);
+                    }
+                    else
+                    {
+                        _log.LogDebug("[Mail] No RLI items found for [{RfqId}] — extraction without anchoring", validJobRef);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Mail] RLI fetch failed for [{RfqId}] — continuing without anchoring", validJobRef);
+                }
+            }
+        }
+
         try
         {
             var extraction = await _claude.ExtractAsync(req);

@@ -16,4 +16,11 @@ public class ProductLine
     public string? LeadTimeText            { get; set; }
     public string? Certifications          { get; set; }
     public string? SupplierProductComments { get; set; }
+
+    /// <summary>
+    /// MSPC / ProductSearchKey resolved by Claude from the RLI requested-items list.
+    /// When non-null, WriteSupplierLineItemAsync uses this directly instead of running
+    /// the fuzzy catalog matcher on the supplier's product name.
+    /// </summary>
+    public string? ProductSearchKey        { get; set; }
 }

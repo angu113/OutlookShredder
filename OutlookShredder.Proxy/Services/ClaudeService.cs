@@ -108,6 +108,17 @@ public class ClaudeService
         the situation in supplierProductComments (e.g. "Out of office until 2026-05-01"
         or "Supplier regrets — unable to supply this material").
         Always return at least one entry in products[].
+
+        ── REQUESTED ITEMS (RLI ANCHORING) ────────────────────────────────────────
+        If the prompt includes a "Requested items for this RFQ" section, each line is
+        an item the buyer originally requested, with an optional MSPC catalog code.
+        For each supplier product you extract:
+        1. Find the best-matching requested item by grade, form, and dimensions.
+        2. If that item has an MSPC, return it as productSearchKey.
+        3. If the best match has no MSPC (name-only entry), return null for productSearchKey.
+        4. Always keep productName as the supplier's own description — do not replace it
+           with the requested item's canonical name.
+        5. When no "Requested items" section is present, always return null for productSearchKey.
         """;
 
     // ── Tool definition ──────────────────────────────────────────────────────
@@ -132,7 +143,8 @@ public class ClaudeService
                 "items": {
                   "type": "object",
                   "properties": {
-                    "productName":             { "type": ["string","null"], "description": "Full spec: grade + form + all dimensions + length + finish" },
+                    "productName":             { "type": ["string","null"], "description": "Full spec: grade + form + all dimensions + length + finish — always the supplier's own description" },
+                    "productSearchKey":        { "type": ["string","null"], "description": "MSPC from the best-matching requested item (e.g. 'AF6061/2502500'). Set only when a Requested items list is provided and you found a match with an MSPC. Null otherwise." },
                     "unitsRequested":          { "type": ["number","null"] },
                     "unitsQuoted":             { "type": ["number","null"] },
                     "lengthPerUnit":           { "type": ["number","null"] },
@@ -359,6 +371,19 @@ public class ClaudeService
         if (jobHint is not null)
         {
             sb.AppendLine(jobHint);
+            sb.AppendLine();
+        }
+
+        if (req.RliItems.Count > 0)
+        {
+            sb.AppendLine("Requested items for this RFQ:");
+            for (int i = 0; i < req.RliItems.Count; i++)
+            {
+                var item    = req.RliItems[i];
+                var mspcPart = string.IsNullOrEmpty(item.Mspc) ? "(none)" : item.Mspc;
+                var namePart = item.ProductName ?? "(unknown)";
+                sb.AppendLine($"  {i + 1}. MSPC={mspcPart}  Product={namePart}");
+            }
             sb.AppendLine();
         }
 

@@ -41,4 +41,21 @@ public class ExtractRequest
     public string? EwsUrl    { get; set; }
     public string? ItemId    { get; set; }
     public string? AttachId  { get; set; }
+
+    /// <summary>
+    /// RFQ line items (what was originally requested) for the matched RFQ.
+    /// Injected by MailPollerService before calling ClaudeService so Claude can
+    /// anchor each extracted supplier product to the nearest requested item.
+    /// Empty when the RFQ ID is unknown or no RLI rows exist.
+    /// </summary>
+    public List<RliContextItem> RliItems { get; set; } = [];
+}
+
+/// <summary>One requested item from the RFQ Line Items list, used to anchor Claude's product matching.</summary>
+public class RliContextItem
+{
+    /// <summary>Internal catalog code (MSPC / ProductSearchKey). Null when the RFQ was created without a catalog selection.</summary>
+    public string? Mspc        { get; set; }
+    /// <summary>Human-readable product name as written on the RFQ.</summary>
+    public string? ProductName { get; set; }
 }
