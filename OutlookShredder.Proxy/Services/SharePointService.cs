@@ -1138,6 +1138,88 @@ public class SharePointService
         return result;
     }
 
+    // ── RLI anchoring dry-run helpers ────────────────────────────────────────
+
+    /// <summary>
+    /// Returns SLI rows (product name + current matched MSPC) for a given RFQ ID.
+    /// Used by the RLI anchoring dry-run endpoint to compare existing fuzzy matches
+    /// against what RLI anchoring would produce.
+    /// </summary>
+    public async Task<List<SliCompactRow>> ReadSliCompactByRfqIdAsync(string rfqId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},SupplierName,ProductName,SupplierProductName,ProductSearchKey,CatalogProductName)"];
+                req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
+                req.QueryParameters.Top    = 200;
+            });
+
+        var result = new List<SliCompactRow>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is null) continue;
+            var d = item.Fields.AdditionalData;
+            var id = d.TryGetValue(col, out var v0) ? v0?.ToString()
+                   : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                   : d.TryGetValue("RFQ_ID", out var v2) ? v2?.ToString() : null;
+            if (!string.Equals(id, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+            result.Add(new SliCompactRow
+            {
+                SupplierName     = d.TryGetValue("SupplierName",     out var sn)  ? sn?.ToString()  : null,
+                ProductName      = d.TryGetValue("ProductName",      out var pn)  ? pn?.ToString()  : null,
+                SupplierProductName = d.TryGetValue("SupplierProductName", out var spn) ? spn?.ToString() : null,
+                ProductSearchKey = d.TryGetValue("ProductSearchKey", out var psk) ? psk?.ToString() : null,
+                CatalogProductName = d.TryGetValue("CatalogProductName", out var cpn) ? cpn?.ToString() : null,
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Returns SR rows (email body + metadata) for a given RFQ ID.
+    /// Used by the RLI anchoring dry-run endpoint to re-run Claude extraction
+    /// with RLI context and compare against existing data.
+    /// </summary>
+    public async Task<List<SrEmailRow>> ReadSrEmailsByRfqIdAsync(string rfqId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierResponsesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},SupplierName,EmailBody,EmailFrom,EmailSubject,MessageId)"];
+                req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
+                req.QueryParameters.Top    = 50;
+            });
+
+        var result = new List<SrEmailRow>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is null) continue;
+            var d = item.Fields.AdditionalData;
+            var id = d.TryGetValue(col, out var v0) ? v0?.ToString()
+                   : d.TryGetValue("RFQ_x005F_ID", out var v1) ? v1?.ToString()
+                   : d.TryGetValue("RFQ_ID", out var v2) ? v2?.ToString() : null;
+            if (!string.Equals(id, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+            result.Add(new SrEmailRow
+            {
+                SupplierName  = d.TryGetValue("SupplierName",  out var sn)  ? sn?.ToString()  : null,
+                EmailBody     = d.TryGetValue("EmailBody",     out var eb)  ? eb?.ToString()  : null,
+                EmailFrom     = d.TryGetValue("EmailFrom",     out var ef)  ? ef?.ToString()  : null,
+                EmailSubject  = d.TryGetValue("EmailSubject",  out var es)  ? es?.ToString()  : null,
+                MessageId     = d.TryGetValue("MessageId",     out var mid) ? mid?.ToString() : null,
+            });
+        }
+        return result;
+    }
+
     /// <summary>Creates one row per entry in <paramref name="items"/> in the RFQ Line Items list.</summary>
     public async Task CreateRfqLineItemsAsync(IEnumerable<RfqLineItemRequest> items)
     {

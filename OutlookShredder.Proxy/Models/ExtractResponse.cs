@@ -97,6 +97,28 @@ public class PurchaseOrderRecord
     public string? PdfUrl       { get; set; }
 }
 
+// ── RLI anchoring dry-run models ─────────────────────────────────────────────
+
+/// <summary>Compact SLI row for RLI anchoring comparison.</summary>
+public class SliCompactRow
+{
+    public string? SupplierName        { get; set; }
+    public string? ProductName         { get; set; }
+    public string? SupplierProductName { get; set; }
+    public string? ProductSearchKey    { get; set; }
+    public string? CatalogProductName  { get; set; }
+}
+
+/// <summary>SR email row for RLI anchoring Claude dry-run.</summary>
+public class SrEmailRow
+{
+    public string? SupplierName  { get; set; }
+    public string? EmailBody     { get; set; }
+    public string? EmailFrom     { get; set; }
+    public string? EmailSubject  { get; set; }
+    public string? MessageId     { get; set; }
+}
+
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>
 public class SpWriteResult
 {
