@@ -25,6 +25,7 @@ public class MailPollerService : BackgroundService
     private readonly MailService               _mail;
     private readonly ClaudeService             _claude;
     private readonly SharePointService         _sp;
+    private readonly ProductCatalogService     _catalog;
     private readonly RfqNotificationService    _notifications;
     private readonly ILogger<MailPollerService> _log;
 
@@ -262,6 +263,7 @@ public class MailPollerService : BackgroundService
         MailService                mail,
         ClaudeService              claude,
         SharePointService          sp,
+        ProductCatalogService      catalog,
         RfqNotificationService     notifications,
         ILogger<MailPollerService> log)
     {
@@ -269,6 +271,7 @@ public class MailPollerService : BackgroundService
         _mail          = mail;
         _claude        = claude;
         _sp            = sp;
+        _catalog       = catalog;
         _notifications = notifications;
         _log           = log;
     }
@@ -746,6 +749,23 @@ public class MailPollerService : BackgroundService
                     var rliItems = await _sp.ReadRfqLineItemsByRfqIdAsync(validJobRef);
                     if (rliItems.Count > 0)
                     {
+                        // Validate each RLI item: if the product name was edited after catalog
+                        // selection, the MSPC may no longer match the name. Null out the MSPC
+                        // so Claude uses name-only matching instead of wrong-product anchoring.
+                        foreach (var item in rliItems.Where(r => !string.IsNullOrEmpty(r.Mspc)))
+                        {
+                            var (consistent, jaccard, catalogName) =
+                                _catalog.CheckRliConsistency(item.Mspc, item.ProductName);
+                            if (!consistent)
+                            {
+                                _log.LogInformation(
+                                    "[Mail] RLI MSPC '{Mspc}' nulled for [{RfqId}]: " +
+                                    "name '{Name}' vs catalog '{Catalog}' (jaccard={J:F2}) — sending name-only",
+                                    item.Mspc, validJobRef, item.ProductName, catalogName, jaccard);
+                                item.Mspc = null;
+                            }
+                        }
+
                         req.RliItems = rliItems;
                         _log.LogInformation("[Mail] RLI anchoring: {Count} item(s) for [{RfqId}]",
                             rliItems.Count, validJobRef);

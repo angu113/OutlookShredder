@@ -12,18 +12,21 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api/rli-anchoring")]
 public class RliAnchoringController : ControllerBase
 {
-    private readonly SharePointService _sp;
-    private readonly ClaudeService     _claude;
+    private readonly SharePointService    _sp;
+    private readonly ClaudeService        _claude;
+    private readonly ProductCatalogService _catalog;
     private readonly ILogger<RliAnchoringController> _log;
 
     public RliAnchoringController(
-        SharePointService sp,
-        ClaudeService     claude,
+        SharePointService    sp,
+        ClaudeService        claude,
+        ProductCatalogService catalog,
         ILogger<RliAnchoringController> log)
     {
-        _sp     = sp;
-        _claude = claude;
-        _log    = log;
+        _sp      = sp;
+        _claude  = claude;
+        _catalog = catalog;
+        _log     = log;
     }
 
     /// <summary>
@@ -173,6 +176,71 @@ public class RliAnchoringController : ControllerBase
     }
 
     /// <summary>
+    /// Checks all RLI rows that have both an MSPC and a ProductName, and reports
+    /// which ones have a product name that no longer matches the catalog entry for
+    /// that MSPC — indicating the user edited the product name after catalog selection.
+    ///
+    /// GET /api/rli-anchoring/validate-rli[?threshold=0.25]
+    /// </summary>
+    [HttpGet("validate-rli")]
+    public async Task<IActionResult> ValidateRli([FromQuery] double threshold = 0.25)
+    {
+        var allRli = await _sp.ReadAllRfqLineItemsAsync();
+
+        var withMspc = allRli
+            .Where(r => !string.IsNullOrEmpty(r.Mspc) && !string.IsNullOrEmpty(r.Product))
+            .ToList();
+
+        var consistent   = new List<RliValidationRow>();
+        var inconsistent = new List<RliValidationRow>();
+        var notInCatalog = new List<RliValidationRow>();
+
+        foreach (var item in withMspc)
+        {
+            var (isConsistent, jaccard, catalogName) =
+                _catalog.CheckRliConsistency(item.Mspc, item.Product, threshold);
+
+            var row = new RliValidationRow
+            {
+                RfqId       = item.RfqId,
+                Mspc        = item.Mspc,
+                RliName     = item.Product,
+                CatalogName = catalogName,
+                Jaccard     = Math.Round(jaccard, 3),
+            };
+
+            if (catalogName is null)
+                notInCatalog.Add(row);
+            else if (isConsistent)
+                consistent.Add(row);
+            else
+                inconsistent.Add(row);
+        }
+
+        var summary = new
+        {
+            TotalWithMspcAndName = withMspc.Count,
+            Consistent           = consistent.Count,
+            Inconsistent         = inconsistent.Count,
+            NotInCatalog         = notInCatalog.Count,
+            ThresholdUsed        = threshold,
+            InconsistentPct      = withMspc.Count > 0
+                ? Math.Round(inconsistent.Count * 100.0 / withMspc.Count, 1)
+                : 0,
+        };
+
+        _log.LogInformation("[RliTest] validate-rli: {Summary}",
+            System.Text.Json.JsonSerializer.Serialize(summary));
+
+        return Ok(new
+        {
+            Summary      = summary,
+            Inconsistent = inconsistent.OrderBy(r => r.Jaccard).ToList(),
+            NotInCatalog = notInCatalog,
+        });
+    }
+
+    /// <summary>
     /// Naive best-match: finds the RLI item whose ProductName shares the most
     /// tokens with the supplier's product name. Good enough for a dry-run comparison.
     /// </summary>
@@ -208,6 +276,15 @@ public class RfqCompareResult
     public string              RfqId       { get; set; } = "";
     public List<RliContextItem> RliItems   { get; set; } = [];
     public List<ProductCompareRow> ProductRows { get; set; } = [];
+}
+
+public class RliValidationRow
+{
+    public string  RfqId       { get; set; } = "";
+    public string? Mspc        { get; set; }
+    public string? RliName     { get; set; }
+    public string? CatalogName { get; set; }
+    public double  Jaccard     { get; set; }
 }
 
 public class ProductCompareRow

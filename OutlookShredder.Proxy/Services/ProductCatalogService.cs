@@ -273,6 +273,37 @@ public class ProductCatalogService : BackgroundService
         return entry is null ? null : (entry.Name, entry.SearchKey);
     }
 
+    /// <summary>
+    /// Checks whether an RLI product name is still consistent with the catalog entry
+    /// for the given SearchKey. Used to detect cases where the user selected a catalog
+    /// product but then edited the product name on the RFQ — in that case we should
+    /// send the RLI item without an MSPC so Claude uses name-only matching.
+    ///
+    /// Returns the Jaccard similarity between the two tokenised names, the catalog entry
+    /// name, and whether they are considered consistent (jaccard ≥ <paramref name="threshold"/>).
+    /// Returns (false, 0, null) when the SearchKey is not in the catalog.
+    /// </summary>
+    public (bool Consistent, double Jaccard, string? CatalogName) CheckRliConsistency(
+        string? searchKey, string? productName, double threshold = 0.25)
+    {
+        if (string.IsNullOrWhiteSpace(searchKey) || string.IsNullOrWhiteSpace(productName))
+            return (true, 1.0, null);   // nothing to check — treat as consistent
+
+        var entry = _cache.FirstOrDefault(e =>
+            string.Equals(e.SearchKey, searchKey, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+            return (false, 0, null);    // MSPC not in catalog — can't validate
+
+        var catalogTokens = entry.Tokens;                   // already tokenised when cached
+        var rliTokens     = Tokenize(productName);
+
+        int overlap = catalogTokens.Intersect(rliTokens, StringComparer.OrdinalIgnoreCase).Count();
+        int union   = catalogTokens.Union(rliTokens,     StringComparer.OrdinalIgnoreCase).Count();
+        double jac  = union > 0 ? (double)overlap / union : 0;
+
+        return (jac >= threshold, jac, entry.Name);
+    }
+
     // ── Service item detection ────────────────────────────────────────────────
 
     // Products that are services/processing — never a catalog match.
