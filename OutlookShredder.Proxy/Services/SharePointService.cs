@@ -1122,8 +1122,22 @@ public class SharePointService
             if (req.JobReference    is not null) data["JobReference"]     = req.JobReference;
             if (req.ProcessingSource is not null) data["ProcessingSource"] = req.ProcessingSource;
 
-            await GetGraph().Sites[siteId].Lists[listId].Items
-                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+            var fieldsSummary = string.Join(", ", data.Select(kv => $"{kv.Key}={kv.Value}"));
+            _log.LogInformation("[SP] CreateRfqLineItem posting: {Fields}", fieldsSummary);
+
+            try
+            {
+                var created = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+                _log.LogInformation("[SP] CreateRfqLineItem OK: [{RfqId}] {Product} → SpId={SpId}",
+                    req.RfqId, req.Product, created?.Id);
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
+            {
+                _log.LogError("[SP] CreateRfqLineItem ODataError for [{RfqId}] {Product}: {Code} — {Msg}",
+                    req.RfqId, req.Product, e.Error?.Code, e.Error?.Message);
+                throw;
+            }
         }
     }
 
