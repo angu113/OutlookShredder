@@ -1257,7 +1257,7 @@ public class SharePointService
 
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
-                sourceFile, emailMeta.EmailFrom, messageId);
+                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
 
             result.Success = true;
         }
@@ -1285,7 +1285,7 @@ public class SharePointService
         string source, string? sourceFile,
         string? messageId = null)
     {
-        var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier);
+        var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier, header.QuoteReference);
         bool isNew = existingId is null;
 
         var emailBodyTrunc = (emailMeta.EmailBody ?? emailMeta.BodyContext) is string body
@@ -1436,10 +1436,10 @@ public class SharePointService
     }
 
     private async Task<string?> FindExistingSupplierResponseAsync(
-        string siteId, string listId, string jobRef, string supplierName)
+        string siteId, string listId, string jobRef, string supplierName,
+        string? quoteReference = null)
     {
-        if (string.IsNullOrEmpty(jobRef) || string.IsNullOrEmpty(supplierName))
-            return null;
+        if (string.IsNullOrEmpty(jobRef)) return null;
 
         // Fetch all SR rows and filter client-side, following nextLink to cover lists > 2000 rows.
         // OData filter on non-indexed columns with HonorNonIndexedQueriesWarningMayFailRandomly
@@ -1450,31 +1450,50 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName)"];
+                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName,QuoteReference)"];
                 r.QueryParameters.Top    = 2000;
             });
 
+        string? nameMatch    = null;
+        string? quoteRefMatch = null;
+
         while (page is not null)
         {
-            var hit = page.Value?.FirstOrDefault(i =>
+            foreach (var i in page.Value ?? [])
             {
                 var d = i.Fields?.AdditionalData;
-                if (d is null) return false;
+                if (d is null || i.Id is null) continue;
                 var itemJobRef = (d.TryGetValue("RFQ_ID",       out var jv)  ? jv?.ToString()  : null)
                               ?? (d.TryGetValue("RFQ_x005F_ID", out var jv2) ? jv2?.ToString() : null);
-                var itemSupplier = d.TryGetValue("SupplierName", out var sv) ? sv?.ToString() : null;
-                return string.Equals(itemJobRef,   jobRef,       StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase);
-            });
-            if (hit is not null) return hit.Id;
+                if (!string.Equals(itemJobRef, jobRef, StringComparison.OrdinalIgnoreCase)) continue;
 
+                var itemSupplier  = d.TryGetValue("SupplierName",   out var sv) ? sv?.ToString() : null;
+                var itemQuoteRef  = d.TryGetValue("QuoteReference",  out var qv) ? qv?.ToString() : null;
+
+                // Strong match: same job ref + same quote reference (supplier-assigned number).
+                // Matches regardless of email address or name variation.
+                if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(itemQuoteRef)
+                    && string.Equals(quoteReference, itemQuoteRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    quoteRefMatch = i.Id;
+                    break;
+                }
+
+                // Fallback: same job ref + same supplier name.
+                if (nameMatch is null
+                    && !string.IsNullOrEmpty(supplierName)
+                    && string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase))
+                    nameMatch = i.Id;
+            }
+
+            if (quoteRefMatch is not null) break;
             if (page.OdataNextLink is null) break;
             var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter);
             page = await next.GetAsync();
         }
 
-        return null;
+        return quoteRefMatch ?? nameMatch;
     }
 
     // ── Write SupplierLineItems (private) ────────────────────────────────────
@@ -1483,7 +1502,8 @@ public class SharePointService
         string siteId, string listId,
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
-        string? sourceFile, string? emailFrom, string? messageId = null)
+        string? sourceFile, string? emailFrom, string? messageId = null,
+        string? quoteReference = null)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -1499,6 +1519,7 @@ public class SharePointService
             ["SupplierResponseId"]       = supplierResponseId,
             ["RFQ_ID"]                   = string.IsNullOrEmpty(jobRef) ? null : jobRef,
             ["SupplierName"]             = supplier,
+            ["QuoteReference"]           = quoteReference,
             ["ProductName"]              = prodName,
             ["SupplierProductName"]      = prodName,
             ["CatalogProductName"]       = catalogMatch?.Name,
@@ -1523,7 +1544,7 @@ public class SharePointService
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
-            siteId, listId, supplierResponseId, prodName, prodTokens);
+            siteId, listId, supplierResponseId, prodName, prodTokens, quoteReference, catalogMatch?.SearchKey);
 
         if (existing is not null)
         {
@@ -1562,7 +1583,8 @@ public class SharePointService
 
     private async Task<ListItem?> FindExistingSupplierLineItemAsync(
         string siteId, string listId,
-        string supplierResponseId, string productName, HashSet<string> productTokens)
+        string supplierResponseId, string productName, HashSet<string> productTokens,
+        string? quoteReference = null, string? productSearchKey = null)
     {
         // Fetch all SLI rows and filter in memory, following nextLink so lists > 2000 rows
         // don't silently miss existing items and create duplicates.
@@ -1573,7 +1595,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName,SupplierProductComments)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments)"];
                 r.QueryParameters.Top    = 2000;
             });
 
@@ -1585,6 +1607,27 @@ public class SharePointService
                 if (d is null) return false;
                 var srId = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
                 if (!string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase)) return false;
+
+                // Strong match: same quote reference + same catalog product key.
+                // If the supplier attached the same quote PDF twice (or it was forwarded
+                // to multiple mailboxes), this reliably identifies the same line without
+                // relying on raw product name extraction being identical.
+                var spQuoteRef = d.TryGetValue("QuoteReference", out var qr) ? qr?.ToString() : null;
+                var spSearchKey = d.TryGetValue("ProductSearchKey", out var sk) ? sk?.ToString() : null;
+                if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(spQuoteRef)
+                    && string.Equals(quoteReference, spQuoteRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Same quote — match by catalog key when available, else by name.
+                    if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
+                        return string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase);
+                    var spProduct2 = d.TryGetValue("ProductName", out var p2) ? p2?.ToString() : null;
+                    if (NormalizeMatch(spProduct2, productName)) return true;
+                    var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
+                    return NumericTokensCompatible(productTokens, spTok2)
+                        && ProductJaccard(spTok2, productTokens) >= 0.4; // relaxed threshold — same quote
+                }
+
+                // Standard fuzzy match by product name.
                 var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
                 if (NormalizeMatch(spProduct, productName)) return true;
                 var spTokens = ProductTokens(spProduct ?? string.Empty);
@@ -1714,9 +1757,14 @@ public class SharePointService
     private static readonly Regex _dimSplit     = new(@"[^a-z0-9]+",                                RegexOptions.Compiled);
     private static readonly Regex _orLength     = new(@"\bor\s+\d+[a-z""']*\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex _trailingZeroInch = new(@"(\d+)\s*'\s*0\s*""", RegexOptions.Compiled);
+
     private static string PreprocessProduct(string s)
     {
         s = s.ToLowerInvariant();
+        // "25' 0"" and "25'" are the same length — strip the zero-inch component
+        // before any other processing so it doesn't produce a spurious numeric token.
+        s = _trailingZeroInch.Replace(s, "$1'");
         s = _orLength.Replace(s, "");
         s = Regex.Replace(s, @"\brandom\s+lengths?\b|\bmill\s+lengths?\b|\bfull\s+lengths?\b|\blengths?\b", "");
         s = _dimFraction.Replace(s, "$1f$2");
@@ -2876,6 +2924,7 @@ public class SharePointService
                 ("SourceFile",               "text"),
                 ("EmailFrom",                "text"),
                 ("MessageId",                "text"),
+                ("QuoteReference",           "text"),
                 ("ProductName",              "text"),
                 ("CatalogProductName",       "text"),
                 ("ProductSearchKey",         "text"),
