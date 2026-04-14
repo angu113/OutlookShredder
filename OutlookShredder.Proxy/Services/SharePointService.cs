@@ -1756,6 +1756,10 @@ public class SharePointService
     private static readonly Regex _dimSeparator = new(@"(\d[a-z0-9]*)[""']?\s*[xX×]\s*[""']?(\d[a-z0-9]*)", RegexOptions.Compiled);
     private static readonly Regex _dimSplit     = new(@"[^a-z0-9]+",                                RegexOptions.Compiled);
     private static readonly Regex _orLength     = new(@"\bor\s+\d+[a-z""']*\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // Mixed number: "2-1/2" (whole-numerator/denominator). Must be handled before _dimFraction
+    // so the compound value 2.5 becomes a single token rather than splitting into "2" and "1/2",
+    // which would collapse "1/4 x 2 x 144" and "1/4 x 2-1/2 x 144" to identical numeric sets.
+    private static readonly Regex _mixedNumber  = new(@"(\d+)-(\d+)/(\d+)",                         RegexOptions.Compiled);
 
     private static readonly Regex _trailingZeroInch = new(@"(\d+)\s*'\s*0\s*""", RegexOptions.Compiled);
 
@@ -1767,6 +1771,17 @@ public class SharePointService
         s = _trailingZeroInch.Replace(s, "$1'");
         s = _orLength.Replace(s, "");
         s = Regex.Replace(s, @"\brandom\s+lengths?\b|\bmill\s+lengths?\b|\bfull\s+lengths?\b|\blengths?\b", "");
+        // Convert mixed numbers (e.g. "2-1/2") to their decimal value ("2.5") before the
+        // fraction regex runs, so they produce a distinct token from bare fractions.
+        s = _mixedNumber.Replace(s, m =>
+        {
+            if (decimal.TryParse(m.Groups[1].Value, out var whole)
+                && decimal.TryParse(m.Groups[2].Value, out var num)
+                && decimal.TryParse(m.Groups[3].Value, out var den)
+                && den != 0)
+                return (whole + num / den).ToString("G29");
+            return m.Value;
+        });
         s = _dimFraction.Replace(s, "$1f$2");
         s = _dimDecimal.Replace(s, "$1d$2");
         s = Regex.Replace(s, @"d(\d+)", m =>
