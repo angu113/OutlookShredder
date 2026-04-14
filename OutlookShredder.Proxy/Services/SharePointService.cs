@@ -4928,19 +4928,34 @@ public class SharePointService
             ct.ThrowIfCancellationRequested();
             string? quoteRef = null;
 
+            _log.LogInformation("[Backfill] Processing SR {Id} procSrc={ProcSrc} msg={MsgId}", srSpId, procSrc, messageId);
+
             try
             {
                 // Prefer attachment extraction (same source as original processing)
                 if (procSrc == "attachment")
                 {
-                    var attachments = await mail.GetAttachmentsAsync(mailbox, messageId);
+                    List<Attachment> attachments;
+                    try
+                    {
+                        attachments = await mail.GetAttachmentsAsync(mailbox, messageId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "[Backfill] SR {Id} — could not fetch attachments from Graph (msg={MsgId})", srSpId, messageId);
+                        skipped++;
+                        continue;
+                    }
+
                     var pdf = attachments
                         .OfType<FileAttachment>()
                         .FirstOrDefault(a =>
                             a.ContentType?.Contains("pdf", StringComparison.OrdinalIgnoreCase) == true
                             || a.Name?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true);
+
                     if (pdf?.ContentBytes is { } bytes)
                     {
+                        _log.LogInformation("[Backfill] SR {Id} — running Claude on PDF attachment '{Name}'", srSpId, pdf.Name);
                         var req = new ExtractRequest
                         {
                             Content     = string.Empty,
@@ -4952,27 +4967,41 @@ public class SharePointService
                         };
                         var result = await claude.ExtractAsync(req);
                         quoteRef = result?.QuoteReference;
+                        _log.LogInformation("[Backfill] SR {Id} — attachment extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
+                    }
+                    else
+                    {
+                        _log.LogInformation("[Backfill] SR {Id} — no PDF attachment found ({Count} attachment(s) total)", srSpId, attachments.Count);
                     }
                 }
 
                 // Fall back to body extraction
-                if (string.IsNullOrWhiteSpace(quoteRef) && !string.IsNullOrWhiteSpace(emailBody))
+                if (string.IsNullOrWhiteSpace(quoteRef))
                 {
-                    var req = new ExtractRequest { Content = emailBody, SourceType = "body" };
-                    var result = await claude.ExtractAsync(req);
-                    quoteRef = result?.QuoteReference;
+                    if (!string.IsNullOrWhiteSpace(emailBody))
+                    {
+                        _log.LogInformation("[Backfill] SR {Id} — running Claude on stored email body ({Len} chars)", srSpId, emailBody!.Length);
+                        var req = new ExtractRequest { Content = emailBody, SourceType = "body" };
+                        var result = await claude.ExtractAsync(req);
+                        quoteRef = result?.QuoteReference;
+                        _log.LogInformation("[Backfill] SR {Id} — body extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
+                    }
+                    else
+                    {
+                        _log.LogInformation("[Backfill] SR {Id} — no email body stored, nothing to extract", srSpId);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "[Backfill] Extraction failed for SR {Id} (msg={MsgId})", srSpId, messageId);
+                _log.LogWarning(ex, "[Backfill] SR {Id} — extraction threw unexpectedly (msg={MsgId})", srSpId, messageId);
                 skipped++;
                 continue;
             }
 
             if (string.IsNullOrWhiteSpace(quoteRef))
             {
-                _log.LogDebug("[Backfill] No QuoteReference found for SR {Id}", srSpId);
+                _log.LogInformation("[Backfill] SR {Id} — skipped (no QuoteReference extracted)", srSpId);
                 skipped++;
                 continue;
             }
