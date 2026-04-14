@@ -801,6 +801,20 @@ public class MailPollerService : BackgroundService
             {
                 _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
                 products = ProductDeduplicator.Deduplicate(products, source, dedupDryRun, _log);
+
+                // Warn for each product Claude couldn't anchor to an RLI item despite context being available.
+                if (req.RliItems.Count > 0)
+                {
+                    foreach (var p in products.Where(p => string.IsNullOrEmpty(p.ProductSearchKey)))
+                        _log.LogWarning(
+                            "[Mail] RLI unmatched: Claude returned no productSearchKey for '{Name}' " +
+                            "despite {Count} RLI item(s) — will fall back to fuzzy match. " +
+                            "RLI=[{Rli}]",
+                            p.ProductName,
+                            req.RliItems.Count,
+                            string.Join(" | ", req.RliItems.Select(r =>
+                                $"{r.Mspc ?? "(no mspc)"}={r.ProductName}")));
+                }
             }
 
             // Write product rows sequentially so they all share one SupplierResponse row.

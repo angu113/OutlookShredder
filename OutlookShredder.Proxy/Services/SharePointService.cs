@@ -1325,6 +1325,13 @@ public class SharePointService
                 ?? string.Empty).ToUpperInvariant();
             var jobRef = string.IsNullOrEmpty(rawJobRef) ? "000000" : rawJobRef;
 
+            if (jobRef == "000000")
+                _log.LogWarning(
+                    "[SP] No job reference resolved — writing under [000000]. " +
+                    "Subject='{Subject}'  From='{From}'  RawRef='{RawRef}'",
+                    emailMeta.EmailSubject, emailMeta.EmailFrom,
+                    string.IsNullOrEmpty(rawJobRef) ? "(none)" : rawJobRef);
+
             // ── Resolve supplier name ────────────────────────────────────────
             var rawSupplier = header.SupplierName;
             if (string.IsNullOrWhiteSpace(rawSupplier) && !string.IsNullOrWhiteSpace(emailMeta.EmailFrom))
@@ -1345,7 +1352,10 @@ public class SharePointService
                 result.SupplierUnknown = true;
                 supplier = "Unknown";
                 jobRef   = "WHOIS";
-                _log.LogInformation("[SP] Supplier '{Raw}' not in reference list — writing under [WHOIS]", rawSupplier);
+                _log.LogWarning(
+                    "[SP] Supplier '{Raw}' not in reference list — writing under [WHOIS]. " +
+                    "Subject='{Subject}'  From='{From}'",
+                    rawSupplier, emailMeta.EmailSubject, emailMeta.EmailFrom);
             }
 
             result.SupplierName = supplier;
@@ -1646,17 +1656,23 @@ public class SharePointService
         string? catalogProductName;
         if (!string.IsNullOrEmpty(product.ProductSearchKey))
         {
-            productSearchKey  = product.ProductSearchKey;
-            var byKey         = _catalog.FindBySearchKey(product.ProductSearchKey);
+            productSearchKey   = product.ProductSearchKey;
+            var byKey          = _catalog.FindBySearchKey(product.ProductSearchKey);
             catalogProductName = byKey?.Name;
-            _log.LogDebug("[SP] RLI-anchored MSPC '{Key}' for '{Name}' → catalog='{Catalog}'",
-                productSearchKey, prodName, catalogProductName ?? "(not in catalog)");
+            _log.LogInformation(
+                "[SP] RLI-anchored: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} catalog='{Catalog}'",
+                jobRef, supplier, prodName, productSearchKey, catalogProductName ?? "(not in catalog)");
         }
         else
         {
             var catalogMatch   = _catalog.ResolveProduct(prodName);
             productSearchKey   = catalogMatch?.SearchKey;
             catalogProductName = catalogMatch?.Name;
+
+            if (productSearchKey is null)
+                _log.LogWarning(
+                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' — ProductSearchKey will be null",
+                    jobRef, supplier, prodName);
         }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";
