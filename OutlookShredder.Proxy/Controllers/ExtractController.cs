@@ -1602,6 +1602,37 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/mail/backfill-quote-references ─────────────────────────────
+    /// <summary>
+    /// Scans SupplierResponse rows (last <paramref name="days"/> days) that have a
+    /// MessageId but no QuoteReference.  Re-runs Claude extraction on the original
+    /// email/attachment and patches QuoteReference onto each SR and its child SLIs.
+    /// </summary>
+    [HttpPost("mail/backfill-quote-references")]
+    public async Task<IActionResult> BackfillQuoteReferences(
+        [FromQuery] int days = 90,
+        CancellationToken ct = default)
+    {
+        var mailbox = _config["Mail:MailboxAddress"];
+        if (string.IsNullOrWhiteSpace(mailbox))
+            return BadRequest(new { error = "Mail:MailboxAddress not configured" });
+        try
+        {
+            var (patched, skipped) = await _sp.BackfillQuoteReferencesAsync(_mail, _claude, mailbox, days, ct);
+            _log.LogInformation("[BackfillQuoteRefs] patched={Patched} skipped={Skipped}", patched, skipped);
+            return Ok(new { patched, skipped });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Cancelled" });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "BackfillQuoteReferences failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── POST /api/mail/deduplicate ────────────────────────────────────────────
     /// <summary>
     /// Removes orphan SupplierResponse rows (no MessageId) and collapses duplicate rows

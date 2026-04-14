@@ -4875,6 +4875,151 @@ public class SharePointService
         return (patched, skipped);
     }
 
+    // ── QuoteReference backfill ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans SupplierResponse rows that have a MessageId but no QuoteReference,
+    /// re-runs Claude extraction on the original email/attachment, and patches
+    /// QuoteReference onto the SR and all its child SLI rows.
+    /// </summary>
+    public async Task<(int Patched, int Skipped)> BackfillQuoteReferencesAsync(
+        MailService mail, ClaudeService claude, string mailbox,
+        int days = 90, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var cutoff    = DateTimeOffset.UtcNow.AddDays(-days);
+
+        // Load SR rows that have a MessageId but no QuoteReference
+        var candidates = new List<(string SpId, string MessageId, string ProcSrc, string? EmailBody)>();
+        string? nextLink = null;
+        do
+        {
+            var page = nextLink is null
+                ? await GetGraph().Sites[siteId].Lists[srListId].Items.GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=id,MessageId,ReceivedAt,QuoteReference,ProcessingSource,EmailBody)"];
+                    req.QueryParameters.Top    = 500;
+                })
+                : await GetGraph().Sites[siteId].Lists[srListId].Items.WithUrl(nextLink).GetAsync();
+
+            foreach (var item in page?.Value ?? [])
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var msgId  = GetStr(d, "MessageId");
+                var qRef   = GetStr(d, "QuoteReference");
+                var recStr = GetStr(d, "ReceivedAt");
+                if (string.IsNullOrWhiteSpace(msgId)) continue;
+                if (!string.IsNullOrWhiteSpace(qRef)) continue;
+                if (DateTimeOffset.TryParse(recStr, out var rec) && rec < cutoff) continue;
+                var procSrc = GetStr(d, "ProcessingSource") ?? "body";
+                var body    = GetStr(d, "EmailBody");
+                candidates.Add((item.Id, msgId, procSrc, body));
+            }
+            nextLink = page?.OdataNextLink;
+        } while (nextLink is not null);
+
+        _log.LogInformation("[Backfill] {Count} SR row(s) missing QuoteReference (last {Days} days)", candidates.Count, days);
+        int patched = 0, skipped = 0;
+
+        foreach (var (srSpId, messageId, procSrc, emailBody) in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            string? quoteRef = null;
+
+            try
+            {
+                // Prefer attachment extraction (same source as original processing)
+                if (procSrc == "attachment")
+                {
+                    var attachments = await mail.GetAttachmentsAsync(mailbox, messageId);
+                    var pdf = attachments
+                        .OfType<FileAttachment>()
+                        .FirstOrDefault(a =>
+                            a.ContentType?.Contains("pdf", StringComparison.OrdinalIgnoreCase) == true
+                            || a.Name?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true);
+                    if (pdf?.ContentBytes is { } bytes)
+                    {
+                        var req = new ExtractRequest
+                        {
+                            Content     = string.Empty,
+                            SourceType  = "attachment",
+                            FileName    = pdf.Name,
+                            Base64Data  = Convert.ToBase64String(bytes),
+                            ContentType = pdf.ContentType ?? "application/pdf",
+                            BodyContext = emailBody,
+                        };
+                        var result = await claude.ExtractAsync(req);
+                        quoteRef = result?.QuoteReference;
+                    }
+                }
+
+                // Fall back to body extraction
+                if (string.IsNullOrWhiteSpace(quoteRef) && !string.IsNullOrWhiteSpace(emailBody))
+                {
+                    var req = new ExtractRequest { Content = emailBody, SourceType = "body" };
+                    var result = await claude.ExtractAsync(req);
+                    quoteRef = result?.QuoteReference;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Backfill] Extraction failed for SR {Id} (msg={MsgId})", srSpId, messageId);
+                skipped++;
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(quoteRef))
+            {
+                _log.LogDebug("[Backfill] No QuoteReference found for SR {Id}", srSpId);
+                skipped++;
+                continue;
+            }
+
+            // Patch the SR
+            await GetGraph().Sites[siteId].Lists[srListId].Items[srSpId].Fields
+                .PatchAsync(new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?> { ["QuoteReference"] = quoteRef }
+                });
+
+            // Patch all linked SLI rows
+            string? sliNext = null;
+            do
+            {
+                var sliPage = sliNext is null
+                    ? await GetGraph().Sites[siteId].Lists[sliListId].Items.GetAsync(req =>
+                    {
+                        req.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,QuoteReference)"];
+                        req.QueryParameters.Top    = 500;
+                    })
+                    : await GetGraph().Sites[siteId].Lists[sliListId].Items.WithUrl(sliNext).GetAsync();
+
+                foreach (var sliItem in sliPage?.Value ?? [])
+                {
+                    if (sliItem.Id is null || sliItem.Fields?.AdditionalData is not { } sd) continue;
+                    var srId = GetStr(sd, "SupplierResponseId");
+                    if (!string.Equals(srId, srSpId, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.IsNullOrWhiteSpace(GetStr(sd, "QuoteReference"))) continue;
+
+                    await GetGraph().Sites[siteId].Lists[sliListId].Items[sliItem.Id].Fields
+                        .PatchAsync(new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?> { ["QuoteReference"] = quoteRef }
+                        });
+                }
+                sliNext = sliPage?.OdataNextLink;
+            } while (sliNext is not null);
+
+            patched++;
+            _log.LogInformation("[Backfill] Patched QuoteReference '{Ref}' on SR {Id}", quoteRef, srSpId);
+        }
+
+        _log.LogInformation("[Backfill] QuoteReference backfill complete — patched={Patched}, skipped={Skipped}", patched, skipped);
+        return (patched, skipped);
+    }
+
     // ── Deduplication ────────────────────────────────────────────────────────
 
     /// <summary>
