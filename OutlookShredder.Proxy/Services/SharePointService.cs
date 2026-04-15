@@ -1347,6 +1347,46 @@ public class SharePointService
             }
             rawSupplier ??= string.Empty;
             var supplier = _suppliers.ResolveSupplierName(rawSupplier);
+
+            // Strategy 3: exact email-domain lookup against ContactEmail in Suppliers list.
+            // Runs when Jaccard + containment both fail.
+            //
+            // Because all supplier emails arrive as Outlook-rule forwards from an internal
+            // staff address (Hackensack@ / Jmalhi@), emailMeta.EmailFrom is always an
+            // internal domain that will never be in DomainMap.  We therefore:
+            //   (a) first try to parse the *original* sender's email from the forwarded body
+            //       (Outlook embeds "From: name <email>" in the body of every forwarded email),
+            //   (b) fall back to emailMeta.EmailFrom for direct (non-forwarded) supplier emails.
+            //
+            // Internal domains that are not in DomainMap simply fall through to WHOIS.
+            if (supplier is null)
+            {
+                var resolveEmail = TryExtractForwardedSenderEmail(
+                                       emailMeta.EmailBody ?? emailMeta.BodyContext)
+                                   ?? emailMeta.EmailFrom;
+
+                if (!string.IsNullOrWhiteSpace(resolveEmail))
+                {
+                    var atIdx        = resolveEmail.IndexOf('@');
+                    var senderDomain = atIdx >= 0
+                        ? resolveEmail[(atIdx + 1)..].ToLowerInvariant()
+                        : null;
+
+                    if (senderDomain is not null &&
+                        _suppliers.DomainMap.TryGetValue(senderDomain, out var domainMatch))
+                    {
+                        supplier = domainMatch;
+                        var source3 = resolveEmail == emailMeta.EmailFrom
+                            ? "direct sender domain"
+                            : "forwarded-body sender domain";
+                        _log.LogInformation(
+                            "[SP] Supplier resolved by {Source} '{Domain}' -> '{Supplier}' " +
+                            "(name match failed for '{Raw}'). Subject='{Subject}'",
+                            source3, senderDomain, supplier, rawSupplier, emailMeta.EmailSubject);
+                    }
+                }
+            }
+
             if (supplier is null)
             {
                 result.SupplierUnknown = true;
@@ -1899,6 +1939,30 @@ public class SharePointService
     private static bool HasRegretPhrase(string? text) =>
         text is not null &&
         _regretPhrases.Any(p => text.Contains(p, StringComparison.OrdinalIgnoreCase));
+
+    // ── Forwarded-email original-sender extraction ───────────────────────────
+
+    // Matches the "From:" line inside a forwarded message block.
+    // Handles both plain-text and HTML-stripped formats, e.g.:
+    //   From: Robert Smith <robert@pennstainless.com>
+    //   From: robert@pennstainless.com
+    //   From: "Penn Stainless" <quotes@pennstainless.com>
+    // Anchored so it only fires after a line-start (not mid-sentence).
+    private static readonly Regex _forwardedFromRegex = new(
+        @"(?:^|[\r\n])\s*From:\s*(?:[^\r\n<@]*<)?\s*([a-zA-Z0-9.+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Scans <paramref name="body"/> for the original sender's email address embedded
+    /// by Outlook when it forwards a message (the "From: ..." line in the forwarded block).
+    /// Returns the first email address found, or <see langword="null"/> if none is present.
+    /// </summary>
+    private static string? TryExtractForwardedSenderEmail(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        var m = _forwardedFromRegex.Match(body);
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
 
     // ── OData helpers ────────────────────────────────────────────────────────
 
