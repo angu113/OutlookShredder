@@ -471,8 +471,9 @@ public class OutlookComPollerService : BackgroundService
 
         // olFolderSentMail = 5
         dynamic sentItems = store.GetDefaultFolder(5);
-        var result   = new List<OutlookPoMessage>();
-        var cutoff   = DateTime.Now.AddDays(-lookbackDays);
+        var result      = new List<OutlookPoMessage>();
+        var cutoff      = DateTime.Now.AddDays(-lookbackDays);
+        var seenRecent  = new List<string>();   // for diagnostic logging
 
         foreach (dynamic item in sentItems.Items)
         {
@@ -487,6 +488,10 @@ public class OutlookComPollerService : BackgroundService
 
                 string subject = item.Subject ?? "";
                 var cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
+
+                // Collect a sample of recent subjects for diagnostic logging
+                if (seenRecent.Count < 10) seenRecent.Add(subject);
+
                 if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -542,6 +547,11 @@ public class OutlookComPollerService : BackgroundService
                 _log.LogWarning(ex, "[OutlookCOM] Error reading Outlook item — skipping");
             }
         }
+
+        // Log a sample of recent subjects when no matches found, to help diagnose subject format mismatches
+        if (result.Count == 0 && seenRecent.Count > 0)
+            _log.LogInformation("[OutlookCOM] No PO matches in last {Days}d. Recent Sent Items subjects (up to 10): {Subjects}",
+                lookbackDays, string.Join(" | ", seenRecent));
 
         return result;
     }
