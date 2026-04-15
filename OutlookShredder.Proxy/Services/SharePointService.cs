@@ -4786,7 +4786,7 @@ public class SharePointService
     /// Skips RLIs whose parent RFQ Reference is already Complete.
     /// After patching, runs a completion check on each affected RFQ.
     /// </summary>
-    public async Task MatchAndMarkRliByMspcAsync(
+    public async Task<HashSet<string>> MatchAndMarkRliByMspcAsync(
         string supplierName, string? poNumber, List<PoLineItem> poLineItems)
     {
         // Only valid MSPC codes contain a forward slash (e.g. ASH3003/040).
@@ -4799,7 +4799,7 @@ public class SharePointService
         if (mspcSet.Count == 0)
         {
             _log.LogInformation("[PO] No valid MSPC codes (containing '/') — skipping RLI MSPC match for {Supplier}", supplierName);
-            return;
+            return [];
         }
 
         var siteId = await GetSiteIdAsync();
@@ -4854,7 +4854,7 @@ public class SharePointService
         {
             _log.LogInformation("[PO] No matching RLI items found for MSPCs [{Mspc}]",
                 string.Join(", ", mspcSet));
-            return;
+            return [];
         }
 
         if (candidates.Count == 0)
@@ -4973,6 +4973,8 @@ public class SharePointService
 
         foreach (var rfqId in affectedRfqIds)
             await CheckRliAllPurchasedAsync(siteId, rfqId);
+
+        return affectedRfqIds;
     }
 
     /// <summary>

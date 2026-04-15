@@ -699,7 +699,12 @@ public class MailPollerService : BackgroundService
             if (!string.IsNullOrWhiteSpace(rfqId))
                 await _sp.UpdateRliPurchaseStatusAsync(rfqId, supplierName, poSpItemId, extraction.LineItems, extraction.PoNumber);
             else
-                await _sp.MatchAndMarkRliByMspcAsync(supplierName, extraction.PoNumber, extraction.LineItems);
+            {
+                var matched = await _sp.MatchAndMarkRliByMspcAsync(supplierName, extraction.PoNumber, extraction.LineItems);
+                // If MSPC matching found the RFQ, use it so the UI notification carries a real ID.
+                if (rfqId is null && matched.Count > 0)
+                    rfqId = matched.First();
+            }
         }
 
         var notification = new Models.RfqProcessedNotification
