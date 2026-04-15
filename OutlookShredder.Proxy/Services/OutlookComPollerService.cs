@@ -96,7 +96,7 @@ public class OutlookComPollerService : BackgroundService
         catch (COMException ex) when (ex.HResult == unchecked((int)0x800401E3))
         {
             // MK_E_UNAVAILABLE — Outlook is not running
-            _log.LogDebug("[OutlookCOM] Outlook not running — skipping poll");
+            _log.LogWarning("[OutlookCOM] Outlook not running — PO emails cannot be processed until Outlook is open");
             return;
         }
         catch (Exception ex)
