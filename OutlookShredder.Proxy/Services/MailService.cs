@@ -427,6 +427,8 @@ public class MailService
 
     /// <summary>
     /// Returns all attachments for a message. Caller should filter by ContentType.
+    /// For large attachments (>~3 MB) the list endpoint returns null ContentBytes;
+    /// those are fetched individually by ID so the bytes are always populated.
     /// </summary>
     public async Task<List<Attachment>> GetAttachmentsAsync(string mailbox, string messageId)
     {
@@ -436,7 +438,32 @@ public class MailService
             .Attachments
             .GetAsync();
 
-        return result?.Value ?? [];
+        var items = result?.Value ?? [];
+
+        // Fetch individual attachments whose ContentBytes are missing (large-file case).
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i] is FileAttachment fa && fa.ContentBytes is null && fa.Id is not null)
+            {
+                try
+                {
+                    var full = await GetGraph()
+                        .Users[mailbox]
+                        .Messages[messageId]
+                        .Attachments[fa.Id]
+                        .GetAsync() as FileAttachment;
+
+                    if (full is not null)
+                        items[i] = full;
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Mail] Could not fetch attachment {Id} by ID — ContentBytes will be null", fa.Id);
+                }
+            }
+        }
+
+        return items;
     }
 
     /// <summary>

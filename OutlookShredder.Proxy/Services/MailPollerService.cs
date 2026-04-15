@@ -32,6 +32,12 @@ public class MailPollerService : BackgroundService
     private static readonly Regex JobRefRegex =
         new(@"\[([A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Fallback: bare 6-char alphanumeric ID appearing after "RFQ" or "Job" (no brackets).
+    // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
+    private static readonly Regex JobRefBareRegex =
+        new(@"\bRFQ\s+([A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*([A-Z0-9]{6})\b",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     // Subject prefixes to strip before PO detection (RE:, FW:, [EXTERNAL], etc.)
     private static readonly Regex SubjectPrefixRegex =
         new(@"^(\s*(RE|FW|FWD)\s*:\s*|\s*\[.*?\]\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -463,10 +469,24 @@ public class MailPollerService : BackgroundService
         }
         var body = rawBody.Trim();
 
-        var jobRefs = JobRefRegex.Matches(subject + " " + body)
+        var searchText = subject + " " + body;
+        var jobRefs = JobRefRegex.Matches(searchText)
             .Select(m => m.Groups[1].Value.ToUpperInvariant())
             .Distinct()
             .ToList();
+
+        // Fallback: supplier replies sometimes strip the brackets. Try the bare-ID pattern
+        // (e.g. "RFQ M5S4OR" or "Job Ref: M5S4OR") when the bracketed form isn't found.
+        if (jobRefs.Count == 0)
+        {
+            jobRefs = JobRefBareRegex.Matches(searchText)
+                .Select(m => (m.Groups[1].Success ? m.Groups[1] : m.Groups[2]).Value.ToUpperInvariant())
+                .Distinct()
+                .ToList();
+            if (jobRefs.Count > 0)
+                _log.LogInformation("[Mail] Job ref found via bare pattern (no brackets): [{Refs}] in \"{Subject}\"",
+                    string.Join(", ", jobRefs), subject);
+        }
 
         // Decide whether to call Claude.
         // Claude is always used when a job reference is present or there is an attachment
