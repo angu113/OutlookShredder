@@ -16,13 +16,13 @@ public class UpdateController : ControllerBase
         _log = log;
     }
 
-    // GET /api/update/version  →  { "version": "2026.158" }
+    // GET /api/update/version?channel=dev|prod  →  { "version": "2026.158.dev" }
     [HttpGet("version")]
-    public async Task<ActionResult> GetVersion()
+    public async Task<ActionResult> GetVersion([FromQuery] string? channel = null)
     {
         try
         {
-            var version = await _sp.GetPublishVersionAsync();
+            var version = await _sp.GetPublishVersionAsync(channel);
             return Ok(new { version });
         }
         catch (Exception ex)
@@ -32,17 +32,17 @@ public class UpdateController : ControllerBase
         }
     }
 
-    // GET /api/update/package  →  streams a ZIP of the publish/current folder
+    // GET /api/update/package?channel=dev|prod  →  streams a ZIP of the publish folder
     [HttpGet("package")]
-    public async Task GetPackage()
+    public async Task GetPackage([FromQuery] string? channel = null)
     {
-        _log.LogInformation("[Update] Package download started");
+        _log.LogInformation("[Update] Package download started (channel={Channel})", channel ?? "prod");
         Response.ContentType = "application/zip";
         Response.Headers.ContentDisposition = "attachment; filename=\"ShredderUpdate.zip\"";
 
         try
         {
-            await _sp.WritePublishPackageZipAsync(Response.Body);
+            await _sp.WritePublishPackageZipAsync(Response.Body, channel);
             _log.LogInformation("[Update] Package download complete");
         }
         catch (Exception ex)

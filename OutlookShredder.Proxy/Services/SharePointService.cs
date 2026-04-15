@@ -2964,11 +2964,18 @@ public class SharePointService
         return (_publishSiteId, _publishDriveId);
     }
 
+    /// <summary>Returns the SharePoint folder path for the given channel.</summary>
+    private string ResolvePublishFolder(string? channel) =>
+        string.Equals(channel, "dev", StringComparison.OrdinalIgnoreCase)
+            ? "publish/dev"
+            : (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+
     /// <summary>Reads version.txt from the configured SharePoint publish folder via Graph.</summary>
-    public async Task<string> GetPublishVersionAsync()
+    /// <param name="channel">"dev" → publish/dev; anything else → publish/current (or Publish:FolderPath config).</param>
+    public async Task<string> GetPublishVersionAsync(string? channel = null)
     {
         var (_, driveId) = await GetPublishDriveAsync();
-        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+        var folderPath   = ResolvePublishFolder(channel);
         // Graph SDK v5: Drives[id].Items["root:/path/to/file:"].Content
         var itemKey = $"root:/{folderPath}/version.txt:";
 
@@ -2984,7 +2991,7 @@ public class SharePointService
     /// Returns (contentType, bytes, fileName).
     /// Throws if the file is not found or the name is not a simple filename (no path traversal).
     /// </summary>
-    public async Task<(string ContentType, byte[] Bytes, string FileName)> GetPublishFileAsync(string fileName)
+    public async Task<(string ContentType, byte[] Bytes, string FileName)> GetPublishFileAsync(string fileName, string? channel = null)
     {
         // Guard against path traversal
         if (string.IsNullOrWhiteSpace(fileName) ||
@@ -2993,7 +3000,7 @@ public class SharePointService
             throw new ArgumentException($"Invalid file name: '{fileName}'");
 
         var (_, driveId) = await GetPublishDriveAsync();
-        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+        var folderPath   = ResolvePublishFolder(channel);
         var itemKey      = $"root:/{folderPath}/{fileName}:";
 
         using var stream = await GetGraph().Drives[driveId].Items[itemKey].Content.GetAsync();
@@ -3024,10 +3031,10 @@ public class SharePointService
     /// Writes to a temp file first so the central directory is fully finalised
     /// before any bytes reach the response stream.
     /// </summary>
-    public async Task WritePublishPackageZipAsync(Stream destination)
+    public async Task WritePublishPackageZipAsync(Stream destination, string? channel = null)
     {
         var (_, driveId) = await GetPublishDriveAsync();
-        var folderPath   = (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
+        var folderPath   = ResolvePublishFolder(channel);
 
         var tempPath = Path.Combine(Path.GetTempPath(), $"ShredderPackage_{Guid.NewGuid():N}.zip");
         try
