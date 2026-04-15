@@ -319,6 +319,29 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/rfq-references/flagged ────────────────────────────────────
+    /// <summary>
+    /// Sets the Flagged boolean on a single RFQ Reference.
+    /// </summary>
+    [HttpPatch("rfq-references/flagged")]
+    public async Task<IActionResult> SetRfqFlagged(
+        [FromQuery] string rfqId,
+        [FromQuery] bool   flagged)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId query param is required" });
+        try
+        {
+            await _sp.SetRfqFlaggedAsync(rfqId, flagged);
+            return Ok(new { updated = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to set Flagged for RFQ '{Id}'", rfqId);
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
     // ── GET /api/mail/body ────────────────────────────────────────────────────
     /// <summary>
     /// Returns the plain-text body and subject of the email identified by sender address

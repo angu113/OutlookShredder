@@ -663,7 +663,7 @@ public class SharePointService
         var result = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged)"];
                 req.QueryParameters.Top    = 500;
             });
 
@@ -688,6 +688,7 @@ public class SharePointService
                     ["Created"]          = i.CreatedDateTime?.UtcDateTime.ToString("o"),
                     ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
                     ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
+                    ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
                 };
             })
             .Where(d => d["RFQ_ID"] is not null)
@@ -826,6 +827,42 @@ public class SharePointService
                 AdditionalData = new Dictionary<string, object?> { ["Complete"] = complete }
             });
         _log.LogInformation("[SP] Set Complete={Complete} for RFQ '{Id}'", complete, rfqId);
+    }
+
+    // ── Write: update Flagged flag on an RFQ Reference ───────────────────────
+
+    public async Task SetRfqFlaggedAsync(string rfqId, bool flagged)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
+                req.QueryParameters.Top    = 500;
+            });
+
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            rfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            _log.LogWarning("[SP] SetRfqFlaggedAsync: RFQ Reference '{Id}' not found", rfqId);
+            return;
+        }
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[matches[0].Id!].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Flagged"] = flagged }
+            });
+        _log.LogInformation("[SP] Set Flagged={Flagged} for RFQ '{Id}'", flagged, rfqId);
     }
 
     /// <summary>
