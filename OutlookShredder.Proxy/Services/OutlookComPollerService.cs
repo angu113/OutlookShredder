@@ -548,10 +548,18 @@ public class OutlookComPollerService : BackgroundService
             }
         }
 
-        // Log a sample of recent subjects when no matches found, to help diagnose subject format mismatches
-        if (result.Count == 0 && seenRecent.Count > 0)
-            _log.LogInformation("[OutlookCOM] No PO matches in last {Days}d. Recent Sent Items subjects (up to 10): {Subjects}",
-                lookbackDays, string.Join(" | ", seenRecent));
+        // Always log poll result so we can see whether Sent Items has content at all
+        if (result.Count == 0)
+        {
+            if (seenRecent.Count > 0)
+                _log.LogInformation(
+                    "[OutlookCOM] No PO matches in last {Days}d ({Total} recent sent items seen). Subjects (up to 10): {Subjects}",
+                    lookbackDays, seenRecent.Count, string.Join(" | ", seenRecent));
+            else
+                _log.LogInformation(
+                    "[OutlookCOM] No sent items in {Mailbox} in last {Days}d — Sent Items appears empty",
+                    mailbox, lookbackDays);
+        }
 
         return result;
     }
