@@ -73,16 +73,25 @@ try
 
     // ── AI Provider Registration ──────────────────────────────────────────
     // Register all available AI providers (Claude, OpenAI, Google AI).
-    // The factory will resolve providers by name, with Claude as the default.
+    // Configuration from appsettings.json:AiProviders section:
+    //   - DefaultProvider: which provider to use by default (e.g., "claude")
+    //   - FallbackProvider: which provider to use if the default fails (e.g., "google")
+    // To disable a provider, omit its configuration or leave ApiKey empty.
     // Configuration keys for each provider:
     //   - Claude:  No config needed (uses existing behavior)
     //   - OpenAI:  Requires OpenAi:ApiKey, optional OpenAi:Model, OpenAi:MaxRetries, OpenAi:TimeoutSeconds
     //   - Google:  Requires Google:ApiKey, optional Google:Model, Google:MaxRetries, Google:TimeoutSeconds
+
     builder.Services.AddClaudeAiProvider();
     builder.Services.AddOpenAiProvider();
     builder.Services.AddGoogleAiProvider();
 
-    // Register the multi-provider factory
+    // Read provider configuration from appsettings
+    var aiProviderConfig = builder.Configuration.GetSection("AiProviders");
+    var defaultProvider = aiProviderConfig["DefaultProvider"] ?? "claude";
+    var fallbackProvider = aiProviderConfig["FallbackProvider"];
+
+    // Register the multi-provider factory with configuration-driven defaults
     builder.Services.AddAiProviderFactory(options =>
     {
         options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));
@@ -90,17 +99,10 @@ try
         options.RegisterProvider("openai", typeof(OpenAiProvider));
         options.RegisterProvider("gemini", typeof(GoogleAiProvider));
         options.RegisterProvider("google", typeof(GoogleAiProvider));
-        options.SetDefaultProvider("claude"); // Claude is the default
+        options.SetDefaultProvider(defaultProvider);
+        if (!string.IsNullOrEmpty(fallbackProvider))
+            options.SetFallbackProvider(fallbackProvider);
     });
-
-    // Example: To use a different default provider, uncomment below:
-    // builder.Services.AddAiProviderFactory(options =>
-    // {
-    //     options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));
-    //     options.RegisterProvider("gpt4", typeof(OpenAiProvider));
-    //     options.RegisterProvider("gemini", typeof(GoogleAiProvider));
-    //     options.SetDefaultProvider("gpt4"); // Use GPT-4 as default instead
-    // });
 
     builder.Services.AddSingleton<SupplierCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());

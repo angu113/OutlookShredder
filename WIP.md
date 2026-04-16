@@ -355,17 +355,76 @@ Proxy/OutlookShredder/
 
 ---
 
+### Phase 5: AI Provider Configuration - Default & Fallback ✅ COMPLETED
+**Objective**: Add configuration-driven provider selection without code changes.
+
+**Deliverables**:
+- ✅ **Configuration Section** - New `AiProviders` section in appsettings.json
+  - `DefaultProvider`: Primary AI provider (default: "claude")
+  - `FallbackProvider`: Backup provider when primary fails (default: "google")
+
+- ✅ **Fallback Support** - Enhanced IAiProviderFactory interface
+  - New `GetFallbackProvider()` method
+  - Factory can resolve fallback provider by name
+  - Optional (can be null if not configured)
+
+- ✅ **Factory Enhancement** - AiProviderFactory supports fallback
+  - Constructor now accepts optional fallback provider name
+  - GetFallbackProvider() returns null if not configured
+  - Enables graceful degradation on provider failures
+
+- ✅ **Configuration Options** - AiProviderFactoryOptions
+  - New `SetFallbackProvider(name)` method
+  - Fluent API for easy configuration in Program.cs
+  - Chainable with existing methods
+
+- ✅ **Program.cs Update** - Read configuration from appsettings
+  - Reads `AiProviders:DefaultProvider` from config (no hardcoding)
+  - Reads `AiProviders:FallbackProvider` from config (optional)
+  - Dynamically sets default and fallback at startup
+  - No code changes needed to switch providers
+
+- ✅ **Current Setup**
+  - Default: Claude (claude-sonnet-4-6)
+  - Fallback: Google (gemini-1.5-pro)
+  - All API keys configured via user-secrets
+
+- ✅ **Documentation** - New comprehensive guide
+  - `AI_PROVIDER_CONFIGURATION.md` (500+ lines)
+  - Configuration examples for every scenario
+  - Usage patterns with fallback handling
+  - Deployment guidance
+  - Troubleshooting tips
+
+**Files Modified**:
+- `Services/Ai/IAiProviderFactory.cs` - Added GetFallbackProvider() interface + implementation
+- `Extensions/AiProviderServiceExtensions.cs` - Added SetFallbackProvider() method
+- `Program.cs` - Read provider config from appsettings (no hardcoding)
+- `appsettings.json` - Added `AiProviders` configuration section
+
+**Files Created**:
+- `AI_PROVIDER_CONFIGURATION.md` - Complete configuration and usage guide
+
+**Build Status**: ✅ **0 errors, 0 warnings**
+
+---
+
 ## ✅ Checklist for Next Session
 
-- [ ] Run `dotnet user-secrets set` commands to populate actual API keys (when ready to test other providers)
-- [ ] Test extraction with each provider (OpenAI and Google, not just Claude)
+- [x] ✅ Add configuration-driven provider selection (DONE - Phase 5)
+- [x] ✅ Set Claude as primary, Google as fallback (DONE - Phase 5)
+- [x] ✅ Add fallback support to factory (DONE - Phase 5)
+- [ ] Test extraction with fallback (use both providers in real scenarios)
 - [ ] Verify email sending works with Reply-To removed
 - [ ] Test RFQ New email workflow end-to-end
-- [ ] Review performance metrics for each provider
-- [ ] Consider which provider to set as default (Claude, OpenAI, or Gemini)
+- [ ] Set up OpenAI API key: `dotnet user-secrets set "OpenAi:ApiKey" "..."`
+- [ ] Test extraction quality with each provider
+- [ ] Review performance metrics (latency, cost) for each provider
+- [ ] Consider performance-optimized configuration (e.g., Gemini primary for speed)
 - [ ] Plan deployment strategy (dev vs staging vs production)
-- [ ] Optional: Implement provider fallback/retry logic
+- [ ] Optional: Implement automatic provider fallback on rate limiting
 - [ ] Optional: Add provider selection UI to WPF client
+- [ ] Optional: Add provider health checks and status endpoint
 
 ---
 

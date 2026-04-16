@@ -19,6 +19,11 @@ public interface IAiProviderFactory
     IAiProvider GetDefaultProvider();
 
     /// <summary>
+    /// Gets the fallback AI provider (used when the default provider fails).
+    /// </summary>
+    IAiProvider? GetFallbackProvider();
+
+    /// <summary>
     /// Gets all registered provider names.
     /// </summary>
     IEnumerable<string> GetAvailableProviders();
@@ -32,12 +37,18 @@ public class AiProviderFactory : IAiProviderFactory
     private readonly IServiceProvider _serviceProvider;
     private readonly Dictionary<string, Type> _providers;
     private readonly string _defaultProviderName;
+    private readonly string? _fallbackProviderName;
 
-    public AiProviderFactory(IServiceProvider serviceProvider, Dictionary<string, Type> providers, string defaultProviderName)
+    public AiProviderFactory(
+        IServiceProvider serviceProvider,
+        Dictionary<string, Type> providers,
+        string defaultProviderName,
+        string? fallbackProviderName = null)
     {
         _serviceProvider = serviceProvider;
         _providers = providers;
         _defaultProviderName = defaultProviderName;
+        _fallbackProviderName = fallbackProviderName;
     }
 
     public IAiProvider? GetProvider(string name)
@@ -56,6 +67,14 @@ public class AiProviderFactory : IAiProviderFactory
                 $"Default AI provider '{_defaultProviderName}' is not registered. " +
                 $"Available providers: {string.Join(", ", _providers.Keys)}");
         return provider;
+    }
+
+    public IAiProvider? GetFallbackProvider()
+    {
+        if (string.IsNullOrEmpty(_fallbackProviderName))
+            return null;
+
+        return GetProvider(_fallbackProviderName);
     }
 
     public IEnumerable<string> GetAvailableProviders() => _providers.Keys;

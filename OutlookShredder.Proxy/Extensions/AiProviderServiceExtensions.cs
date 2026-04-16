@@ -69,7 +69,8 @@ public static class AiProviderServiceExtensions
             return new AiProviderFactory(
                 sp,
                 providers,
-                options.DefaultProviderName ?? throw new InvalidOperationException("No default provider configured"));
+                options.DefaultProviderName ?? throw new InvalidOperationException("No default provider configured"),
+                options.FallbackProviderName);
         });
 
         return services;
@@ -85,6 +86,7 @@ public class AiProviderFactoryOptions
 
     public IReadOnlyList<(string Name, Type ProviderType)> Providers => _providers.AsReadOnly();
     public string? DefaultProviderName { get; private set; }
+    public string? FallbackProviderName { get; private set; }
 
     /// <summary>
     /// Registers an AI provider implementation.
@@ -104,6 +106,15 @@ public class AiProviderFactoryOptions
     public AiProviderFactoryOptions SetDefaultProvider(string name)
     {
         DefaultProviderName = name;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets which provider to use as a fallback when the default provider fails.
+    /// </summary>
+    public AiProviderFactoryOptions SetFallbackProvider(string name)
+    {
+        FallbackProviderName = name;
         return this;
     }
 }
