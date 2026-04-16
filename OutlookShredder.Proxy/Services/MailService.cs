@@ -74,8 +74,7 @@ public class MailService
         string body,
         IEnumerable<string> bccAddresses)
     {
-        var from    = _config["Mail:FromAddress"]    ?? throw new InvalidOperationException("Mail:FromAddress not configured");
-        var replyTo = _config["Mail:ReplyToAddress"] ?? throw new InvalidOperationException("Mail:ReplyToAddress not configured");
+        var from = _config["Mail:FromAddress"] ?? throw new InvalidOperationException("Mail:FromAddress not configured");
 
         var bcc = bccAddresses
             .Where(a => !string.IsNullOrWhiteSpace(a))
@@ -89,7 +88,6 @@ public class MailService
                 Subject     = subject,
                 Body        = new ItemBody { ContentType = BodyType.Text, Content = body },
                 From        = new Recipient { EmailAddress = new EmailAddress { Address = from } },
-                ReplyTo     = [new Recipient { EmailAddress = new EmailAddress { Address = replyTo } }],
                 BccRecipients = bcc,
             }
         });

@@ -1,5 +1,7 @@
 // OutlookShredder.Proxy — Program.cs
+using OutlookShredder.Proxy.Extensions;
 using OutlookShredder.Proxy.Services;
+using OutlookShredder.Proxy.Services.Ai;
 using Serilog;
 using Serilog.Events;
 
@@ -68,7 +70,38 @@ try
     });
 
     builder.Services.AddControllers();
-    builder.Services.AddSingleton<ClaudeService>();
+
+    // ── AI Provider Registration ──────────────────────────────────────────
+    // Register all available AI providers (Claude, OpenAI, Google AI).
+    // The factory will resolve providers by name, with Claude as the default.
+    // Configuration keys for each provider:
+    //   - Claude:  No config needed (uses existing behavior)
+    //   - OpenAI:  Requires OpenAi:ApiKey, optional OpenAi:Model, OpenAi:MaxRetries, OpenAi:TimeoutSeconds
+    //   - Google:  Requires Google:ApiKey, optional Google:Model, Google:MaxRetries, Google:TimeoutSeconds
+    builder.Services.AddClaudeAiProvider();
+    builder.Services.AddOpenAiProvider();
+    builder.Services.AddGoogleAiProvider();
+
+    // Register the multi-provider factory
+    builder.Services.AddAiProviderFactory(options =>
+    {
+        options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));
+        options.RegisterProvider("gpt4", typeof(OpenAiProvider));
+        options.RegisterProvider("openai", typeof(OpenAiProvider));
+        options.RegisterProvider("gemini", typeof(GoogleAiProvider));
+        options.RegisterProvider("google", typeof(GoogleAiProvider));
+        options.SetDefaultProvider("claude"); // Claude is the default
+    });
+
+    // Example: To use a different default provider, uncomment below:
+    // builder.Services.AddAiProviderFactory(options =>
+    // {
+    //     options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));
+    //     options.RegisterProvider("gpt4", typeof(OpenAiProvider));
+    //     options.RegisterProvider("gemini", typeof(GoogleAiProvider));
+    //     options.SetDefaultProvider("gpt4"); // Use GPT-4 as default instead
+    // });
+
     builder.Services.AddSingleton<SupplierCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());
     builder.Services.AddSingleton<ProductCatalogService>();
