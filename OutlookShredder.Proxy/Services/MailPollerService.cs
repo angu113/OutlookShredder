@@ -676,7 +676,7 @@ public class MailPollerService : BackgroundService
         PoExtraction? extraction = null;
         foreach (var (name, bytes) in pdfAttachments)
         {
-            _log.LogInformation("[PO] Sending PDF '{File}' to Claude for extraction", name);
+            _log.LogInformation("[PO] Sending PDF '{File}' to AI for extraction", name);
             extraction = await _aiFactory.GetService().ExtractPurchaseOrderAsync(
                 Convert.ToBase64String(bytes),
                 name,

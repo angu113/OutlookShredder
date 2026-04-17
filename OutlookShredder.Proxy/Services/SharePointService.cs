@@ -13,9 +13,9 @@ namespace OutlookShredder.Proxy.Services;
 /// Manages all SharePoint list operations via Microsoft Graph (app-only auth).
 ///
 /// Lists:
-///   SupplierResponses  — one row per supplier email; holds email metadata + body + attachment
-///   SupplierLineItems  — one row per extracted product line; child of SupplierResponses
-///   RFQ References     — source RFQs written by ShredderXL; holds Notes field
+///   SupplierResponses  â€” one row per supplier email; holds email metadata + body + attachment
+///   SupplierLineItems  â€” one row per extracted product line; child of SupplierResponses
+///   RFQ References     â€” source RFQs written by ShredderXL; holds Notes field
 ///
 /// Azure AD app requires:  Sites.FullControl.All  (Application, admin consented)
 /// </summary>
@@ -34,7 +34,7 @@ public class SharePointService
     private string? _srListId;            // SupplierResponses
     private string? _sliListId;           // SupplierLineItems
     private string? _rfqRefListId;        // RFQ References
-    private string? _listId;              // RFQ Line Items (legacy — kept for EnsureColumnsAsync)
+    private string? _listId;              // RFQ Line Items (legacy â€” kept for EnsureColumnsAsync)
     private string? _qcSiteId;            // QC SP site
     private string? _qcListId;            // QC list
     private string? _shredderConfigListId; // ShredderConfig
@@ -43,7 +43,7 @@ public class SharePointService
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock"];
 
-    // ── Shared SP read helpers ───────────────────────────────────────────────
+    // â”€â”€ Shared SP read helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Coerces a SharePoint AdditionalData value to string.
@@ -99,7 +99,7 @@ public class SharePointService
         _catalog   = catalog;
     }
 
-    // ── Graph client (lazy init) ─────────────────────────────────────────────
+    // â”€â”€ Graph client (lazy init) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     private GraphServiceClient GetGraph()
     {
         if (_graph is not null) return _graph;
@@ -113,7 +113,7 @@ public class SharePointService
         return _graph;
     }
 
-    // ── SharePoint REST credential (separate audience from Graph) ────────────
+    // â”€â”€ SharePoint REST credential (separate audience from Graph) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     private ClientSecretCredential GetSpCredential()
     {
         if (_spCredential is not null) return _spCredential;
@@ -126,7 +126,7 @@ public class SharePointService
         return _spCredential;
     }
 
-    // ── Site ID (cached) ─────────────────────────────────────────────────────
+    // â”€â”€ Site ID (cached) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     private async Task<string> GetSiteIdAsync()
     {
         if (_siteId is not null) return _siteId;
@@ -147,7 +147,7 @@ public class SharePointService
         return _siteId;
     }
 
-    // ── List ID getters (cached) ─────────────────────────────────────────────
+    // â”€â”€ List ID getters (cached) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async Task<string> GetSupplierResponsesListIdAsync()
     {
@@ -170,7 +170,7 @@ public class SharePointService
         return _rfqRefListId;
     }
 
-    // Legacy — used by EnsureColumnsAsync only
+    // Legacy â€” used by EnsureColumnsAsync only
     private async Task<string> GetListIdAsync()
     {
         if (_listId is not null) return _listId;
@@ -190,7 +190,7 @@ public class SharePointService
         return id;
     }
 
-    // ── Read: SupplierLineItems joined with SupplierResponses ────────────────
+    // â”€â”€ Read: SupplierLineItems joined with SupplierResponses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns up to <paramref name="top"/> SupplierLineItems merged with their parent
@@ -204,7 +204,7 @@ public class SharePointService
     ///
     /// Pass <paramref name="sliNextLink"/> = <c>null</c> for the first page; on subsequent calls
     /// pass back the value returned in the previous response.  Graph SharePoint list items do not
-    /// support <c>$skip</c> — cursor-based pagination via <c>@odata.nextLink</c> is the only
+    /// support <c>$skip</c> â€” cursor-based pagination via <c>@odata.nextLink</c> is the only
     /// supported approach.
     /// </summary>
     public async Task<(List<Dictionary<string, object?>> Items, string? NextLink)>
@@ -214,12 +214,12 @@ public class SharePointService
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
-        // Always fetch ALL SR rows — every page of SLI needs to be able to join against them.
+        // Always fetch ALL SR rows â€” every page of SLI needs to be able to join against them.
         var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
 
         // SLI: first page uses standard request; subsequent pages follow the @odata.nextLink.
-        // Graph SharePoint list items don't support $skip — cursor pagination only.
+        // Graph SharePoint list items don't support $skip â€” cursor pagination only.
         Task<Microsoft.Graph.Models.ListItemCollectionResponse?> sliTask;
         if (sliNextLink is null)
         {
@@ -232,7 +232,7 @@ public class SharePointService
         }
         else
         {
-            // Construct a request builder from the raw nextLink URL — the SDK injects auth
+            // Construct a request builder from the raw nextLink URL â€” the SDK injects auth
             // automatically and the URL already carries all required query parameters.
             var nextBuilder = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 sliNextLink, GetGraph().RequestAdapter);
@@ -244,17 +244,17 @@ public class SharePointService
         var sliResponse = sliTask.Result;
         var nextLink    = sliResponse?.OdataNextLink;   // null on last page
 
-        // Build lookup: SupplierResponse SP item ID → its fields
+        // Build lookup: SupplierResponse SP item ID â†’ its fields
         var srById = (srTask.Result?.Value ?? [])
             .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
             .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
 
-        // Separate lookup: SR item ID → item-level CreatedDateTime (not in Fields)
+        // Separate lookup: SR item ID â†’ item-level CreatedDateTime (not in Fields)
         var srCreatedAt = (srTask.Result?.Value ?? [])
             .Where(i => i.Id is not null && i.CreatedDateTime.HasValue)
             .ToDictionary(i => i.Id!, i => i.CreatedDateTime!.Value.UtcDateTime);
 
-        // Fallback lookup: "RFQ_ID|SupplierName" → (SP item ID, SR fields).
+        // Fallback lookup: "RFQ_ID|SupplierName" â†’ (SP item ID, SR fields).
         // Used when SupplierResponseId is missing or stale.
         // RfqIdRaw() handles both "RFQ_ID" and the SP-encoded "RFQ_x005F_ID" column names.
         var srBySupplierRfq = new Dictionary<string, (string SrId, IDictionary<string, object> Fields)>(StringComparer.OrdinalIgnoreCase);
@@ -281,10 +281,10 @@ public class SharePointService
 
             if (sli.Id is not null) row["SpItemId"] = sli.Id;
 
-            // ── Resolve parent SupplierResponse record ─────────────────────
+            // â”€â”€ Resolve parent SupplierResponse record â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             IDictionary<string, object>? srMatch = null;
 
-            // Primary join: SupplierResponseId → SR item's SP integer ID
+            // Primary join: SupplierResponseId â†’ SR item's SP integer ID
             var srId = GetStr(row, "SupplierResponseId");
             if (srId is not null)
             {
@@ -308,7 +308,7 @@ public class SharePointService
                     row["SupplierResponseId"] = fb.SrId;
                     if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
                         row["SrCreatedAt"] = srCa;
-                    _log.LogDebug("[SP] SLI {SliId} [{Rfq}/{Supplier}]: joined via fallback, corrected SrId {OldId}→{NewId}",
+                    _log.LogDebug("[SP] SLI {SliId} [{Rfq}/{Supplier}]: joined via fallback, corrected SrId {OldId}â†’{NewId}",
                         sli.Id, sliRfq, sliSn, srId ?? "null", fb.SrId);
                 }
             }
@@ -337,11 +337,11 @@ public class SharePointService
 
         if (skipDedup) return (result, nextLink);
 
-        // ── Deduplicate by (SupplierResponseId, normalised ProductName) ──────
+        // â”€â”€ Deduplicate by (SupplierResponseId, normalised ProductName) â”€â”€â”€â”€â”€â”€
         // Pass 1: exact normalised-name dedup (whitespace/case/decimal variants).
-        // Pass 2: fuzzy dedup within each SrId group — catches abbreviation variants
+        // Pass 2: fuzzy dedup within each SrId group â€” catches abbreviation variants
         //         like "HR Flat Bar" vs "Hot Rolled Flat Bar" that share the same
-        //         numeric tokens and have Jaccard ≥ 0.5.  Keeps the longer name.
+        //         numeric tokens and have Jaccard â‰¥ 0.5.  Keeps the longer name.
         static string NormProd(string? s)
         {
             if (string.IsNullOrWhiteSpace(s)) return "";
@@ -358,7 +358,7 @@ public class SharePointService
             .Select(g =>
             {
                 if (g.Count() == 1) return g.First();
-                _log.LogWarning("[SP] Dedup: {Count} SLI rows with SrId={SrId} product='{Prod}' — keeping most-populated",
+                _log.LogWarning("[SP] Dedup: {Count} SLI rows with SrId={SrId} product='{Prod}' â€” keeping most-populated",
                     g.Count(), g.Key.SrId, g.Key.Prod);
                 return g.OrderByDescending(r => r.Count(kv => kv.Value is not null)).First();
             })
@@ -405,12 +405,12 @@ public class SharePointService
         return (result, nextLink);
     }
 
-    // ── Read: all supplier items for one RFQ ID (targeted refresh) ───────────
+    // â”€â”€ Read: all supplier items for one RFQ ID (targeted refresh) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Fetches all SupplierLineItems for a specific RFQ ID, joined with their parent
     /// SupplierResponses.  Returns the same flat dict shape as <see cref="ReadSupplierItemsAsync"/>
-    /// but scoped to one job — used for targeted UI refresh after a Service Bus notification.
+    /// but scoped to one job â€” used for targeted UI refresh after a Service Bus notification.
     /// </summary>
     public async Task<List<Dictionary<string, object?>>> ReadSupplierItemsByRfqIdAsync(string rfqId)
     {
@@ -419,12 +419,12 @@ public class SharePointService
         var sliListId = await GetSupplierLineItemsListIdAsync();
         var sliCol    = await ResolveRfqIdColumnAsync(siteId, sliListId);
 
-        // Always fetch all SR rows — needed for the join.
+        // Always fetch all SR rows â€” needed for the join.
         var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
 
         // Fetch only SLI rows for this rfqId via OData $filter.
-        // RFQ_ID is not indexed in SP — the Prefer header allows the query to run anyway.
+        // RFQ_ID is not indexed in SP â€” the Prefer header allows the query to run anyway.
         // For best performance, index the RFQ_ID column in the SharePoint list settings.
         var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
             .GetAsync(req =>
@@ -508,7 +508,7 @@ public class SharePointService
         return result;
     }
 
-    // ── Read: new supplier activity since a timestamp ────────────────────────
+    // â”€â”€ Read: new supplier activity since a timestamp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns SupplierLineItems created after <paramref name="since"/>, grouped into
@@ -562,13 +562,13 @@ public class SharePointService
             })
             .ToList();
 
-        _log.LogInformation("[SP] GetNewResponsesSince({Since}): scanned {Total} SLI rows, {New} new → {Groups} activities",
+        _log.LogInformation("[SP] GetNewResponsesSince({Since}): scanned {Total} SLI rows, {New} new â†’ {Groups} activities",
             sinceStr, page?.Value?.Count ?? 0, activities.Sum(a => a.Products.Count), activities.Count);
 
         return new ChangesResult { Activities = activities, ServerTime = serverTime };
     }
 
-    // ── Read: new RFQ References since a timestamp ───────────────────────────
+    // â”€â”€ Read: new RFQ References since a timestamp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns RFQ References created after <paramref name="since"/>, with their
@@ -592,7 +592,7 @@ public class SharePointService
 
         await Task.WhenAll(refsTask, lirTask);
 
-        // Parse new RFQ References — client-side date filter
+        // Parse new RFQ References â€” client-side date filter
         var newRefs = (refsTask.Result?.Value ?? [])
             .Where(i => i.Fields?.AdditionalData is not null &&
                         i.CreatedDateTime.HasValue &&
@@ -615,7 +615,7 @@ public class SharePointService
 
         if (newRefs.Count == 0) return [];
 
-        // Group new line items by RFQ_ID — client-side date filter
+        // Group new line items by RFQ_ID â€” client-side date filter
         var lirByRfq = (lirTask.Result?.Value ?? [])
             .Where(i => i.Fields?.AdditionalData is not null &&
                         i.CreatedDateTime.HasValue &&
@@ -652,7 +652,7 @@ public class SharePointService
         return result;
     }
 
-    // ── Read: RFQ References (for Notes) ────────────────────────────────────
+    // â”€â”€ Read: RFQ References (for Notes) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<List<Dictionary<string, object?>>> ReadRfqReferencesAsync()
     {
@@ -696,7 +696,7 @@ public class SharePointService
             ?? [];
     }
 
-    // ── Write: update Notes on an RFQ Reference ──────────────────────────────
+    // â”€â”€ Write: update Notes on an RFQ Reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task UpdateRfqNotesAsync(string rfqId, string notes)
     {
@@ -704,7 +704,7 @@ public class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        // Fetch all refs client-side — OData filter on unindexed columns is unreliable
+        // Fetch all refs client-side â€” OData filter on unindexed columns is unreliable
         // and was causing duplicate rows to be created on every note save.
         var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
@@ -722,7 +722,7 @@ public class SharePointService
 
         if (matches.Count == 0)
         {
-            _log.LogInformation("[SP] RFQ Reference '{Id}' not found — creating it", rfqId);
+            _log.LogInformation("[SP] RFQ Reference '{Id}' not found â€” creating it", rfqId);
             await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem
                 {
@@ -756,7 +756,7 @@ public class SharePointService
         }
     }
 
-    // ── Write: update Requester on an RFQ Reference ───────────────────────────
+    // â”€â”€ Write: update Requester on an RFQ Reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task UpdateRfqRequesterAsync(string rfqId, string requester)
     {
@@ -780,7 +780,7 @@ public class SharePointService
 
         if (matches.Count == 0)
         {
-            _log.LogWarning("[SP] RFQ Reference '{Id}' not found — cannot update Requester", rfqId);
+            _log.LogWarning("[SP] RFQ Reference '{Id}' not found â€” cannot update Requester", rfqId);
             return;
         }
 
@@ -789,10 +789,10 @@ public class SharePointService
             {
                 AdditionalData = new Dictionary<string, object?> { ["Requester"] = requester }
             });
-        _log.LogInformation("[SP] Updated Requester for RFQ '{Id}' → '{Requester}'", rfqId, requester);
+        _log.LogInformation("[SP] Updated Requester for RFQ '{Id}' â†’ '{Requester}'", rfqId, requester);
     }
 
-    // ── Write: update Complete flag on an RFQ Reference ────────────────────────
+    // â”€â”€ Write: update Complete flag on an RFQ Reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task SetRfqCompleteAsync(string rfqId, bool complete)
     {
@@ -829,7 +829,7 @@ public class SharePointService
         _log.LogInformation("[SP] Set Complete={Complete} for RFQ '{Id}'", complete, rfqId);
     }
 
-    // ── Write: update Flagged flag on an RFQ Reference ───────────────────────
+    // â”€â”€ Write: update Flagged flag on an RFQ Reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task SetRfqFlaggedAsync(string rfqId, bool flagged)
     {
@@ -950,7 +950,7 @@ public class SharePointService
         return deleted;
     }
 
-    // ── RFQ Import: read / write RFQ References + RFQ Line Items ────────────
+    // â”€â”€ RFQ Import: read / write RFQ References + RFQ Line Items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private string? _rfqLineItemsListId;
 
@@ -994,7 +994,7 @@ public class SharePointService
     /// Upserts one row in the RFQ References list.
     /// If the row does not exist it is created with all fields.
     /// If it already exists, any blank Requester / DateCreated / EmailRecipients fields
-    /// are filled in from <paramref name="req"/> — populated fields are left untouched.
+    /// are filled in from <paramref name="req"/> â€” populated fields are left untouched.
     /// </summary>
     public async Task CreateRfqReferenceAsync(RfqReferenceRequest req)
     {
@@ -1003,7 +1003,7 @@ public class SharePointService
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
         // Fetch existing items for this RFQ_ID (same client-side filter approach as UpdateRfqNotesAsync
-        // — OData filter on unindexed columns is unreliable).
+        // â€” OData filter on unindexed columns is unreliable).
         var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req2 =>
             {
@@ -1020,7 +1020,7 @@ public class SharePointService
 
         if (matches.Count == 0)
         {
-            // New — create a full row.
+            // New â€” create a full row.
             await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem
                 {
@@ -1039,7 +1039,7 @@ public class SharePointService
             return;
         }
 
-        // Existing — patch only fields that are currently blank.
+        // Existing â€” patch only fields that are currently blank.
         var primary = matches[0];
         var data    = primary.Fields?.AdditionalData ?? new Dictionary<string, object?>();
 
@@ -1066,7 +1066,7 @@ public class SharePointService
         }
         else
         {
-            _log.LogInformation("[SP] RFQ Reference '{Id}' already complete — no update needed", req.RfqId);
+            _log.LogInformation("[SP] RFQ Reference '{Id}' already complete â€” no update needed", req.RfqId);
         }
     }
 
@@ -1140,7 +1140,7 @@ public class SharePointService
     }
 
     /// <summary>
-    /// Returns the RFQ Line Items for a specific RFQ ID — used to inject requested-item
+    /// Returns the RFQ Line Items for a specific RFQ ID â€” used to inject requested-item
     /// context into the Claude extraction prompt (RLI anchoring).
     /// </summary>
     public async Task<List<RliContextItem>> ReadRfqLineItemsByRfqIdAsync(string rfqId)
@@ -1175,7 +1175,7 @@ public class SharePointService
         return result;
     }
 
-    // ── RLI anchoring dry-run helpers ────────────────────────────────────────
+    // â”€â”€ RLI anchoring dry-run helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns SLI rows (product name + current matched MSPC) for a given RFQ ID.
@@ -1284,19 +1284,19 @@ public class SharePointService
             {
                 var created = await GetGraph().Sites[siteId].Lists[listId].Items
                     .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
-                _log.LogInformation("[SP] CreateRfqLineItem OK: [{RfqId}] {Product} → SpId={SpId}",
+                _log.LogInformation("[SP] CreateRfqLineItem OK: [{RfqId}] {Product} â†’ SpId={SpId}",
                     req.RfqId, req.Product, created?.Id);
             }
             catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
             {
-                _log.LogError("[SP] CreateRfqLineItem ODataError for [{RfqId}] {Product}: {Code} — {Msg}",
+                _log.LogError("[SP] CreateRfqLineItem ODataError for [{RfqId}] {Product}: {Code} â€” {Msg}",
                     req.RfqId, req.Product, e.Error?.Code, e.Error?.Message);
                 throw;
             }
         }
     }
 
-    // Cached: list ID → internal column name for RFQ_ID
+    // Cached: list ID â†’ internal column name for RFQ_ID
     private readonly Dictionary<string, string> _rfqColByList = new();
 
     private async Task<string> ResolveRfqIdColumnAsync(string siteId, string listId)
@@ -1306,7 +1306,7 @@ public class SharePointService
         var cols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
         var all  = cols?.Value ?? [];
 
-        // Match on internal name (Name) or display name (DisplayName) — whichever has RFQ+ID.
+        // Match on internal name (Name) or display name (DisplayName) â€” whichever has RFQ+ID.
         var col = all.FirstOrDefault(c =>
             c.Name?.Equals("RFQ_x005F_ID", StringComparison.OrdinalIgnoreCase) == true ||
             c.Name?.Equals("RFQ_ID",        StringComparison.OrdinalIgnoreCase) == true ||
@@ -1320,7 +1320,7 @@ public class SharePointService
                 $"RFQ_ID column not found in list (id={listId}).\nAvailable columns:\n{dump}");
         }
 
-        // Use the internal name (Name) for writes — DisplayName is just for matching.
+        // Use the internal name (Name) for writes â€” DisplayName is just for matching.
         var name = col.Name
             ?? throw new InvalidOperationException(
                 $"Column '{col.DisplayName}' has a null internal Name. Cannot write to it.");
@@ -1331,7 +1331,7 @@ public class SharePointService
         return name;
     }
 
-    // ── Write: upsert one supplier email + all its extracted lines ───────────
+    // â”€â”€ Write: upsert one supplier email + all its extracted lines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Main write entry point.  For each extracted email:
@@ -1356,7 +1356,7 @@ public class SharePointService
         {
             var siteId = await GetSiteIdAsync();
 
-            // ── Resolve job reference ────────────────────────────────────────
+            // â”€â”€ Resolve job reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             var rawJobRef = (header.JobReference
                 ?? emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']')
                 ?? string.Empty).ToUpperInvariant();
@@ -1364,12 +1364,12 @@ public class SharePointService
 
             if (jobRef == "000000")
                 _log.LogWarning(
-                    "[SP] No job reference resolved — writing under [000000]. " +
+                    "[SP] No job reference resolved â€” writing under [000000]. " +
                     "Subject='{Subject}'  From='{From}'  RawRef='{RawRef}'",
                     emailMeta.EmailSubject, emailMeta.EmailFrom,
                     string.IsNullOrEmpty(rawJobRef) ? "(none)" : rawJobRef);
 
-            // ── Resolve supplier name ────────────────────────────────────────
+            // â”€â”€ Resolve supplier name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             var rawSupplier = header.SupplierName;
             if (string.IsNullOrWhiteSpace(rawSupplier) && !string.IsNullOrWhiteSpace(emailMeta.EmailFrom))
             {
@@ -1430,20 +1430,20 @@ public class SharePointService
                 supplier = "Unknown";
                 jobRef   = "WHOIS";
                 _log.LogWarning(
-                    "[SP] Supplier '{Raw}' not in reference list — writing under [WHOIS]. " +
+                    "[SP] Supplier '{Raw}' not in reference list â€” writing under [WHOIS]. " +
                     "Subject='{Subject}'  From='{From}'",
                     rawSupplier, emailMeta.EmailSubject, emailMeta.EmailFrom);
             }
 
             result.SupplierName = supplier;
 
-            // ── Upsert SupplierResponses ─────────────────────────────────────
+            // â”€â”€ Upsert SupplierResponses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             var srListId      = await GetSupplierResponsesListIdAsync();
             var (srId, srNew) = await EnsureSupplierResponseAsync(
                 siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile, messageId);
             result.SpItemId = srId;
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
-            result.RfqId    = jobRef;   // resolved RFQ ID — may differ from req.JobRefs when email subject has no bracket ref
+            result.RfqId    = jobRef;   // resolved RFQ ID â€” may differ from req.JobRefs when email subject has no bracket ref
 
             // Upload the source attachment as a SharePoint list item attachment.
             if (result.SpItemId is not null &&
@@ -1458,19 +1458,19 @@ public class SharePointService
                 }
                 catch (Exception ex)
                 {
-                    _log.LogError(ex, "[SP] Attachment upload FAILED for SR {Id} ('{File}') — quote PDF will be missing from SharePoint", srId, emailMeta.FileName);
+                    _log.LogError(ex, "[SP] Attachment upload FAILED for SR {Id} ('{File}') â€” quote PDF will be missing from SharePoint", srId, emailMeta.FileName);
                 }
             }
 
-            // ── Upsert SupplierLineItems ─────────────────────────────────────
+            // â”€â”€ Upsert SupplierLineItems â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             var sliListId = await GetSupplierLineItemsListIdAsync();
 
             // On the first product of a MessageId-bearing reprocess, purge any existing SLI
             // rows for this SR that have no MessageId.  These are stale rows from an earlier
             // extraction whose product names may differ enough to fail the fuzzy match, causing
             // the new extraction to insert duplicates instead of replacing them.
-            // We only reach here after Claude has already returned ≥1 product, so purging first
-            // is safe — the new rows are about to be written immediately after.
+            // We only reach here after Claude has already returned â‰¥1 product, so purging first
+            // is safe â€” the new rows are about to be written immediately after.
             if (messageId is not null && rowIndex == 0)
                 await PurgeNoMessageIdSliForSrAsync(siteId, sliListId, srId);
 
@@ -1495,7 +1495,7 @@ public class SharePointService
         return result;
     }
 
-    // ── Upsert SupplierResponses (private) ───────────────────────────────────
+    // â”€â”€ Upsert SupplierResponses (private) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async Task<(string Id, bool IsNew)> EnsureSupplierResponseAsync(
         string siteId, string listId,
@@ -1531,13 +1531,13 @@ public class SharePointService
             ["SourceFile"]           = sourceFile,
             ["MessageId"]            = messageId,
             ["QuoteReference"]       = header.QuoteReference,
-            // DateOfQuote / EstimatedDeliveryDate intentionally omitted —
+            // DateOfQuote / EstimatedDeliveryDate intentionally omitted â€”
             // dates come from the RFQ Reference record, not from extraction.
             ["FreightTerms"]         = header.FreightTerms,
             ["IsRegret"]             = blanketRegret,
         };
 
-        // Build an NDJSON log entry for this Claude response — always appended, never
+        // Build an NDJSON log entry for this Claude response â€” always appended, never
         // overwritten, so every extraction is preserved for auditing and smart merging.
         var logEntry = System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -1552,7 +1552,7 @@ public class SharePointService
         if (!isNew)
         {
             // Fetch the precious Claude-extracted fields that already exist on this row.
-            // We only overwrite them when the current value is blank — a good extraction
+            // We only overwrite them when the current value is blank â€” a good extraction
             // from an earlier pass (e.g. the attachment run) should never be clobbered by
             // a weaker body-only re-run that returns nulls or less detail.
             // ProcessingSource/SourceFile are also protected: attachment beats body.
@@ -1574,14 +1574,14 @@ public class SharePointService
                 // Keep existing value when it is populated and the new value adds nothing
                 if (!string.IsNullOrWhiteSpace(curStr) && string.IsNullOrWhiteSpace(newStr))
                     update.Remove(key);
-                // Never downgrade attachment → body
+                // Never downgrade attachment â†’ body
                 if (key == "ProcessingSource" &&
                     string.Equals(curStr, "attachment", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(newStr, "attachment", StringComparison.OrdinalIgnoreCase))
                     update.Remove(key);
             }
 
-            // Append to the log — keep the last 50 entries so the field stays within SP limits
+            // Append to the log â€” keep the last 50 entries so the field stays within SP limits
             cur.TryGetValue("ClaudeResponseLog", out var existingLog);
             var existingLogStr = existingLog is JsonElement lje ? lje.GetString() : existingLog?.ToString();
             var logLines = string.IsNullOrWhiteSpace(existingLogStr)
@@ -1592,7 +1592,7 @@ public class SharePointService
             logLines.Add(logEntry);
             update["ClaudeResponseLog"] = string.Join("\n", logLines);
 
-            // Strip any remaining null-valued keys — no point patching fields to null
+            // Strip any remaining null-valued keys â€” no point patching fields to null
             foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
                 update.Remove(key);
 
@@ -1625,7 +1625,7 @@ public class SharePointService
         catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
             when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
         {
-            _log.LogDebug("[SP] ClaudeResponseLog field absent — retrying PATCH without it");
+            _log.LogDebug("[SP] ClaudeResponseLog field absent â€” retrying PATCH without it");
             data.Remove("ClaudeResponseLog");
             await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
                 .PatchAsync(new FieldValueSet { AdditionalData = data });
@@ -1647,7 +1647,7 @@ public class SharePointService
         catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
             when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
         {
-            _log.LogDebug("[SP] ClaudeResponseLog field absent — retrying POST without it");
+            _log.LogDebug("[SP] ClaudeResponseLog field absent â€” retrying POST without it");
             data.Remove("ClaudeResponseLog");
             return await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
@@ -1663,7 +1663,7 @@ public class SharePointService
         // Fetch all SR rows and filter client-side, following nextLink to cover lists > 2000 rows.
         // OData filter on non-indexed columns with HonorNonIndexedQueriesWarningMayFailRandomly
         // can silently return empty results, causing a new SR to be inserted instead of updating
-        // the existing one — producing duplicate supplier response rows.
+        // the existing one â€” producing duplicate supplier response rows.
         // $select includes both RFQ_ID and RFQ_x005F_ID because SharePoint may return the
         // underscore column under either internal name depending on how the list was created.
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -1715,7 +1715,7 @@ public class SharePointService
         return quoteRefMatch ?? nameMatch;
     }
 
-    // ── Write SupplierLineItems (private) ────────────────────────────────────
+    // â”€â”€ Write SupplierLineItems (private) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async Task WriteSupplierLineItemAsync(
         string siteId, string listId,
@@ -1737,7 +1737,7 @@ public class SharePointService
             var byKey          = _catalog.FindBySearchKey(product.ProductSearchKey);
             catalogProductName = byKey?.Name;
             _log.LogInformation(
-                "[SP] RLI-anchored: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} catalog='{Catalog}'",
+                "[SP] RLI-anchored: [{RfqId}] {Supplier} '{Name}' â†’ MSPC={Key} catalog='{Catalog}'",
                 jobRef, supplier, prodName, productSearchKey, catalogProductName ?? "(not in catalog)");
         }
         else
@@ -1748,7 +1748,7 @@ public class SharePointService
 
             if (productSearchKey is null)
                 _log.LogWarning(
-                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' — ProductSearchKey will be null",
+                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' â€” ProductSearchKey will be null",
                     jobRef, supplier, prodName);
         }
 
@@ -1807,7 +1807,7 @@ public class SharePointService
             else if (string.IsNullOrWhiteSpace(newComments))
                 update.Remove("SupplierProductComments"); // nothing to write
 
-            // Strip null values — don't null out fields that are already populated
+            // Strip null values â€” don't null out fields that are already populated
             foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
                 update.Remove(key);
 
@@ -1859,14 +1859,14 @@ public class SharePointService
                 if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(spQuoteRef)
                     && string.Equals(quoteReference, spQuoteRef, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Same quote — match by catalog key when available, else by name.
+                    // Same quote â€” match by catalog key when available, else by name.
                     if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
                         return string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase);
                     var spProduct2 = d.TryGetValue("ProductName", out var p2) ? p2?.ToString() : null;
                     if (NormalizeMatch(spProduct2, productName)) return true;
                     var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
                     return NumericTokensCompatible(productTokens, spTok2)
-                        && ProductJaccard(spTok2, productTokens) >= 0.4; // relaxed threshold — same quote
+                        && ProductJaccard(spTok2, productTokens) >= 0.4; // relaxed threshold â€” same quote
                 }
 
                 // Standard fuzzy match by product name.
@@ -1887,7 +1887,7 @@ public class SharePointService
         return null;
     }
 
-    // ── Purge stale no-MessageId SLI rows ───────────────────────────────────
+    // â”€â”€ Purge stale no-MessageId SLI rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Deletes all SupplierLineItems rows for the given SR that have no MessageId.
@@ -1930,7 +1930,7 @@ public class SharePointService
         }
     }
 
-    // ── TotalPrice fallback calculation ─────────────────────────────────────
+    // â”€â”€ TotalPrice fallback calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Mirrors the Claude Step-8 forward calculation as a server-side fallback.
@@ -1940,10 +1940,10 @@ public class SharePointService
     {
         var qty = (double?)(p.UnitsQuoted ?? p.UnitsRequested);
 
-        // a. piece price × qty
+        // a. piece price Ã— qty
         if (p.PricePerPiece.HasValue && qty.HasValue)
             return p.PricePerPiece.Value * qty.Value;
-        // b. foot price × qty × length
+        // b. foot price Ã— qty Ã— length
         if (p.PricePerFoot.HasValue && qty.HasValue && p.LengthPerUnit.HasValue)
         {
             var ft = (p.LengthUnit ?? "ft").Trim().ToLowerInvariant() switch
@@ -1956,7 +1956,7 @@ public class SharePointService
             };
             return p.PricePerFoot.Value * qty.Value * ft;
         }
-        // c. pound price × qty × weight
+        // c. pound price Ã— qty Ã— weight
         if (p.PricePerPound.HasValue && qty.HasValue && p.WeightPerUnit.HasValue)
         {
             var lb = (p.WeightUnit ?? "lb").Trim().ToLowerInvariant() switch
@@ -1971,13 +1971,13 @@ public class SharePointService
         return null;
     }
 
-    // ── Regret detection ─────────────────────────────────────────────────────
+    // â”€â”€ Regret detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private static bool HasRegretPhrase(string? text) =>
         text is not null &&
         _regretPhrases.Any(p => text.Contains(p, StringComparison.OrdinalIgnoreCase));
 
-    // ── Forwarded-email original-sender extraction ───────────────────────────
+    // â”€â”€ Forwarded-email original-sender extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // Matches the "From:" line inside a forwarded message block.
     // Handles both plain-text and HTML-stripped formats, e.g.:
@@ -2001,11 +2001,11 @@ public class SharePointService
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
-    // ── OData helpers ────────────────────────────────────────────────────────
+    // â”€â”€ OData helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private static string EscapeOdata(string s) => s.Replace("'", "''");
 
-    // ── Product tokenisation ─────────────────────────────────────────────────
+    // â”€â”€ Product tokenisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private static readonly Regex _normaliseRegex  = new(@"[\s\W]+", RegexOptions.Compiled);
     private static bool NormalizeMatch(string? a, string? b)
@@ -2019,7 +2019,7 @@ public class SharePointService
 
     private static readonly Regex _dimFraction  = new(@"(\d+)/(\d+)",                               RegexOptions.Compiled);
     private static readonly Regex _dimDecimal   = new(@"(\d+)\.(\d+)",                              RegexOptions.Compiled);
-    private static readonly Regex _dimSeparator = new(@"(\d[a-z0-9]*)[""']?\s*[xX×]\s*[""']?(\d[a-z0-9]*)", RegexOptions.Compiled);
+    private static readonly Regex _dimSeparator = new(@"(\d[a-z0-9]*)[""']?\s*[xXÃ—]\s*[""']?(\d[a-z0-9]*)", RegexOptions.Compiled);
     private static readonly Regex _dimSplit     = new(@"[^a-z0-9]+",                                RegexOptions.Compiled);
     private static readonly Regex _orLength     = new(@"\bor\s+\d+[a-z""']*\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     // Mixed number: "2-1/2" (whole-numerator/denominator). Must be handled before _dimFraction
@@ -2032,7 +2032,7 @@ public class SharePointService
     private static string PreprocessProduct(string s)
     {
         s = s.ToLowerInvariant();
-        // "25' 0"" and "25'" are the same length — strip the zero-inch component
+        // "25' 0"" and "25'" are the same length â€” strip the zero-inch component
         // before any other processing so it doesn't produce a spurious numeric token.
         s = _trailingZeroInch.Replace(s, "$1'");
         s = _orLength.Replace(s, "");
@@ -2091,7 +2091,7 @@ public class SharePointService
         if (dimA.Count > 0 && dimB.Count > 0)
         {
             // Compare the underlying numeric values in the dim tokens rather than the
-            // raw token strings.  "MC6 × 18" and "MC 6 x 18" tokenise differently:
+            // raw token strings.  "MC6 Ã— 18" and "MC 6 x 18" tokenise differently:
             // the former produces dim={6x3d5x0d475} + plain=18, the latter produces
             // dim={6x18, 6x3d5x0d475}.  Extracting digits from dim tokens and combining
             // with standalone plain-digit tokens gives the same number set for both.
@@ -2105,7 +2105,7 @@ public class SharePointService
             var gradeB = numB.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
             return gradeA.IsSubsetOf(gradeB) || gradeB.IsSubsetOf(gradeA);
         }
-        // One side has dim tokens, the other doesn't — e.g. "A500 Pipe 6 SCH 40 (6.625 OD x 0.280 wall) x 21'"
+        // One side has dim tokens, the other doesn't â€” e.g. "A500 Pipe 6 SCH 40 (6.625 OD x 0.280 wall) x 21'"
         // vs the simplified re-extraction "A500 Pipe 6 SCH 40 x 21'".
         // Treat as compatible when the simpler side's plain numbers are a subset of the
         // richer side's expanded numbers (the nominal size is still represented).
@@ -2132,7 +2132,7 @@ public class SharePointService
     /// <summary>
     /// Splits dim tokens on the dimension separators (x, f, d) used by
     /// <see cref="PreprocessProduct"/> and returns the individual digit strings.
-    /// e.g. "6x3d5x0d475" → {"6","3","5","0","475"}
+    /// e.g. "6x3d5x0d475" â†’ {"6","3","5","0","475"}
     /// </summary>
     private static HashSet<string> ExtractDimNumbers(HashSet<string> dimTokens)
     {
@@ -2144,7 +2144,7 @@ public class SharePointService
         return result;
     }
 
-    // ── Attachment upload (SharePoint REST API) ──────────────────────────────
+    // â”€â”€ Attachment upload (SharePoint REST API) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async Task UpsertItemAttachmentAsync(string spItemId, string listId, string fileName, byte[] bytes)
     {
@@ -2202,12 +2202,12 @@ public class SharePointService
         }
     }
 
-    // ── Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows ─────
+    // â”€â”€ Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Iterates every SupplierLineItem and writes the current catalog match result
     /// to <c>CatalogProductName</c> and <c>ProductSearchKey</c>.
-    /// Safe to run repeatedly — idempotent patch, no rows created or deleted.
+    /// Safe to run repeatedly â€” idempotent patch, no rows created or deleted.
     /// Returns (total rows visited, rows updated, rows with a match).
     /// </summary>
     public async Task<(int Total, int Updated, int Matched)> BackfillCatalogMatchesAsync(
@@ -2242,7 +2242,7 @@ public class SharePointService
                 var match = _catalog.ResolveProduct(prodName);
                 if (match is not null) matched++;
 
-                // Always patch — clears stale values when catalog changes remove a match.
+                // Always patch â€” clears stale values when catalog changes remove a match.
                 var patch = new Dictionary<string, object?>
                 {
                     ["CatalogProductName"] = match?.Name,
@@ -2265,7 +2265,7 @@ public class SharePointService
         return (total, updated, matched);
     }
 
-    // ── Clean: delete all derived email-processing data ──────────────────────
+    // â”€â”€ Clean: delete all derived email-processing data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Deletes a single SupplierLineItem row by its SharePoint item ID.
@@ -2332,7 +2332,7 @@ public class SharePointService
     /// </summary>
     /// <summary>
     /// Deletes all rows from all four RFQ lists: RFQ References, RFQ Line Items,
-    /// SupplierResponses, and SupplierLineItems.  Order: SLI → SR → RLI → RR
+    /// SupplierResponses, and SupplierLineItems.  Order: SLI â†’ SR â†’ RLI â†’ RR
     /// (child before parent to respect any referential integrity).
     /// </summary>
     public async Task<(int RefsDeleted, int RliDeleted, int SrDeleted, int SliDeleted)> CleanAllDataAsync()
@@ -2434,7 +2434,7 @@ public class SharePointService
             srDeleted++;
         }
 
-        _log.LogInformation("[SP] Purge complete — SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
+        _log.LogInformation("[SP] Purge complete â€” SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
         return (srDeleted, sliDeleted);
     }
 
@@ -2444,7 +2444,7 @@ public class SharePointService
 
         while (true)
         {
-            // Fetch a page of item IDs only — no fields needed
+            // Fetch a page of item IDs only â€” no fields needed
             var page = await GetGraph().Sites[siteId].Lists[listId].Items
                 .GetAsync(req => { req.QueryParameters.Top = 100; });
 
@@ -2469,9 +2469,9 @@ public class SharePointService
         return deleted;
     }
 
-    // ── Deduplicate SupplierResponses ────────────────────────────────────────
+    // â”€â”€ Deduplicate SupplierResponses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    // Report models — populated in both live and dry-run modes
+    // Report models â€” populated in both live and dry-run modes
     public record DedupeReportSli(
         string Action,            // "delete" | "reparent"
         string SliId,
@@ -2523,12 +2523,12 @@ public class SharePointService
     /// each duplicate group into a single canonical row.
     ///
     /// For each duplicate group:
-    ///   • Keep the SR with the best data: attachment rows beat body rows; priced SLIs beat
+    ///   â€¢ Keep the SR with the best data: attachment rows beat body rows; priced SLIs beat
     ///     unpriceds; newest DateCreated breaks ties.
-    ///   • For each SLI under a duplicate SR:
-    ///       – If the keeper already has an SLI for the same product → delete the duplicate SLI.
-    ///       – Otherwise → re-parent the SLI to the keeper.
-    ///   • Delete the duplicate SR.
+    ///   â€¢ For each SLI under a duplicate SR:
+    ///       â€“ If the keeper already has an SLI for the same product â†’ delete the duplicate SLI.
+    ///       â€“ Otherwise â†’ re-parent the SLI to the keeper.
+    ///   â€¢ Delete the duplicate SR.
     /// </summary>
     public async Task<DedupeSupplierResponsesResult> DedupeSupplierResponsesAsync(bool dryRun = false)
     {
@@ -2536,7 +2536,7 @@ public class SharePointService
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
-        // ── Fetch all SR rows ─────────────────────────────────────────────────
+        // â”€â”€ Fetch all SR rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // RFQ_x005F_ID is the SP internal column name in some list configurations;
         // select both so the fallback in FldRfqId always finds a value.
         var srResponse = await GetGraph().Sites[siteId].Lists[srListId].Items
@@ -2549,9 +2549,9 @@ public class SharePointService
             });
         var srItems = srResponse?.Value ?? [];
         if (srItems.Count >= 5000)
-            _log.LogWarning("[Dedupe-SR] SR fetch hit the 5 000-row limit — re-run to catch any remaining duplicates");
+            _log.LogWarning("[Dedupe-SR] SR fetch hit the 5 000-row limit â€” re-run to catch any remaining duplicates");
 
-        // ── Fetch all SLI rows ────────────────────────────────────────────────
+        // â”€â”€ Fetch all SLI rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // SupplierProductComments included so we can rescue Claude commentary
         // before deleting a duplicate SLI that covers the same product.
         var sliResponse = await GetGraph().Sites[siteId].Lists[sliListId].Items
@@ -2563,9 +2563,9 @@ public class SharePointService
             });
         var sliItems = sliResponse?.Value ?? [];
         if (sliItems.Count >= 5000)
-            _log.LogWarning("[Dedupe-SR] SLI fetch hit the 5 000-row limit — re-run to catch any remaining duplicates");
+            _log.LogWarning("[Dedupe-SR] SLI fetch hit the 5 000-row limit â€” re-run to catch any remaining duplicates");
 
-        // ── Helpers ────────────────────────────────────────────────────────
+        // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         static string? Fld(ListItem item, string key)
         {
             var d = item.Fields?.AdditionalData;
@@ -2601,7 +2601,7 @@ public class SharePointService
             .GroupBy(sli => Fld(sli, "SupplierResponseId") ?? "")
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        // ── Find duplicate groups ──────────────────────────────────────────
+        // â”€â”€ Find duplicate groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var duplicateGroups = srItems
             .GroupBy(sr => (
                 RfqId:    (FldRfqId(sr) ?? "").ToUpperInvariant(),
@@ -2638,7 +2638,7 @@ public class SharePointService
                 .ThenByDescending(sr => sr.CreatedDateTime)
                 .First();
 
-            // keeper's SLIs as a mutable list — entries are added as SLIs are re-parented
+            // keeper's SLIs as a mutable list â€” entries are added as SLIs are re-parented
             // so subsequent dupes in the same group see the updated coverage.
             var keeperSlis = slisBySrId.GetValueOrDefault(keeper.Id ?? "", []).ToList();
 
@@ -2650,7 +2650,7 @@ public class SharePointService
 
             foreach (var dupe in srsInGroup.Where(sr => sr.Id != keeper.Id))
             {
-                // ── Merge SR-level Claude content into keeper ──────────────────
+                // â”€â”€ Merge SR-level Claude content into keeper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 // Only fill blank keeper fields. Update the in-memory dict after each
                 // merge so subsequent dupes in the same group see the updated values
                 // and don't try to merge the same field twice.
@@ -2675,11 +2675,11 @@ public class SharePointService
                             foreach (var (k, v) in toMerge)
                                 keeperDict[k] = v;
                     }
-                    _log.LogInformation("{Tag}[Dedupe-SR] Merged {Fields} from retiring SR {From} → keeper {To}",
+                    _log.LogInformation("{Tag}[Dedupe-SR] Merged {Fields} from retiring SR {From} â†’ keeper {To}",
                         dryTag, string.Join(", ", toMerge.Keys), dupe.Id, keeper.Id);
                 }
 
-                // ── Handle this dupe's SLIs ────────────────────────────────────
+                // â”€â”€ Handle this dupe's SLIs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 var dupeSlis = slisBySrId.GetValueOrDefault(dupe.Id ?? "", []);
                 var reportSlis = new List<DedupeReportSli>();
 
@@ -2690,7 +2690,7 @@ public class SharePointService
                     var dupeComments = Fld(sli, "SupplierProductComments");
 
                     // Match against keeper SLIs by original name (NormalizeMatch) or
-                    // token Jaccard — avoids the broken "join tokens → NormalizeMatch" pattern.
+                    // token Jaccard â€” avoids the broken "join tokens â†’ NormalizeMatch" pattern.
                     var coveringKeeperSli = keeperSlis.FirstOrDefault(k =>
                     {
                         var kName = Fld(k, "ProductName") ?? "";
@@ -2731,7 +2731,7 @@ public class SharePointService
                                         sliDict[k] = v;
                             }
                             _log.LogInformation(
-                                "{Tag}[Dedupe-SR] Rescued {Fields} from SLI {From} → keeper SLI {To} ('{Product}')",
+                                "{Tag}[Dedupe-SR] Rescued {Fields} from SLI {From} â†’ keeper SLI {To} ('{Product}')",
                                 dryTag, string.Join(", ", rescueFields.Keys), sli.Id, coveringKeeperSli.Id, prodName);
                         }
 
@@ -2744,7 +2744,7 @@ public class SharePointService
                     }
                     else
                     {
-                        // Not covered — re-parent to keeper and track in-memory
+                        // Not covered â€” re-parent to keeper and track in-memory
                         if (!dryRun)
                         {
                             await GetGraph().Sites[siteId].Lists[sliListId].Items[sli.Id!].Fields
@@ -2757,7 +2757,7 @@ public class SharePointService
                         }
                         sliReparented++;
                         reportSlis.Add(new DedupeReportSli("reparent", sli.Id!, prodName, false));
-                        _log.LogInformation("{Tag}[Dedupe-SR] Re-parented SLI {Id} ('{Product}') from SR {From} → {To}",
+                        _log.LogInformation("{Tag}[Dedupe-SR] Re-parented SLI {Id} ('{Product}') from SR {From} â†’ {To}",
                             dryTag, sli.Id, prodName, dupe.Id, keeper.Id);
                     }
                 }
@@ -2785,10 +2785,10 @@ public class SharePointService
                 [.. reportRetiring]));
         }
 
-        _log.LogInformation("{Tag}[Dedupe-SR] Done — {G} groups, {Sr} SR deleted, {SliR} SLI re-parented, {SliD} SLI deleted",
+        _log.LogInformation("{Tag}[Dedupe-SR] Done â€” {G} groups, {Sr} SR deleted, {SliR} SLI re-parented, {SliD} SLI deleted",
             dryTag, duplicateGroups.Count, srDeleted, sliReparented, sliDeleted);
 
-        // ── Pass 2: SLI-level dedup within each SR ────────────────────────────
+        // â”€â”€ Pass 2: SLI-level dedup within each SR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Catches the case where the same attachment was processed multiple times
         // in a single run (SP write-lag means the just-written SLI isn't visible
         // to subsequent FindExistingSupplierLineItemAsync calls), producing several
@@ -2797,7 +2797,7 @@ public class SharePointService
         int sliWithinSrDeleted = 0;
         var reportSliGroups    = new List<DedupeReportSliDupeGroup>();
 
-        // Reverse index: SR ID → SR item (for RFQ_ID / SupplierName in report)
+        // Reverse index: SR ID â†’ SR item (for RFQ_ID / SupplierName in report)
         var srById = srItems.ToDictionary(sr => sr.Id ?? "", sr => sr);
 
         int SliScore(ListItem sli)
@@ -2826,8 +2826,8 @@ public class SharePointService
             // Greedy clustering: each SLI joins the first cluster whose representative
             // it matches. Three criteria (any one is sufficient):
             //   1. Exact-normalised product name, OR
-            //   2. NumericTokensCompatible + Jaccard ≥ 0.5 (standard ProductsMatch), OR
-            //   3. Same non-zero TotalPrice with Jaccard ≥ 0.3 — catches the case where
+            //   2. NumericTokensCompatible + Jaccard â‰¥ 0.5 (standard ProductsMatch), OR
+            //   3. Same non-zero TotalPrice with Jaccard â‰¥ 0.3 â€” catches the case where
             //      Claude adds extra descriptive dimensions (e.g. "0.379\" web") that shift
             //      the numeric token set, making (2) fail despite identical pricing.
             static double? SliTotalPrice(ListItem sli)
@@ -2904,7 +2904,7 @@ public class SharePointService
                                     kd[k] = v;
                         }
                         _log.LogInformation(
-                            "{Tag}[Dedupe-SLI] Rescued {Fields} from SLI {From} → keeper SLI {To}",
+                            "{Tag}[Dedupe-SLI] Rescued {Fields} from SLI {From} â†’ keeper SLI {To}",
                             dryTag, string.Join(", ", rescueFields.Keys), dupe.Id, sliKeeper.Id);
                     }
 
@@ -2925,7 +2925,7 @@ public class SharePointService
             }
         }
 
-        _log.LogInformation("{Tag}[Dedupe-SLI] Done — {G} within-SR duplicate groups, {D} SLI deleted",
+        _log.LogInformation("{Tag}[Dedupe-SLI] Done â€” {G} within-SR duplicate groups, {D} SLI deleted",
             dryTag, reportSliGroups.Count, sliWithinSrDeleted);
 
         return new DedupeSupplierResponsesResult(
@@ -2933,7 +2933,7 @@ public class SharePointService
             reportSliGroups.Count, sliWithinSrDeleted, reportSliGroups);
     }
 
-    // ── Fetch SP list item attachment (SupplierResponses PDF) ────────────────
+    // â”€â”€ Fetch SP list item attachment (SupplierResponses PDF) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Downloads the named attachment from a SupplierResponses list item via the SP REST API.
@@ -2973,7 +2973,7 @@ public class SharePointService
         return (ct, bytes, fileName);
     }
 
-    // ── Publish folder (Graph) ───────────────────────────────────────────────
+    // â”€â”€ Publish folder (Graph) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // Cached publish site + drive IDs (separate from the RFQ/QC site).
     private string? _publishSiteId;
@@ -3008,7 +3008,7 @@ public class SharePointService
             : (_config["Publish:FolderPath"] ?? "publish/current").Trim('/');
 
     /// <summary>Reads version.txt from the configured SharePoint publish folder via Graph.</summary>
-    /// <param name="channel">"dev" → publish/dev; anything else → publish/current (or Publish:FolderPath config).</param>
+    /// <param name="channel">"dev" â†’ publish/dev; anything else â†’ publish/current (or Publish:FolderPath config).</param>
     public async Task<string> GetPublishVersionAsync(string? channel = null)
     {
         var (_, driveId) = await GetPublishDriveAsync();
@@ -3076,7 +3076,7 @@ public class SharePointService
         var tempPath = Path.Combine(Path.GetTempPath(), $"ShredderPackage_{Guid.NewGuid():N}.zip");
         try
         {
-            // Build complete ZIP on disk — Dispose() writes the central directory before we stream
+            // Build complete ZIP on disk â€” Dispose() writes the central directory before we stream
             using (var tempFile = File.OpenWrite(tempPath))
             using (var zip = new ZipArchive(tempFile, ZipArchiveMode.Create, leaveOpen: false))
                 await AddFolderToZipAsync(zip, driveId, folderPath, "");
@@ -3118,7 +3118,7 @@ public class SharePointService
         }
     }
 
-    // ── Diagnostics ──────────────────────────────────────────────────────────
+    // â”€â”€ Diagnostics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<object> DiagnoseAsync()
     {
@@ -3178,7 +3178,7 @@ public class SharePointService
         return new { steps };
     }
 
-    // ── Provision new supplier lists (run once) ──────────────────────────────
+    // â”€â”€ Provision new supplier lists (run once) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<Dictionary<string, object>> EnsureSupplierListsAsync()
     {
@@ -3318,7 +3318,7 @@ public class SharePointService
         return results;
     }
 
-    // ── Legacy: provision old RFQ Line Items list (kept for recovery) ────────
+    // â”€â”€ Legacy: provision old RFQ Line Items list (kept for recovery) â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<Dictionary<string, string>> EnsureColumnsAsync()
     {
@@ -3399,7 +3399,7 @@ public class SharePointService
         return results;
     }
 
-    // ── Legacy: read from old RFQ Line Items (kept for migration) ───────────
+    // â”€â”€ Legacy: read from old RFQ Line Items (kept for migration) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<List<Dictionary<string, object?>>> ReadItemsAsync(int top = 500)
     {
@@ -3426,7 +3426,7 @@ public class SharePointService
             ?? [];
     }
 
-    // ── QC list ──────────────────────────────────────────────────────────────
+    // â”€â”€ QC list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Resolves and caches the QC SP site + list IDs, returning the list object.
@@ -3458,7 +3458,7 @@ public class SharePointService
             return (_qcSiteId, _qcListId, list);
         }
 
-        // Already cached — fetch list object for LastModifiedDateTime
+        // Already cached â€” fetch list object for LastModifiedDateTime
         var cachedList = await graph.Sites[_qcSiteId].Lists[_qcListId].GetAsync();
         if (cachedList is null)
             throw new Exception("[QC] Could not retrieve cached QC list");
@@ -3486,7 +3486,7 @@ public class SharePointService
         var (siteId, listId, list) = await ResolveQcAsync();
         var graph = GetGraph();
 
-        // ── Discover columns ───────────────────────────────────────────────
+        // â”€â”€ Discover columns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Metal and Shape are multi-value lookup fields; QC Cut contains notes.
         var wantedDisplay = new[] { "Metal", "Shape", "Title", "QC", "QC Cut", "LQ", "LQ Count", "LQ Min", "LQ Max" };
 
@@ -3503,7 +3503,7 @@ public class SharePointService
                 w => w.Equals(c.Display, StringComparison.OrdinalIgnoreCase)))
             .ToArray();
 
-        // ── Fetch items ────────────────────────────────────────────────────
+        // â”€â”€ Fetch items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var selectFields = string.Join(",", fields.Select(f => f.Internal));
         var items = await graph.Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
@@ -3535,7 +3535,7 @@ public class SharePointService
         return new QcListResult(outputColumns, rows, itemIds, list.LastModifiedDateTime?.UtcDateTime);
     }
 
-    // ── QC row update ─────────────────────────────────────────────────────────
+    // â”€â”€ QC row update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Patches the QC and QC Cut fields of a single QC list item by SP item ID.
@@ -3574,22 +3574,22 @@ public class SharePointService
         _log.LogInformation("[QC] Patched item {ItemId}: QC={Qc} QcCut={QcCut}", itemId, qc, qcCut);
     }
 
-    // ── LQ update ─────────────────────────────────────────────────────────────
+    // â”€â”€ LQ update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
-    /// Joins supplier quotes → RFQ Line Items (canonical product names) → QC Metal+Shape rows,
+    /// Joins supplier quotes â†’ RFQ Line Items (canonical product names) â†’ QC Metal+Shape rows,
     /// derives $/lb for each quote, patches the QC list 'LQ' column, and returns a match/miss log.
     ///
     /// Join chain:
-    ///   SupplierLineItem.RFQ_ID → RFQLineItem.RFQ_ID → RFQLineItem.Product
-    ///   RFQLineItem.Product (text-containment) → QC row Metal+Shape
+    ///   SupplierLineItem.RFQ_ID â†’ RFQLineItem.RFQ_ID â†’ RFQLineItem.Product
+    ///   RFQLineItem.Product (text-containment) â†’ QC row Metal+Shape
     /// </summary>
     public async Task<LqUpdateResult> UpdateQcLqAsync()
     {
         var (qcSiteId, qcListId, _) = await ResolveQcAsync();
         var graph = GetGraph();
 
-        // ── Helper: extract number from an object? that may be JsonElement ────
+        // â”€â”€ Helper: extract number from an object? that may be JsonElement â”€â”€â”€â”€
         static double? GetNum(Dictionary<string, object?> row, string key)
         {
             if (!row.TryGetValue(key, out var v) || v is null) return null;
@@ -3640,7 +3640,7 @@ public class SharePointService
             return null;
         }
 
-        // ── 1. Fetch QC rows with item IDs ────────────────────────────────────
+        // â”€â”€ 1. Fetch QC rows with item IDs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var wantedDisplay = new[] { "Metal", "Shape", "Title", "LQ", "LQ Count", "LQ Min", "LQ Max" };
         var colsResp = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
         var fields = (colsResp?.Value ?? [])
@@ -3656,14 +3656,14 @@ public class SharePointService
         var metalField = ColInternal("Metal") ?? throw new Exception("[QC] 'Metal' column not found");
         var shapeField = ColInternal("Shape") ?? throw new Exception("[QC] 'Shape' column not found");
         var titleField = ColInternal("Title") ?? "Title";
-        var lqField    = ColInternal("LQ")    ?? throw new Exception("[QC] 'LQ' column not found — create it in the QC list first");
+        var lqField    = ColInternal("LQ")    ?? throw new Exception("[QC] 'LQ' column not found â€” create it in the QC list first");
 
         // Auto-create 'LQ Count', 'LQ Min', 'LQ Max' number columns if missing
         async Task<string> EnsureNumberColumn(string display, string fallback)
         {
             var existing = ColInternal(display);
             if (existing is not null) return existing;
-            _log.LogInformation("[LQ] '{Display}' column not found — creating it", display);
+            _log.LogInformation("[LQ] '{Display}' column not found â€” creating it", display);
             var created = await graph.Sites[qcSiteId].Lists[qcListId].Columns
                 .PostAsync(new ColumnDefinition
                 {
@@ -3704,13 +3704,13 @@ public class SharePointService
             .Where(r => r.Metals.Length > 0 && r.Shapes.Length > 0)
             .ToArray();
 
-        // ── 2. Fetch priced supplier quotes, group by RFQ_ID ─────────────────
+        // â”€â”€ 2. Fetch priced supplier quotes, group by RFQ_ID â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var lookbackDays = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 7;
         var cutoff       = DateTime.UtcNow.AddDays(-lookbackDays);
 
         var (allSli, _) = await ReadSupplierItemsAsync(top: 5000);
 
-        // rfqId → list of $/lb values from priced non-regret quotes within the lookback window
+        // rfqId â†’ list of $/lb values from priced non-regret quotes within the lookback window
         var pricesByRfq = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
         var unpricedCount = 0;
         var staleCount    = 0;
@@ -3720,7 +3720,7 @@ public class SharePointService
             if (IsRegret(sli)) continue;
 
             // Filter by when the data was processed/written to SP (Modified), not when the
-            // email arrived (ReceivedAt) — emails can sit in the inbox for days before
+            // email arrived (ReceivedAt) â€” emails can sit in the inbox for days before
             // being processed, making ReceivedAt an unreliable freshness indicator.
             DateTime? quoteDate = null;
             foreach (var key in new[] { "Modified", "ProcessedAt", "DateOfQuote", "ReceivedAt" })
@@ -3748,8 +3748,8 @@ public class SharePointService
         _log.LogInformation("[LQ] {QcRows} QC rows, {RfqCount} RFQs with prices in last {Days}d, {Unpriced} unpriced, {Stale} outside window",
             qcRows.Length, pricesByRfq.Count, lookbackDays, unpricedCount, staleCount);
 
-        // ── 3. Fetch RFQ Line Items for RFQs that have quotes ────────────────
-        // rfqId → canonical product names (lower-cased)
+        // â”€â”€ 3. Fetch RFQ Line Items for RFQs that have quotes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // rfqId â†’ canonical product names (lower-cased)
         var rfqProducts = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var allRfqLines = await ReadAllRfqLineItemsAsync();
 
@@ -3764,7 +3764,7 @@ public class SharePointService
 
         _log.LogInformation("[LQ] {Count} RFQ Line Item products across quoted RFQs", rfqProducts.Values.Sum(v => v.Count));
 
-        // ── 4. Build: QC row → list of prices whose RFQ products match ────────
+        // â”€â”€ 4. Build: QC row â†’ list of prices whose RFQ products match â”€â”€â”€â”€â”€â”€â”€â”€
         // For each QC row, find RFQs where any product contains Metal AND Shape,
         // then collect all prices from those RFQs.
         var updated = new List<LqMatch>();
@@ -3820,7 +3820,7 @@ public class SharePointService
             }
         }
 
-        // ── 5. Log RFQ Line Item products that matched no QC row ──────────────
+        // â”€â”€ 5. Log RFQ Line Item products that matched no QC row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var matchedProducts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var qcRow in qcRows)
         foreach (var (_, products) in rfqProducts)
@@ -3877,7 +3877,7 @@ public class SharePointService
         return "";
     }
 
-    // ── Read: Product Catalog ────────────────────────────────────────────────
+    // â”€â”€ Read: Product Catalog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns all rows from the "Product Catalog" SP list.
@@ -3900,10 +3900,10 @@ public class SharePointService
                 req.QueryParameters.Top    = 5000;
             });
 
-        // Category lookup: Metals list item-id → category name
+        // Category lookup: Metals list item-id â†’ category name
         var categoryMapTask = BuildLookupMapAsync(siteId, ["Metals", "Metal", "Product Categories"], "Title");
 
-        // Shape lookup: Shapes list item-id → shape name
+        // Shape lookup: Shapes list item-id â†’ shape name
         var shapeMapTask = BuildLookupMapAsync(siteId, ["Shapes", "Shape"], "ProductShape", "Title");
 
         await Task.WhenAll(itemsTask, categoryMapTask, shapeMapTask);
@@ -3918,7 +3918,7 @@ public class SharePointService
             {
                 var d = i.Fields!.AdditionalData!;
 
-                // Resolve lookup IDs → text values via the maps built above.
+                // Resolve lookup IDs â†’ text values via the maps built above.
                 var catId   = RfqField(d, "Product_x0020_CategoryLookupId");
                 var shapeId = RfqField(d, "Product_x0020_ShapeLookupId");
                 var cat     = catId   is not null && categoryMap.TryGetValue(catId,   out var c) ? c : null;
@@ -3941,7 +3941,7 @@ public class SharePointService
     }
 
     /// <summary>
-    /// Reads items from the first matching list name and returns a map of item-ID → text value
+    /// Reads items from the first matching list name and returns a map of item-ID â†’ text value
     /// (tries each field key in order; used to resolve SharePoint lookup column IDs).
     /// </summary>
     private async Task<Dictionary<string, string>> BuildLookupMapAsync(
@@ -3971,7 +3971,7 @@ public class SharePointService
         return [];
     }
 
-    // ── Read: Metal Categories ────────────────────────────────────────────────
+    // â”€â”€ Read: Metal Categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns all ProductCategory values from the "Metals" SP list, sorted alphabetically.
@@ -3986,7 +3986,7 @@ public class SharePointService
         foreach (var name in new[] { "Metals", "Metal", "Product Categories", "ProductCategories" })
         {
             try { listId = await ResolveListIdAsync(name); break; }
-            catch { /* list not found — try next */ }
+            catch { /* list not found â€” try next */ }
         }
 
         if (listId is not null)
@@ -4019,7 +4019,7 @@ public class SharePointService
         }
 
         // Fallback: derive distinct Metal/Category values from the Product Catalog.
-        _log.LogInformation("[SP] ReadMetalCategories — Metals list not found, deriving from Product Catalog");
+        _log.LogInformation("[SP] ReadMetalCategories â€” Metals list not found, deriving from Product Catalog");
         var catalogListName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
         var catalogListId   = await ResolveListIdAsync(catalogListName);
         var catalogItems = await GetGraph().Sites[siteId].Lists[catalogListId].Items
@@ -4039,7 +4039,7 @@ public class SharePointService
             .ToList();
     }
 
-    // ── Read: Product Shapes ──────────────────────────────────────────────────
+    // â”€â”€ Read: Product Shapes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns all ProductShape values from the "Shapes" SP list, sorted alphabetically.
@@ -4069,7 +4069,7 @@ public class SharePointService
             .ToList();
     }
 
-    // ── Read: Supplier Relationships ──────────────────────────────────────────
+    // â”€â”€ Read: Supplier Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns all rows from the "Supplier Relationships" SP list.
@@ -4080,7 +4080,7 @@ public class SharePointService
     {
         var siteId = await GetSiteIdAsync();
 
-        // ── Step 1: read Supplier Relationships rows (lookup IDs only) ────────
+        // â”€â”€ Step 1: read Supplier Relationships rows (lookup IDs only) â”€â”€â”€â”€â”€â”€â”€â”€
         var relListId = await ResolveListIdAsync("Supplier Relationships");
         _log.LogInformation("[SP] ReadSupplierRelationships");
 
@@ -4100,7 +4100,7 @@ public class SharePointService
             _log.LogInformation("[SP] SupplierRelationships first-item fields: [{Keys}]", sampleKeys);
         }
 
-        // ── Step 2: build Suppliers map id→(name,email) ─────────────────────
+        // â”€â”€ Step 2: build Suppliers map idâ†’(name,email) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var suppListId = await ResolveListIdAsync("Suppliers");
         var suppItems  = await GetGraph().Sites[siteId].Lists[suppListId].Items
             .GetAsync(req =>
@@ -4119,7 +4119,7 @@ public class SharePointService
                 )
             );
 
-        // ── Step 3: build Metals map id→name ─────────────────────────────────
+        // â”€â”€ Step 3: build Metals map idâ†’name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         string? metalListId = null;
         foreach (var n in new[] { "Metals", "Metal", "Product Categories", "ProductCategories" })
         {
@@ -4145,7 +4145,7 @@ public class SharePointService
                 );
         }
 
-        // ── Step 4: build Shapes map id→name (optional — list may not exist) ─
+        // â”€â”€ Step 4: build Shapes map idâ†’name (optional â€” list may not exist) â”€
         Dictionary<string, string> shapeMap = [];
         try
         {
@@ -4172,14 +4172,14 @@ public class SharePointService
         }
         catch { /* Shapes list is optional */ }
 
-        // ── Step 5: join ──────────────────────────────────────────────────────
+        // â”€â”€ Step 5: join â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         return relRaw
             .Where(i => i.Fields?.AdditionalData is not null)
             .Select(i =>
             {
                 var d = i.Fields!.AdditionalData!;
 
-                // Lookup ID fields: "SKLookupId" → supplier item ID, "MetalLookupId" → metal item ID
+                // Lookup ID fields: "SKLookupId" â†’ supplier item ID, "MetalLookupId" â†’ metal item ID
                 var suppId   = RfqField(d, "SKLookupId",    "SupplierLookupId");
                 var metalId  = RfqField(d, "MetalLookupId", "Metal_x0020_CategoryLookupId");
                 var shapeId  = RfqField(d, "ShapeLookupId", "Product_x0020_ShapeLookupId");
@@ -4217,7 +4217,7 @@ public class SharePointService
         return null;
     }
 
-    // ── ShredderConfig list ──────────────────────────────────────────────────
+    // â”€â”€ ShredderConfig list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns the ShredderConfig list ID, creating the list and its columns
@@ -4236,7 +4236,7 @@ public class SharePointService
         string listId;
         if (lists?.Value?.FirstOrDefault() is null)
         {
-            _log.LogInformation("[SP] Creating ShredderConfig list…");
+            _log.LogInformation("[SP] Creating ShredderConfig listâ€¦");
             var newList = await GetGraph().Sites[siteId].Lists.PostAsync(new List
             {
                 DisplayName = listName,
@@ -4260,7 +4260,7 @@ public class SharePointService
             listId = lists.Value.First().Id!;
         }
 
-        // Ensure Value and Comments columns exist (idempotent — skips already-present columns).
+        // Ensure Value and Comments columns exist (idempotent â€” skips already-present columns).
         var existing = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
         var existingNames = existing?.Value?
             .Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
@@ -4361,7 +4361,7 @@ public class SharePointService
         }
     }
 
-    // ── PurchaseOrders list ──────────────────────────────────────────────────
+    // â”€â”€ PurchaseOrders list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async Task<string> GetPurchaseOrdersListIdAsync()
     {
@@ -4395,7 +4395,7 @@ public class SharePointService
                 });
             if (existing?.Value?.Count > 0)
             {
-                _log.LogInformation("[PO] Skipping duplicate PO — MessageId already in SP: {Id}", messageId);
+                _log.LogInformation("[PO] Skipping duplicate PO â€” MessageId already in SP: {Id}", messageId);
                 return null;
             }
         }
@@ -4503,7 +4503,7 @@ public class SharePointService
         try
         {
             var siteId = await GetSiteIdAsync();
-            // Sanitise filename — keep PO number as the primary name
+            // Sanitise filename â€” keep PO number as the primary name
             var safeName = $"{poNumber}.pdf";
 
             // Resolve the default drive for the site
@@ -4531,17 +4531,17 @@ public class SharePointService
                     AdditionalData = new Dictionary<string, object?> { ["PdfUrl"] = webUrl }
                 });
 
-            _log.LogInformation("[PO] PDF uploaded for {PoNumber} → {Url}", poNumber, webUrl);
+            _log.LogInformation("[PO] PDF uploaded for {PoNumber} â†’ {Url}", poNumber, webUrl);
             return webUrl;
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "[PO] Failed to upload PDF for {PoNumber} — continuing without attachment", poNumber);
+            _log.LogWarning(ex, "[PO] Failed to upload PDF for {PoNumber} â€” continuing without attachment", poNumber);
             return null;
         }
     }
 
-    // ── RLI purchase status update ────────────────────────────────────────────
+    // â”€â”€ RLI purchase status update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Returns true if the RFQ Reference for <paramref name="rfqId"/> has Complete = true.
@@ -4586,13 +4586,13 @@ public class SharePointService
 
         if (await IsRfqCompleteAsync(siteId, rfqId))
         {
-            _log.LogInformation("[PO] Skipping RLI update for [{RfqId}] — RFQ is marked Complete", rfqId);
+            _log.LogInformation("[PO] Skipping RLI update for [{RfqId}] â€” RFQ is marked Complete", rfqId);
             return;
         }
 
         var sliListId = await GetSupplierLineItemsListIdAsync();
 
-        // Build MSPC set from PO line items; empty means no MSPC data → mark all supplier rows
+        // Build MSPC set from PO line items; empty means no MSPC data â†’ mark all supplier rows
         var mspcSet = poLineItems
             .Select(li => li.Mspc?.Trim())
             .Where(m => !string.IsNullOrEmpty(m))
@@ -4655,7 +4655,7 @@ public class SharePointService
 
         // Also update matching RLI rows so Shredder can show the PO badge on the group header.
         // UpdateRliPurchaseStatusAsync previously only patched SLI, leaving RfqLineItemData.IsPurchased
-        // and RfqLineItemData.PoNumber blank — causing the PO badge to never appear.
+        // and RfqLineItemData.PoNumber blank â€” causing the PO badge to never appear.
         if (!string.IsNullOrWhiteSpace(poNumber))
         {
             var rliListId = await GetRfqLineItemsListIdAsync();
@@ -4718,7 +4718,7 @@ public class SharePointService
     /// </summary>
     private async Task CheckAndCompleteRfqAsync(string siteId, string rfqId)
     {
-        // ── 1. Read RFQ Line Items for this rfqId ────────────────────────────
+        // â”€â”€ 1. Read RFQ Line Items for this rfqId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var rliListId = await GetRfqLineItemsListIdAsync();
         var rliCol    = await ResolveRfqIdColumnAsync(siteId, rliListId);
 
@@ -4756,11 +4756,11 @@ public class SharePointService
 
         if (rliItems.Count == 0)
         {
-            _log.LogInformation("[PO] No RFQ Line Items found for [{RfqId}] — skipping completion check", rfqId);
+            _log.LogInformation("[PO] No RFQ Line Items found for [{RfqId}] â€” skipping completion check", rfqId);
             return;
         }
 
-        // ── 2. Aggregate PO quantities per MSPC for this rfqId ───────────────
+        // â”€â”€ 2. Aggregate PO quantities per MSPC for this rfqId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var poListId = await GetPurchaseOrdersListIdAsync();
         var poQtyByMspc = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
@@ -4791,7 +4791,7 @@ public class SharePointService
                         poQtyByMspc[li.Mspc] = existing + (li.Quantity ?? 0);
                     }
                 }
-                catch { /* malformed LineItems JSON — skip */ }
+                catch { /* malformed LineItems JSON â€” skip */ }
             }
 
             if (poPage.OdataNextLink is null) break;
@@ -4799,7 +4799,7 @@ public class SharePointService
                 .WithUrl(poPage.OdataNextLink).GetAsync();
         }
 
-        // ── 3. Check every RLI item is fully covered ─────────────────────────
+        // â”€â”€ 3. Check every RLI item is fully covered â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         foreach (var (mspc, requestedQty) in rliItems)
         {
             poQtyByMspc.TryGetValue(mspc, out var poQty);
@@ -4807,13 +4807,13 @@ public class SharePointService
             if (!covered)
             {
                 _log.LogInformation(
-                    "[PO] [{RfqId}] not complete — MSPC {Mspc} needs {Required}, POs have {Covered}",
+                    "[PO] [{RfqId}] not complete â€” MSPC {Mspc} needs {Required}, POs have {Covered}",
                     rfqId, mspc, requestedQty, poQty);
                 return;
             }
         }
 
-        _log.LogInformation("[PO] All RFQ Line Items covered — marking [{RfqId}] Complete", rfqId);
+        _log.LogInformation("[PO] All RFQ Line Items covered â€” marking [{RfqId}] Complete", rfqId);
         await SetRfqCompleteAsync(rfqId, true);
     }
 
@@ -4835,7 +4835,7 @@ public class SharePointService
 
         if (mspcSet.Count == 0)
         {
-            _log.LogInformation("[PO] No valid MSPC codes (containing '/') — skipping RLI MSPC match for {Supplier}", supplierName);
+            _log.LogInformation("[PO] No valid MSPC codes (containing '/') â€” skipping RLI MSPC match for {Supplier}", supplierName);
             return [];
         }
 
@@ -4896,7 +4896,7 @@ public class SharePointService
 
         if (candidates.Count == 0)
         {
-            _log.LogInformation("[PO] No unmatched RLI items found for MSPCs [{Mspc}] — all already purchased; checking SLI",
+            _log.LogInformation("[PO] No unmatched RLI items found for MSPCs [{Mspc}] â€” all already purchased; checking SLI",
                 string.Join(", ", mspcSet));
         }
 
@@ -4939,7 +4939,7 @@ public class SharePointService
         // Covers both freshly-patched RLI items AND already-purchased RLI items whose
         // corresponding SLI rows may never have been stamped (backfill scenario).
         {
-            // Build rfqId → mspc set from all matching RLI rows (patched now + already purchased)
+            // Build rfqId â†’ mspc set from all matching RLI rows (patched now + already purchased)
             var sliTargets = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
             void AddToSliTargets(string rfqId, string? mspc)
@@ -5054,12 +5054,12 @@ public class SharePointService
 
         if (hasItems && allPurchased)
         {
-            _log.LogInformation("[PO] All RLI items purchased — marking [{RfqId}] Complete", rfqId);
+            _log.LogInformation("[PO] All RLI items purchased â€” marking [{RfqId}] Complete", rfqId);
             await SetRfqCompleteAsync(rfqId, true);
         }
     }
 
-    // ── MessageId backfill ───────────────────────────────────────────────────
+    // â”€â”€ MessageId backfill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Scans SupplierResponses rows from the last <paramref name="days"/> days that have no MessageId,
@@ -5161,11 +5161,11 @@ public class SharePointService
             _log.LogInformation("[Backfill] Patched MessageId on SR {Id} ({From})", srSpId, emailFrom);
         }
 
-        _log.LogInformation("[Backfill] MessageId backfill complete — patched={Patched}, skipped={Skipped}", patched, skipped);
+        _log.LogInformation("[Backfill] MessageId backfill complete â€” patched={Patched}, skipped={Skipped}", patched, skipped);
         return (patched, skipped);
     }
 
-    // ── QuoteReference backfill ──────────────────────────────────────────────
+    // â”€â”€ QuoteReference backfill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Scans SupplierResponse rows that have a MessageId but no QuoteReference,
@@ -5232,7 +5232,7 @@ public class SharePointService
                     }
                     catch (Exception ex)
                     {
-                        _log.LogWarning(ex, "[Backfill] SR {Id} — could not fetch attachments from Graph (msg={MsgId})", srSpId, messageId);
+                        _log.LogWarning(ex, "[Backfill] SR {Id} â€” could not fetch attachments from Graph (msg={MsgId})", srSpId, messageId);
                         skipped++;
                         continue;
                     }
@@ -5245,7 +5245,7 @@ public class SharePointService
 
                     if (pdf?.ContentBytes is { } bytes)
                     {
-                        _log.LogInformation("[Backfill] SR {Id} — running Claude on PDF attachment '{Name}'", srSpId, pdf.Name);
+                        _log.LogInformation("[Backfill] SR {Id} â€” running AI on PDF attachment '{Name}'", srSpId, pdf.Name);
                         var req = new ExtractRequest
                         {
                             Content     = string.Empty,
@@ -5257,11 +5257,11 @@ public class SharePointService
                         };
                         var result = await ai.ExtractRfqAsync(req, ct);
                         quoteRef = result?.QuoteReference;
-                        _log.LogInformation("[Backfill] SR {Id} — attachment extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
+                        _log.LogInformation("[Backfill] SR {Id} â€” attachment extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
                     }
                     else
                     {
-                        _log.LogInformation("[Backfill] SR {Id} — no PDF attachment found ({Count} attachment(s) total)", srSpId, attachments.Count);
+                        _log.LogInformation("[Backfill] SR {Id} â€” no PDF attachment found ({Count} attachment(s) total)", srSpId, attachments.Count);
                     }
                 }
 
@@ -5270,28 +5270,28 @@ public class SharePointService
                 {
                     if (!string.IsNullOrWhiteSpace(emailBody))
                     {
-                        _log.LogInformation("[Backfill] SR {Id} — running Claude on stored email body ({Len} chars)", srSpId, emailBody!.Length);
+                        _log.LogInformation("[Backfill] SR {Id} â€” running AI on stored email body ({Len} chars)", srSpId, emailBody!.Length);
                         var req = new ExtractRequest { Content = emailBody, SourceType = "body" };
                         var result = await ai.ExtractRfqAsync(req, ct);
                         quoteRef = result?.QuoteReference;
-                        _log.LogInformation("[Backfill] SR {Id} — body extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
+                        _log.LogInformation("[Backfill] SR {Id} â€” body extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
                     }
                     else
                     {
-                        _log.LogInformation("[Backfill] SR {Id} — no email body stored, nothing to extract", srSpId);
+                        _log.LogInformation("[Backfill] SR {Id} â€” no email body stored, nothing to extract", srSpId);
                     }
                 }
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "[Backfill] SR {Id} — extraction threw unexpectedly (msg={MsgId})", srSpId, messageId);
+                _log.LogWarning(ex, "[Backfill] SR {Id} â€” extraction threw unexpectedly (msg={MsgId})", srSpId, messageId);
                 skipped++;
                 continue;
             }
 
             if (string.IsNullOrWhiteSpace(quoteRef))
             {
-                _log.LogInformation("[Backfill] SR {Id} — skipped (no QuoteReference extracted)", srSpId);
+                _log.LogInformation("[Backfill] SR {Id} â€” skipped (no QuoteReference extracted)", srSpId);
                 skipped++;
                 continue;
             }
@@ -5335,16 +5335,16 @@ public class SharePointService
             _log.LogInformation("[Backfill] Patched QuoteReference '{Ref}' on SR {Id}", quoteRef, srSpId);
         }
 
-        _log.LogInformation("[Backfill] QuoteReference backfill complete — patched={Patched}, skipped={Skipped}", patched, skipped);
+        _log.LogInformation("[Backfill] QuoteReference backfill complete â€” patched={Patched}, skipped={Skipped}", patched, skipped);
         return (patched, skipped);
     }
 
-    // ── Deduplication ────────────────────────────────────────────────────────
+    // â”€â”€ Deduplication â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Removes duplicate SupplierResponse + SupplierLineItem rows:
-    /// 1. SR rows with no MessageId (within <paramref name="days"/> days) — deleted with their SLIs.
-    /// 2. SR rows sharing the same MessageId — keep the one with the most populated fields,
+    /// 1. SR rows with no MessageId (within <paramref name="days"/> days) â€” deleted with their SLIs.
+    /// 2. SR rows sharing the same MessageId â€” keep the one with the most populated fields,
     ///    delete the rest with their SLIs.
     /// Returns counts of deleted SR and SLI rows.
     /// </summary>
@@ -5364,7 +5364,7 @@ public class SharePointService
                 req.QueryParameters.Top    = 2000;
             });
 
-        // srId → (messageId, receivedAt, score)
+        // srId â†’ (messageId, receivedAt, score)
         var allSr = new List<(string SpId, string? MessageId, DateTimeOffset ReceivedAt, int Score)>();
         while (srPage?.Value is not null)
         {
@@ -5445,7 +5445,7 @@ public class SharePointService
             _log.LogInformation("[Dedup] Deleted SR {Id}", spId);
         }
 
-        _log.LogInformation("[Dedup] Complete — SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
+        _log.LogInformation("[Dedup] Complete â€” SR deleted={Sr}, SLI deleted={Sli}", srDeleted, sliDeleted);
         return (srDeleted, sliDeleted);
     }
 
@@ -5466,7 +5466,7 @@ public class SharePointService
             var cutoff = DateTimeOffset.UtcNow.AddDays(-days.Value);
             records = records.Where(r =>
                 DateTimeOffset.TryParse(r.ReceivedAt, out var dt) ? dt >= cutoff : true).ToList();
-            _log.LogInformation("[PO] Backfill scoped to last {Days} days — {Count} record(s) in window",
+            _log.LogInformation("[PO] Backfill scoped to last {Days} days â€” {Count} record(s) in window",
                 days.Value, records.Count);
         }
 
@@ -5490,7 +5490,7 @@ public class SharePointService
             if (string.IsNullOrWhiteSpace(rec.RfqId) ||
                 rec.RfqId.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
             {
-                // No RFQ ID — match by MSPC directly against RFQ Line Items
+                // No RFQ ID â€” match by MSPC directly against RFQ Line Items
                 await MatchAndMarkRliByMspcAsync(rec.SupplierName, rec.PoNumber, lineItems);
             }
             else
@@ -5500,7 +5500,7 @@ public class SharePointService
             processed++;
         }
 
-        _log.LogInformation("[PO] Backfill complete — processed={Processed}, skipped={Skipped}",
+        _log.LogInformation("[PO] Backfill complete â€” processed={Processed}, skipped={Skipped}",
             processed, skipped);
         return (processed, skipped);
     }

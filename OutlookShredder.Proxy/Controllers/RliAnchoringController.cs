@@ -31,19 +31,19 @@ public class RliAnchoringController : ControllerBase
 
     /// <summary>
     /// Compares existing SLI ProductSearchKey values against the RLI MSPC for the same RFQ.
-    /// When withClaude=true, re-runs Claude extraction on the stored SR EmailBody with RLI
-    /// context injected and shows what productSearchKey Claude would now return.
+    /// When withAi=true, re-runs AI extraction on the stored SR EmailBody with RLI
+    /// context injected and shows what productSearchKey the AI would now return.
     ///
-    /// GET /api/rli-anchoring/compare?sampleSize=20[&withClaude=true&claudeLimit=5]
+    /// GET /api/rli-anchoring/compare?sampleSize=20[&withAi=true&aiLimit=5]
     /// </summary>
     [HttpGet("compare")]
     public async Task<IActionResult> Compare(
         [FromQuery] int  sampleSize   = 20,
-        [FromQuery] bool withClaude   = false,
-        [FromQuery] int  claudeLimit  = 5)
+        [FromQuery] bool withAi      = false,
+        [FromQuery] int  aiLimit     = 5)
     {
-        _log.LogInformation("[RliTest] Starting dry-run compare: sampleSize={N}, withClaude={WC}",
-            sampleSize, withClaude);
+        _log.LogInformation("[RliTest] Starting dry-run compare: sampleSize={N}, withAi={WC}",
+            sampleSize, withAi);
 
         // ── 1. Sample RFQ IDs that have RLI rows ─────────────────────────────
         var allRli = await _sp.ReadAllRfqLineItemsAsync();
@@ -94,13 +94,13 @@ public class RliAnchoringController : ControllerBase
                 };
             }).ToList();
 
-            // ── 5. Optionally re-run Claude with RLI context ───────────────
-            if (withClaude && claudeCallsUsed < claudeLimit && rliItems.Count > 0)
+            // ── 5. Optionally re-run AI with RLI context ──────────────────
+            if (withAi && claudeCallsUsed < aiLimit && rliItems.Count > 0)
             {
                 var srRows = await _sp.ReadSrEmailsByRfqIdAsync(rfqId);
                 foreach (var sr in srRows)
                 {
-                    if (claudeCallsUsed >= claudeLimit) break;
+                    if (claudeCallsUsed >= aiLimit) break;
                     if (string.IsNullOrWhiteSpace(sr.EmailBody)) continue;
 
                     var req = new ExtractRequest
@@ -147,7 +147,7 @@ public class RliAnchoringController : ControllerBase
                     }
                     catch (Exception ex)
                     {
-                        _log.LogWarning(ex, "[RliTest] Claude dry-run failed for [{RfqId}]", rfqId);
+                        _log.LogWarning(ex, "[RliTest] AI dry-run failed for [{RfqId}]", rfqId);
                     }
                 }
             }
