@@ -1,26 +1,7 @@
-# Visual Studio
-.vs/
 bin/
 obj/
 *.user
-*.suo
-
-# Environment / secrets
-appsettings.Development.json
-appsettings.secrets.json
-secrets.json
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Publish output
+.vs/
 publish/
-publish_scf/
-publish_tmp/
-
-# Logs
-*.log
-
-# Claude Code
-.claude/
+Logs/
+appsettings.secrets.json

@@ -48,7 +48,7 @@ public class OutlookComPollerService : BackgroundService
             return;
         }
 
-        var interval = int.TryParse(_config["OutlookCom:PollIntervalSeconds"], out var i) ? i : 60;
+        var interval = int.TryParse(_config["OutlookCom:PollIntervalSeconds"], out var i) ? i : 300;
         _log.LogInformation("[OutlookCOM] Polling {Mailbox} every {Interval}s via COM", mailbox, interval);
 
         // Give Outlook time to start before the first poll
@@ -311,26 +311,45 @@ public class OutlookComPollerService : BackgroundService
             return 0;
         }
 
-        dynamic sentItems = store.GetDefaultFolder(5); // olFolderSentMail = 5
+        dynamic sentFolder = store.GetDefaultFolder(5); // olFolderSentMail = 5
         var cutoff  = DateTime.Now.AddDays(-days);
         int cleared = 0;
 
-        foreach (dynamic item in sentItems.Items)
+        // Use Restrict() to filter by date server-side
+        var cutoffStr = cutoff.ToString("MM/dd/yyyy HH:mm");
+        dynamic items;
+        try
+        {
+            items = sentFolder.Items.Restrict($"[SentOn] >= '{cutoffStr}'");
+        }
+        catch
+        {
+            items = sentFolder.Items;
+        }
+
+        foreach (dynamic item in items)
         {
             try
             {
-                if ((int)item.Class != 43) continue;
-                try { if ((DateTime)item.SentOn < cutoff) continue; } catch { continue; }
+                if ((int)item.Class != 43) { Marshal.ReleaseComObject(item); continue; }
+                try { if ((DateTime)item.SentOn < cutoff) { Marshal.ReleaseComObject(item); continue; } }
+                catch { Marshal.ReleaseComObject(item); continue; }
 
                 string subject      = item.Subject ?? "";
                 var    cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
                 if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
+                {
+                    Marshal.ReleaseComObject(item);
                     continue;
+                }
 
                 string current = item.Categories ?? "";
                 if (!current.Contains("PO-COM-Processed",  StringComparison.OrdinalIgnoreCase) &&
                     !current.Contains("PO-COM-NoExtract",   StringComparison.OrdinalIgnoreCase))
+                {
+                    Marshal.ReleaseComObject(item);
                     continue;
+                }
 
                 // Strip the PO-COM-* categories, preserve any others
                 var remaining = current
@@ -345,6 +364,7 @@ public class OutlookComPollerService : BackgroundService
                 item.Save();
                 cleared++;
                 _log.LogInformation("[OutlookCOM] Unstamped PO email: {Subject}", subject);
+                Marshal.ReleaseComObject(item);
             }
             catch (Exception ex)
             {
@@ -470,19 +490,35 @@ public class OutlookComPollerService : BackgroundService
         }
 
         // olFolderSentMail = 5
-        dynamic sentItems = store.GetDefaultFolder(5);
+        dynamic sentFolder = store.GetDefaultFolder(5);
         var result      = new List<OutlookPoMessage>();
         var cutoff      = DateTime.Now.AddDays(-lookbackDays);
         var seenRecent  = new List<string>();   // for diagnostic logging
 
-        foreach (dynamic item in sentItems.Items)
+        // Use Restrict() to filter server-side — avoids iterating every item in Sent Items
+        // which was causing Outlook UI freezes via cross-process COM calls.
+        var cutoffStr = cutoff.ToString("MM/dd/yyyy HH:mm");
+        dynamic items;
+        try
+        {
+            items = sentFolder.Items.Restrict(
+                $"[SentOn] >= '{cutoffStr}'");
+        }
+        catch
+        {
+            // Fallback if Restrict fails (shouldn't happen, but be safe)
+            _log.LogWarning("[OutlookCOM] Items.Restrict failed — falling back to full iteration");
+            items = sentFolder.Items;
+        }
+
+        foreach (dynamic item in items)
         {
             try
             {
                 // olMail = 43
                 if ((int)item.Class != 43) continue;
 
-                // Skip items older than the lookback window
+                // Skip items older than the lookback window (belt-and-suspenders with Restrict)
                 try { if ((DateTime)item.SentOn < cutoff) continue; }
                 catch { continue; }
 
@@ -493,13 +529,19 @@ public class OutlookComPollerService : BackgroundService
                 if (seenRecent.Count < 10) seenRecent.Add(subject);
 
                 if (!cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
+                {
+                    Marshal.ReleaseComObject(item);
                     continue;
+                }
 
                 // Skip already-stamped items
                 string categories = item.Categories ?? "";
                 if (categories.Contains(processedCategory, StringComparison.OrdinalIgnoreCase) ||
                     categories.Contains("PO-COM-NoExtract",  StringComparison.OrdinalIgnoreCase))
+                {
+                    Marshal.ReleaseComObject(item);
                     continue;
+                }
 
                 // Extract body (plain text)
                 string body = item.Body ?? "";
@@ -511,7 +553,11 @@ public class OutlookComPollerService : BackgroundService
                 {
                     dynamic att = attachments[i];
                     string attName = att.FileName ?? att.DisplayName ?? "";
-                    if (!attName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!attName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Marshal.ReleaseComObject(att);
+                        continue;
+                    }
 
                     var tmp = Path.Combine(Path.GetTempPath(), $"shredder_po_{Guid.NewGuid():N}.pdf");
                     try
@@ -522,9 +568,11 @@ public class OutlookComPollerService : BackgroundService
                     finally
                     {
                         if (File.Exists(tmp)) File.Delete(tmp);
+                        Marshal.ReleaseComObject(att);
                     }
                     break; // first PDF only
                 }
+                Marshal.ReleaseComObject(attachments);
 
                 string sentOn = "";
                 try { sentOn = ((DateTime)item.SentOn).ToUniversalTime().ToString("o"); }
@@ -541,6 +589,8 @@ public class OutlookComPollerService : BackgroundService
                     SentOn:         sentOn,
                     SenderHint:     senderName,
                     PdfAttachments: pdfs));
+
+                Marshal.ReleaseComObject(item);
             }
             catch (Exception ex)
             {

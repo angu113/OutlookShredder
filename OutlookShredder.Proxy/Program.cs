@@ -32,6 +32,11 @@ try
     var builder = WebApplication.CreateBuilder(args);
     builder.Configuration.SetBasePath(exeDir);
 
+    // Re-add appsettings.json from the exe directory so it overrides any file
+    // that CreateBuilder auto-loaded from the working directory.
+    builder.Configuration.AddJsonFile("appsettings.json", optional: true, reloadOnChange: false);
+    builder.Configuration.AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: false);
+
     // Secrets file: gitignored, deployed alongside the exe.
     // Overrides appsettings.json values — put real API keys and credentials here.
     builder.Configuration.AddJsonFile("appsettings.secrets.json", optional: true, reloadOnChange: false);
