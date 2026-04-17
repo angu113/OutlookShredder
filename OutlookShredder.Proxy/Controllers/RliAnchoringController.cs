@@ -13,18 +13,18 @@ namespace OutlookShredder.Proxy.Controllers;
 public class RliAnchoringController : ControllerBase
 {
     private readonly SharePointService    _sp;
-    private readonly ClaudeService        _claude;
+    private readonly AiServiceFactory     _aiFactory;
     private readonly ProductCatalogService _catalog;
     private readonly ILogger<RliAnchoringController> _log;
 
     public RliAnchoringController(
         SharePointService    sp,
-        ClaudeService        claude,
+        AiServiceFactory     aiFactory,
         ProductCatalogService catalog,
         ILogger<RliAnchoringController> log)
     {
-        _sp      = sp;
-        _claude  = claude;
+        _sp        = sp;
+        _aiFactory = aiFactory;
         _catalog = catalog;
         _log     = log;
     }
@@ -115,9 +115,9 @@ public class RliAnchoringController : ControllerBase
 
                     try
                     {
-                        _log.LogInformation("[RliTest] Claude dry-run for [{RfqId}] / {Supplier}",
+                        _log.LogInformation("[RliTest] AI dry-run for [{RfqId}] / {Supplier}",
                             rfqId, sr.SupplierName);
-                        var extraction = await _claude.ExtractAsync(req);
+                        var extraction = await _aiFactory.GetService().ExtractRfqAsync(req, HttpContext.RequestAborted);
                         claudeCallsUsed++;
 
                         // Annotate matching product rows with Claude's new suggestion

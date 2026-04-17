@@ -1,0 +1,52 @@
+[1mdiff --cc OutlookShredder.Proxy/Program.cs[m
+[1mindex 5b30f9f,c3052b5..0000000[m
+[1m--- a/OutlookShredder.Proxy/Program.cs[m
+[1m+++ b/OutlookShredder.Proxy/Program.cs[m
+[36m@@@ -70,40 -68,10 +70,47 @@@[m [mtr[m
+      });[m
+  [m
+      builder.Services.AddControllers();[m
+[32m++<<<<<<< Updated upstream[m
+[32m +[m
+[32m +    // ── AI Provider Registration ──────────────────────────────────────────[m
+[32m +    // Register all available AI providers (Claude, OpenAI, Google AI).[m
+[32m +    // Configuration from appsettings.json:AiProviders section:[m
+[32m +    //   - DefaultProvider: which provider to use by default (e.g., "claude")[m
+[32m +    //   - FallbackProvider: which provider to use if the default fails (e.g., "google")[m
+[32m +    // To disable a provider, omit its configuration or leave ApiKey empty.[m
+[32m +    // Configuration keys for each provider:[m
+[32m +    //   - Claude:  No config needed (uses existing behavior)[m
+[32m +    //   - OpenAI:  Requires OpenAi:ApiKey, optional OpenAi:Model, OpenAi:MaxRetries, OpenAi:TimeoutSeconds[m
+[32m +    //   - Google:  Requires Google:ApiKey, optional Google:Model, Google:MaxRetries, Google:TimeoutSeconds[m
+[32m +[m
+[32m +    builder.Services.AddClaudeAiProvider();[m
+[32m +    builder.Services.AddOpenAiProvider();[m
+[32m +    builder.Services.AddGoogleAiProvider();[m
+[32m +[m
+[32m +    // Read provider configuration from appsettings[m
+[32m +    var aiProviderConfig = builder.Configuration.GetSection("AiProviders");[m
+[32m +    var defaultProvider = aiProviderConfig["DefaultProvider"] ?? "claude";[m
+[32m +    var fallbackProvider = aiProviderConfig["FallbackProvider"];[m
+[32m +[m
+[32m +    // Register the multi-provider factory with configuration-driven defaults[m
+[32m +    builder.Services.AddAiProviderFactory(options =>[m
+[32m +    {[m
+[32m +        options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));[m
+[32m +        options.RegisterProvider("gpt4", typeof(OpenAiProvider));[m
+[32m +        options.RegisterProvider("openai", typeof(OpenAiProvider));[m
+[32m +        options.RegisterProvider("gemini", typeof(GoogleAiProvider));[m
+[32m +        options.RegisterProvider("google", typeof(GoogleAiProvider));[m
+[32m +        options.SetDefaultProvider(defaultProvider);[m
+[32m +        if (!string.IsNullOrEmpty(fallbackProvider))[m
+[32m +            options.SetFallbackProvider(fallbackProvider);[m
+[32m +    });[m
+[32m +[m
+[32m++=======[m
+[32m+         // Register AI extraction services (pluggable)[m
+[32m+     builder.Services.AddSingleton<ClaudeExtractionService>();[m
+[32m+     builder.Services.AddSingleton<GeminiExtractionService>();[m
+[32m+     builder.Services.AddSingleton<AiServiceFactory>();[m
+[32m++>>>>>>> Stashed changes[m
+      builder.Services.AddSingleton<SupplierCacheService>();[m
+      builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());[m
+      builder.Services.AddSingleton<ProductCatalogService>();[m

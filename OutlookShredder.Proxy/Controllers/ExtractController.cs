@@ -8,7 +8,7 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api")]
 public class ExtractController : ControllerBase
 {
-    private readonly ClaudeService              _claude;
+    private readonly AiServiceFactory            _aiFactory;
     private readonly SharePointService          _sp;
     private readonly MailService                _mail;
     private readonly MailPollerService          _poller;
@@ -20,7 +20,7 @@ public class ExtractController : ControllerBase
     private readonly ILogger<ExtractController> _log;
 
     public ExtractController(
-        ClaudeService               claude,
+        AiServiceFactory            aiFactory,
         SharePointService           sp,
         MailService                 mail,
         MailPollerService           poller,
@@ -31,7 +31,7 @@ public class ExtractController : ControllerBase
         IConfiguration              config,
         ILogger<ExtractController>  log)
     {
-        _claude        = claude;
+        _aiFactory     = aiFactory;
         _sp            = sp;
         _mail          = mail;
         _poller        = poller;
@@ -58,11 +58,11 @@ public class ExtractController : ControllerBase
         RfqExtraction? extraction;
         try
         {
-            extraction = await _claude.ExtractAsync(req);
+            extraction = await _aiFactory.GetService().ExtractRfqAsync(req, HttpContext.RequestAborted);
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "Claude extraction failed");
+            _log.LogError(ex, "AI extraction failed");
             return StatusCode(502, new ExtractResponse { Success = false, Error = ex.Message });
         }
 
@@ -1641,7 +1641,7 @@ public class ExtractController : ControllerBase
             return BadRequest(new { error = "Mail:MailboxAddress not configured" });
         try
         {
-            var (patched, skipped) = await _sp.BackfillQuoteReferencesAsync(_mail, _claude, mailbox, days, ct);
+            var (patched, skipped) = await _sp.BackfillQuoteReferencesAsync(_mail, _aiFactory.GetService(), mailbox, days, ct);
             _log.LogInformation("[BackfillQuoteRefs] patched={Patched} skipped={Skipped}", patched, skipped);
             return Ok(new { patched, skipped });
         }

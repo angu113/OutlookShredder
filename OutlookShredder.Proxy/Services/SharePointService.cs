@@ -5173,7 +5173,7 @@ public class SharePointService
     /// QuoteReference onto the SR and all its child SLI rows.
     /// </summary>
     public async Task<(int Patched, int Skipped)> BackfillQuoteReferencesAsync(
-        MailService mail, ClaudeService claude, string mailbox,
+        MailService mail, IAiExtractionService ai, string mailbox,
         int days = 90, CancellationToken ct = default)
     {
         var siteId    = await GetSiteIdAsync();
@@ -5255,7 +5255,7 @@ public class SharePointService
                             ContentType = pdf.ContentType ?? "application/pdf",
                             BodyContext = emailBody,
                         };
-                        var result = await claude.ExtractAsync(req);
+                        var result = await ai.ExtractRfqAsync(req, ct);
                         quoteRef = result?.QuoteReference;
                         _log.LogInformation("[Backfill] SR {Id} — attachment extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
                     }
@@ -5272,7 +5272,7 @@ public class SharePointService
                     {
                         _log.LogInformation("[Backfill] SR {Id} — running Claude on stored email body ({Len} chars)", srSpId, emailBody!.Length);
                         var req = new ExtractRequest { Content = emailBody, SourceType = "body" };
-                        var result = await claude.ExtractAsync(req);
+                        var result = await ai.ExtractRfqAsync(req, ct);
                         quoteRef = result?.QuoteReference;
                         _log.LogInformation("[Backfill] SR {Id} — body extraction quoteRef={QuoteRef}", srSpId, quoteRef ?? "(null)");
                     }

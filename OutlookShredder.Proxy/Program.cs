@@ -71,39 +71,10 @@ try
 
     builder.Services.AddControllers();
 
-    // ── AI Provider Registration ──────────────────────────────────────────
-    // Register all available AI providers (Claude, OpenAI, Google AI).
-    // Configuration from appsettings.json:AiProviders section:
-    //   - DefaultProvider: which provider to use by default (e.g., "claude")
-    //   - FallbackProvider: which provider to use if the default fails (e.g., "google")
-    // To disable a provider, omit its configuration or leave ApiKey empty.
-    // Configuration keys for each provider:
-    //   - Claude:  No config needed (uses existing behavior)
-    //   - OpenAI:  Requires OpenAi:ApiKey, optional OpenAi:Model, OpenAi:MaxRetries, OpenAi:TimeoutSeconds
-    //   - Google:  Requires Google:ApiKey, optional Google:Model, Google:MaxRetries, Google:TimeoutSeconds
-
-    builder.Services.AddClaudeAiProvider();
-    builder.Services.AddOpenAiProvider();
-    builder.Services.AddGoogleAiProvider();
-
-    // Read provider configuration from appsettings
-    var aiProviderConfig = builder.Configuration.GetSection("AiProviders");
-    var defaultProvider = aiProviderConfig["DefaultProvider"] ?? "claude";
-    var fallbackProvider = aiProviderConfig["FallbackProvider"];
-
-    // Register the multi-provider factory with configuration-driven defaults
-    builder.Services.AddAiProviderFactory(options =>
-    {
-        options.RegisterProvider("claude", typeof(ClaudeServiceAdapter));
-        options.RegisterProvider("gpt4", typeof(OpenAiProvider));
-        options.RegisterProvider("openai", typeof(OpenAiProvider));
-        options.RegisterProvider("gemini", typeof(GoogleAiProvider));
-        options.RegisterProvider("google", typeof(GoogleAiProvider));
-        options.SetDefaultProvider(defaultProvider);
-        if (!string.IsNullOrEmpty(fallbackProvider))
-            options.SetFallbackProvider(fallbackProvider);
-    });
-
+    // Register AI extraction services (pluggable)
+    builder.Services.AddSingleton<ClaudeExtractionService>();
+    builder.Services.AddSingleton<GeminiExtractionService>();
+    builder.Services.AddSingleton<AiServiceFactory>();
     builder.Services.AddSingleton<SupplierCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());
     builder.Services.AddSingleton<ProductCatalogService>();
@@ -155,3 +126,4 @@ finally
     Log.Information("ShredderProxy shut down");
     Log.CloseAndFlush();
 }
+

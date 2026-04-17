@@ -227,27 +227,87 @@ public class MailService
         return result;
     }
 
+    // ── Folder helpers ────────────────────────────────────────────────────────
+
     /// <summary>
-    /// Returns inbox messages already tagged with "RFQ-Processed" (newest first).
+    /// Returns the list of folder IDs to scan for RFQ emails:
+    /// always "inbox", plus ALL direct child folders of Inbox (supplier subfolders
+    /// created by Outlook rules).  Any folder display-names listed in
+    /// Mail:ExcludeFolders config are skipped.
+    /// </summary>
+    private async Task<List<string>> GetFolderIdsToScanAsync(string mailbox)
+    {
+        var ids = new List<string> { "inbox" };
+
+        var exclude = (_config.GetSection("Mail:ExcludeFolders").Get<string[]>() ?? [])
+                          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Resolve inbox folder ID (needed to call ChildFolders API).
+        string? inboxId = null;
+        try
+        {
+            var inboxResult = await GetGraph().Users[mailbox].MailFolders
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Filter = "displayName eq 'Inbox'";
+                    req.QueryParameters.Select = ["id"];
+                });
+            inboxId = inboxResult?.Value?.FirstOrDefault()?.Id;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Mail] Could not resolve Inbox folder ID for {Mailbox}", mailbox);
+        }
+
+        if (inboxId is null) return ids;
+
+        // Enumerate all Inbox child folders (supplier subfolders added by Outlook rules).
+        try
+        {
+            var children = await GetGraph().Users[mailbox].MailFolders[inboxId].ChildFolders
+                .GetAsync(req => req.QueryParameters.Select = ["id", "displayName"]);
+
+            foreach (var folder in children?.Value ?? [])
+            {
+                if (folder.Id is null || folder.DisplayName is null) continue;
+                if (exclude.Contains(folder.DisplayName)) continue;
+                ids.Add(folder.Id);
+                _log.LogDebug("[Mail] Scanning Inbox subfolder '{Name}'", folder.DisplayName);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Mail] Could not enumerate Inbox child folders for {Mailbox}", mailbox);
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Returns messages tagged with "RFQ-Processed" across inbox and any ExtraFolders (newest first).
     /// Used to populate the Reprocess Supplier Emails scan list.
     /// </summary>
     public async Task<List<ProcessedEmailDto>> GetProcessedMessagesAsync(string mailbox, int top = 200)
     {
-        var result = await GetGraph()
-            .Users[mailbox]
-            .MailFolders["inbox"]
-            .Messages
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Filter  = $"categories/any(c: c eq '{ProcessedCategory}')";
-                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
-                                               "bodyPreview", "categories"];
-                req.QueryParameters.Top     = top;
-                req.QueryParameters.Orderby = ["receivedDateTime desc"];
-            });
+        var folderIds = await GetFolderIdsToScanAsync(mailbox);
+        var all = new List<ProcessedEmailDto>();
 
-        return (result?.Value ?? [])
-            .Select(m => new ProcessedEmailDto
+        foreach (var folderId in folderIds)
+        {
+            var result = await GetGraph()
+                .Users[mailbox]
+                .MailFolders[folderId]
+                .Messages
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Filter  = $"categories/any(c: c eq '{ProcessedCategory}')";
+                    req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
+                                                   "bodyPreview", "categories"];
+                    req.QueryParameters.Top     = top;
+                    req.QueryParameters.Orderby = ["receivedDateTime desc"];
+                });
+
+            all.AddRange((result?.Value ?? []).Select(m => new ProcessedEmailDto
             {
                 MessageId  = m.Id ?? "",
                 Subject    = m.Subject ?? "(no subject)",
@@ -255,8 +315,10 @@ public class MailService
                 ReceivedAt = m.ReceivedDateTime?.UtcDateTime ?? DateTime.MinValue,
                 Preview    = m.BodyPreview ?? "",
                 IsUnknown  = m.Categories?.Contains("Unknown", StringComparer.OrdinalIgnoreCase) == true,
-            })
-            .ToList();
+            }));
+        }
+
+        return all.OrderByDescending(m => m.ReceivedAt).Take(top).ToList();
     }
 
     /// <summary>
@@ -276,8 +338,8 @@ public class MailService
     }
 
     /// <summary>
-    /// Returns inbox messages received at or after <paramref name="since"/> that have NOT
-    /// been tagged with the "RFQ-Processed" category. Filtering is done server-side.
+    /// Returns unprocessed messages received at or after <paramref name="since"/> across
+    /// inbox and any Mail:ExtraFolders. Filtering is done server-side per folder.
     /// </summary>
     public async Task<List<Message>> GetMessagesAsync(string mailbox, DateTimeOffset since)
     {
@@ -285,22 +347,30 @@ public class MailService
                      $" and not (categories/any(c: c eq '{ProcessedCategory}'))" +
                      $" and not (categories/any(c: c eq '{ClaimingCategory}'))";
 
-        _log.LogDebug("[Mail] Querying inbox for {Mailbox} since {Since}", mailbox, since);
+        var folderIds = await GetFolderIdsToScanAsync(mailbox);
+        var all = new List<Message>();
 
-        var result = await GetGraph()
-            .Users[mailbox]
-            .MailFolders["inbox"]
-            .Messages
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Filter  = filter;
-                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
-                                               "body", "hasAttachments", "bodyPreview", "categories"];
-                req.QueryParameters.Top     = 50;
-                req.QueryParameters.Orderby = ["receivedDateTime desc"];
-            });
+        foreach (var folderId in folderIds)
+        {
+            _log.LogDebug("[Mail] Querying folder {Folder} for {Mailbox} since {Since}", folderId, mailbox, since);
 
-        return result?.Value ?? [];
+            var result = await GetGraph()
+                .Users[mailbox]
+                .MailFolders[folderId]
+                .Messages
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Filter  = filter;
+                    req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
+                                                   "body", "hasAttachments", "bodyPreview", "categories"];
+                    req.QueryParameters.Top     = 50;
+                    req.QueryParameters.Orderby = ["receivedDateTime desc"];
+                });
+
+            all.AddRange(result?.Value ?? []);
+        }
+
+        return all;
     }
 
     // ── Dashboard: retrieve email body text ──────────────────────────────────
@@ -465,30 +535,33 @@ public class MailService
     }
 
     /// <summary>
-    /// Removes "RFQ-Processed" (and "Unknown") categories from every message in the inbox
-    /// so the next poll cycle will reprocess all emails.
+    /// Removes "RFQ-Processed" (and "Unknown") categories from every message in inbox
+    /// and any Mail:ExtraFolders so the next poll cycle will reprocess all emails.
     /// Returns the count of messages that were un-marked.
     /// </summary>
     public async Task<int> UnmarkAllAsync(string mailbox)
     {
+        var folderIds   = await GetFolderIdsToScanAsync(mailbox);
         var unmarkCount = 0;
 
-        // Fetch batches of marked messages and clear them until none remain.
-        while (true)
+        foreach (var folderId in folderIds)
         {
-            var result = await GetGraph()
-                .Users[mailbox]
-                .MailFolders["inbox"]
-                .Messages
-                .GetAsync(req =>
-                {
-                    req.QueryParameters.Filter = $"categories/any(c: c eq '{ProcessedCategory}')";
-                    req.QueryParameters.Select = ["id", "categories"];
-                    req.QueryParameters.Top    = 50;
-                });
+            // Fetch batches of marked messages and clear them until none remain.
+            while (true)
+            {
+                var result = await GetGraph()
+                    .Users[mailbox]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(req =>
+                    {
+                        req.QueryParameters.Filter = $"categories/any(c: c eq '{ProcessedCategory}')";
+                        req.QueryParameters.Select = ["id", "categories"];
+                        req.QueryParameters.Top    = 50;
+                    });
 
-            var messages = result?.Value ?? [];
-            if (messages.Count == 0) break;
+                var messages = result?.Value ?? [];
+                if (messages.Count == 0) break;
 
             foreach (var msg in messages)
             {
@@ -511,6 +584,7 @@ public class MailService
                 }
             }
         }
+        } // end foreach folderId
 
         return unmarkCount;
     }

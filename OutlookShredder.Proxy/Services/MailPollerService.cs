@@ -23,7 +23,7 @@ public class MailPollerService : BackgroundService
 {
     private readonly IConfiguration            _config;
     private readonly MailService               _mail;
-    private readonly ClaudeService             _claude;
+    private readonly AiServiceFactory _aiFactory;
     private readonly SharePointService         _sp;
     private readonly ProductCatalogService     _catalog;
     private readonly RfqNotificationService    _notifications;
@@ -194,7 +194,7 @@ public class MailPollerService : BackgroundService
             PoExtraction? extraction = null;
             foreach (var (name, bytes) in pdfAttachments)
             {
-                extraction = await _claude.ExtractPurchaseOrderAsync(
+                extraction = await _aiFactory.GetService().ExtractPurchaseOrderAsync(
                     Convert.ToBase64String(bytes),
                     name,
                     body[..Math.Min(body.Length, 1_000)],
@@ -267,7 +267,7 @@ public class MailPollerService : BackgroundService
     public MailPollerService(
         IConfiguration             config,
         MailService                mail,
-        ClaudeService              claude,
+        AiServiceFactory aiFactory,
         SharePointService          sp,
         ProductCatalogService      catalog,
         RfqNotificationService     notifications,
@@ -275,7 +275,7 @@ public class MailPollerService : BackgroundService
     {
         _config        = config;
         _mail          = mail;
-        _claude        = claude;
+        _aiFactory = aiFactory;
         _sp            = sp;
         _catalog       = catalog;
         _notifications = notifications;
@@ -677,7 +677,7 @@ public class MailPollerService : BackgroundService
         foreach (var (name, bytes) in pdfAttachments)
         {
             _log.LogInformation("[PO] Sending PDF '{File}' to Claude for extraction", name);
-            extraction = await _claude.ExtractPurchaseOrderAsync(
+            extraction = await _aiFactory.GetService().ExtractPurchaseOrderAsync(
                 Convert.ToBase64String(bytes),
                 name,
                 plainTextBody[..Math.Min(plainTextBody.Length, 1_000)],
@@ -809,7 +809,7 @@ public class MailPollerService : BackgroundService
 
         try
         {
-            var extraction = await _claude.ExtractAsync(req);
+            var extraction = await _aiFactory.GetService().ExtractRfqAsync(req);
             _log.LogInformation("[Mail] Extracted: supplier={Supplier} quoteRef={QuoteRef}",
                 extraction?.SupplierName, extraction?.QuoteReference ?? "(none)");
 
@@ -908,3 +908,7 @@ public class MailPollerService : BackgroundService
         }
     }
 }
+
+
+
+

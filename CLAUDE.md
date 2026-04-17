@@ -82,14 +82,27 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 
 ### Services
 
-**`ClaudeService`** (singleton)
-- `ExtractAsync(ExtractRequest)` → `RfqExtraction`
+**`IAiExtractionService`** (interface) + **`AiServiceFactory`** (singleton)
+- Provider selected at startup via `AI:Provider` in appsettings (`"claude"` | `"gemini"`; default `"claude"`)
+- `AiServiceFactory.GetService()` resolves the configured implementation from DI
+- To add a new provider: implement `IAiExtractionService`, register it in `Program.cs`, add a case in `AiServiceFactory`
+
+**`ClaudeExtractionService`** (singleton) — provider `"claude"`
+- `ExtractRfqAsync(ExtractRequest, CancellationToken)` → `RfqExtraction`
 - Uses **tool_use** (`extract_rfq` tool) for schema-enforced output — no free-text JSON parsing
 - Static system prompt + tool definition sent with **prompt caching** (`anthropic-beta: prompt-caching-2024-07-31`)
 - Retries 429/5xx/network errors up to `Claude:MaxRetries` with randomised jitter
 - Logs warning when `stop_reason == "max_tokens"` or content is truncated at `Claude:MaxContentChars`
 - Extraction fields: jobReference, quoteReference, supplierName, freightTerms, products[]
   (dateOfQuote/estimatedDeliveryDate removed — dates come from the RFQ Reference record, not extraction)
+
+**`GeminiExtractionService`** (singleton) — provider `"gemini"`
+- Uses `Mscc.GenerativeAI` SDK (v3.x) with `GoogleAI` → `GenerativeModel` factory pattern
+- JSON mode (`ResponseMimeType = "application/json"`) + `ResponseSchema` (ParameterType enum, not SchemaType)
+- System prompt injected via `systemInstruction` on the model (not as a user turn)
+- PDF/DOCX attachments passed as `InlineData { MimeType, Data }` parts in the parts list
+- Retries up to `Gemini:MaxRetries` with same jitter table as Claude
+- Config keys: `Google:ApiKey`, `Gemini:Model` (default `gemini-2.0-flash`), `Gemini:MaxRetries`, `Gemini:MaxContentChars`, `Gemini:MaxContextChars`
 
 **`SharePointService`** (singleton)
 - All Graph API calls. Uses `ClientSecretCredential` (app-only, `Sites.FullControl.All`).
@@ -264,4 +277,4 @@ Shredder desktop  ◄─AMQP───  Azure Service Bus (RfqServiceBusListener)
 
 - `@mithrilmetals.com` is never a valid supplier — never appear in extraction results or email targets
 - All SharePoint writes go through `SharePointService` — no direct Graph calls from controllers
-- Claude extraction prompt and JSON schema live in `ClaudeService.ExtractAsync` — edit there to change extraction behaviour
+- Extraction prompt and JSON schema live in `ClaudeExtractionService.ExtractRfqAsync` and `GeminiExtractionService` — edit there to change extraction behaviour. The system prompt text is a `const string` near the top of each file.
