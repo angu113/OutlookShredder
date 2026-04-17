@@ -231,9 +231,9 @@ public class MailService
 
     /// <summary>
     /// Returns the list of folder IDs to scan for RFQ emails:
-    /// always "inbox", plus ALL direct child folders of Inbox (supplier subfolders
-    /// created by Outlook rules).  Any folder display-names listed in
-    /// Mail:ExcludeFolders config are skipped.
+    /// always "inbox", plus ALL descendant folders of Inbox (supplier subfolders
+    /// and their sub-subfolders, created by Outlook rules).  Any folder display-names
+    /// listed in Mail:ExcludeFolders config are skipped.
     /// </summary>
     private async Task<List<string>> GetFolderIdsToScanAsync(string mailbox)
     {
@@ -261,26 +261,68 @@ public class MailService
 
         if (inboxId is null) return ids;
 
-        // Enumerate all Inbox child folders (supplier subfolders added by Outlook rules).
+        // Recursively enumerate ALL descendant folders of Inbox so that nested
+        // supplier subfolders (e.g. Inbox/Suppliers/CompanyX) are not missed.
+        await CollectChildFolderIdsAsync(mailbox, inboxId, exclude, ids);
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Recursively collects all descendant folder IDs under <paramref name="parentFolderId"/>,
+    /// handling Graph API pagination (default page size is 10).
+    /// </summary>
+    private async Task CollectChildFolderIdsAsync(
+        string mailbox, string parentFolderId, HashSet<string> exclude, List<string> ids)
+    {
         try
         {
-            var children = await GetGraph().Users[mailbox].MailFolders[inboxId].ChildFolders
-                .GetAsync(req => req.QueryParameters.Select = ["id", "displayName"]);
+            var page = await GetGraph().Users[mailbox]
+                .MailFolders[parentFolderId].ChildFolders
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Select = ["id", "displayName", "childFolderCount"];
+                    req.QueryParameters.Top = 100;
+                });
 
-            foreach (var folder in children?.Value ?? [])
+            while (page?.Value is not null)
             {
-                if (folder.Id is null || folder.DisplayName is null) continue;
-                if (exclude.Contains(folder.DisplayName)) continue;
-                ids.Add(folder.Id);
-                _log.LogDebug("[Mail] Scanning Inbox subfolder '{Name}'", folder.DisplayName);
+                foreach (var folder in page.Value)
+                {
+                    if (folder.Id is null || folder.DisplayName is null) continue;
+                    if (exclude.Contains(folder.DisplayName))
+                    {
+                        _log.LogDebug("[Mail] Skipping excluded subfolder '{Name}'", folder.DisplayName);
+                        continue;
+                    }
+
+                    ids.Add(folder.Id);
+                    _log.LogDebug("[Mail] Scanning Inbox subfolder '{Name}'", folder.DisplayName);
+
+                    // Recurse into nested subfolders if any exist.
+                    if (folder.ChildFolderCount is > 0)
+                        await CollectChildFolderIdsAsync(mailbox, folder.Id, exclude, ids);
+                }
+
+                // Follow @odata.nextLink if there are more pages.
+                if (!string.IsNullOrEmpty(page.OdataNextLink))
+                {
+                    page = await GetGraph().Users[mailbox]
+                        .MailFolders[parentFolderId].ChildFolders
+                        .WithUrl(page.OdataNextLink)
+                        .GetAsync();
+                }
+                else
+                {
+                    break;
+                }
             }
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "[Mail] Could not enumerate Inbox child folders for {Mailbox}", mailbox);
+            _log.LogWarning(ex, "[Mail] Could not enumerate child folders of {ParentFolder} for {Mailbox}",
+                parentFolderId, mailbox);
         }
-
-        return ids;
     }
 
     /// <summary>
