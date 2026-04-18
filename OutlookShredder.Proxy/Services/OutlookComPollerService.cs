@@ -46,6 +46,7 @@ public class OutlookComPollerService : BackgroundService
         {
             _log.LogInformation("[OutlookCOM] OutlookCom:Mailbox not configured — poller disabled");
             return;
+
         }
 
         var interval = int.TryParse(_config["OutlookCom:PollIntervalSeconds"], out var i) ? i : 300;
