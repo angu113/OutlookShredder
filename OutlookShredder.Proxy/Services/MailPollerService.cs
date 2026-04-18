@@ -7,8 +7,8 @@ namespace OutlookShredder.Proxy.Services;
 /// <summary>
 /// Background service that polls a configured mailbox on a timer.
 /// For each new message it:
-///   1. Sends the email body to Claude for RFQ extraction
-///   2. Sends any PDF/DOCX attachments to Claude
+///   1. Sends the email body to the AI for RFQ extraction
+///   2. Sends any PDF/DOCX attachments to the AI
 ///   3. Writes extracted product rows to SharePoint
 ///   4. Stamps "RFQ-Processed" category on the message via Graph so it is
 ///      excluded from future polls at the server-side query level.
@@ -17,7 +17,7 @@ namespace OutlookShredder.Proxy.Services;
 ///   Mail:MailboxAddress       — UPN of the inbox to watch, e.g. "rfq@example.com"
 ///   Mail:PollIntervalSeconds  — how often to poll (default: 30)
 ///   Mail:LookbackHours        — rolling lookback window per poll (default: 24)
-///   Mail:MaxEmailsPerMinute   — max Claude API calls per minute (default: 5)
+///   Mail:MaxEmailsPerMinute   — max AI API calls per minute (default: 5)
 /// </summary>
 public class MailPollerService : BackgroundService
 {
@@ -54,8 +54,8 @@ public class MailPollerService : BackgroundService
     private static readonly Regex ExcessiveNewlineRegex =
         new(@"\n{3,}", RegexOptions.Compiled);
 
-    // Sliding-window rate limiter — tracks timestamps of recent Claude calls.
-    private readonly Queue<DateTimeOffset> _claudeCallTimestamps = new();
+    // Sliding-window rate limiter — tracks timestamps of recent AI calls.
+    private readonly Queue<DateTimeOffset> _aiCallTimestamps = new();
     private readonly SemaphoreSlim         _rateLimitLock        = new(1, 1);
 
     // Signalled by TriggerReprocessAllAsync to request an immediate full scan.
@@ -63,7 +63,7 @@ public class MailPollerService : BackgroundService
 
     /// <summary>
     /// Reprocesses a specific set of already-processed messages by fetching each one from
-    /// Graph and running the full extraction pipeline (Claude + SharePoint write + re-stamp).
+    /// Graph and running the full extraction pipeline (AI + SharePoint write + re-stamp).
     /// Called synchronously by the reprocess-selected endpoint; awaited before responding.
     /// </summary>
     public async Task ReprocessMessagesAsync(IEnumerable<string> messageIds, CancellationToken ct)
@@ -92,7 +92,7 @@ public class MailPollerService : BackgroundService
     }
 
     /// <summary>
-    /// Re-runs Claude extraction on each PO record that has a stored MessageId, updates the
+    /// Re-runs AI extraction on each PO record
     /// LineItems JSON in SharePoint, uploads the PDF if not already stored, then re-runs the
     /// RLI matching logic.
     /// <para>
@@ -178,7 +178,9 @@ public class MailPollerService : BackgroundService
                     {
                         if (att is not FileAttachment fa) continue;
                         if (fa.ContentBytes is null) continue;
-                        if (!(fa.ContentType ?? "").ToLowerInvariant().Contains("pdf")) continue;
+                        var ct2 = (fa.ContentType ?? "").ToLowerInvariant();
+                        var ext2 = Path.GetExtension(fa.Name ?? "").ToLowerInvariant();
+                        if (!ct2.Contains("pdf") && ext2 != ".pdf") continue;
                         pdfAttachments.Add((fa.Name ?? "po.pdf", fa.ContentBytes));
                         break;
                     }
@@ -190,7 +192,7 @@ public class MailPollerService : BackgroundService
                 .Distinct()
                 .ToList();
 
-            // Re-run Claude extraction on the first PDF attachment
+            // Re-run AI extraction on the first PDF attachment
             PoExtraction? extraction = null;
             foreach (var (name, bytes) in pdfAttachments)
             {
@@ -367,7 +369,7 @@ public class MailPollerService : BackgroundService
     // ── Rate limiter ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Waits until a Claude API call is allowed under the sliding-window rate limit.
+    /// Waits until an AI API call is allowed under the sliding-window rate limit.
     /// Records the call timestamp so subsequent calls count against the same window.
     /// </summary>
     private async Task AcquireRateSlotAsync(int maxPerMinute, CancellationToken ct)
@@ -383,17 +385,17 @@ public class MailPollerService : BackgroundService
                 var cutoff = now - window;
 
                 // Evict timestamps older than one minute.
-                while (_claudeCallTimestamps.Count > 0 && _claudeCallTimestamps.Peek() <= cutoff)
-                    _claudeCallTimestamps.Dequeue();
+                while (_aiCallTimestamps.Count > 0 && _aiCallTimestamps.Peek() <= cutoff)
+                    _aiCallTimestamps.Dequeue();
 
-                if (_claudeCallTimestamps.Count < maxPerMinute)
+                if (_aiCallTimestamps.Count < maxPerMinute)
                 {
-                    _claudeCallTimestamps.Enqueue(now);
+                    _aiCallTimestamps.Enqueue(now);
                     return;   // slot acquired
                 }
 
                 // Calculate exactly how long until the oldest call leaves the window.
-                var waitUntil = _claudeCallTimestamps.Peek() + window;
+                var waitUntil = _aiCallTimestamps.Peek() + window;
                 var precise   = waitUntil - now + TimeSpan.FromMilliseconds(50); // 50 ms buffer
                 _log.LogDebug("[Mail] Rate limit reached ({Max}/min) — waiting {Ms}ms", maxPerMinute, (int)precise.TotalMilliseconds);
             }
@@ -410,10 +412,10 @@ public class MailPollerService : BackgroundService
             {
                 var now2   = DateTimeOffset.UtcNow;
                 var cutoff = now2 - window;
-                while (_claudeCallTimestamps.Count > 0 && _claudeCallTimestamps.Peek() <= cutoff)
-                    _claudeCallTimestamps.Dequeue();
-                sleepFor = _claudeCallTimestamps.Count >= maxPerMinute
-                    ? (_claudeCallTimestamps.Peek() + window - now2 + TimeSpan.FromMilliseconds(50))
+                while (_aiCallTimestamps.Count > 0 && _aiCallTimestamps.Peek() <= cutoff)
+                    _aiCallTimestamps.Dequeue();
+                sleepFor = _aiCallTimestamps.Count >= maxPerMinute
+                    ? (_aiCallTimestamps.Peek() + window - now2 + TimeSpan.FromMilliseconds(50))
                     : TimeSpan.Zero;
             }
             finally { _rateLimitLock.Release(); }
@@ -488,18 +490,18 @@ public class MailPollerService : BackgroundService
                     string.Join(", ", jobRefs), subject);
         }
 
-        // Decide whether to call Claude.
-        // Claude is always used when a job reference is present or there is an attachment
+        // Decide whether to call the AI.
+        // AI is always used when a job reference is present or there is an attachment
         // (which may be a quote PDF/DOCX even without a reference in the body).
-        // Body-only emails with no job reference bypass Claude and get a direct placeholder row
+        // Body-only emails with no job reference bypass AI and get a direct placeholder row
         // unless ExtractBodyWithoutJobRef is explicitly enabled in config.
         bool hasJobRef    = jobRefs.Count > 0;
         bool hasAttachment = msg.HasAttachments == true;
-        bool sendToClaude = hasJobRef || hasAttachment || extractBodyWithoutJobRef;
+        bool sendToAi = hasJobRef || hasAttachment || extractBodyWithoutJobRef;
 
         if (!hasJobRef && !hasAttachment)
             _log.LogInformation("[Mail] No job ref or attachment in \"{Subject}\" from {From} — {Action}",
-                subject, fromAddr, sendToClaude ? "sending to Claude" : "writing direct row under [000000]");
+                subject, fromAddr, sendToAi ? "sending to AI" : "writing direct row under [000000]");
         else
             _log.LogInformation("[Mail] Processing: \"{Subject}\" from {From} refs=[{Refs}] attachments={Att}",
                 subject, fromAddr, string.Join(", ", jobRefs), hasAttachment);
@@ -508,10 +510,10 @@ public class MailPollerService : BackgroundService
 
         bool supplierUnknown = false;
 
-        if (!sendToClaude)
+        if (!sendToAi)
         {
             // Fast path: no job ref and no attachment — write a placeholder row directly
-            // without spending a Claude API call. SP will assign [000000] or [WHOIS] as appropriate.
+            // without spending an AI API call. SP will assign [000000] or [WHOIS] as appropriate.
             var req = new ExtractRequest
             {
                 Content      = string.Empty,
@@ -553,17 +555,51 @@ public class MailPollerService : BackgroundService
             var attachments = await _mail.GetAttachmentsAsync(mailbox, msg.Id);
             bool processedAny = false;
 
+            _log.LogInformation("[Mail] Fetched {Count} attachment(s) for message {Id}",
+                attachments.Count, msg.Id);
+
             foreach (var att in attachments)
             {
                 if (ct.IsCancellationRequested) break;
-                if (att is not FileAttachment fa) continue;
+                if (att is not FileAttachment fa)
+                {
+                    _log.LogDebug("[Mail] Skipping non-file attachment: {Type}", att.GetType().Name);
+                    continue;
+                }
 
                 var contentType = (fa.ContentType ?? "").ToLowerInvariant();
-                if (!contentType.Contains("pdf") &&
-                    !contentType.Contains("wordprocessingml") &&
-                    !contentType.Contains("msword")) continue;
+                var fileName = fa.Name ?? "(unnamed)";
+                var ext = Path.GetExtension(fileName).ToLowerInvariant();
 
-                if (fa.ContentBytes is null) continue;
+                bool isSupportedType = contentType.Contains("pdf")
+                    || contentType.Contains("wordprocessingml")
+                    || contentType.Contains("msword")
+                    || ext is ".pdf" or ".docx" or ".doc";
+
+                if (!isSupportedType)
+                {
+                    _log.LogInformation("[Mail] Skipping attachment '{Name}' — unsupported content type: {ContentType}",
+                        fileName, contentType);
+                    continue;
+                }
+
+                // Normalise content type from file extension when the MIME type is generic
+                if (!contentType.Contains("pdf") && ext == ".pdf")
+                {
+                    _log.LogInformation("[Mail] Overriding content type for '{Name}': '{Original}' → 'application/pdf'",
+                        fileName, contentType);
+                    contentType = "application/pdf";
+                }
+
+                if (fa.ContentBytes is null)
+                {
+                    _log.LogWarning("[Mail] Attachment '{Name}' has null ContentBytes (type={ContentType}, size={Size})",
+                        fileName, contentType, fa.Size);
+                    continue;
+                }
+
+                _log.LogInformation("[Mail] Processing attachment '{Name}' ({ContentType}, {Bytes} bytes)",
+                    fileName, contentType, fa.ContentBytes.Length);
 
                 supplierUnknown = await RunExtractionAsync(new ExtractRequest
                 {
@@ -571,7 +607,7 @@ public class MailPollerService : BackgroundService
                     EmailBody    = body,
                     SourceType   = "attachment",
                     FileName     = fa.Name,
-                    ContentType  = fa.ContentType,
+                    ContentType  = contentType,
                     Base64Data   = Convert.ToBase64String(fa.ContentBytes),
                     BodyContext  = bodySnippet,
                     JobRefs      = jobRefs,
@@ -639,7 +675,9 @@ public class MailPollerService : BackgroundService
             {
                 if (att is not FileAttachment fa) continue;
                 if (fa.ContentBytes is null) continue;
-                if (!(fa.ContentType ?? "").ToLowerInvariant().Contains("pdf")) continue;
+                var poContentType = (fa.ContentType ?? "").ToLowerInvariant();
+                var poExt = Path.GetExtension(fa.Name ?? "").ToLowerInvariant();
+                if (!poContentType.Contains("pdf") && poExt != ".pdf") continue;
                 pdfs.Add((fa.Name ?? "po.pdf", fa.ContentBytes));
                 break;
             }
@@ -748,7 +786,7 @@ public class MailPollerService : BackgroundService
         return true;
     }
 
-    // ── Claude → SharePoint ───────────────────────────────────────────────────
+    // ── AI → SharePoint
 
     // Returns true if the supplier was not found in the reference list.
     private async Task<bool> RunExtractionAsync(
@@ -759,7 +797,7 @@ public class MailPollerService : BackgroundService
 
         bool dedupDryRun = bool.TryParse(_config["Dedup:DryRun"], out var dr) && dr;
 
-        // Inject RLI requested-items context so Claude can anchor each extracted supplier
+        // Inject RLI requested-items context so the AI can anchor each extracted supplier
         // product to the nearest requested item and return its MSPC as productSearchKey.
         if (req.RliItems.Count == 0)
         {
@@ -776,7 +814,7 @@ public class MailPollerService : BackgroundService
                     {
                         // Validate each RLI item: if the product name was edited after catalog
                         // selection, the MSPC may no longer match the name. Null out the MSPC
-                        // so Claude uses name-only matching instead of wrong-product anchoring.
+                        // so the AI uses name-only matching instead of wrong-product anchoring.
                         foreach (var item in rliItems.Where(r => !string.IsNullOrEmpty(r.Mspc)))
                         {
                             var (consistent, jaccard, catalogName) =
@@ -827,12 +865,12 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
                 products = ProductDeduplicator.Deduplicate(products, source, dedupDryRun, _log);
 
-                // Warn for each product Claude couldn't anchor to an RLI item despite context being available.
+                // Warn for each product the AI couldn't anchor to an RLI item despite context being available.
                 if (req.RliItems.Count > 0)
                 {
                     foreach (var p in products.Where(p => string.IsNullOrEmpty(p.ProductSearchKey)))
                         _log.LogWarning(
-                            "[Mail] RLI unmatched: Claude returned no productSearchKey for '{Name}' " +
+                            "[Mail] RLI unmatched: AI returned no productSearchKey for '{Name}' " +
                             "despite {Count} RLI item(s) — will fall back to fuzzy match. " +
                             "RLI=[{Rli}]",
                             p.ProductName,

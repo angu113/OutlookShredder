@@ -3,12 +3,12 @@ using OutlookShredder.Proxy.Models;
 namespace OutlookShredder.Proxy.Services;
 
 /// <summary>
-/// Abstraction for AI-powered extraction services (Claude, Gemini, OpenAI, etc.).
+/// Abstraction for AI-powered extraction services.
 /// Implementations handle provider-specific API calls, retry logic, and response parsing.
 /// </summary>
 public interface IAiExtractionService
 {
-    /// <summary>Provider name for logging and diagnostics (e.g., "Claude", "Gemini", "OpenAI").</summary>
+    /// <summary>Provider name for logging and diagnostics.</summary>
     string ProviderName { get; }
 
     /// <summary>

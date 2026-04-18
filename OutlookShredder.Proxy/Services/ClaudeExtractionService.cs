@@ -203,8 +203,10 @@ public class ClaudeExtractionService : IAiExtractionService
             : null;
 
         var contentType = (req.ContentType ?? string.Empty).ToLowerInvariant();
-        var isPdf   = contentType.Contains("pdf");
-        var isDocx  = contentType.Contains("wordprocessingml") || contentType.Contains("msword");
+        var fileExt = Path.GetExtension(req.FileName ?? "").ToLowerInvariant();
+        var isPdf   = contentType.Contains("pdf") || fileExt == ".pdf";
+        var isDocx  = contentType.Contains("wordprocessingml") || contentType.Contains("msword")
+                      || fileExt is ".docx" or ".doc";
 
         string? decodedText = null;
         if (!isPdf && !isDocx && req.SourceType == "attachment" && !string.IsNullOrEmpty(req.Base64Data))

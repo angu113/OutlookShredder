@@ -5,7 +5,7 @@ namespace OutlookShredder.Proxy.Services;
 /// <summary>
 /// Pre-insert deduplication for extracted product lines.
 ///
-/// Claude sometimes extracts the same product multiple times when a quote PDF
+/// The AI sometimes extracts the same product multiple times when a quote PDF
 /// describes pricing in more than one place (e.g. a line-item table and a summary
 /// section). This class collapses those duplicates before the SP write loop runs.
 ///

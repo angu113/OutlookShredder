@@ -9,7 +9,7 @@ public interface IAiProviderFactory
     /// <summary>
     /// Gets an AI provider by name.
     /// </summary>
-    /// <param name="name">Provider name (e.g., "claude", "gpt4").</param>
+    /// <param name="name">Provider name (e.g., "gemini", "gpt4").</param>
     /// <returns>The requested provider, or null if not registered.</returns>
     IAiProvider? GetProvider(string name);
 

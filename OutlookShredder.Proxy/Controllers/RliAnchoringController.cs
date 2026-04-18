@@ -61,7 +61,7 @@ public class RliAnchoringController : ControllerBase
             rfqIds.Count, sampleSize);
 
         var results = new List<RfqCompareResult>();
-        int claudeCallsUsed = 0;
+        int aiCallsUsed = 0;
 
         foreach (var rfqId in rfqIds)
         {
@@ -95,12 +95,12 @@ public class RliAnchoringController : ControllerBase
             }).ToList();
 
             // ── 5. Optionally re-run AI with RLI context ──────────────────
-            if (withAi && claudeCallsUsed < aiLimit && rliItems.Count > 0)
+            if (withAi && aiCallsUsed < aiLimit && rliItems.Count > 0)
             {
                 var srRows = await _sp.ReadSrEmailsByRfqIdAsync(rfqId);
                 foreach (var sr in srRows)
                 {
-                    if (claudeCallsUsed >= aiLimit) break;
+                    if (aiCallsUsed >= aiLimit) break;
                     if (string.IsNullOrWhiteSpace(sr.EmailBody)) continue;
 
                     var req = new ExtractRequest
@@ -118,9 +118,9 @@ public class RliAnchoringController : ControllerBase
                         _log.LogInformation("[RliTest] AI dry-run for [{RfqId}] / {Supplier}",
                             rfqId, sr.SupplierName);
                         var extraction = await _aiFactory.GetService().ExtractRfqAsync(req, HttpContext.RequestAborted);
-                        claudeCallsUsed++;
+                        aiCallsUsed++;
 
-                        // Annotate matching product rows with Claude's new suggestion
+                        // Annotate matching product rows with the AI's new suggestion
                         if (extraction?.Products is { Count: > 0 } products)
                         {
                             foreach (var (p, idx) in products.Select((p, i) => (p, i)))
@@ -133,12 +133,12 @@ public class RliAnchoringController : ControllerBase
 
                                 if (target is not null)
                                 {
-                                    target.ClaudeProductName  = p.ProductName;
-                                    target.ClaudeSearchKey    = p.ProductSearchKey;
-                                    target.ClaudeAgreesWithRli = p.ProductSearchKey is not null &&
+                                    target.AiProductName  = p.ProductName;
+                                                                    target.AiSearchKey    = p.ProductSearchKey;
+                                                                    target.AiAgreesWithRli = p.ProductSearchKey is not null &&
                                         string.Equals(p.ProductSearchKey, target.BestRliMspc,
                                             StringComparison.OrdinalIgnoreCase);
-                                    target.ClaudeAgreesWithExisting = string.Equals(
+                                    target.AiAgreesWithExisting = string.Equals(
                                         p.ProductSearchKey, target.ExistingSearchKey,
                                         StringComparison.OrdinalIgnoreCase);
                                 }
@@ -167,7 +167,7 @@ public class RliAnchoringController : ControllerBase
             DataMatches     = results.SelectMany(r => r.ProductRows).Count(p => p.DataMatch),
             DataMismatches  = results.SelectMany(r => r.ProductRows).Count(p => !p.DataMatch && p.BestRliMspc is not null),
             NoRliMatch      = results.SelectMany(r => r.ProductRows).Count(p => p.BestRliMspc is null),
-            ClaudeCallsUsed = claudeCallsUsed,
+            AiCallsUsed = aiCallsUsed,
         };
 
         _log.LogInformation("[RliTest] Done. {Summary}", System.Text.Json.JsonSerializer.Serialize(summary));
@@ -302,11 +302,11 @@ public class ProductCompareRow
     /// <summary>True when ExistingSearchKey already matches the RLI MSPC — fuzzy match got it right.</summary>
     public bool    DataMatch           { get; set; }
 
-    // ── Claude dry-run result (withClaude=true only) ──────────────────────────
-    public string? ClaudeProductName         { get; set; }
-    public string? ClaudeSearchKey           { get; set; }
-    /// <summary>Claude's productSearchKey agrees with the RLI MSPC.</summary>
-    public bool?   ClaudeAgreesWithRli       { get; set; }
-    /// <summary>Claude's productSearchKey agrees with the existing fuzzy match.</summary>
-    public bool?   ClaudeAgreesWithExisting  { get; set; }
+    // ── AI dry-run result (withAi=true only) ──────────────────────────────────
+    public string? AiProductName         { get; set; }
+    public string? AiSearchKey           { get; set; }
+    /// <summary>AI's productSearchKey agrees with the RLI MSPC.</summary>
+    public bool?   AiAgreesWithRli       { get; set; }
+    /// <summary>AI's productSearchKey agrees with the existing fuzzy match.</summary>
+    public bool?   AiAgreesWithExisting  { get; set; }
 }

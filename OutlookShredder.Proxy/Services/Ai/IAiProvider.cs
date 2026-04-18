@@ -9,7 +9,7 @@ namespace OutlookShredder.Proxy.Services.Ai;
 public interface IAiProvider
 {
     /// <summary>
-    /// Gets the name of this provider (e.g., "claude", "gpt4", "llama").
+    /// Gets the name of this provider (e.g., "gemini", "gpt4", "llama").
     /// </summary>
     string Name { get; }
 

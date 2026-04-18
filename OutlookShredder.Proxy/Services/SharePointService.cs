@@ -1141,7 +1141,7 @@ public class SharePointService
 
     /// <summary>
     /// Returns the RFQ Line Items for a specific RFQ ID â€” used to inject requested-item
-    /// context into the Claude extraction prompt (RLI anchoring).
+    /// context into the AI extraction prompt (RLI anchoring).
     /// </summary>
     public async Task<List<RliContextItem>> ReadRfqLineItemsByRfqIdAsync(string rfqId)
     {
@@ -1219,7 +1219,7 @@ public class SharePointService
 
     /// <summary>
     /// Returns SR rows (email body + metadata) for a given RFQ ID.
-    /// Used by the RLI anchoring dry-run endpoint to re-run Claude extraction
+    /// Used by the RLI anchoring dry-run endpoint to re-run AI extraction
     /// with RLI context and compare against existing data.
     /// </summary>
     public async Task<List<SrEmailRow>> ReadSrEmailsByRfqIdAsync(string rfqId)
@@ -1356,11 +1356,33 @@ public class SharePointService
         {
             var siteId = await GetSiteIdAsync();
 
-            // â”€â”€ Resolve job reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            var rawJobRef = (header.JobReference
-                ?? emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']')
+            // ── Resolve job reference ────────────────────────────────────────
+            // Prefer the regex-matched refs from the email subject/body (reliable 6-char
+            // alphanumeric IDs in brackets) over the AI-extracted JobReference, which may
+            // contain a supplier quote number or PO number instead of our RFQ ID.
+            var regexRef = emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']');
+            var aiRef    = header.JobReference?.Trim();
+
+            // Our RFQ IDs are exactly 6 alphanumeric characters (e.g. BX9EWM, UA2ZJC).
+            // Reject AI-extracted values that don't match this format.
+            static bool IsValidRfqId(string? s) =>
+                !string.IsNullOrEmpty(s) && s.Length == 6 &&
+                s.All(c => char.IsLetterOrDigit(c));
+
+            var rawJobRef = (regexRef
+                ?? (IsValidRfqId(aiRef) ? aiRef : null)
                 ?? string.Empty).ToUpperInvariant();
             var jobRef = string.IsNullOrEmpty(rawJobRef) ? "000000" : rawJobRef;
+
+            if (!string.IsNullOrEmpty(aiRef) && !IsValidRfqId(aiRef) && string.IsNullOrEmpty(regexRef))
+            {
+                _log.LogInformation(
+                    "[SP] AI returned non-RFQ ID '{AiRef}' as JobReference — " +
+                    "treating as orphan [000000]. Subject='{Subject}'",
+                    aiRef, emailMeta.EmailSubject);
+                if (string.IsNullOrWhiteSpace(header.QuoteReference))
+                    header.QuoteReference = aiRef;
+            }
 
             if (jobRef == "000000")
                 _log.LogWarning(
@@ -1469,7 +1491,7 @@ public class SharePointService
             // rows for this SR that have no MessageId.  These are stale rows from an earlier
             // extraction whose product names may differ enough to fail the fuzzy match, causing
             // the new extraction to insert duplicates instead of replacing them.
-            // We only reach here after Claude has already returned â‰¥1 product, so purging first
+            // We only reach here after the AI has already returned
             // is safe â€” the new rows are about to be written immediately after.
             if (messageId is not null && rowIndex == 0)
                 await PurgeNoMessageIdSliForSrAsync(siteId, sliListId, srId);
@@ -1537,7 +1559,7 @@ public class SharePointService
             ["IsRegret"]             = blanketRegret,
         };
 
-        // Build an NDJSON log entry for this Claude response â€” always appended, never
+        // Build an NDJSON log entry for this AI response
         // overwritten, so every extraction is preserved for auditing and smart merging.
         var logEntry = System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -1551,7 +1573,7 @@ public class SharePointService
 
         if (!isNew)
         {
-            // Fetch the precious Claude-extracted fields that already exist on this row.
+            // Fetch the precious AI-extracted fields that already exist on this row.
             // We only overwrite them when the current value is blank â€” a good extraction
             // from an earlier pass (e.g. the attachment run) should never be clobbered by
             // a weaker body-only re-run that returns nulls or less detail.
@@ -1727,7 +1749,7 @@ public class SharePointService
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
 
-        // If Claude resolved an MSPC directly from the RLI requested-items list, use it.
+        // If the AI resolved an MSPC directly from the RLI requested-items list, use it.
         // Otherwise fall back to the fuzzy catalog matcher on the supplier's product name.
         string? productSearchKey;
         string? catalogProductName;
@@ -1794,7 +1816,7 @@ public class SharePointService
             update.Remove("ProductName");         // preserve canonical name from first write
             update.Remove("SupplierProductName"); // preserve original supplier name from first write
 
-            // Preserve SupplierProductComments: Claude's commentary is cumulative.
+            // Preserve SupplierProductComments: AI commentary is cumulative.
             // Only overwrite when the existing row has no comment and the new run does.
             // If both have values and they differ, keep the existing one (first good extraction wins).
             var curComments = existing.Fields?.AdditionalData is { } d &&
@@ -1933,8 +1955,8 @@ public class SharePointService
     // â”€â”€ TotalPrice fallback calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
-    /// Mirrors the Claude Step-8 forward calculation as a server-side fallback.
-    /// Called when Claude returns a null totalPrice despite having valid unit prices and quantities.
+    /// Mirrors the AI Step-8 forward calculation as a server-side fallback.
+    /// Called when the AI returns a null totalPrice despite having valid unit prices and quantities.
     /// </summary>
     private static double? ComputeTotalPrice(ProductLine p)
     {
@@ -2144,62 +2166,36 @@ public class SharePointService
         return result;
     }
 
-    // â”€â”€ Attachment upload (SharePoint REST API) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Attachment upload (Graph drive API) ──────────────────────────────────
 
+    /// <summary>
+    /// Cached drive ID for the RFQ site's default document library.
+    /// </summary>
+    private string? _rfqDriveId;
+
+    private async Task<string> GetRfqDriveIdAsync()
+    {
+        if (_rfqDriveId is not null) return _rfqDriveId;
+        var siteId = await GetSiteIdAsync();
+        var drive  = await GetGraph().Sites[siteId].Drive.GetAsync();
+        _rfqDriveId = drive!.Id ?? throw new Exception("Could not resolve RFQ site drive ID");
+        return _rfqDriveId;
+    }
+
+    /// <summary>
+    /// Uploads a file to the site's default drive at QuoteAttachments/{srItemId}/{fileName}.
+    /// Uses Graph PUT content which supports app-only tokens.
+    /// </summary>
     private async Task UpsertItemAttachmentAsync(string spItemId, string listId, string fileName, byte[] bytes)
     {
-        var siteUrl  = _config["SharePoint:SiteUrl"] ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
-        var uri      = new Uri(siteUrl);
-        var host     = uri.Host;
-        var sitePath = uri.AbsolutePath.TrimEnd('/');
+        var driveId = await GetRfqDriveIdAsync();
+        var itemKey = $"root:/QuoteAttachments/{spItemId}/{fileName}:";
 
-        var tokenCtx = new Azure.Core.TokenRequestContext([$"https://{host}/.default"]);
-        var token    = await GetSpCredential().GetTokenAsync(tokenCtx);
+        using var stream = new MemoryStream(bytes);
+        await GetGraph().Drives[driveId].Items[itemKey].Content.PutAsync(stream);
 
-        var attBase = $"https://{host}{sitePath}/_api/web/lists(guid'{listId}')/items({spItemId})/AttachmentFiles";
-
-        using var http = new HttpClient();
-        http.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
-        http.DefaultRequestHeaders.Add("Accept", "application/json;odata=nometadata");
-
-        // Delete existing same-named attachment if present
-        var listResp = await http.GetAsync(attBase);
-        if (listResp.IsSuccessStatusCode)
-        {
-            var listJson = await listResp.Content.ReadAsStringAsync();
-            using var listDoc = System.Text.Json.JsonDocument.Parse(listJson);
-            var alreadyExists = listDoc.RootElement.TryGetProperty("value", out var val) &&
-                val.EnumerateArray()
-                   .Any(e => e.TryGetProperty("FileName", out var fn) &&
-                             string.Equals(fn.GetString(), fileName, StringComparison.OrdinalIgnoreCase));
-
-            if (alreadyExists)
-            {
-                var delUrl = $"{attBase}/getByFileName('{Uri.EscapeDataString(fileName)}')";
-                using var delReq = new HttpRequestMessage(HttpMethod.Delete, delUrl);
-                delReq.Headers.Add("IF-MATCH", "*");
-                var delResp = await http.SendAsync(delReq);
-                if (!delResp.IsSuccessStatusCode)
-                    _log.LogWarning("[SP] Could not delete existing attachment '{File}': {Status}", fileName, delResp.StatusCode);
-            }
-        }
-
-        // Upload
-        var uploadUrl  = $"{attBase}/add(FileName='{Uri.EscapeDataString(fileName)}')";
-        var fileContent = new ByteArrayContent(bytes);
-        fileContent.Headers.ContentType =
-            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-
-        var addResp = await http.PostAsync(uploadUrl, fileContent);
-        if (addResp.IsSuccessStatusCode)
-            _log.LogInformation("[SP] Uploaded attachment '{File}' ({Bytes} bytes) to item {Id}", fileName, bytes.Length, spItemId);
-        else
-        {
-            var err = await addResp.Content.ReadAsStringAsync();
-            _log.LogWarning("[SP] Failed to upload attachment '{File}': {Status} {Body}",
-                fileName, addResp.StatusCode, err[..Math.Min(err.Length, 400)]);
-        }
+        _log.LogInformation("[SP] Uploaded attachment '{File}' ({Bytes} bytes) to drive for SR item {Id}",
+            fileName, bytes.Length, spItemId);
     }
 
     // â”€â”€ Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows â”€â”€â”€â”€â”€
@@ -2552,7 +2548,7 @@ public class SharePointService
             _log.LogWarning("[Dedupe-SR] SR fetch hit the 5 000-row limit â€” re-run to catch any remaining duplicates");
 
         // â”€â”€ Fetch all SLI rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // SupplierProductComments included so we can rescue Claude commentary
+        // SupplierProductComments included so we can rescue AI commentary
         // before deleting a duplicate SLI that covers the same product.
         var sliResponse = await GetGraph().Sites[siteId].Lists[sliListId].Items
             .GetAsync(r =>
@@ -2650,7 +2646,7 @@ public class SharePointService
 
             foreach (var dupe in srsInGroup.Where(sr => sr.Id != keeper.Id))
             {
-                // â”€â”€ Merge SR-level Claude content into keeper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // ── Merge SR-level AI content into keeper ──────────
                 // Only fill blank keeper fields. Update the in-memory dict after each
                 // merge so subsequent dupes in the same group see the updated values
                 // and don't try to merge the same field twice.
@@ -2828,7 +2824,7 @@ public class SharePointService
             //   1. Exact-normalised product name, OR
             //   2. NumericTokensCompatible + Jaccard â‰¥ 0.5 (standard ProductsMatch), OR
             //   3. Same non-zero TotalPrice with Jaccard â‰¥ 0.3 â€” catches the case where
-            //      Claude adds extra descriptive dimensions (e.g. "0.379\" web") that shift
+            //      the AI adds extra descriptive dimensions
             //      the numeric token set, making (2) fail despite identical pricing.
             static double? SliTotalPrice(ListItem sli)
             {
@@ -2942,35 +2938,35 @@ public class SharePointService
     public async Task<(string ContentType, byte[] Bytes, string FileName)?> GetSpItemAttachmentAsync(
         string srItemId, string fileName)
     {
-        var siteUrl  = _config["SharePoint:SiteUrl"] ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
-        var uri      = new Uri(siteUrl);
-        var host     = uri.Host;
-        var sitePath = uri.AbsolutePath.TrimEnd('/');
-        var listId   = await GetSupplierResponsesListIdAsync();
+        var driveId = await GetRfqDriveIdAsync();
+        var itemKey = $"root:/QuoteAttachments/{srItemId}/{fileName}:";
 
-        var tokenCtx = new Azure.Core.TokenRequestContext([$"https://{host}/.default"]);
-        var token    = await GetSpCredential().GetTokenAsync(tokenCtx);
-
-        var url = $"https://{host}{sitePath}/_api/web/lists(guid'{listId}')" +
-                  $"/items({srItemId})/AttachmentFiles" +
-                  $"/getByFileName('{Uri.EscapeDataString(fileName)}')/$value";
-
-        using var http = new HttpClient();
-        http.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
-
-        var resp = await http.GetAsync(url);
-        if (!resp.IsSuccessStatusCode)
+        try
         {
-            _log.LogWarning("[SP] Attachment not found: srItemId={Id} file={File} status={Status}",
-                srItemId, fileName, resp.StatusCode);
+            using var stream = await GetGraph().Drives[driveId].Items[itemKey].Content.GetAsync();
+            if (stream is null) return null;
+
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            var bytes = ms.ToArray();
+
+            var ext = Path.GetExtension(fileName).ToLowerInvariant();
+            var ct = ext switch
+            {
+                ".pdf"  => "application/pdf",
+                ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".doc"  => "application/msword",
+                _        => "application/octet-stream",
+            };
+
+            _log.LogInformation("[SP] Fetched attachment '{File}' ({Bytes} bytes) from drive for SR item {Id}", fileName, bytes.Length, srItemId);
+            return (ct, bytes, fileName);
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+        {
+            _log.LogWarning("[SP] Attachment not found in drive: srItemId={Id} file={File}", srItemId, fileName);
             return null;
         }
-
-        var bytes = await resp.Content.ReadAsByteArrayAsync();
-        var ct    = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        _log.LogInformation("[SP] Fetched attachment '{File}' ({Bytes} bytes) from SR item {Id}", fileName, bytes.Length, srItemId);
-        return (ct, bytes, fileName);
     }
 
     // â”€â”€ Publish folder (Graph) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5169,7 +5165,7 @@ public class SharePointService
 
     /// <summary>
     /// Scans SupplierResponse rows that have a MessageId but no QuoteReference,
-    /// re-runs Claude extraction on the original email/attachment, and patches
+    /// re-runs AI extraction on the original email/attachment, and patches
     /// QuoteReference onto the SR and all its child SLI rows.
     /// </summary>
     public async Task<(int Patched, int Skipped)> BackfillQuoteReferencesAsync(

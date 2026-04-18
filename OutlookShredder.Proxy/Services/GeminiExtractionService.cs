@@ -142,7 +142,8 @@ public class GeminiExtractionService : IAiExtractionService
             : null;
 
         var contentType = (req.ContentType ?? string.Empty).ToLowerInvariant();
-        var isPdf       = contentType.Contains("pdf");
+        var fileExt     = Path.GetExtension(req.FileName ?? "").ToLowerInvariant();
+        var isPdf       = contentType.Contains("pdf") || fileExt == ".pdf";
 
         var genConfig = new GenerationConfig
         {

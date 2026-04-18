@@ -32,7 +32,7 @@ namespace OutlookShredder.Proxy.Services;
 ///   • HSS designations mapped to product types:
 ///       HSS NxMxt (N≠M) → rectangular tube, HSS NxNxt → square tube,
 ///       HSS N Sch t    → pipe (nominal).
-///   • "A-" used as a cross-section separator (Claude extraction artifact for ×).
+///   • "A-" used as a cross-section separator (AI extraction artifact for ×).
 ///
 /// Config keys (optional — defaults shown):
 ///   ProductCatalog:SiteUrl   default: https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com
@@ -261,7 +261,7 @@ public class ProductCatalogService : BackgroundService
 
     /// <summary>
     /// Looks up a catalog entry by its SearchKey (MSPC).
-    /// Used when Claude has already resolved the MSPC via RLI anchoring and we
+    /// Used when the AI has already resolved the MSPC via RLI anchoring and we
     /// just need the canonical catalog name for CatalogProductName.
     /// Returns null when the key is not found in the current cache.
     /// </summary>
@@ -277,7 +277,7 @@ public class ProductCatalogService : BackgroundService
     /// Checks whether an RLI product name is still consistent with the catalog entry
     /// for the given SearchKey. Used to detect cases where the user selected a catalog
     /// product but then edited the product name on the RFQ — in that case we should
-    /// send the RLI item without an MSPC so Claude uses name-only matching.
+    /// send the RLI item without an MSPC so the AI uses name-only matching.
     ///
     /// Returns the Jaccard similarity between the two tokenised names, the catalog entry
     /// name, and whether they are considered consistent (jaccard ≥ <paramref name="threshold"/>).
@@ -333,7 +333,7 @@ public class ProductCatalogService : BackgroundService
     // The "x" in the result is intentional — IsDimToken now requires a leading digit,
     // so "w8x24" (starts with 'w') is classified as a non-dim token and participates
     // directly in the overlap/Jaccard calculation.
-    // Also matches U+00C3 (Ã) + U+2014 (em dash) which Claude extraction sometimes
+    // Also matches U+00C3 (Ã) + U+2014 (em dash) which AI extraction sometimes
     // writes instead of ASCII "A-" in beam designations like "W8[U+00C3][U+2014]15".
     private static readonly Regex _beamDesig =
         new(@"\b(MC|[WSC])(\d+)\s*(?:[xX×]|A-|\u00C3\u2014)\s*(\d+(?:\.\d+)?)\b",
@@ -349,7 +349,7 @@ public class ProductCatalogService : BackgroundService
         new(@"\bHSS\s+(\d+(?:\.\d+)?)\s+[Ss]ch(?:edule)?\s*(\d+)\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // "A-" used as a cross-section dimension separator (Claude extraction artifact for ×).
+    // "A-" used as a cross-section dimension separator (AI extraction artifact for ×).
     // Applied AFTER decimal normalisation; requires a digit-token before "a-".
     // Example: "0d125" a- 0d75" a- 144" → "0d125 x 0d75 x 144"
     // Does NOT match "a-36" (ASTM grade) because there is no preceding digit token.
@@ -424,7 +424,7 @@ public class ProductCatalogService : BackgroundService
         s = _stripParens.Replace(s, " ");
 
         // Normalise beam/channel designations BEFORE lowercasing so that the Unicode
-        // "Ã—" variant (U+00C3 + U+2014) used by Claude extraction can be matched by
+        // "Ã—" variant (U+00C3 + U+2014) used by AI extraction can be matched by
         // the regex directly. The replacement lowercases the prefix itself.
         // "W8 X 24.0" → "w8x24",  "W6A-20" → "w6x20",  "W8Ã—15" → "w8x15"
         s = _beamDesig.Replace(s, m =>
@@ -493,7 +493,7 @@ public class ProductCatalogService : BackgroundService
             return "d" + (stripped.Length == 0 ? "0" : stripped);
         });
 
-        // Convert "A-" cross-section separator (Claude extraction artifact) to "x".
+        // Convert "A-" cross-section separator (AI extraction artifact) to "x".
         // Only fires when preceded by a digit-form token (never matches "a-36" grade).
         s = _aDimSep.Replace(s, "$1 x ");
 

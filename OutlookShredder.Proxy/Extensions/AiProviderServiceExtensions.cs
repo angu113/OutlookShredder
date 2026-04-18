@@ -9,7 +9,7 @@ namespace OutlookShredder.Proxy.Extensions;
 public static class AiProviderServiceExtensions
 {
     /// <summary>
-    /// Registers Claude as an AI provider and sets it as the default.
+    /// Registers the Claude AI provider and sets it as the default.
     /// Maintains backward compatibility with existing ClaudeService code.
     /// </summary>
     public static IServiceCollection AddClaudeAiProvider(this IServiceCollection services)

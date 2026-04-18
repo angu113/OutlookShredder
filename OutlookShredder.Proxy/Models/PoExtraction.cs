@@ -1,6 +1,6 @@
 namespace OutlookShredder.Proxy.Models;
 
-/// <summary>Structured data extracted by Claude from a Purchase Order PDF.</summary>
+/// <summary>Structured data extracted by the AI from a Purchase Order PDF.</summary>
 public class PoExtraction
 {
     public string?         JobReference { get; set; }

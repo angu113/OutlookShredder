@@ -6,7 +6,7 @@ public class ExtractResponse
     /// <summary>True if at least one SharePoint row was written successfully.</summary>
     public bool              Success    { get; set; }
 
-    /// <summary>The structured data Claude extracted from the email / attachment.</summary>
+    /// <summary>The structured data the AI extracted from the email / attachment.</summary>
     public RfqExtraction?    Extracted  { get; set; }
 
     /// <summary>One entry per product line — parallel to <see cref="RfqExtraction.Products"/>.</summary>
@@ -109,7 +109,7 @@ public class SliCompactRow
     public string? CatalogProductName  { get; set; }
 }
 
-/// <summary>SR email row for RLI anchoring Claude dry-run.</summary>
+/// <summary>SR email row for RLI anchoring AI dry-run.</summary>
 public class SrEmailRow
 {
     public string? SupplierName  { get; set; }
@@ -122,7 +122,7 @@ public class SrEmailRow
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>
 public class SpWriteResult
 {
-    /// <summary>Product name as extracted by Claude (for display/logging).</summary>
+    /// <summary>Product name as extracted by the AI (for display/logging).</summary>
     public string? ProductName { get; set; }
 
     /// <summary>True if the SharePoint list item was created successfully.</summary>

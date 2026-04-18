@@ -102,7 +102,7 @@ public class ExtractController : ControllerBase
 
             // Stamp "RFQ-Processed" on the mailbox message so the background poller
             // skips it on its next cycle.  Without this stamp the poller would re-run
-            // Claude on the same email and write a second (duplicate) SR row.
+            // the AI on the same email and write a second (duplicate) SR row.
             var mailbox = _config["Mail:MailboxAddress"];
             if (!string.IsNullOrEmpty(mailbox) && !string.IsNullOrEmpty(req.ItemId))
             {
@@ -561,7 +561,7 @@ public class ExtractController : ControllerBase
     // ── POST /api/mail/reprocess-selected ────────────────────────────────────
     /// <summary>
     /// Fetches each listed message from Graph and re-runs the full extraction pipeline
-    /// (Claude + SharePoint upsert + re-stamp "RFQ-Processed").
+    /// (AI extraction + SharePoint upsert + re-stamp "RFQ-Processed").
     /// Awaits completion before responding so the client knows when all rows are written.
     /// </summary>
     [HttpPost("mail/reprocess-selected")]
@@ -1570,7 +1570,7 @@ public class ExtractController : ControllerBase
 
     // ── POST /api/purchase-orders/reextract ──────────────────────────────────
     /// <summary>
-    /// Re-runs Claude extraction on each PO record's original email, updates the stored
+    /// Re-runs AI extraction on each PO record's original email, updates the stored
     /// LineItems JSON in SharePoint, then re-runs RLI matching. Use this when the extraction
     /// prompt has been updated and existing records need to be refreshed.
     /// </summary>
@@ -1628,7 +1628,7 @@ public class ExtractController : ControllerBase
     // ── POST /api/mail/backfill-quote-references ─────────────────────────────
     /// <summary>
     /// Scans SupplierResponse rows (last <paramref name="days"/> days) that have a
-    /// MessageId but no QuoteReference.  Re-runs Claude extraction on the original
+    /// MessageId but no QuoteReference.  Re-runs AI extraction on the original
     /// email/attachment and patches QuoteReference onto each SR and its child SLIs.
     /// </summary>
     [HttpPost("mail/backfill-quote-references")]

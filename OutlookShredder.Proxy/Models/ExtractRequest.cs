@@ -14,7 +14,7 @@ public class ExtractRequest
     /// <summary>Filename when SourceType == "attachment"</summary>
     public string? FileName    { get; set; }
 
-    /// <summary>Base64-encoded attachment bytes (PDF/DOCX sent natively to Claude)</summary>
+    /// <summary>Base64-encoded attachment bytes (PDF/DOCX sent natively to the AI)</summary>
     public string? Base64Data  { get; set; }
 
     /// <summary>MIME type of the attachment</summary>
@@ -44,14 +44,14 @@ public class ExtractRequest
 
     /// <summary>
     /// RFQ line items (what was originally requested) for the matched RFQ.
-    /// Injected by MailPollerService before calling ClaudeService so Claude can
+    /// Injected by MailPollerService before calling the AI so it can
     /// anchor each extracted supplier product to the nearest requested item.
     /// Empty when the RFQ ID is unknown or no RLI rows exist.
     /// </summary>
     public List<RliContextItem> RliItems { get; set; } = [];
 }
 
-/// <summary>One requested item from the RFQ Line Items list, used to anchor Claude's product matching.</summary>
+/// <summary>One requested item from the RFQ Line Items list, used to anchor the AI's product matching.</summary>
 public class RliContextItem
 {
     /// <summary>Internal catalog code (MSPC / ProductSearchKey). Null when the RFQ was created without a catalog selection.</summary>

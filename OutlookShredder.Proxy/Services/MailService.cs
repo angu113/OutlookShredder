@@ -365,7 +365,7 @@ public class MailService
 
     /// <summary>
     /// Fetches a single full message (with body content) by ID.
-    /// Used by the reprocess flow to fetch body + attachment metadata before calling Claude.
+    /// Used by the reprocess flow to fetch body + attachment metadata before calling the AI.
     /// </summary>
     public async Task<Message?> GetMessageByIdAsync(string mailbox, string messageId)
     {

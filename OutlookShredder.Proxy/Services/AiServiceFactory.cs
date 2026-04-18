@@ -2,7 +2,7 @@ namespace OutlookShredder.Proxy.Services;
 
 /// <summary>
 /// Factory for creating AI extraction service instances based on configuration.
-/// Supports multiple providers (Claude, Gemini, OpenAI, etc.) with fallback logic.
+/// Supports multiple providers with fallback logic.
 /// </summary>
 public class AiServiceFactory
 {
@@ -22,8 +22,8 @@ public class AiServiceFactory
 
     /// <summary>
     /// Gets the configured AI extraction service, or the first available if config is invalid.
-    /// Provider is selected via AI:Provider in appsettings (Claude | Gemini | OpenAI).
-    /// Falls back to Claude if not specified.
+    /// Provider is selected via AI:Provider in appsettings.
+    /// Falls back to the default provider if not specified.
     /// </summary>
     public IAiExtractionService GetService()
     {

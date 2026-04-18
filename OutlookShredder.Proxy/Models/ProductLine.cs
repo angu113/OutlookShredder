@@ -18,7 +18,7 @@ public class ProductLine
     public string? SupplierProductComments { get; set; }
 
     /// <summary>
-    /// MSPC / ProductSearchKey resolved by Claude from the RLI requested-items list.
+    /// MSPC / ProductSearchKey resolved by the AI from the RLI requested-items list.
     /// When non-null, WriteSupplierLineItemAsync uses this directly instead of running
     /// the fuzzy catalog matcher on the supplier's product name.
     /// </summary>
