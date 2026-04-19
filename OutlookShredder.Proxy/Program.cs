@@ -89,14 +89,7 @@ try
     builder.Services.AddSingleton<RfqNotificationService>();
     builder.Services.AddSingleton<MailPollerService>();
 
-    // Only enable MailPollerService as a hosted service in production.
-    // In development, the email polling fails if SharePoint:TenantId is not configured
-    // with a valid production Azure AD tenant. For development testing, disable email polling
-    // and test the API endpoints directly. Email polling works fine in production.
-    if (!builder.Environment.IsDevelopment())
-    {
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
-    }
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
 
     builder.Services.AddSingleton<OutlookComPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
