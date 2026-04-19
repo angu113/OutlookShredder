@@ -86,9 +86,11 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 ### Services
 
 **`IAiExtractionService`** (interface) + **`AiServiceFactory`** (singleton)
-- Provider selected at startup via `AI:Provider` in appsettings (`"claude"` | `"gemini"`; default `"claude"`)
-- `AiServiceFactory.GetService()` resolves the configured primary and — when the *other* provider's API key is also configured — wraps it in `FallbackAiExtractionService` so a thrown exception from the primary (after its own internal retries) is transparently retried against the secondary. If only one API key is configured, the primary is returned directly with no fallback.
-- Caller-initiated cancellation (`CancellationToken`) is honoured: the secondary is **not** tried when the caller has cancelled.
+- Provider selected at startup via `AI:Provider` in appsettings (`"claude"` | `"gemini"` | `"roundrobin"`; default `"claude"`)
+- `AiServiceFactory.GetService()` resolves once and caches the wrapper so any per-instance state (e.g. the round-robin counter) persists across calls.
+- **`"claude"` / `"gemini"`**: returns the named primary. If the *other* provider's API key is also configured, wraps it in `FallbackAiExtractionService` so a thrown exception from the primary (after its own internal retries) is transparently retried against the secondary. If only one API key is configured, the primary is returned directly with no fallback.
+- **`"roundrobin"`** (alias `"round-robin"`): alternates between Claude and Gemini per call via `RoundRobinAiExtractionService` (`Interlocked.Increment` counter, starts on Claude), cross-falling back to the other provider if the chosen one throws. Requires both API keys; degrades gracefully to single-provider mode with a warning if only one is set.
+- Caller-initiated cancellation (`CancellationToken`) is honoured in both wrappers: the secondary is **not** tried when the caller has cancelled.
 - To add a new provider: implement `IAiExtractionService`, register it in `Program.cs`, add a case in `AiServiceFactory.ResolveByName` and `IsProviderKeyConfigured`
 
 **`ClaudeExtractionService`** (singleton) — provider `"claude"`
