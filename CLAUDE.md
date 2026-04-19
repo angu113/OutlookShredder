@@ -28,6 +28,7 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 | `RfqNewController` | `/api/rfq-new` | Send RFQ emails via Graph; served product/supplier data for RfqNew tab |
 | `UpdateController` | `/api/update` | Version check + download publish package ZIP |
 | `HealthController` | `/api/health` | Aggregated service health for Shredder's Home dashboard |
+| `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -76,7 +77,17 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `POST /api/rfq-import/dedupe-supplier-responses?dryRun=true` — dedup SR-level and within-SR SLI duplicates using name normalisation + Jaccard ≥ 0.5
 - `DELETE /api/rfq-import/clean` — wipe SupplierResponses + SupplierLineItems
 
-**MessageId maintenance endpoints:**
+**MailStatusController endpoints:**
+- `GET /api/mail/status` → `MailStatus` — live snapshot: poller cycle state, reprocess batch progress, rate limiter, and list of in-flight messages
+
+**Mail maintenance endpoints:**
+- `POST /api/mail/processed-emails?top=N` — alias for rfq-import/processed; returns `ProcessedEmailItem[]`
+- `POST /api/mail/reprocess-selected` body: `{ messageIds[] }` — manually re-extracts specific messages by Graph message ID (routes POs correctly too); blocks until batch completes
+- `POST /api/mail/backfill-message-ids?days=7` — scans SR rows within the window that are missing MessageId; matches them to Graph messages by sender+time (±5 min), patches MessageId on matched rows and their child SLIs
+- `POST /api/mail/deduplicate?days=7` — deletes SR rows with no MessageId AND collapses duplicate rows sharing the same MessageId (keeps highest-scoring: attachment source > priced SLI > has QuoteReference); also deletes child SLI rows for deleted SRs
+- Run order: `setup-supplier-lists` first (creates the column), then `backfill-message-ids`, then `deduplicate`
+
+**MessageId maintenance endpoints (legacy — prefer Mail maintenance endpoints above):**
 - `POST /api/mail/backfill-message-ids?days=7` — scans SR rows within the window that are missing MessageId; matches them to Graph messages by sender+time (±5 min), patches MessageId on matched rows and their child SLIs
 - `POST /api/mail/deduplicate?days=7` — deletes SR rows with no MessageId AND collapses duplicate rows sharing the same MessageId (keeps highest-scoring: attachment source > priced SLI > has QuoteReference); also deletes child SLI rows for deleted SRs
 - Run order: `setup-supplier-lists` first (creates the column), then `backfill-message-ids`, then `deduplicate`
@@ -113,6 +124,8 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - PDF/DOCX attachments passed as `InlineData { MimeType, Data }` parts in the parts list
 - Retries up to `Gemini:MaxRetries` with same jitter table as Claude
 - Config keys: `Google:ApiKey`, `Gemini:Model` (default `gemini-2.0-flash`), `Gemini:MaxRetries`, `Gemini:MaxContentChars`, `Gemini:MaxContextChars`
+- System prompt is kept **aligned with Claude's** — both prompts are canonical and describe the same extraction schema. Edit both together when changing extraction behaviour.
+- Regret handling: supplier returns `supplierProductComments` explaining inability to supply (e.g. "Supplier regrets — unable to supply"). Does **not** use a sentinel `productName="Regret"`; that sentinel is filtered out on the Shredder side as a safety net for older data.
 
 **`SharePointService`** (singleton)
 - All Graph API calls. Uses `ClientSecretCredential` (app-only, `Sites.FullControl.All`).
@@ -144,9 +157,20 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - Polls inbox every `Mail:PollIntervalSeconds` (default 30s) for messages without "RFQ-Processed"
 - Per message: strips FW:/RE:/[EXTERNAL] prefixes, then routes:
   - Subject starts with `"Purchase Order #HSK-PO"` → `ProcessPurchaseOrderAsync` (extracts PDF via Claude, writes to `PurchaseOrders` SP list, publishes `EventType="PO"` to Service Bus, stamps "RFQ-Processed"+"PO-Processed")
-  - Everything else → normal RFQ pipeline (Claude extract → SharePoint → notify)
-- `ReprocessMessagesAsync(messageIds[])` — manual re-extraction (routes POs correctly too)
-- Config: `Mail:MailboxAddress`, `Mail:LookbackHours` (default 24), `Mail:MaxEmailsPerMinute`, `Mail:BodyContextChars`
+  - Everything else → normal RFQ pipeline (Claude/Gemini extract → SharePoint → notify)
+- Processes emails concurrently via `Parallel.ForEachAsync` with `MaxDegreeOfParallelism = MaxConcurrency`
+- Rate-limited via sliding-window: tracks AI call timestamps in `_aiCallTimestamps`, blocks until a slot is available within the current 60-second window
+- `ReprocessMessagesAsync(messageIds[])` — manual re-extraction of arbitrary message IDs; blocks until complete; routes POs correctly; tracks progress with `Interlocked.Increment`
+- `GetStatus()` → `MailStatus` — live snapshot used by `GET /api/mail/status`
+- In-flight tracking: `ProcessMessageAsync` registers each message in `_inFlight` (subject, from, startedAt) on entry and removes it in a `finally` block
+- Config:
+  - `Mail:MailboxAddress` — required
+  - `Mail:LookbackHours` (default 24) — rolling window per poll cycle
+  - `Mail:MaxEmailsPerMinute` (default **100**) — AI calls per minute across all concurrent slots
+  - `Mail:MaxConcurrency` (default **8**) — parallel processing slots
+  - `Mail:BodyContextChars` (default 2000) — email body chars included when processing an attachment
+  - `Mail:PollIntervalSeconds` (default 30) — poll frequency
+  - `Mail:ExtractBodyWithoutJobRef` (default false) — when false, body-only emails with no job ref get a placeholder row under [000000] without calling AI
 
 **`RfqNotificationService`** (singleton pub/sub)
 - `Subscribe()` → `(Guid, ChannelReader<string>)` — SSE subscriber registration
@@ -196,6 +220,15 @@ WeightPerUnit, WeightUnit, PricePerPound, PricePerFoot, PricePerPiece,
 TotalPrice, LeadTimeText, Certifications, SupplierProductComments
 ```
 
+**`MailStatus`** — returned by `GET /api/mail/status`
+```
+Poller: PollerStatus, Reprocess: ReprocessStatus, RateLimit: RateLimitStatus, InFlight: List<InFlightItem>
+```
+- `PollerStatus` — `{ Running, LastPollAt, MessagesFoundLastCycle }`
+- `ReprocessStatus` — `{ Active, Total, Completed, Failed, PercentComplete }`
+- `RateLimitStatus` — `{ CallsInLastMinute, MaxPerMinute, SlotsAvailable }`
+- `InFlightItem` — `{ Subject, From, StartedAt }`
+
 **`RfqProcessedNotification`** / **`RfqBusMessage`** (Service Bus wire format)
 ```
 EventType ("SR"|"RFQ"), RfqId, SupplierName, MessageId, Products[]: { Name, TotalPrice }
@@ -242,6 +275,10 @@ Secrets go in `appsettings.secrets.json` (gitignored) — copy from `appsettings
 | `Mail:ReplyToAddress` | `hackensack@metalsupermarkets.com` | Reply-To on RFQ emails |
 | `Mail:PollIntervalSeconds` | `30` | How often the poller checks for new mail |
 | `Mail:LookbackHours` | `24` | Rolling window of messages considered per poll |
+| `Mail:MaxEmailsPerMinute` | `100` | AI API calls per minute (across all concurrent slots) |
+| `Mail:MaxConcurrency` | `8` | Parallel processing slots per poll/reprocess cycle |
+| `Mail:BodyContextChars` | `2000` | Email body chars included as context when processing an attachment |
+| `Mail:ExtractBodyWithoutJobRef` | `false` | When false, body-only emails with no job ref skip AI and get a placeholder row |
 | `Proxy:AllowedOrigin` | `https://localhost:3000` | CORS origin for AddinHost |
 
 ### Logging
