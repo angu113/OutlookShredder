@@ -52,7 +52,7 @@ public class ClaudeService
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number assigned to this quote — NOT the
-        [XXXXXX] job reference which belongs to Metal Supermarkets.
+        [HQXXXXXX] or [XXXXXX] job reference which belongs to Metal Supermarkets.
         This is any code, number, or alphanumeric identifier that the supplier uses to
         track this specific quote in their own system. It may appear anywhere in the
         document or subject line and can be labelled in any way the supplier chooses
@@ -133,7 +133,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "6-char alphanumeric from [XXXXXX] pattern, no brackets" },
+              "jobReference":   { "type": ["string","null"], "description": "Job reference from [XXXXXX] pattern — either HQ+6 alphanumeric (e.g. HQABC123) or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },
@@ -426,9 +426,13 @@ public class ClaudeService
         sent by Metal Supermarkets to a supplier.
 
         ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
-        Look for a 6-character alphanumeric code in [XXXXXX] brackets anywhere in the
-        document (subject line, PO header, line item descriptions, or email body context).
-        Extract just the 6 characters without brackets.
+        Look for a bracketed alphanumeric job reference anywhere in the document
+        (subject line, PO header, line item descriptions, or email body context). Two
+        formats are valid:
+          - New:    [HQXXXXXX]  — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy: [XXXXXX]    — exactly 6 alphanumeric chars
+        Extract the content inside the brackets (including "HQ" when present), without
+        the brackets themselves.
 
         ── SUPPLIER NAME ──────────────────────────────────────────────────────────
         The company this PO is addressed TO (the vendor/supplier receiving the order).
@@ -459,7 +463,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference": { "type": ["string","null"], "description": "6-char alphanumeric from [XXXXXX] pattern, no brackets" },
+              "jobReference": { "type": ["string","null"], "description": "Job reference from [XXXXXX] pattern — either HQ+6 alphanumeric (e.g. HQABC123) or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
               "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
               "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
               "lineItems": {

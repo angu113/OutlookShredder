@@ -64,10 +64,15 @@ public class GeminiExtractionService : IAiExtractionService
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────────────
         Metal Supermarkets' internal job number, typically in square brackets in the email
-        subject line (e.g. [D0XXXX], [Y1XXXX]). NOT the supplier's quote number.
+        subject line. Two formats are valid:
+          - New:    [HQXXXXXX]  — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy: [XXXXXX]    — exactly 6 alphanumeric chars
+        Extract the content inside the brackets (including "HQ" when present), without
+        the brackets themselves. NOT the supplier's quote number.
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────────────
-        The supplier's own quote/quotation reference number — NOT the [XXXXXX] job reference.
+        The supplier's own quote/quotation reference number — NOT the [HQXXXXXX] or [XXXXXX]
+        job reference.
         Store only the identifier value itself, stripping any label prefix.
 
         ── PRICING ── work through ALL steps; leave a field null only if no path yields a value ──
@@ -104,8 +109,11 @@ public class GeminiExtractionService : IAiExtractionService
         within the document itself.
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number (e.g. [D0XXXX], [Y1XXXX]).
-        When a hint is provided, use it to confirm.
+        Metal Supermarkets' internal job number, in square brackets. Two formats are valid:
+          - New:    [HQXXXXXX]  — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy: [XXXXXX]    — exactly 6 alphanumeric chars
+        Extract the content inside the brackets (including "HQ" when present), without
+        the brackets themselves. When a hint is provided, use it to confirm.
 
         ── PO NUMBER ──────────────────────────────────────────────────────────────────────
         The purchase order number assigned by Metal Supermarkets (e.g. PO-12345).

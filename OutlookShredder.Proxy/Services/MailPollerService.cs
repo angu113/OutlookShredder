@@ -29,13 +29,17 @@ public class MailPollerService : BackgroundService
     private readonly RfqNotificationService    _notifications;
     private readonly ILogger<MailPollerService> _log;
 
+    // Accepts two formats:
+    //   New:    HQ + 6 alphanumeric (e.g. HQBX9EWM) — 8 chars total
+    //   Legacy: 6 alphanumeric       (e.g. UA2ZJC)
+    // HQ alt is listed first so 8-char matches aren't truncated to 6.
     private static readonly Regex JobRefRegex =
-        new(@"\[([A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        new(@"\[(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // Fallback: bare 6-char alphanumeric ID appearing after "RFQ" or "Job" (no brackets).
+    // Fallback: bare ID appearing after "RFQ" or "Job" (no brackets). Same two formats.
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+([A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*([A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // Subject prefixes to strip before PO detection (RE:, FW:, [EXTERNAL], etc.)
