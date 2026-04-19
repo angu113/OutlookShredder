@@ -74,25 +74,26 @@ public class MailPollerService : BackgroundService
     {
         var mailbox             = _config["Mail:MailboxAddress"]
             ?? throw new InvalidOperationException("Mail:MailboxAddress not configured");
-        var maxPerMinute        = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 30;
+        var maxPerMinute        = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 60;
+        var maxConcurrency      = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 4;
         var bodyContextChars    = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc             : 2_000;
         var extractBodyNoJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
 
-        foreach (var messageId in messageIds)
-        {
-            if (ct.IsCancellationRequested) break;
-
-            var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
-            if (msg is null)
+        await Parallel.ForEachAsync(messageIds,
+            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+            async (messageId, _ct) =>
             {
-                _log.LogWarning("[Reprocess] Message {Id} not found — skipping", messageId);
-                continue;
-            }
+                var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
+                if (msg is null)
+                {
+                    _log.LogWarning("[Reprocess] Message {Id} not found — skipping", messageId);
+                    return;
+                }
 
-            _log.LogInformation("[Reprocess] Reprocessing \"{Subject}\" from {From}",
-                msg.Subject, msg.From?.EmailAddress?.Address);
-            await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyNoJobRef, ct);
-        }
+                _log.LogInformation("[Reprocess] Reprocessing \"{Subject}\" from {From}",
+                    msg.Subject, msg.From?.EmailAddress?.Address);
+                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyNoJobRef, _ct);
+            });
     }
 
     /// <summary>
@@ -297,14 +298,15 @@ public class MailPollerService : BackgroundService
 
         var intervalSeconds          = int.TryParse(_config["Mail:PollIntervalSeconds"],      out var s)  ? s          : 30;
         var lookbackHours            = double.TryParse(_config["Mail:LookbackHours"],          out var h)  ? h          : 24.0;
-        var maxPerMinute             = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 30;
+        var maxPerMinute             = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 60;
+        var maxConcurrency           = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 4;
         var bodyContextChars         = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc         : 2_000;
         var extractBodyWithoutJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
         var interval                 = TimeSpan.FromSeconds(intervalSeconds);
 
         _log.LogInformation(
-            "[Mail] Poller started — mailbox={Mailbox} interval={Interval}s lookback={Lookback}h rateLimit={Rate}/min extractBodyNoRef={ExtractNoRef}",
-            mailbox, intervalSeconds, lookbackHours, maxPerMinute, extractBodyWithoutJobRef);
+            "[Mail] Poller started — mailbox={Mailbox} interval={Interval}s lookback={Lookback}h rateLimit={Rate}/min concurrency={Concurrency} extractBodyNoRef={ExtractNoRef}",
+            mailbox, intervalSeconds, lookbackHours, maxPerMinute, maxConcurrency, extractBodyWithoutJobRef);
 
         bool firstCycle = true;
         while (!stoppingToken.IsCancellationRequested)
@@ -324,7 +326,7 @@ public class MailPollerService : BackgroundService
 
             try
             {
-                await PollAsync(mailbox, since, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, stoppingToken);
+                await PollAsync(mailbox, since, maxPerMinute, maxConcurrency, bodyContextChars, extractBodyWithoutJobRef, stoppingToken);
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
@@ -339,9 +341,11 @@ public class MailPollerService : BackgroundService
     // ── Poll one cycle ────────────────────────────────────────────────────────
 
     private async Task PollAsync(
-        string mailbox, DateTimeOffset since, int maxPerMinute,
+        string mailbox, DateTimeOffset since, int maxPerMinute, int maxConcurrency,
         int bodyContextChars, bool extractBodyWithoutJobRef, CancellationToken ct)
     {
+        var parallelOpts = new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct };
+
         var messages = await _mail.GetMessagesAsync(mailbox, since);
 
         if (messages.Count == 0)
@@ -349,11 +353,8 @@ public class MailPollerService : BackgroundService
         else
         {
             _log.LogInformation("[Mail] {Count} unprocessed inbox message(s) found", messages.Count);
-            foreach (var msg in messages)
-            {
-                if (ct.IsCancellationRequested) break;
-                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
-            }
+            await Parallel.ForEachAsync(messages, parallelOpts,
+                async (msg, _ct) => await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, _ct));
         }
 
         // Also scan Sent Items for outbound PO emails not yet processed.
@@ -362,11 +363,8 @@ public class MailPollerService : BackgroundService
         if (sentPo.Count > 0)
         {
             _log.LogInformation("[Mail] {Count} unprocessed sent PO email(s) found", sentPo.Count);
-            foreach (var msg in sentPo)
-            {
-                if (ct.IsCancellationRequested) break;
-                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, ct);
-            }
+            await Parallel.ForEachAsync(sentPo, parallelOpts,
+                async (msg, _ct) => await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyWithoutJobRef, _ct));
         }
     }
 
