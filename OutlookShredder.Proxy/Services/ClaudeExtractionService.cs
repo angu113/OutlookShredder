@@ -50,9 +50,17 @@ public class ClaudeExtractionService : IAiExtractionService
         5. Finish or condition if stated: 2B, #4, HR, CR, DOM, ERW, Annealed, T6.
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
+        ── JOB REFERENCE ──────────────────────────────────────────────────────────
+        Metal Supermarkets' internal job number, typically in square brackets in the email
+        subject line. Two formats are valid:
+          - New:    [HQXXXXXX] — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy: [XXXXXX]   — exactly 6 alphanumeric chars
+        Extract the content inside the brackets (including "HQ" when present), without
+        the brackets themselves. NOT the supplier's quote number.
+
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number assigned to this quote — NOT the
-        [XXXXXX] job reference which belongs to Metal Supermarkets.
+        [HQXXXXXX] / [XXXXXX] job reference which belongs to Metal Supermarkets.
         This is any code, number, or alphanumeric identifier that the supplier uses to
         track this specific quote in their own system. It may appear anywhere in the
         document or subject line and can be labelled in any way the supplier chooses
@@ -69,7 +77,7 @@ public class ClaudeExtractionService : IAiExtractionService
         Step 3 - $/kg: divide by 2.20462 to get $/lb.
         Step 4 - Unit price to $/lb: if pricePerPiece is known AND weightPerUnit is known,
                  YOU MUST compute pricePerPound = pricePerPiece / weightPerUnit (convert weight to lb first).
-                 Example: $61.75/pc / 82 lb/pc = $0.7531/lb -- always do this arithmetic.
+                 Example: $61.75/pc / 82 lb/pc = $0.7531/lb — always do this arithmetic.
         Step 5 - Unit price to $/ft: if pricePerPiece is known AND lengthPerUnit is known,
                  YOU MUST compute pricePerFoot = pricePerPiece / lengthPerUnit (convert to ft first).
         Step 6 - Total to $/lb: if totalPrice and total weight are derivable,
@@ -90,12 +98,12 @@ public class ClaudeExtractionService : IAiExtractionService
         - Linear-feet pricing: when quantity is expressed as total linear footage
           (e.g. "100 LF", "500 linear feet") rather than pieces, set unitsQuoted = that
           footage number, lengthPerUnit = 1, lengthUnit = "ft".
-        - ALWAYS extract lengthPerUnit when pricing is per foot ($/ft, $/LF) -- it is
+        - ALWAYS extract lengthPerUnit when pricing is per foot ($/ft, $/LF) — it is
           required to compute the line total.
 
         ── MULTIPLE PRODUCTS ──────────────────────────────────────────────────────
         Every distinct grade, form, size, or finish is a SEPARATE entry in products[].
-        "1\" and 2\" flat bar" -> two entries. "304 and 316 sheet" -> two entries.
+        "1\" and 2\" flat bar" → two entries. "304 and 316 sheet" → two entries.
 
         ── COMMENTS ───────────────────────────────────────────────────────────────
         Capture in supplierProductComments: partial availability, alternates offered,
