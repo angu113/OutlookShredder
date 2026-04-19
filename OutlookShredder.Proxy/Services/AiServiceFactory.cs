@@ -1,8 +1,10 @@
 namespace OutlookShredder.Proxy.Services;
 
 /// <summary>
-/// Factory for creating AI extraction service instances based on configuration.
-/// Supports multiple providers with fallback logic.
+/// Resolves the AI extraction service based on <c>AI:Provider</c> in configuration.
+/// When the other provider's API key is configured, wraps the chosen primary in a
+/// <see cref="FallbackAiExtractionService"/> so a runtime failure of the primary
+/// transparently retries against the secondary.
 /// </summary>
 public class AiServiceFactory
 {
@@ -20,30 +22,37 @@ public class AiServiceFactory
         _log = log;
     }
 
-    /// <summary>
-    /// Gets the configured AI extraction service, or the first available if config is invalid.
-    /// Provider is selected via AI:Provider in appsettings.
-    /// Falls back to the default provider if not specified.
-    /// </summary>
     public IAiExtractionService GetService()
     {
-        var provider = _config["AI:Provider"]?.ToLowerInvariant() ?? "claude";
+        var providerName = (_config["AI:Provider"] ?? "claude").ToLowerInvariant();
+        var primary = ResolveByName(providerName);
+        var secondary = ResolveByName(providerName == "gemini" ? "claude" : "gemini");
 
-        _log.LogInformation("AI provider configured: {Provider}", provider);
-
-        return provider switch
+        if (!IsProviderKeyConfigured(secondary))
         {
-            "gemini" => GetService<GeminiExtractionService>(),
-            "claude" => GetService<ClaudeExtractionService>(),
-            // Future: "openai" => GetService<OpenAiExtractionService>(),
-            _ => GetService<ClaudeExtractionService>() // default fallback
-        };
+            _log.LogInformation("AI provider: {Primary} (no fallback — {Secondary} API key not configured)",
+                primary.ProviderName, secondary.ProviderName);
+            return primary;
+        }
+
+        _log.LogInformation("AI provider: {Primary} with fallback to {Secondary}",
+            primary.ProviderName, secondary.ProviderName);
+
+        var fallbackLog = _serviceProvider.GetRequiredService<ILogger<FallbackAiExtractionService>>();
+        return new FallbackAiExtractionService(primary, secondary, fallbackLog);
     }
 
-    private IAiExtractionService GetService<T>() where T : IAiExtractionService
+    private IAiExtractionService ResolveByName(string name) => name switch
     {
-        var service = _serviceProvider.GetRequiredService<T>();
-        _log.LogInformation("Using AI provider: {Provider}", service.ProviderName);
-        return service;
-    }
+        "gemini" => _serviceProvider.GetRequiredService<GeminiExtractionService>(),
+        // Future: "openai" => _serviceProvider.GetRequiredService<OpenAiExtractionService>(),
+        _        => _serviceProvider.GetRequiredService<ClaudeExtractionService>(),
+    };
+
+    private bool IsProviderKeyConfigured(IAiExtractionService svc) => svc switch
+    {
+        ClaudeExtractionService => !string.IsNullOrWhiteSpace(_config["Anthropic:ApiKey"]),
+        GeminiExtractionService => !string.IsNullOrWhiteSpace(_config["Google:ApiKey"]),
+        _ => false,
+    };
 }
