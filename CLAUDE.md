@@ -9,7 +9,7 @@ This proxy is accessed as a **git submodule** inside the Shredder repo at `Shred
 The submodule clone has no local git identity by default; pass `-c user.name=Angus -c user.email=angus@mithrilmetals.com` on `git commit` or set it locally once via `git config`.
 
 Two projects in one repo:
-- **OutlookShredder.Proxy** — ASP.NET Core 8 Windows Service; all business logic, Graph API, Claude API
+- **OutlookShredder.Proxy** — ASP.NET Core 10 Windows Service; all business logic, Graph API, Claude API
 - **OutlookShredder.AddinHost** — Static file host for the Office.js Outlook taskpane add-in
 
 ## Proxy (`OutlookShredder.Proxy/`)
@@ -242,7 +242,7 @@ Serilog — console + rolling daily file at `Logs/proxy-.log`.
 
 ## AddinHost (`OutlookShredder.AddinHost/`)
 
-Minimal ASP.NET Core 8 static file server (HTTPS on port 3000). Serves the Office.js taskpane.
+Minimal ASP.NET Core 10 static file server (HTTPS on port 3000). Serves the Office.js taskpane.
 
 CORS allows: `https://localhost`, `https://outlook.office.com`, `https://outlook.office365.com`, `https://*.office365.com`, `https://*.microsoft.com`.
 
