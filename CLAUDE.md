@@ -2,11 +2,11 @@
 
 ## Repo Coordination
 
-The proxy and its Shredder client live in **two separate repos** that must stay API-version compatible:
-- **Proxy** (this repo): `C:\Users\angus\source\repos\angu113\OutlookShredder`
-- **Shredder** (companion repo): `C:\Users\angus\source\repos\angu113\Shredder`
+This proxy is accessed as a **git submodule** inside the Shredder repo at `Shredder/Proxy/OutlookShredder/`. There is no separate primary clone — edit in-place inside Shredder, then commit + push from the submodule working directory, and bump the submodule pointer in the parent Shredder commit.
 
-**Unless a command explicitly targets only one project, always apply git operations (pull, push, fetch, merge, status, log) to both repos.** Breaking API changes in one without updating the other will cause runtime failures.
+**Breaking API changes must land with the matching Shredder-side change in the same commit that bumps the submodule pointer.** A pointer bump without the companion client change (or vice versa) will fail at runtime.
+
+The submodule clone has no local git identity by default; pass `-c user.name=Angus -c user.email=angus@mithrilmetals.com` on `git commit` or set it locally once via `git config`.
 
 Two projects in one repo:
 - **OutlookShredder.Proxy** — ASP.NET Core 8 Windows Service; all business logic, Graph API, Claude API
