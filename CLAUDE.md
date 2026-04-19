@@ -27,6 +27,7 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 | `CatalogController` | `/api/catalog` | Read/refresh product catalog, backfill, fuzzy-resolve vendor names |
 | `RfqNewController` | `/api/rfq-new` | Send RFQ emails via Graph; served product/supplier data for RfqNew tab |
 | `UpdateController` | `/api/update` | Version check + download publish package ZIP |
+| `HealthController` | `/api/health` | Aggregated service health for Shredder's Home dashboard |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -34,6 +35,9 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `PATCH /api/sr/{srId}/rfq-id` body: `{ rfqId }` — reparents a SupplierResponse and all its child SupplierLineItems to a new RFQ ID; rfqId must be 6 alphanumeric (legacy) or `HQ`+6 alphanumeric (new)
 - `PATCH /api/sli/{sliItemId}/rfq-id` body: `{ rfqId }` — reparents a single SupplierLineItem to a new RFQ ID; if the source SR has no remaining SLI children it is deleted
 - `GET /api/version` → `{ version }` — returns the running assembly's `InformationalVersion` (distinct from `/api/publish/version`, which reads SharePoint's version.txt)
+
+**HealthController endpoints:**
+- `GET /api/health` → `{ services: [ { id, label, status, detail } ] }` — lightweight snapshot of SharePoint (catalog cache state), Mailbox (config), Service Bus (config), Claude (key configured), Gemini (key configured), and AI Routing (current `IAiExtractionService.ProviderName`). `status` is one of `ok` | `degraded` | `fail` | `disabled`. Reads cached state only — does not hit Graph live.
 
 **QcController endpoints:**
 - `GET /api/qc` → `{ columns[], rows[][], itemIds[], lastModified }`
