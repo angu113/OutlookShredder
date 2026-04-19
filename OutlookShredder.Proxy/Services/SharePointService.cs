@@ -315,7 +315,11 @@ public class SharePointService
 
             if (srMatch is not null)
             {
-                var rfqIdVal = RfqIdRaw(srMatch);
+                // Prefer the SLI's own RFQ_ID when it was individually reparented (differs from SR)
+                var sliOwnRfqId = RfqId(row);
+                var rfqIdVal = (!string.IsNullOrEmpty(sliOwnRfqId) && sliOwnRfqId != "000000")
+                    ? sliOwnRfqId
+                    : RfqIdRaw(srMatch);
                 if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
 
                 foreach (var f in ParentFields)
@@ -488,7 +492,10 @@ public class SharePointService
             }
             if (srMatch is not null)
             {
-                var rfqIdVal = RfqIdRaw(srMatch);
+                var sliOwnRfqId = RfqId(row);
+                var rfqIdVal = (!string.IsNullOrEmpty(sliOwnRfqId) && sliOwnRfqId != "000000")
+                    ? sliOwnRfqId
+                    : RfqIdRaw(srMatch);
                 if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
                 foreach (var f in ParentFields)
                     if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
@@ -2319,6 +2326,118 @@ public class SharePointService
         _log.LogInformation("[SP] Deleted SR {Id} ({SliCount} SLIs removed)", srId, sliIds.Count);
 
         return (sliIds.Count, 1);
+    }
+
+    /// <summary>
+    /// Re-parents a SupplierResponse and all its child SupplierLineItems to a new RFQ ID.
+    /// Updates RFQ_ID on both the SR row and every SLI row that references it via SupplierResponseId.
+    /// </summary>
+    public async Task ReparentSupplierResponseAsync(string srId, string rfqId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+
+        // Find child SLI rows by SupplierResponseId
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        var sliIds = new List<string>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null || item.Id is null) continue;
+                var refId = d.TryGetValue("SupplierResponseId", out var v) ? v?.ToString() : null;
+                if (string.Equals(refId, srId, StringComparison.OrdinalIgnoreCase))
+                    sliIds.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        await GetGraph().Sites[siteId].Lists[srListId].Items[srId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["RFQ_ID"] = rfqId } });
+
+        foreach (var sliId in sliIds)
+        {
+            await GetGraph().Sites[siteId].Lists[sliListId].Items[sliId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["RFQ_ID"] = rfqId } });
+        }
+
+        _log.LogInformation("[SP] Reparented SR {SrId} and {N} SLI row(s) to RFQ {RfqId}", srId, sliIds.Count, rfqId);
+    }
+
+    /// <summary>
+    /// Re-parents a single SupplierLineItem to a new RFQ ID.
+    /// If the source SR has no remaining SLI children, it is deleted.
+    /// Returns true when the source SR was deleted.
+    /// </summary>
+    public async Task<bool> ReparentSliAsync(string sliItemId, string rfqId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+
+        // Read the SLI to discover its parent SR before patching
+        var sliItem = await GetGraph().Sites[siteId].Lists[sliListId].Items[sliItemId]
+            .GetAsync(r => r.QueryParameters.Expand = ["fields($select=SupplierResponseId)"]);
+        var parentSrId = sliItem?.Fields?.AdditionalData
+            ?.TryGetValue("SupplierResponseId", out var sv) == true ? sv?.ToString() : null;
+
+        // Patch the SLI's own RFQ_ID to the target RFQ
+        await GetGraph().Sites[siteId].Lists[sliListId].Items[sliItemId].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["RFQ_ID"] = rfqId }
+            });
+
+        _log.LogInformation("[SP] Reparented SLI {SliId} to RFQ {RfqId}", sliItemId, rfqId);
+
+        if (string.IsNullOrEmpty(parentSrId)) return false;
+
+        // Count SLI rows still referencing the source SR; break early once we know there are 2+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=SupplierResponseId)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        int siblingCount = 0;
+        while (page is not null && siblingCount < 2)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+                var refId = d.TryGetValue("SupplierResponseId", out var rv) ? rv?.ToString() : null;
+                if (string.Equals(refId, parentSrId, StringComparison.OrdinalIgnoreCase))
+                    siblingCount++;
+                if (siblingCount >= 2) break;
+            }
+            if (page.OdataNextLink is null || siblingCount >= 2) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        // siblingCount == 1 means only our just-reparented SLI remains (still points at old SR)
+        if (siblingCount <= 1)
+        {
+            await GetGraph().Sites[siteId].Lists[srListId].Items[parentSrId].DeleteAsync();
+            _log.LogInformation("[SP] Deleted empty SR {SrId} after last SLI reparented to {RfqId}", parentSrId, rfqId);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

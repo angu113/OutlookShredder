@@ -31,6 +31,9 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
 - `POST /api/setup-supplier-lists` — idempotent: creates SupplierResponses + SupplierLineItems SP lists
+- `PATCH /api/sr/{srId}/rfq-id` body: `{ rfqId }` — reparents a SupplierResponse and all its child SupplierLineItems to a new RFQ ID; rfqId must be 6 alphanumeric (legacy) or `HQ`+6 alphanumeric (new)
+- `PATCH /api/sli/{sliItemId}/rfq-id` body: `{ rfqId }` — reparents a single SupplierLineItem to a new RFQ ID; if the source SR has no remaining SLI children it is deleted
+- `GET /api/version` → `{ version }` — returns the running assembly's `InformationalVersion` (distinct from `/api/publish/version`, which reads SharePoint's version.txt)
 
 **QcController endpoints:**
 - `GET /api/qc` → `{ columns[], rows[][], itemIds[], lastModified }`

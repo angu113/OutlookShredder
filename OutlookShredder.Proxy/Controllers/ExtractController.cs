@@ -809,6 +809,55 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/sr/{srId}/rfq-id ─────────────────────────────────────────────
+
+    /// <summary>Re-parents a SupplierResponse (and its child SLI rows) to a different RFQ ID.</summary>
+    [HttpPatch("sr/{srId}/rfq-id")]
+    public async Task<IActionResult> ReparentSr(string srId, [FromBody] ReparentSrRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.RfqId) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^([Hh][Qq][A-Za-z0-9]{6}|[A-Za-z0-9]{6})$"))
+            return BadRequest(new { error = "rfqId must be 'HQ'+6 alphanumeric (new) or 6 alphanumeric (legacy)" });
+
+        try
+        {
+            var rfqId = request.RfqId.Trim().ToUpperInvariant();
+            await _sp.ReparentSupplierResponseAsync(srId, rfqId);
+            return Ok(new { srId, rfqId });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ReparentSr failed for SR {Id}", srId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── PATCH /api/sli/{sliItemId}/rfq-id ───────────────────────────────────────
+
+    /// <summary>
+    /// Re-parents a single SupplierLineItem to a different RFQ ID.
+    /// If the source SR ends up with no remaining SLI children it is deleted automatically.
+    /// </summary>
+    [HttpPatch("sli/{sliItemId}/rfq-id")]
+    public async Task<IActionResult> ReparentSli(string sliItemId, [FromBody] ReparentSrRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.RfqId) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^([Hh][Qq][A-Za-z0-9]{6}|[A-Za-z0-9]{6})$"))
+            return BadRequest(new { error = "rfqId must be 'HQ'+6 alphanumeric (new) or 6 alphanumeric (legacy)" });
+
+        var rfqId = request.RfqId.Trim();
+        try
+        {
+            var srDeleted = await _sp.ReparentSliAsync(sliItemId, rfqId);
+            return Ok(new { sliItemId, rfqId, srDeleted });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ReparentSli failed for SLI {Id}", sliItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── DELETE /api/sli/{itemId} ─────────────────────────────────────────────
     /// <summary>
     /// Deletes a single SupplierLineItem by its SharePoint item ID.
@@ -1689,4 +1738,15 @@ public class ExtractController : ControllerBase
     public IActionResult Health() =>
         Ok(new { status = "ok", utc = DateTime.UtcNow });
 
+    public record ReparentSrRequest(string RfqId);
+
+    // ── GET /api/version ─────────────────────────────────────────────────────
+    [HttpGet("version")]
+    public IActionResult Version()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        var attr = (System.Reflection.AssemblyInformationalVersionAttribute?)
+            System.Attribute.GetCustomAttribute(asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+        return Ok(new { version = attr?.InformationalVersion ?? "unknown" });
+    }
 }
