@@ -300,9 +300,15 @@ public class ClaudeExtractionService : IAiExtractionService
             if (!block.TryGetProperty("input", out var inputEl))
                 continue;
 
-            return JsonSerializer.Deserialize<RfqExtraction>(
+            var extraction = JsonSerializer.Deserialize<RfqExtraction>(
                 inputEl.GetRawText(),
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (extraction is not null)
+            {
+                _log.LogInformation("[Claude] Extracted supplier={Supplier} products={Count}",
+                    extraction.SupplierName, extraction.Products.Count);
+            }
+            return extraction;
         }
 
         _log.LogError("Claude response contained no extract_rfq tool_use block: {Raw}", raw);
@@ -561,9 +567,15 @@ public class ClaudeExtractionService : IAiExtractionService
             if (!block.TryGetProperty("name",  out var nameEl) || nameEl.GetString() != "extract_po") continue;
             if (!block.TryGetProperty("input", out var inputEl)) continue;
 
-            return JsonSerializer.Deserialize<PoExtraction>(
+            var po = JsonSerializer.Deserialize<PoExtraction>(
                 inputEl.GetRawText(),
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (po is not null)
+            {
+                _log.LogInformation("[Claude] Extracted PO supplier={Supplier} lines={Count}",
+                    po.SupplierName, po.LineItems.Count);
+            }
+            return po;
         }
 
         _log.LogError("[PO] Claude response contained no extract_po tool_use block: {Raw}", raw);

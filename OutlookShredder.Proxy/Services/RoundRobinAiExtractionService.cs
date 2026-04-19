@@ -72,6 +72,7 @@ public class RoundRobinAiExtractionService : IAiExtractionService
         Func<IAiExtractionService, Task<T>> invoke,
         CancellationToken ct)
     {
+        _log.LogInformation("[RoundRobin] Routing {Op} to {Primary}", op, primary.ProviderName);
         try
         {
             return await invoke(primary);
