@@ -93,7 +93,7 @@ public class MailPollerService : BackgroundService
             while (_aiCallTimestamps.Count > 0 && _aiCallTimestamps.Peek() <= cutoff)
                 _aiCallTimestamps.Dequeue();
             callsInWindow = _aiCallTimestamps.Count;
-            maxPerMinute  = int.TryParse(_config["Mail:MaxEmailsPerMinute"], out var r) ? Math.Max(1, r) : 60;
+            maxPerMinute  = int.TryParse(_config["Mail:MaxEmailsPerMinute"], out var r) ? Math.Max(1, r) : 100;
         }
         finally { _rateLimitLock.Release(); }
 
@@ -131,8 +131,8 @@ public class MailPollerService : BackgroundService
     {
         var mailbox             = _config["Mail:MailboxAddress"]
             ?? throw new InvalidOperationException("Mail:MailboxAddress not configured");
-        var maxPerMinute        = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 60;
-        var maxConcurrency      = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 4;
+        var maxPerMinute        = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 100;
+        var maxConcurrency      = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 8;
         var bodyContextChars    = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc             : 2_000;
         var extractBodyNoJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
 
@@ -381,8 +381,8 @@ public class MailPollerService : BackgroundService
 
         var intervalSeconds          = int.TryParse(_config["Mail:PollIntervalSeconds"],      out var s)  ? s          : 30;
         var lookbackHours            = double.TryParse(_config["Mail:LookbackHours"],          out var h)  ? h          : 24.0;
-        var maxPerMinute             = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 60;
-        var maxConcurrency           = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 4;
+        var maxPerMinute             = int.TryParse(_config["Mail:MaxEmailsPerMinute"],        out var r)  ? Math.Max(1, r) : 100;
+        var maxConcurrency           = int.TryParse(_config["Mail:MaxConcurrency"],            out var mc) ? Math.Max(1, mc) : 8;
         var bodyContextChars         = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc         : 2_000;
         var extractBodyWithoutJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
         var interval                 = TimeSpan.FromSeconds(intervalSeconds);
