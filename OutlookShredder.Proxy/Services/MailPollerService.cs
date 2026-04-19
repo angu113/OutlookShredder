@@ -60,10 +60,67 @@ public class MailPollerService : BackgroundService
 
     // Sliding-window rate limiter — tracks timestamps of recent AI calls.
     private readonly Queue<DateTimeOffset> _aiCallTimestamps = new();
-    private readonly SemaphoreSlim         _rateLimitLock        = new(1, 1);
+    private readonly SemaphoreSlim         _rateLimitLock    = new(1, 1);
 
     // Signalled by TriggerReprocessAllAsync to request an immediate full scan.
     private readonly SemaphoreSlim _reprocessTrigger = new(0, 1);
+
+    // ── Observable status (read by MailStatusController) ─────────────────────
+
+    // Reprocess batch progress (reset at start of each batch).
+    private volatile int  _reprocessTotal     = 0;
+    private volatile int  _reprocessCompleted = 0;
+    private volatile int  _reprocessFailed    = 0;
+    private volatile bool _reprocessActive    = false;
+
+    // Messages currently being processed (messageId → subject + from + start time).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Subject, string From, DateTimeOffset StartedAt)>
+        _inFlight = new();
+
+    // Last poll cycle summary.
+    private volatile int        _lastPollFound   = 0;
+    private DateTimeOffset?     _lastPollAt      = null;
+
+    /// <summary>Snapshot of current processing status for the /api/mail/status endpoint.</summary>
+    public MailStatus GetStatus()
+    {
+        int callsInWindow;
+        int maxPerMinute;
+        _rateLimitLock.Wait();
+        try
+        {
+            var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(1);
+            while (_aiCallTimestamps.Count > 0 && _aiCallTimestamps.Peek() <= cutoff)
+                _aiCallTimestamps.Dequeue();
+            callsInWindow = _aiCallTimestamps.Count;
+            maxPerMinute  = int.TryParse(_config["Mail:MaxEmailsPerMinute"], out var r) ? Math.Max(1, r) : 60;
+        }
+        finally { _rateLimitLock.Release(); }
+
+        return new MailStatus(
+            Poller: new PollerStatus(
+                Running:                true,
+                LastPollAt:             _lastPollAt,
+                MessagesFoundLastCycle: _lastPollFound),
+            Reprocess: new ReprocessStatus(
+                Active:          _reprocessActive,
+                Total:           _reprocessTotal,
+                Completed:       _reprocessCompleted,
+                Failed:          _reprocessFailed,
+                PercentComplete: _reprocessTotal > 0
+                                 ? Math.Round(_reprocessCompleted * 100.0 / _reprocessTotal, 1)
+                                 : 0),
+            RateLimit: new RateLimitStatus(
+                CallsInLastMinute: callsInWindow,
+                MaxPerMinute:      maxPerMinute,
+                SlotsAvailable:    Math.Max(0, maxPerMinute - callsInWindow)),
+            InFlight: _inFlight
+                .Select(kv => new InFlightItem(
+                    kv.Value.Subject,
+                    kv.Value.From,
+                    kv.Value.StartedAt.ToLocalTime().ToString("HH:mm:ss")))
+                .ToList());
+    }
 
     /// <summary>
     /// Reprocesses a specific set of already-processed messages by fetching each one from
@@ -79,21 +136,47 @@ public class MailPollerService : BackgroundService
         var bodyContextChars    = int.TryParse(_config["Mail:BodyContextChars"],          out var bc) ? bc             : 2_000;
         var extractBodyNoJobRef = bool.TryParse(_config["Mail:ExtractBodyWithoutJobRef"], out var eb) && eb;
 
-        await Parallel.ForEachAsync(messageIds,
-            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
-            async (messageId, _ct) =>
-            {
-                var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
-                if (msg is null)
-                {
-                    _log.LogWarning("[Reprocess] Message {Id} not found — skipping", messageId);
-                    return;
-                }
+        var idList = messageIds.ToList();
+        _reprocessTotal     = idList.Count;
+        _reprocessCompleted = 0;
+        _reprocessFailed    = 0;
+        _reprocessActive    = true;
+        _log.LogInformation("[Reprocess] Starting batch of {Total} message(s)", idList.Count);
 
-                _log.LogInformation("[Reprocess] Reprocessing \"{Subject}\" from {From}",
-                    msg.Subject, msg.From?.EmailAddress?.Address);
-                await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyNoJobRef, _ct);
-            });
+        try
+        {
+            await Parallel.ForEachAsync(idList,
+                new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+                async (messageId, _ct) =>
+                {
+                    var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
+                    if (msg is null)
+                    {
+                        _log.LogWarning("[Reprocess] Message {Id} not found — skipping", messageId);
+                        Interlocked.Increment(ref _reprocessFailed);
+                        return;
+                    }
+
+                    _log.LogInformation("[Reprocess] Reprocessing \"{Subject}\" from {From}",
+                        msg.Subject, msg.From?.EmailAddress?.Address);
+                    try
+                    {
+                        await ProcessMessageAsync(mailbox, msg, maxPerMinute, bodyContextChars, extractBodyNoJobRef, _ct);
+                        Interlocked.Increment(ref _reprocessCompleted);
+                    }
+                    catch (Exception ex) when (!_ct.IsCancellationRequested)
+                    {
+                        _log.LogError(ex, "[Reprocess] Failed processing {Id}", messageId);
+                        Interlocked.Increment(ref _reprocessFailed);
+                    }
+                });
+        }
+        finally
+        {
+            _reprocessActive = false;
+            _log.LogInformation("[Reprocess] Batch complete — {Completed}/{Total} succeeded, {Failed} failed",
+                _reprocessCompleted, _reprocessTotal, _reprocessFailed);
+        }
     }
 
     /// <summary>
@@ -346,7 +429,9 @@ public class MailPollerService : BackgroundService
     {
         var parallelOpts = new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct };
 
+        _lastPollAt = DateTimeOffset.UtcNow;
         var messages = await _mail.GetMessagesAsync(mailbox, since);
+        _lastPollFound = messages.Count;
 
         if (messages.Count == 0)
             _log.LogDebug("[Mail] No unprocessed inbox messages");
@@ -437,6 +522,10 @@ public class MailPollerService : BackgroundService
         var fromAddr = msg.From?.EmailAddress?.Address ?? "unknown";
         var received = msg.ReceivedDateTime?.ToString("o") ?? DateTime.UtcNow.ToString("o");
 
+        // Track in-flight for /api/mail/status
+        var trackId = msg.Id ?? Guid.NewGuid().ToString();
+        _inFlight[trackId] = (subject, fromAddr, DateTimeOffset.UtcNow);
+
         // Attach email context to every log line emitted while processing this message.
         using var logScope = _log.BeginScope(new Dictionary<string, object?>
         {
@@ -444,6 +533,9 @@ public class MailPollerService : BackgroundService
             ["EmailFrom"]    = fromAddr,
             ["MessageId"]    = msg.Id,
         });
+
+        try
+        {
 
         // Claim this message immediately so other proxy instances skip it on their next poll.
         if (msg.Id is not null)
@@ -646,6 +738,9 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Supplier unrecognised in \"{Subject}\" — stamping 'Unknown' category", subject);
             await _mail.MarkProcessedAsync(mailbox, msg.Id, extra);
         }
+
+        } // end try
+        finally { _inFlight.TryRemove(trackId, out _); }
     }
 
     // ── Purchase Order processing ─────────────────────────────────────────────
