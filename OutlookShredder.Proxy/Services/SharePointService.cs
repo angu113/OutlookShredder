@@ -1416,6 +1416,17 @@ public class SharePointService
 
             // ??"?????"??? Resolve supplier name ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
             var rawSupplier = header.SupplierName;
+
+            // Discard AI-extracted names that are our own company — Claude sometimes picks
+            // these up from the quoted original message embedded in supplier reply chains.
+            static bool IsOurCompanyName(string? s) =>
+                s is not null && (
+                    s.Contains("mithril", StringComparison.OrdinalIgnoreCase) ||
+                    s.Contains("metal supermarket", StringComparison.OrdinalIgnoreCase) ||
+                    s.Contains("hackensack", StringComparison.OrdinalIgnoreCase));
+            if (IsOurCompanyName(rawSupplier))
+                rawSupplier = null;
+
             if (string.IsNullOrWhiteSpace(rawSupplier) && !string.IsNullOrWhiteSpace(emailMeta.EmailFrom))
             {
                 var addr = emailMeta.EmailFrom;
@@ -1454,17 +1465,37 @@ public class SharePointService
                         ? resolveEmail[(atIdx + 1)..].ToLowerInvariant()
                         : null;
 
-                    if (senderDomain is not null &&
-                        _suppliers.DomainMap.TryGetValue(senderDomain, out var domainMatch))
+                    if (senderDomain is not null)
                     {
-                        supplier = domainMatch;
-                        var source3 = resolveEmail == emailMeta.EmailFrom
+                        string? domainResolved = null;
+                        string  resolveSource  = resolveEmail == emailMeta.EmailFrom
                             ? "direct sender domain"
                             : "forwarded-body sender domain";
-                        _log.LogInformation(
-                            "[SP] Supplier resolved by {Source} '{Domain}' -> '{Supplier}' " +
-                            "(name match failed for '{Raw}'). Subject='{Subject}'",
-                            source3, senderDomain, supplier, rawSupplier, emailMeta.EmailSubject);
+
+                        if (_suppliers.DomainMap.TryGetValue(senderDomain, out var domainMatch))
+                        {
+                            domainResolved = domainMatch;
+                        }
+                        else
+                        {
+                            // Domain not in map — try substring matching: all canonical tokens
+                            // must appear somewhere in the domain TLD-2 part.
+                            // e.g. "certifiedsteel.com" → TLD-2 "certifiedsteel"
+                            //      matches "Certified Steel" tokens ["certified","steel"].
+                            var tld2 = senderDomain.Split('.')[0].ToLowerInvariant();
+                            domainResolved = _suppliers.ResolveByDomainSubstring(tld2);
+                            if (domainResolved is not null)
+                                resolveSource += " (token-substring)";
+                        }
+
+                        if (domainResolved is not null)
+                        {
+                            supplier = domainResolved;
+                            _log.LogInformation(
+                                "[SP] Supplier resolved by {Source} '{Domain}' -> '{Supplier}' " +
+                                "(name match failed for '{Raw}'). Subject='{Subject}'",
+                                resolveSource, senderDomain, supplier, rawSupplier, emailMeta.EmailSubject);
+                        }
                     }
                 }
             }
@@ -1521,7 +1552,7 @@ public class SharePointService
 
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
-                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference, contactEmail);
+                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
 
             result.Success = true;
         }
@@ -1667,9 +1698,14 @@ public class SharePointService
         }
     }
 
+    // Optional columns that may not exist on older list schemas.
+    // When a PATCH or POST fails because one of these is unrecognised, it is
+    // silently dropped and the request retried rather than failing the whole write.
+    private static readonly string[] _optionalColumns = ["ClaudeResponseLog", "ContactEmail"];
+
     /// <summary>
-    /// PATCH a SP list item's fields, retrying without ClaudeResponseLog if the field
-    /// doesn't exist in this list (avoids breaking all upserts when the column is absent).
+    /// PATCH a SP list item's fields, retrying without any optional columns
+    /// that don't exist in this list schema yet.
     /// </summary>
     private async Task PatchFieldsAsync(string siteId, string listId, string itemId,
         Dictionary<string, object?> data)
@@ -1680,18 +1716,19 @@ public class SharePointService
                 .PatchAsync(new FieldValueSet { AdditionalData = data });
         }
         catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
-            when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
+            when (_optionalColumns.Any(c => e.Error?.Message?.Contains(c) == true))
         {
-            _log.LogDebug("[SP] ClaudeResponseLog field absent  -- retrying PATCH without it");
-            data.Remove("ClaudeResponseLog");
+            var missing = _optionalColumns.First(c => e.Error?.Message?.Contains(c) == true);
+            _log.LogDebug("[SP] Optional field '{Field}' absent  -- retrying PATCH without it", missing);
+            data.Remove(missing);
             await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
                 .PatchAsync(new FieldValueSet { AdditionalData = data });
         }
     }
 
     /// <summary>
-    /// POST a new SP list item, retrying without ClaudeResponseLog if the field
-    /// doesn't exist in this list.
+    /// POST a new SP list item, retrying without any optional columns
+    /// that don't exist in this list schema yet.
     /// </summary>
     private async Task<ListItem?> PostListItemAsync(string siteId, string listId,
         Dictionary<string, object?> data)
@@ -1702,10 +1739,11 @@ public class SharePointService
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
         }
         catch (Microsoft.Graph.Models.ODataErrors.ODataError e)
-            when (e.Error?.Message?.Contains("ClaudeResponseLog") == true)
+            when (_optionalColumns.Any(c => e.Error?.Message?.Contains(c) == true))
         {
-            _log.LogDebug("[SP] ClaudeResponseLog field absent  -- retrying POST without it");
-            data.Remove("ClaudeResponseLog");
+            var missing = _optionalColumns.First(c => e.Error?.Message?.Contains(c) == true);
+            _log.LogDebug("[SP] Optional field '{Field}' absent  -- retrying POST without it", missing);
+            data.Remove(missing);
             return await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
         }
@@ -1779,7 +1817,7 @@ public class SharePointService
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
         string? sourceFile, string? emailFrom, string? messageId = null,
-        string? quoteReference = null, string? contactEmail = null)
+        string? quoteReference = null)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -1825,7 +1863,6 @@ public class SharePointService
             ["ProductSearchKey"]         = productSearchKey,
             ["SourceFile"]               = sourceFile,
             ["EmailFrom"]                = emailFrom,
-            ["ContactEmail"]             = contactEmail,
             ["MessageId"]                = messageId,
             ["UnitsRequested"]           = product.UnitsRequested,
             ["UnitsQuoted"]              = product.UnitsQuoted,
@@ -1917,14 +1954,25 @@ public class SharePointService
                 if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(spQuoteRef)
                     && string.Equals(quoteReference, spQuoteRef, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Same quote  -- match by catalog key when available, else by name.
-                    if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
-                        return string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase);
+                    // Same quote  -- match by catalog key + numeric tokens when available, else by name.
+                    // We must check numeric tokens even when the catalog key matches because two line items
+                    // on the same quote can share an MSPC but differ in cut size
+                    // (e.g. 4'×8' and 4'×10' cold-rolled sheet are both CSHCQ/048).
+                    // A pure catalog-key comparison would incorrectly collapse them into one row.
                     var spProduct2 = d.TryGetValue("ProductName", out var p2) ? p2?.ToString() : null;
+                    if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
+                    {
+                        if (!string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase))
+                            return false; // different catalog products
+                        // Same MSPC: still verify dimensions match so distinct cut sizes are kept separate.
+                        var spTok3 = ProductTokens(spProduct2 ?? string.Empty);
+                        return NumericTokensCompatible(productTokens, spTok3)
+                            && ProductJaccard(spTok3, productTokens) >= 0.4;
+                    }
                     if (NormalizeMatch(spProduct2, productName)) return true;
                     var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
                     return NumericTokensCompatible(productTokens, spTok2)
-                        && ProductJaccard(spTok2, productTokens) >= 0.4; // relaxed threshold  -- same quote
+                        && ProductJaccard(spTok2, productTokens) >= 0.4;
                 }
 
                 // Standard fuzzy match by product name.

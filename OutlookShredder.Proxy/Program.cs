@@ -76,6 +76,14 @@ try
 
     builder.Services.AddControllers();
 
+    // Rate limit tracker — shared across both AI providers
+    builder.Services.AddSingleton<AiRateLimitTracker>();
+    builder.Services.AddHttpClient("gemini")
+        .AddHttpMessageHandler(sp => new AiRateLimitHandler(
+            "Gemini",
+            sp.GetRequiredService<AiRateLimitTracker>(),
+            sp.GetRequiredService<ILogger<AiRateLimitHandler>>()));
+
     // Register AI extraction services (pluggable)
     builder.Services.AddSingleton<ClaudeExtractionService>();
     builder.Services.AddSingleton<GeminiExtractionService>();

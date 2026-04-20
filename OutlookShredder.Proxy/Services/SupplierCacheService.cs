@@ -195,6 +195,22 @@ public class SupplierCacheService : BackgroundService
             .GroupBy(e => e.EmailDomain!, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Fallback when the domain is not in <see cref="DomainMap"/>: checks whether all
+    /// canonical name tokens appear as substrings in <paramref name="domainPart"/>.
+    /// e.g. "certifiedsteel" matches "Certified Steel" (tokens: certified, steel).
+    /// Returns the first matching canonical name, or <see langword="null"/>.
+    /// </summary>
+    public string? ResolveByDomainSubstring(string domainPart)
+    {
+        if (string.IsNullOrWhiteSpace(domainPart)) return null;
+        var lower = domainPart.ToLowerInvariant();
+        return _cache
+            .Where(e => e.Tokens.Count > 0 && e.Tokens.All(t => lower.Contains(t)))
+            .Select(e => e.Name)
+            .FirstOrDefault();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static readonly char[] _delimiters = [' ', ',', '.', '-', '/', '&', '(', ')', '_'];

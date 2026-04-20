@@ -15,6 +15,8 @@ public class GeminiExtractionService : IAiExtractionService
 {
     private readonly IConfiguration _config;
     private readonly ILogger<GeminiExtractionService> _log;
+    private readonly AiRateLimitTracker _rateLimits;
+    private readonly IHttpClientFactory _httpFactory;
 
     public string ProviderName => "Gemini";
 
@@ -161,10 +163,16 @@ public class GeminiExtractionService : IAiExtractionService
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
-    public GeminiExtractionService(IConfiguration config, ILogger<GeminiExtractionService> log)
+    public GeminiExtractionService(
+        IConfiguration config,
+        ILogger<GeminiExtractionService> log,
+        AiRateLimitTracker rateLimits,
+        IHttpClientFactory httpFactory)
     {
-        _config = config;
-        _log    = log;
+        _config     = config;
+        _log        = log;
+        _rateLimits = rateLimits;
+        _httpFactory = httpFactory;
     }
 
     // ── IAiExtractionService ──────────────────────────────────────────────────
@@ -192,7 +200,7 @@ public class GeminiExtractionService : IAiExtractionService
             ResponseSchema   = BuildRfqSchema(),
         };
 
-        var googleAi = new GoogleAI(apiKey: apiKey);
+        var googleAi = new GoogleAI(apiKey: apiKey, httpClientFactory: _httpFactory);
         var model    = googleAi.GenerativeModel(
             model:             modelName,
             generationConfig:  genConfig,
@@ -202,6 +210,7 @@ public class GeminiExtractionService : IAiExtractionService
         {
             try
             {
+                await _rateLimits.ThrottleIfNeededAsync("Gemini", ct);
                 var parts  = BuildRfqParts(req, jobHint, maxContent, maxContext, isPdf);
                 var result = await model.GenerateContent(parts, cancellationToken: ct);
 
@@ -259,7 +268,7 @@ public class GeminiExtractionService : IAiExtractionService
             ResponseSchema   = BuildPoSchema(),
         };
 
-        var googleAi = new GoogleAI(apiKey: apiKey);
+        var googleAi = new GoogleAI(apiKey: apiKey, httpClientFactory: _httpFactory);
         var model    = googleAi.GenerativeModel(
             model:             modelName,
             generationConfig:  genConfig,
@@ -269,6 +278,7 @@ public class GeminiExtractionService : IAiExtractionService
         {
             try
             {
+                await _rateLimits.ThrottleIfNeededAsync("Gemini", ct);
                 var parts = new List<IPart>
                 {
                     new Part

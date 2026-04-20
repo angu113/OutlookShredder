@@ -14,6 +14,7 @@ public class ClaudeExtractionService : IAiExtractionService
 {
     private readonly IConfiguration _config;
     private readonly ILogger<ClaudeExtractionService> _log;
+    private readonly AiRateLimitTracker _rateLimits;
     private readonly HttpClient _http;
 
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
@@ -186,12 +187,21 @@ public class ClaudeExtractionService : IAiExtractionService
     public string ProviderName => "Claude";
 
 
-    public ClaudeExtractionService(IConfiguration config, ILogger<ClaudeExtractionService> log)
+    public ClaudeExtractionService(
+        IConfiguration config,
+        ILogger<ClaudeExtractionService> log,
+        AiRateLimitTracker rateLimits,
+        ILogger<AiRateLimitHandler> handlerLog)
     {
-        _config = config;
-        _log    = log;
+        _config     = config;
+        _log        = log;
+        _rateLimits = rateLimits;
         var timeoutSeconds = int.TryParse(_config["Claude:TimeoutSeconds"], out var t) ? t : 60;
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+        var handler = new AiRateLimitHandler("Claude", rateLimits, handlerLog)
+        {
+            InnerHandler = new HttpClientHandler()
+        };
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
     public async Task<RfqExtraction?> ExtractRfqAsync(ExtractRequest req, CancellationToken ct = default)
@@ -268,7 +278,7 @@ public class ClaudeExtractionService : IAiExtractionService
         var bodyJson = JsonSerializer.Serialize(body);
 
         // ── Send with retry ──────────────────────────────────────────────────
-        HttpResponseMessage response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries);
+        HttpResponseMessage response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries, ct);
 
         var raw = await response.Content.ReadAsStringAsync();
 
@@ -326,12 +336,14 @@ public class ClaudeExtractionService : IAiExtractionService
     // ── HTTP send with retry ─────────────────────────────────────────────────
 
     private async Task<HttpResponseMessage> SendWithRetryAsync(
-        string apiKey, string bodyJson, int maxRetries)
+        string apiKey, string bodyJson, int maxRetries, CancellationToken ct = default)
     {
         HttpResponseMessage? lastResponse = null;
 
         for (int attempt = 0; attempt <= maxRetries; attempt++)
         {
+            await _rateLimits.ThrottleIfNeededAsync("Claude", ct);
+
             var request = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
             request.Headers.Add("x-api-key", apiKey);
             request.Headers.Add("anthropic-version", "2023-06-01");
@@ -340,7 +352,7 @@ public class ClaudeExtractionService : IAiExtractionService
 
             try
             {
-                lastResponse = await _http.SendAsync(request);
+                lastResponse = await _http.SendAsync(request, ct);
             }
             catch (Exception ex) when (attempt < maxRetries)
             {
@@ -551,7 +563,7 @@ public class ClaudeExtractionService : IAiExtractionService
         };
 
         var bodyJson = JsonSerializer.Serialize(body);
-        HttpResponseMessage response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries);
+        HttpResponseMessage response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries, ct);
         var raw = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
