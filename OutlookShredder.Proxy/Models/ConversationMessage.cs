@@ -14,6 +14,12 @@ public class ConversationMessage
     public string? BodyText { get; set; }
     public bool HasAttachments { get; set; }
     public bool ExtractedPricing { get; set; }
+    /// <summary>
+    /// For inbound messages that arrived as forwards: the original supplier's email address
+    /// extracted from the forwarded body. Null for direct (non-forwarded) emails.
+    /// Use this instead of EmailFrom when composing a reply.
+    /// </summary>
+    public string? ContactEmail { get; set; }
 }
 
 public class SupplierInquiryRequest

@@ -84,7 +84,7 @@ public class SharePointService
     /// <summary>Fields lifted from SupplierResponses into each SupplierLineItems read row.</summary>
     private static readonly string[] ParentFields =
     [
-        "EmailFrom", "ReceivedAt", "ProcessedAt", "ProcessingSource",
+        "EmailFrom", "ContactEmail", "ReceivedAt", "ProcessedAt", "ProcessingSource",
         "SourceFile", "DateOfQuote", "EstimatedDeliveryDate",
         "QuoteReference", "FreightTerms", "EmailBody", "EmailSubject"
     ];
@@ -1483,8 +1483,8 @@ public class SharePointService
             result.SupplierName = supplier;
 
             // ??"?????"??? Upsert SupplierResponses ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-            var srListId      = await GetSupplierResponsesListIdAsync();
-            var (srId, srNew) = await EnsureSupplierResponseAsync(
+            var srListId                   = await GetSupplierResponsesListIdAsync();
+            var (srId, srNew, contactEmail) = await EnsureSupplierResponseAsync(
                 siteId, srListId, jobRef, supplier, header, emailMeta, source, sourceFile, messageId);
             result.SpItemId = srId;
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
@@ -1521,7 +1521,7 @@ public class SharePointService
 
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
-                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
+                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference, contactEmail);
 
             result.Success = true;
         }
@@ -1542,7 +1542,7 @@ public class SharePointService
 
     // ??"?????"??? Upsert SupplierResponses (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
-    private async Task<(string Id, bool IsNew)> EnsureSupplierResponseAsync(
+    private async Task<(string Id, bool IsNew, string? ContactEmail)> EnsureSupplierResponseAsync(
         string siteId, string listId,
         string jobRef, string supplier,
         RfqExtraction header, ExtractRequest emailMeta,
@@ -1557,6 +1557,15 @@ public class SharePointService
                   int.TryParse(_config["SharePoint:MaxEmailBodyChars"], out var mebc) ? mebc : 10_000)]
             : null;
 
+        // For forwarded emails (from internal staff) extract the original supplier sender address
+        // embedded by Outlook in the forwarded body ("From: name <email>"). Store it as ContactEmail
+        // so the conversation feature can reply to the real supplier rather than the internal forwarder.
+        var forwardedSender = TryExtractForwardedSenderEmail(emailMeta.EmailBody ?? emailMeta.BodyContext);
+        var contactEmail = forwardedSender is not null &&
+                           !string.Equals(forwardedSender, emailMeta.EmailFrom, StringComparison.OrdinalIgnoreCase)
+            ? forwardedSender
+            : null;
+
         bool blanketRegret = HasRegretPhrase(emailMeta.EmailBody) || HasRegretPhrase(emailMeta.BodyContext);
 
         var title = $"[{jobRef}] {supplier} {(emailMeta.ReceivedAt is not null ? DateTime.Parse(emailMeta.ReceivedAt).ToString("yyyy-MM-dd") : "unknown")}";
@@ -1568,6 +1577,7 @@ public class SharePointService
             ["RFQ_ID"]               = string.IsNullOrEmpty(jobRef) ? null : jobRef,
             ["SupplierName"]         = supplier,
             ["EmailFrom"]            = emailMeta.EmailFrom,
+            ["ContactEmail"]         = contactEmail,
             ["ReceivedAt"]           = emailMeta.ReceivedAt,
             ["EmailSubject"]         = emailMeta.EmailSubject,
             ["EmailBody"]            = emailBodyTrunc,
@@ -1603,7 +1613,7 @@ public class SharePointService
             // ProcessingSource/SourceFile are also protected: attachment beats body.
             var precious = new[] { "QuoteReference", "DateOfQuote", "EstimatedDeliveryDate",
                                    "FreightTerms", "ProcessingSource", "SourceFile",
-                                   "ClaudeResponseLog" };
+                                   "ContactEmail", "ClaudeResponseLog" };
             var currentItem = await GetGraph().Sites[siteId].Lists[listId].Items[existingId!]
                 .GetAsync(r => r.QueryParameters.Expand =
                     [$"fields($select={string.Join(",", precious)})"]);
@@ -1644,7 +1654,7 @@ public class SharePointService
             await PatchFieldsAsync(siteId, listId, existingId!, update);
             InvalidateSrCache();
             _log.LogInformation("[SP] Updated SupplierResponse {Id} for [{JobRef}] {Supplier}", existingId, jobRef, supplier);
-            return (existingId!, false);
+            return (existingId!, false, contactEmail);
         }
         else
         {
@@ -1653,7 +1663,7 @@ public class SharePointService
             var newId = item!.Id!;
             InvalidateSrCache();
             _log.LogInformation("[SP] Created SupplierResponse {Id} for [{JobRef}] {Supplier}", newId, jobRef, supplier);
-            return (newId, true);
+            return (newId, true, contactEmail);
         }
     }
 
@@ -1769,7 +1779,7 @@ public class SharePointService
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
         string? sourceFile, string? emailFrom, string? messageId = null,
-        string? quoteReference = null)
+        string? quoteReference = null, string? contactEmail = null)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -1815,6 +1825,7 @@ public class SharePointService
             ["ProductSearchKey"]         = productSearchKey,
             ["SourceFile"]               = sourceFile,
             ["EmailFrom"]                = emailFrom,
+            ["ContactEmail"]             = contactEmail,
             ["MessageId"]                = messageId,
             ["UnitsRequested"]           = product.UnitsRequested,
             ["UnitsQuoted"]              = product.UnitsQuoted,
@@ -4893,7 +4904,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ContactEmail,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile)"];
                 req.QueryParameters.Top    = 200;
                 req.QueryParameters.Filter = filter;
             });
@@ -4917,6 +4928,7 @@ public class SharePointService
                     BodyText           = GetStr(f, "EmailBody"),
                     HasAttachments     = !string.IsNullOrEmpty(GetStr(f, "SourceFile")),
                     ExtractedPricing   = true,
+                    ContactEmail       = GetStr(f, "ContactEmail"),
                 });
             }
             if (page.OdataNextLink is null) break;
