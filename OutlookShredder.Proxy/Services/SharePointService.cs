@@ -324,100 +324,10 @@ public class SharePointService
         var sliResponse = sliTask.Result;
         var nextLink    = sliResponse?.OdataNextLink;   // null on last page
 
-        // Build lookup: SupplierResponse SP item ID -> its fields
-        var srById = srItems
-            .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
-            .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
-
-        // Separate lookup: SR item ID -> item-level CreatedDateTime (not in Fields)
-        var srCreatedAt = srItems
-            .Where(i => i.Id is not null && i.CreatedDateTime.HasValue)
-            .ToDictionary(i => i.Id!, i => i.CreatedDateTime!.Value.UtcDateTime);
-
-        // Fallback lookup: "RFQ_ID|SupplierName" ?????' (SP item ID, SR fields).
-        // Used when SupplierResponseId is missing or stale.
-        // RfqIdRaw() handles both "RFQ_ID" and the SP-encoded "RFQ_x005F_ID" column names.
-        var srBySupplierRfq = new Dictionary<string, (string SrId, IDictionary<string, object> Fields)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (srItemId, srRaw) in srById)
-        {
-            var rfq = RfqIdRaw(srRaw);
-            var sn  = GetStrRaw(srRaw, "SupplierName");
-            if (rfq is not null && sn is not null)
-                srBySupplierRfq.TryAdd($"{rfq}|{sn}", (srItemId, srRaw));
-        }
-
         _log.LogDebug("[SP] ReadSupplierItems: {SrCount} SR rows, {SliCount} SLI rows",
-            srById.Count, sliResponse?.Value?.Count ?? 0);
+            srItems.Count, sliResponse?.Value?.Count ?? 0);
 
-        var result = new List<Dictionary<string, object?>>();
-
-        foreach (var sli in sliResponse?.Value ?? [])
-        {
-            if (sli.Fields?.AdditionalData is null) continue;
-
-            var row = sli.Fields.AdditionalData
-                .Where(kv => IsAppField(kv.Key))
-                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
-
-            if (sli.Id is not null) row["SpItemId"] = sli.Id;
-
-            // ??"?????"??? Resolve parent SupplierResponse record ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-            IDictionary<string, object>? srMatch = null;
-
-            // Primary join: SupplierResponseId ?????' SR item's SP integer ID
-            var srId = GetStr(row, "SupplierResponseId");
-            if (srId is not null)
-            {
-                srById.TryGetValue(srId, out srMatch);
-                if (srMatch is null)
-                    _log.LogDebug("[SP] SLI {SliId}: SupplierResponseId={SrId} not found in srById (keys: {Keys})",
-                        sli.Id, srId, string.Join(",", srById.Keys.Take(10)));
-                else if (srCreatedAt.TryGetValue(srId, out var srCa))
-                    row["SrCreatedAt"] = srCa;
-            }
-
-            // Fallback join: RFQ_ID + SupplierName (handles stale/missing SupplierResponseId)
-            if (srMatch is null)
-            {
-                var sliRfq = RfqId(row);
-                var sliSn  = GetStr(row, "SupplierName");
-                if (sliRfq is not null && sliSn is not null &&
-                    srBySupplierRfq.TryGetValue($"{sliRfq}|{sliSn}", out var fb))
-                {
-                    srMatch = fb.Fields;
-                    row["SupplierResponseId"] = fb.SrId;
-                    if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
-                        row["SrCreatedAt"] = srCa;
-                    _log.LogDebug("[SP] SLI {SliId} [{Rfq}/{Supplier}]: joined via fallback, corrected SrId {OldId}?????'{NewId}",
-                        sli.Id, sliRfq, sliSn, srId ?? "null", fb.SrId);
-                }
-            }
-
-            if (srMatch is not null)
-            {
-                // Prefer the SLI's own RFQ_ID when it was individually reparented (differs from SR)
-                var sliOwnRfqId = RfqId(row);
-                var rfqIdVal = (!string.IsNullOrEmpty(sliOwnRfqId) && sliOwnRfqId != "000000")
-                    ? sliOwnRfqId
-                    : RfqIdRaw(srMatch);
-                if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
-
-                foreach (var f in ParentFields)
-                    if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
-                        row[f] = v;
-
-                // If SR is blanket-regret and line item has no pricing, inherit regret flag
-                if (srMatch.TryGetValue("IsRegret", out var srRegret) &&
-                    srRegret is true or JsonElement { ValueKind: JsonValueKind.True })
-                {
-                    if (!row.ContainsKey("PricePerPound") || row["PricePerPound"] is null)
-                        if (!row.ContainsKey("PricePerFoot") || row["PricePerFoot"] is null)
-                            row["IsRegret"] = true;
-                }
-            }
-
-            result.Add(row);
-        }
+        var result = JoinSliToSr(sliResponse?.Value ?? [], srItems);
 
         if (skipDedup) return (result, nextLink);
 
@@ -520,7 +430,23 @@ public class SharePointService
 
         await Task.WhenAll(srTask, sliTask);
 
-        var srItems = srTask.Result;
+        var result = JoinSliToSr(sliTask.Result?.Value ?? [], srTask.Result);
+
+        _log.LogInformation("[SP] ReadSupplierItemsByRfqId({RfqId}): {Count} items", rfqId, result.Count);
+        return result;
+    }
+
+    // -- Shared SLI join helper --
+
+    /// <summary>
+    /// Builds lookup tables from a set of SR rows and joins each SLI item against them,
+    /// returning flat merged dictionaries ready for serialisation.
+    /// Used by both ReadSupplierItemsAsync and ReadSupplierItemsByRfqIdAsync.
+    /// </summary>
+    private List<Dictionary<string, object?>> JoinSliToSr(
+        IEnumerable<Microsoft.Graph.Models.ListItem> sliItems,
+        List<Microsoft.Graph.Models.ListItem>        srItems)
+    {
         var srById = srItems
             .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
             .ToDictionary(i => i.Id!, i => i.Fields!.AdditionalData!);
@@ -539,7 +465,7 @@ public class SharePointService
         }
 
         var result = new List<Dictionary<string, object?>>();
-        foreach (var sli in sliTask.Result?.Value ?? [])
+        foreach (var sli in sliItems)
         {
             if (sli.Fields?.AdditionalData is null) continue;
 
@@ -550,13 +476,20 @@ public class SharePointService
             if (sli.Id is not null) row["SpItemId"] = sli.Id;
 
             IDictionary<string, object>? srMatch = null;
+
+            // Primary join: SupplierResponseId -> SR item's SP integer ID
             var srId = GetStr(row, "SupplierResponseId");
             if (srId is not null)
             {
                 srById.TryGetValue(srId, out srMatch);
-                if (srMatch is not null && srCreatedAt.TryGetValue(srId, out var srCa))
+                if (srMatch is null)
+                    _log.LogDebug("[SP] SLI {SliId}: SupplierResponseId={SrId} not found in srById",
+                        sli.Id, srId);
+                else if (srCreatedAt.TryGetValue(srId, out var srCa))
                     row["SrCreatedAt"] = srCa;
             }
+
+            // Fallback join: RFQ_ID + SupplierName (handles stale/missing SupplierResponseId)
             if (srMatch is null)
             {
                 var sliRfq = RfqId(row);
@@ -568,18 +501,25 @@ public class SharePointService
                     row["SupplierResponseId"] = fb.SrId;
                     if (srCreatedAt.TryGetValue(fb.SrId, out var srCa))
                         row["SrCreatedAt"] = srCa;
+                    _log.LogDebug("[SP] SLI {SliId} [{Rfq}/{Supplier}]: joined via fallback, corrected SrId {OldId}->{NewId}",
+                        sli.Id, sliRfq, sliSn, srId ?? "null", fb.SrId);
                 }
             }
+
             if (srMatch is not null)
             {
+                // Prefer the SLI's own RFQ_ID when it was individually reparented
                 var sliOwnRfqId = RfqId(row);
                 var rfqIdVal = (!string.IsNullOrEmpty(sliOwnRfqId) && sliOwnRfqId != "000000")
                     ? sliOwnRfqId
                     : RfqIdRaw(srMatch);
                 if (rfqIdVal is not null) row["JobReference"] = rfqIdVal;
+
                 foreach (var f in ParentFields)
                     if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
                         row[f] = v;
+
+                // If SR is blanket-regret and line item has no pricing, inherit regret flag
                 if (srMatch.TryGetValue("IsRegret", out var srRegret) &&
                     srRegret is true or JsonElement { ValueKind: JsonValueKind.True })
                 {
@@ -588,14 +528,13 @@ public class SharePointService
                             row["IsRegret"] = true;
                 }
             }
+
             result.Add(row);
         }
-
-        _log.LogInformation("[SP] ReadSupplierItemsByRfqId({RfqId}): {Count} items", rfqId, result.Count);
         return result;
     }
 
-    // ??"?????"??? Read: new supplier activity since a timestamp ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+    // -- Read: new supplier activity since a timestamp --
 
     /// <summary>
     /// Returns SupplierLineItems created after <paramref name="since"/>, grouped into
