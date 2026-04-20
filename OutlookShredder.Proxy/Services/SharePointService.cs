@@ -126,6 +126,42 @@ public class SharePointService
         return _spCredential;
     }
 
+    /// <summary>
+    /// Resolves the site ID and all frequently-used list IDs in parallel, and issues one
+    /// throwaway Graph query to establish the HTTP/2 connection + cache the OAuth token.
+    /// Called once from Program.cs at app startup — subsequent user requests skip ~500ms
+    /// of one-time warmup cost.
+    /// </summary>
+    public async Task PrewarmAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var siteId = await GetSiteIdAsync();
+
+            // Resolve list IDs in parallel. Missing lists are OK here — they'll fail on
+            // first real use with a clearer error if setup-supplier-lists wasn't run yet.
+            var tasks = new List<Task>
+            {
+                TrySwallowAsync(() => GetSupplierResponsesListIdAsync()),
+                TrySwallowAsync(() => GetConversationsListIdAsync()),
+                TrySwallowAsync(() => GetGraph().Sites[siteId].Lists
+                    .GetAsync(r => r.QueryParameters.Top = 1, ct)),
+            };
+            await Task.WhenAll(tasks);
+
+            _log.LogInformation("[SP] Pre-warm complete");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SP] Pre-warm failed (non-fatal — first request will warm cold)");
+        }
+    }
+
+    private static async Task TrySwallowAsync(Func<Task> f)
+    {
+        try { await f(); } catch { /* first-request will retry with proper error */ }
+    }
+
     // â”€â”€ Site ID (cached) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     private async Task<string> GetSiteIdAsync()
     {
@@ -3364,6 +3400,20 @@ public class SharePointService
                 ("LineItems",    "note"),
                 ("PdfUrl",       "text"),
             ]),
+            ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
+            [
+                ("RFQ_ID",             "text"),
+                ("SupplierName",       "text"),
+                ("SupplierResponseId", "text"),
+                ("Direction",          "text"),
+                ("MessageId",          "text"),
+                ("InReplyTo",          "text"),
+                ("SentAt",             "dateTime"),
+                ("EmailSubject",       "text"),
+                ("BodyText",           "note"),
+                ("HasAttachments",     "boolean"),
+                ("ExtractedPricing",   "boolean"),
+            ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
             poMap is Dictionary<string, string> poDict &&
@@ -3371,6 +3421,75 @@ public class SharePointService
         {
             // Cache list ID so we don't resolve again immediately
             _poListId = null; // will be lazy-resolved on next use
+        }
+
+        // Index the hot filter columns so grid/conversation queries hit a SharePoint
+        // column index instead of scanning the list (which is what the
+        // "HonorNonIndexedQueriesWarningMayFailRandomly" hint falls back to).
+        results["Indexes:SupplierConversations"] = await EnsureColumnIndexesAsync(
+            siteId, "SupplierConversations", "RFQ_ID", "SupplierName");
+        results["Indexes:SupplierResponses"] = await EnsureColumnIndexesAsync(
+            siteId, "SupplierResponses",     "RFQ_ID", "SupplierName", "MessageId");
+        results["Indexes:SupplierLineItems"] = await EnsureColumnIndexesAsync(
+            siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId");
+        results["Indexes:PurchaseOrders"] = await EnsureColumnIndexesAsync(
+            siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
+
+        return results;
+    }
+
+    /// <summary>
+    /// Ensures each named column on the list has its <c>Indexed</c> flag set. Idempotent — columns
+    /// already indexed or missing from the list are returned with a status string and no PATCH is issued.
+    /// SharePoint allows at most 20 indexed columns per list; we're well under that.
+    /// </summary>
+    private async Task<Dictionary<string, string>> EnsureColumnIndexesAsync(
+        string siteId, string listName, params string[] columnNames)
+    {
+        var results = new Dictionary<string, string>();
+
+        var lists = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+        var listId = lists?.Value?.FirstOrDefault()?.Id;
+        if (listId is null)
+        {
+            foreach (var n in columnNames) results[n] = "list not found";
+            return results;
+        }
+
+        var cols = await GetGraph().Sites[siteId].Lists[listId].Columns
+            .GetAsync(r => r.QueryParameters.Select = ["id", "name", "indexed"]);
+
+        var byName = cols?.Value?
+            .Where(c => c.Name is not null)
+            .ToDictionary(c => c.Name!, c => c, StringComparer.OrdinalIgnoreCase)
+            ?? new Dictionary<string, ColumnDefinition>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in columnNames)
+        {
+            if (!byName.TryGetValue(name, out var col) || col.Id is null)
+            {
+                results[name] = "column not found";
+                continue;
+            }
+            if (col.Indexed == true)
+            {
+                results[name] = "already indexed";
+                continue;
+            }
+
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new ColumnDefinition { Indexed = true });
+                results[name] = "indexed";
+                _log.LogInformation("[SP] Indexed column '{Col}' on '{List}'", name, listName);
+            }
+            catch (Exception ex)
+            {
+                results[name] = $"error: {ex.Message}";
+                _log.LogWarning("[SP] Failed to index '{Col}' on '{List}': {Err}", name, listName, ex.Message);
+            }
         }
         return results;
     }
@@ -4602,6 +4721,223 @@ public class SharePointService
             page = await GetGraph().Sites[siteId].Lists[listId].Items
                 .WithUrl(page.OdataNextLink)
                 .GetAsync();
+        }
+
+        return results;
+    }
+
+    // ── Supplier conversations ───────────────────────────────────────────────
+
+    private string? _conversationsListId;
+
+    private async Task<string> GetConversationsListIdAsync()
+    {
+        if (_conversationsListId is not null) return _conversationsListId;
+
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'SupplierConversations'");
+
+        var listId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "SupplierConversations list not found. Run POST /api/setup-supplier-lists once.");
+
+        _conversationsListId = listId;
+        return listId;
+    }
+
+    /// <summary>
+    /// Appends one message (inbound or outbound) to the SupplierConversations list.
+    /// Dedupes on MessageId when provided so re-runs and the mail poller don't duplicate.
+    /// Returns the new SP item ID, or null if a duplicate was skipped.
+    /// </summary>
+    public async Task<string?> WriteConversationMessageAsync(Models.ConversationMessage msg)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetConversationsListIdAsync();
+
+        if (!string.IsNullOrEmpty(msg.MessageId))
+        {
+            var existing = await GetGraph().Sites[siteId].Lists[listId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Expand = ["fields($select=MessageId)"];
+                    req.QueryParameters.Top    = 1;
+                    req.QueryParameters.Filter = $"fields/MessageId eq '{msg.MessageId.Replace("'", "''")}'";
+                    req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+                });
+            if (existing?.Value?.Count > 0)
+            {
+                _log.LogDebug("[Conv] Skipping duplicate message — MessageId already in SP: {Id}", msg.MessageId);
+                return null;
+            }
+        }
+
+        var title = $"[{msg.RfqId}] {msg.SupplierName} {msg.Direction}";
+        var data  = new Dictionary<string, object?>
+        {
+            ["Title"]              = title[..Math.Min(title.Length, 255)],
+            ["RFQ_ID"]             = msg.RfqId,
+            ["SupplierName"]       = msg.SupplierName,
+            ["SupplierResponseId"] = msg.SupplierResponseId,
+            ["Direction"]          = msg.Direction,
+            ["MessageId"]          = msg.MessageId,
+            ["InReplyTo"]          = msg.InReplyTo,
+            ["SentAt"]             = msg.SentAt.ToString("o"),
+            ["EmailSubject"]       = msg.Subject,
+            ["BodyText"]           = msg.BodyText,
+            ["HasAttachments"]     = msg.HasAttachments,
+            ["ExtractedPricing"]   = msg.ExtractedPricing,
+        };
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+
+        _log.LogInformation("[Conv] Wrote {Direction} message for [{RfqId}] {Supplier}",
+            msg.Direction, msg.RfqId, msg.SupplierName);
+        return item?.Id;
+    }
+
+    /// <summary>
+    /// Returns all conversation messages for a given RFQ + supplier, merged from
+    /// SupplierConversations (outbound + any logged inbound follow-ups) and
+    /// SupplierResponses (inbound priced responses), ordered by SentAt ascending.
+    /// The two underlying SharePoint list queries run in parallel.
+    /// </summary>
+    public async Task<List<Models.ConversationMessage>> ReadConversationAsync(
+        string rfqId, string supplierName)
+    {
+        // Resolve site/list IDs first (these are typically cached after first resolve).
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+        var srListId   = await GetSupplierResponsesListIdAsync();
+
+        var rfq      = rfqId.Replace("'", "''");
+        var supplier = supplierName.Replace("'", "''");
+        var filter   = $"fields/RFQ_ID eq '{rfq}' and fields/SupplierName eq '{supplier}'";
+
+        // Fire both list-item queries concurrently — they're independent.
+        var convTask = ReadConversationRowsAsync(siteId, convListId, filter, rfqId, supplierName);
+        var srTask   = ReadInboundSrRowsAsync(siteId, srListId, filter, rfqId, supplierName);
+
+        await Task.WhenAll(convTask, srTask);
+
+        var convRows = convTask.Result;
+        var srRows   = srTask.Result;
+
+        // Dedup SR rows against any convRows that already captured the same MessageId
+        // (e.g. if the Phase 3 poller hook has logged the inbound already).
+        if (convRows.Count > 0)
+        {
+            var seen = convRows
+                .Where(r => !string.IsNullOrEmpty(r.MessageId))
+                .Select(r => r.MessageId!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            srRows = srRows
+                .Where(r => string.IsNullOrEmpty(r.MessageId) || !seen.Contains(r.MessageId!))
+                .ToList();
+        }
+
+        return convRows.Concat(srRows).OrderBy(r => r.SentAt).ToList();
+    }
+
+    /// <summary>
+    /// Reads only the outbound conversation rows (and any inbound follow-ups logged by
+    /// the poller) from the SupplierConversations list — skips the slow SupplierResponses
+    /// scan. Use when the caller already has the SR-derived inbound messages in memory.
+    /// </summary>
+    public async Task<List<Models.ConversationMessage>> ReadOutboundConversationAsync(
+        string rfqId, string supplierName)
+    {
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+        var rfq        = rfqId.Replace("'", "''");
+        var supplier   = supplierName.Replace("'", "''");
+        var filter     = $"fields/RFQ_ID eq '{rfq}' and fields/SupplierName eq '{supplier}'";
+        var rows       = await ReadConversationRowsAsync(siteId, convListId, filter, rfqId, supplierName);
+        return rows.OrderBy(r => r.SentAt).ToList();
+    }
+
+    private async Task<List<Models.ConversationMessage>> ReadConversationRowsAsync(
+        string siteId, string convListId, string filter, string rfqId, string supplierName)
+    {
+        var results = new List<Models.ConversationMessage>();
+        var page = await GetGraph().Sites[siteId].Lists[convListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,ExtractedPricing)"];
+                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Filter = filter;
+                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var f = item.Fields?.AdditionalData;
+                if (f is null) continue;
+                results.Add(new Models.ConversationMessage
+                {
+                    SpItemId           = item.Id,
+                    RfqId              = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID") ?? rfqId,
+                    SupplierName       = GetStr(f, "SupplierName") ?? supplierName,
+                    SupplierResponseId = GetStr(f, "SupplierResponseId"),
+                    Direction          = GetStr(f, "Direction") ?? "out",
+                    MessageId          = GetStr(f, "MessageId"),
+                    InReplyTo          = GetStr(f, "InReplyTo"),
+                    SentAt             = DateTimeOffset.TryParse(GetStr(f, "SentAt"), out var dt) ? dt : default,
+                    Subject            = GetStr(f, "EmailSubject"),
+                    BodyText           = GetStr(f, "BodyText"),
+                    HasAttachments     = f.TryGetValue("HasAttachments", out var ha) && ha is bool hab && hab,
+                    ExtractedPricing   = f.TryGetValue("ExtractedPricing", out var ep) && ep is bool epb && epb,
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[convListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        return results;
+    }
+
+    private async Task<List<Models.ConversationMessage>> ReadInboundSrRowsAsync(
+        string siteId, string srListId, string filter, string rfqId, string supplierName)
+    {
+        var results = new List<Models.ConversationMessage>();
+        var page = await GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile)"];
+                req.QueryParameters.Top    = 200;
+                req.QueryParameters.Filter = filter;
+                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var f = item.Fields?.AdditionalData;
+                if (f is null) continue;
+                results.Add(new Models.ConversationMessage
+                {
+                    SpItemId           = item.Id,
+                    RfqId              = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID") ?? rfqId,
+                    SupplierName       = GetStr(f, "SupplierName") ?? supplierName,
+                    SupplierResponseId = item.Id,
+                    Direction          = "in",
+                    MessageId          = GetStr(f, "MessageId"),
+                    SentAt             = DateTimeOffset.TryParse(GetStr(f, "ReceivedAt"), out var dt) ? dt : default,
+                    Subject            = GetStr(f, "EmailSubject"),
+                    BodyText           = GetStr(f, "EmailBody"),
+                    HasAttachments     = !string.IsNullOrEmpty(GetStr(f, "SourceFile")),
+                    ExtractedPricing   = true,
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[srListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
         }
 
         return results;

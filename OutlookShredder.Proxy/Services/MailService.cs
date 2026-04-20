@@ -95,6 +95,55 @@ public class MailService
         _log.LogInformation("[RFQ Send] Sent '{Subject}' BCC to {Count} recipient(s)", subject, bcc.Count);
     }
 
+    /// <summary>
+    /// Sends a follow-up / clarification email to a single supplier for an ongoing RFQ.
+    /// Returns the sent message's internet MessageId (when Graph surfaces it via saveToSentItems),
+    /// which the caller should store on the conversation row for later threading.
+    /// </summary>
+    public async Task SendSupplierInquiryAsync(
+        string to,
+        string subject,
+        string body,
+        string? attachmentName = null,
+        byte[]? attachmentBytes = null,
+        string? attachmentContentType = null)
+    {
+        if (string.IsNullOrWhiteSpace(to))
+            throw new ArgumentException("Recipient address required", nameof(to));
+
+        var from = _config["Mail:FromAddress"] ?? throw new InvalidOperationException("Mail:FromAddress not configured");
+
+        var message = new Message
+        {
+            Subject = subject,
+            Body    = new ItemBody { ContentType = BodyType.Text, Content = body },
+            From    = new Recipient { EmailAddress = new EmailAddress { Address = from } },
+            ToRecipients =
+            [
+                new Recipient { EmailAddress = new EmailAddress { Address = to } }
+            ],
+        };
+
+        if (attachmentBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(attachmentName))
+        {
+            message.Attachments =
+            [
+                new FileAttachment
+                {
+                    OdataType   = "#microsoft.graph.fileAttachment",
+                    Name        = attachmentName,
+                    ContentType = attachmentContentType ?? "application/octet-stream",
+                    ContentBytes = attachmentBytes,
+                }
+            ];
+        }
+
+        await GetGraph().Users[from].SendMail.PostAsync(new() { Message = message, SaveToSentItems = true });
+
+        _log.LogInformation("[Inquiry] Sent '{Subject}' to {To} (attachment: {Att})",
+            subject, to, attachmentBytes is { Length: > 0 } ? attachmentName : "none");
+    }
+
     // ── RFQ Import: scan a named folder ──────────────────────────────────────
 
     /// <summary>

@@ -112,7 +112,50 @@ try
     }));
 
     app.UseCors();
+
+    // Per-request duration log for /api/* — helps diagnose UI lag. Logs only
+    // method + path + status + ms, so noise stays low while still making slow
+    // requests (>1s) and errors (>=500) immediately visible in the proxy log.
+    app.Use(async (ctx, next) =>
+    {
+        if (!ctx.Request.Path.StartsWithSegments("/api"))
+        {
+            await next();
+            return;
+        }
+        var logger = ctx.RequestServices.GetRequiredService<ILogger<Program>>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await next();
+        sw.Stop();
+        var ms = sw.ElapsedMilliseconds;
+        var status = ctx.Response.StatusCode;
+        if (status >= 500 || ms >= 1000)
+            logger.LogWarning("[HTTP] {Method} {Path} -> {Status} in {Ms}ms", ctx.Request.Method, ctx.Request.Path, status, ms);
+        else
+            logger.LogInformation("[HTTP] {Method} {Path} -> {Status} in {Ms}ms", ctx.Request.Method, ctx.Request.Path, status, ms);
+    });
+
     app.MapControllers();
+
+    // Fire-and-forget SharePoint pre-warm so the first user request skips ~500ms
+    // of cold-path setup (auth token exchange, site ID + list ID resolution, HTTP/2 handshake).
+    var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+    lifetime.ApplicationStarted.Register(() =>
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var sp = app.Services.GetRequiredService<SharePointService>();
+                await sp.PrewarmAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "SharePoint pre-warm failed (non-fatal)");
+            }
+        });
+    });
+
     app.Run();
 }
 catch (Exception ex) when (ex is not OperationCanceledException)

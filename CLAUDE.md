@@ -17,6 +17,10 @@ Two projects in one repo:
 ### Bootstrap (`Program.cs`)
 Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key config sections: `SharePoint`, `Mail`, `Anthropic`, `ServiceBus`, `Suppliers`, `Proxy`.
 
+Also installs:
+- **Per-request HTTP log middleware** for `/api/*` — logs `METHOD PATH -> STATUS in Nms`; slow requests (≥1000ms) or 5xx responses are logged at Warning level to make perf regressions visible in the proxy log without drowning it in info noise.
+- **SharePoint pre-warm** fired from `ApplicationStarted` — calls `SharePointService.PrewarmAsync` which resolves site ID, common list IDs (SupplierResponses, SupplierConversations), and issues a throwaway Graph query to cache the OAuth token + establish the HTTP/2 connection. Cuts first-user-request latency by ~500ms. Non-fatal — logged at Warning on failure.
+
 ### Controllers
 
 | Controller | Prefix | Purpose |
@@ -29,6 +33,7 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 | `UpdateController` | `/api/update` | Version check + download publish package ZIP |
 | `HealthController` | `/api/health` | Aggregated service health for Shredder's Home dashboard |
 | `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
+| `SupplierConversationsController` | `/api` | Read supplier conversation threads + send follow-up inquiries (WIP) |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -79,6 +84,11 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 
 **MailStatusController endpoints:**
 - `GET /api/mail/status` → `MailStatus` — live snapshot: poller cycle state, reprocess batch progress, rate limiter, and list of in-flight messages
+
+**SupplierConversationsController endpoints (WIP — supplier follow-up feature):**
+- `GET /api/supplier-conversations?rfqId=&supplierName=&outboundOnly=false` → `{ rfqId, supplierName, messages: ConversationMessage[] }` — merged thread (inbound from `SupplierResponses` + outbound from `SupplierConversations`); set `outboundOnly=true` to skip the SR scan when the caller already has inbound data from the RFQ grid
+- `POST /api/supplier-inquiry/send` body: `SupplierInquiryRequest { to, subject, body, rfqId, supplierName, supplierResponseId?, inReplyTo?, attachmentName?, attachmentContentBase64?, attachmentContentType? }` → `{ success, spItemId }` — sends via `MailService.SendSupplierInquiryAsync`, appends outbound row to `SupplierConversations` list. Rejects `@mithrilmetals.com` recipients.
+- SP list `SupplierConversations` is provisioned by `setup-supplier-lists` with columns `RFQ_ID, SupplierName, SupplierResponseId, Direction, MessageId, InReplyTo, SentAt, EmailSubject, BodyText, HasAttachments, ExtractedPricing`. `RFQ_ID + SupplierName` are indexed. Also indexes `SupplierResponses`/`SupplierLineItems`/`PurchaseOrders` hot columns so thread queries don't trigger unindexed-scan warnings.
 
 **Mail maintenance endpoints:**
 - `POST /api/mail/processed-emails?top=N` — alias for rfq-import/processed; returns `ProcessedEmailItem[]`
@@ -144,10 +154,15 @@ Registers all DI, runs as Windows Service (`ShredderProxy`) or console. Key conf
 - `WritePurchaseOrderAsync(rfqId, supplierName, poNumber, receivedAt, messageId, lineItemsJson)` → deduped by MessageId
 - `ReadPurchaseOrdersAsync()` → `List<PurchaseOrderRecord>` — all PO rows
 - `GET /api/purchase-orders` controller endpoint — Shredder loads this on startup
+- `PrewarmAsync(ct)` — site ID + hot list IDs + one throwaway Graph call. Called once from `Program.cs` at startup.
+- `ReadConversationAsync(rfqId, supplierName)` → `List<ConversationMessage>` — inbound (SR) + outbound (SupplierConversations) merged, ordered by `SentAt`
+- `ReadOutboundConversationAsync(rfqId, supplierName)` → outbound-only (skips SR scan — fast path)
+- `WriteConversationMessageAsync(msg)` → SP item ID of the new row
 
 **`MailService`** (singleton)
 - Graph API for mailbox (app-only, `Mail.ReadWrite` + `Mail.Send`)
 - `SendRfqEmailAsync(subject, body, bccAddresses)` — sends via Graph
+- `SendSupplierInquiryAsync(to, subject, body, attachmentName?, attachmentBytes?, attachmentContentType?)` — sends a single-recipient follow-up to one supplier about an ongoing RFQ; saves to Sent Items
 - `GetMessageByIdAsync(mailbox, messageId)` → message metadata + body
 - `MarkProcessedAsync(mailbox, itemId, extra)` — stamps "RFQ-Processed" category
 - Strips RE:/FW: prefixes, [EXTERNAL] tags, converts HTML → plain text
@@ -245,6 +260,7 @@ EventType ("SR"|"RFQ"), RfqId, SupplierName, MessageId, Products[]: { Name, Tota
 | `QC` | Dynamic columns — Metal, Shape, LQ (Last Quote $/lb), and product name columns |
 | `Catalog` | Mspc, Name, SearchKey, Category, Shape |
 | `SourcingList` | Supplier names + emails (source for SupplierCacheService) |
+| `SupplierConversations` | RFQ_ID, SupplierName, Direction (in\|out), MessageId, InReplyTo, SentAt, EmailSubject, BodyText, HasAttachments, ExtractedPricing — indexed on RFQ_ID + SupplierName |
 
 ### Configuration
 
