@@ -417,15 +417,12 @@ public class SharePointService
         var srTask = GetCachedSrItemsAsync(siteId, srListId);
 
         // Fetch only SLI rows for this rfqId via OData $filter.
-        // RFQ_ID is not indexed in SP  --  the Prefer header allows the query to run anyway.
-        // For best performance, index the RFQ_ID column in the SharePoint list settings.
         var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = ["fields"];
                 req.QueryParameters.Filter = $"fields/{sliCol} eq '{rfqId}'";
                 req.QueryParameters.Top    = 500;
-                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
             });
 
         await Task.WhenAll(srTask, sliTask);
@@ -4858,7 +4855,6 @@ public class SharePointService
                 req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,ExtractedPricing)"];
                 req.QueryParameters.Top    = 500;
                 req.QueryParameters.Filter = filter;
-                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
             });
 
         while (page?.Value is not null)
@@ -4901,7 +4897,6 @@ public class SharePointService
                 req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile)"];
                 req.QueryParameters.Top    = 200;
                 req.QueryParameters.Filter = filter;
-                req.Headers.Add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
             });
 
         while (page?.Value is not null)
