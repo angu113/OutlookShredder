@@ -927,6 +927,56 @@ public class SharePointService
         return rows;
     }
 
+    /// <summary>
+    /// Looks up the supplier name from the SR cache for a given rfqId, optionally
+    /// preferring the row whose EmailFrom domain matches the caller's address.
+    /// Used as a fallback when the sender's domain is not in the SupplierCacheService
+    /// but we have a valid SHR tracking token.
+    /// Returns null if no SR exists for the rfqId.
+    /// </summary>
+    public async Task<string?> ResolveSupplierNameFromSrAsync(string rfqId, string fromAddr)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierResponsesListIdAsync();
+        var cached = await GetCachedSrItemsAsync(siteId, listId);
+
+        var fromDomain = fromAddr.Contains('@')
+            ? fromAddr[(fromAddr.IndexOf('@') + 1)..].ToLowerInvariant()
+            : null;
+
+        string? domainMatch = null;
+        string? anyMatch    = null;
+
+        foreach (var item in cached)
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null) continue;
+
+            var itemRfq = RfqIdRaw(d);
+            if (!string.Equals(itemRfq, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var supplierName = GetStrRaw(d, "SupplierName");
+            if (string.IsNullOrWhiteSpace(supplierName)) continue;
+
+            anyMatch = supplierName;
+
+            if (fromDomain is not null)
+            {
+                var emailFrom = GetStrRaw(d, "EmailFrom") ?? "";
+                var srDomain  = emailFrom.Contains('@')
+                    ? emailFrom[(emailFrom.IndexOf('@') + 1)..].ToLowerInvariant()
+                    : null;
+                if (srDomain is not null && srDomain == fromDomain)
+                {
+                    domainMatch = supplierName;
+                    break;
+                }
+            }
+        }
+
+        return domainMatch ?? anyMatch;
+    }
+
     public async Task<int> DedupeRfqReferencesAsync()
     {
         var siteId = await GetSiteIdAsync();

@@ -603,7 +603,8 @@ public class MailPollerService : BackgroundService
         if (shrMatch.Success)
         {
             var shrRfqId     = shrMatch.Groups[1].Value.ToUpperInvariant();
-            var supplierName = ResolveSupplierFromEmail(fromAddr);
+            var supplierName = ResolveSupplierFromEmail(fromAddr)
+                               ?? await _sp.ResolveSupplierNameFromSrAsync(shrRfqId, fromAddr);
 
             if (supplierName is not null)
             {
@@ -630,9 +631,9 @@ public class MailPollerService : BackgroundService
                 return;
             }
 
-            // Supplier domain not in cache — fall through to normal AI processing but
-            // seed the rfqId so the SR row is routed correctly.
-            _log.LogInformation("[Mail] SHR token [{RfqId}] found but supplier domain '{Domain}' not in cache — processing as normal SR",
+            // Supplier domain not in cache and no existing SR for this rfqId —
+            // fall through to normal AI processing but seed the rfqId.
+            _log.LogInformation("[Mail] SHR token [{RfqId}] found but supplier unresolvable from '{From}' — processing as normal SR",
                 shrRfqId, fromAddr);
             if (!jobRefs.Contains(shrRfqId, StringComparer.OrdinalIgnoreCase))
                 jobRefs.Insert(0, shrRfqId);
