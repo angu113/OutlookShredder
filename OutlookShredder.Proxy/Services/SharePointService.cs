@@ -2766,7 +2766,7 @@ public class SharePointService
     ///        -- Otherwise ?????' re-parent the SLI to the keeper.
     ///    --?? Delete the duplicate SR.
     /// </summary>
-    public async Task<DedupeSupplierResponsesResult> DedupeSupplierResponsesAsync(bool dryRun = false)
+    public async Task<DedupeSupplierResponsesResult> DedupeSupplierResponsesAsync(bool dryRun = false, string? rfqId = null)
     {
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
@@ -2838,11 +2838,13 @@ public class SharePointService
             .ToDictionary(g => g.Key, g => g.ToList());
 
         // ??"?????"??? Find duplicate groups ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+        var rfqFilter = rfqId?.Trim().ToUpperInvariant();
         var duplicateGroups = srItems
             .GroupBy(sr => (
                 RfqId:    (FldRfqId(sr) ?? "").ToUpperInvariant(),
                 Supplier: (Fld(sr, "SupplierName") ?? "").ToLowerInvariant()))
-            .Where(g => g.Key.RfqId.Length > 0 && g.Key.Supplier.Length > 0 && g.Count() > 1)
+            .Where(g => g.Key.RfqId.Length > 0 && g.Key.Supplier.Length > 0 && g.Count() > 1
+                     && (rfqFilter is null || g.Key.RfqId == rfqFilter))
             .ToList();
 
         _log.LogInformation("[Dedupe-SR] Found {G} duplicate group(s) across {T} total SR rows",
@@ -3101,13 +3103,13 @@ public class SharePointService
                     .ThenByDescending(s => s.CreatedDateTime)
                     .First();
 
-                var sr       = srById.GetValueOrDefault(srId);
-                var rfqId    = sr is not null ? (FldRfqId(sr) ?? "") : "";
-                var supplier = sr is not null ? (Fld(sr, "SupplierName") ?? "") : "";
+                var sr          = srById.GetValueOrDefault(srId);
+                var sliRfqId    = sr is not null ? (FldRfqId(sr) ?? "") : "";
+                var supplier    = sr is not null ? (Fld(sr, "SupplierName") ?? "") : "";
                 var reportDupes = new List<DedupeReportSliDupe>();
 
                 _log.LogInformation("{Tag}[Dedupe-SLI] SR {Sr} [{Rfq}] {Supplier}: keeping SLI {Keep}, retiring {Dupes}",
-                    dryTag, srId, rfqId, supplier, sliKeeper.Id,
+                    dryTag, srId, sliRfqId, supplier, sliKeeper.Id,
                     string.Join(", ", cluster.Where(s => s.Id != sliKeeper.Id).Select(s => s.Id)));
 
                 foreach (var dupe in cluster.Where(s => s.Id != sliKeeper.Id))

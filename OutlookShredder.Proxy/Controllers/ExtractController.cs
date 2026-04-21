@@ -741,11 +741,11 @@ public class ExtractController : ControllerBase
     /// Safe to call repeatedly — idempotent once all duplicates are resolved.
     /// </summary>
     [HttpPost("rfq-import/dedupe-supplier-responses")]
-    public async Task<IActionResult> DedupeSupplierResponses([FromQuery] bool dryRun = false)
+    public async Task<IActionResult> DedupeSupplierResponses([FromQuery] bool dryRun = false, [FromQuery] string? rfqId = null)
     {
         try
         {
-            var result = await _sp.DedupeSupplierResponsesAsync(dryRun);
+            var result = await _sp.DedupeSupplierResponsesAsync(dryRun, rfqId);
             _log.LogInformation("[Dedupe-SR] Endpoint complete — dryRun={DryRun}, {G} groups, {Sr} SR deleted, {SliR} SLI re-parented, {SliD} SLI deleted",
                 dryRun, result.DuplicateGroups, result.SrDeleted, result.SliReparented, result.SliDeleted);
             return Ok(new
