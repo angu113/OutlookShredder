@@ -2284,8 +2284,21 @@ public class SharePointService
         var result = new HashSet<string>();
         foreach (var tok in dimTokens)
             foreach (var part in tok.Split(new[] { 'x', 'f', 'd' }, StringSplitOptions.RemoveEmptyEntries))
-                if (part.Length > 0 && part.All(char.IsDigit))
+            {
+                if (part.Length == 0) continue;
+                if (part.All(char.IsDigit))
+                {
                     result.Add(part);
+                }
+                else if (char.IsDigit(part[0]))
+                {
+                    // Digit-leading mixed token like "11ga" (gauge) or "14ga" — extract the
+                    // leading numeric portion so gauge differences are compared as numbers.
+                    // Letter-leading tokens like "t6511" (alloy) are skipped (not dim data).
+                    var leadingDigits = new string(part.TakeWhile(char.IsDigit).ToArray());
+                    if (leadingDigits.Length > 0) result.Add(leadingDigits);
+                }
+            }
         return result;
     }
 
@@ -3062,35 +3075,26 @@ public class SharePointService
             if (slis.Count <= 1) continue;
 
             // Greedy clustering: each SLI joins the first cluster whose representative
-            // it matches. Three criteria (any one is sufficient):
-            //   1. Exact-normalised product name, OR
-            //   2. NumericTokensCompatible + Jaccard ??????? 0.5 (standard ProductsMatch), OR
-            //   3. Same non-zero TotalPrice with Jaccard ??????? 0.3  -- catches the case where
-            //      the AI adds extra descriptive dimensions
-            //      the numeric token set, making (2) fail despite identical pricing.
-            static double? SliTotalPrice(ListItem sli)
-            {
-                var d = sli.Fields?.AdditionalData;
-                if (d is null || !d.TryGetValue("TotalPrice", out var v) || v is null) return null;
-                return v is JsonElement je && je.ValueKind == JsonValueKind.Number ? je.GetDouble() : null;
-            }
+            // it matches. Two criteria (any one is sufficient):
+            //   1. Exact-normalised product name (strips punctuation/whitespace), OR
+            //   2. NumericTokensCompatible + Jaccard >= 0.75 (strict — within one email the AI
+            //      should describe the same product almost identically; the high threshold
+            //      prevents genuinely different products like "Round Bar" vs "Square Bar" or
+            //      "11GA" vs "16GA" sheet from being collapsed into one row).
+            // The previous criterion 3 (same price + Jaccard >= 0.3) was too loose and caused
+            // different products with coincidentally equal prices to be merged.
 
             var clusters = new List<List<ListItem>>();
             foreach (var sli in slis)
             {
                 var prodName = Fld(sli, "ProductName") ?? "";
                 var prodTok  = ProductTokens(prodName);
-                var sliPrice = SliTotalPrice(sli);
                 var cluster  = clusters.FirstOrDefault(c =>
                 {
-                    var repName  = Fld(c[0], "ProductName") ?? "";
-                    var repTok   = ProductTokens(repName);
-                    var repPrice = SliTotalPrice(c[0]);
+                    var repName = Fld(c[0], "ProductName") ?? "";
+                    var repTok  = ProductTokens(repName);
                     if (NormalizeMatch(prodName, repName)) return true;
-                    if (ProductsMatch(prodTok, repTok)) return true;
-                    if (sliPrice.HasValue && sliPrice > 0 && sliPrice == repPrice
-                        && ProductJaccard(prodTok, repTok) >= 0.3) return true;
-                    return false;
+                    return NumericTokensCompatible(prodTok, repTok) && ProductJaccard(prodTok, repTok) >= 0.75;
                 });
                 if (cluster is not null) cluster.Add(sli);
                 else clusters.Add([sli]);
