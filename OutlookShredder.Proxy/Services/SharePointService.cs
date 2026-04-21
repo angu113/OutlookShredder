@@ -2157,8 +2157,10 @@ public class SharePointService
     {
         if (a is null && b is null) return true;
         if (a is null || b is null) return false;
-        // Strip ALL whitespace and non-word characters so "12 GA" == "12GA", etc.
-        static string N(string s) => _normaliseRegex.Replace(s.Trim().ToLowerInvariant(), "");
+        // Convert fractions before stripping so "3/8" → "3f8" and "1/2" → "1f2" stay distinct.
+        // Without this, stripping "/" makes "3/8 x 12" and "3/8 x 1/2" both normalise to "38x12".
+        static string N(string s) => _normaliseRegex.Replace(
+            _dimFraction.Replace(s.Trim().ToLowerInvariant(), "$1f$2"), "");
         return N(a) == N(b);
     }
 
