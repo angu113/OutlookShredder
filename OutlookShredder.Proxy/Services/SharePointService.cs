@@ -1883,7 +1883,7 @@ public class SharePointService
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
-            siteId, listId, supplierResponseId, prodName, prodTokens, quoteReference, productSearchKey);
+            siteId, listId, supplierResponseId, jobRef, supplier, prodName, prodTokens, quoteReference, productSearchKey);
 
         if (existing is not null)
         {
@@ -1922,7 +1922,8 @@ public class SharePointService
 
     private async Task<ListItem?> FindExistingSupplierLineItemAsync(
         string siteId, string listId,
-        string supplierResponseId, string productName, HashSet<string> productTokens,
+        string supplierResponseId, string jobRef, string supplierName,
+        string productName, HashSet<string> productTokens,
         string? quoteReference = null, string? productSearchKey = null)
     {
         // Fetch all SLI rows and filter in memory, following nextLink so lists > 2000 rows
@@ -1934,57 +1935,46 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,RFQ_ID,SupplierName,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments)"];
                 r.QueryParameters.Top    = 2000;
             });
 
+        // Cross-email dedup: prefer a match within the same SR (same email), but fall back to a
+        // matching row from a different SR for the same RFQ+supplier so repeated quotes from the
+        // same supplier update the existing row rather than creating duplicates.
+        bool canCrossSr = !string.IsNullOrEmpty(jobRef) && jobRef != "000000";
+        ListItem? srMatch      = null;
+        ListItem? crossSrMatch = null;
+
         while (page is not null)
         {
-            var hit = page.Value?.FirstOrDefault(i =>
+            foreach (var item in page.Value ?? [])
             {
-                var d = i.Fields?.AdditionalData;
-                if (d is null) return false;
-                var srId = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
-                if (!string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase)) return false;
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
 
-                // Strong match: same quote reference + same catalog product key.
-                // If the supplier attached the same quote PDF twice (or it was forwarded
-                // to multiple mailboxes), this reliably identifies the same line without
-                // relying on raw product name extraction being identical.
-                var spQuoteRef = d.TryGetValue("QuoteReference", out var qr) ? qr?.ToString() : null;
-                var spSearchKey = d.TryGetValue("ProductSearchKey", out var sk) ? sk?.ToString() : null;
-                if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(spQuoteRef)
-                    && string.Equals(quoteReference, spQuoteRef, StringComparison.OrdinalIgnoreCase))
+                var srId  = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
+                bool sameSr = string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase);
+
+                if (sameSr)
                 {
-                    // Same quote  -- match by catalog key + numeric tokens when available, else by name.
-                    // We must check numeric tokens even when the catalog key matches because two line items
-                    // on the same quote can share an MSPC but differ in cut size
-                    // (e.g. 4'×8' and 4'×10' cold-rolled sheet are both CSHCQ/048).
-                    // A pure catalog-key comparison would incorrectly collapse them into one row.
-                    var spProduct2 = d.TryGetValue("ProductName", out var p2) ? p2?.ToString() : null;
-                    if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
-                    {
-                        if (!string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase))
-                            return false; // different catalog products
-                        // Same MSPC: still verify dimensions match so distinct cut sizes are kept separate.
-                        var spTok3 = ProductTokens(spProduct2 ?? string.Empty);
-                        return NumericTokensCompatible(productTokens, spTok3)
-                            && ProductJaccard(spTok3, productTokens) >= 0.4;
-                    }
-                    if (NormalizeMatch(spProduct2, productName)) return true;
-                    var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
-                    return NumericTokensCompatible(productTokens, spTok2)
-                        && ProductJaccard(spTok2, productTokens) >= 0.4;
+                    if (srMatch is null && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey))
+                        srMatch = item;
                 }
+                else if (canCrossSr && crossSrMatch is null)
+                {
+                    var spRfqId    = d.TryGetValue("RFQ_ID",       out var ri) ? ri?.ToString() : null;
+                    var spSupplier = d.TryGetValue("SupplierName",  out var sn) ? sn?.ToString() : null;
+                    if (string.Equals(spRfqId, jobRef, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(spSupplier, supplierName, StringComparison.OrdinalIgnoreCase)
+                        && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey))
+                    {
+                        crossSrMatch = item;
+                    }
+                }
+            }
 
-                // Standard fuzzy match by product name.
-                var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
-                if (NormalizeMatch(spProduct, productName)) return true;
-                var spTokens = ProductTokens(spProduct ?? string.Empty);
-                return NumericTokensCompatible(productTokens, spTokens)
-                    && ProductJaccard(spTokens, productTokens) >= 0.5;
-            });
-            if (hit is not null) return hit;
+            if (srMatch is not null) return srMatch;
 
             if (page.OdataNextLink is null) break;
             var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
@@ -1992,7 +1982,50 @@ public class SharePointService
             page = await next.GetAsync();
         }
 
-        return null;
+        return srMatch ?? crossSrMatch;
+    }
+
+    private bool SliProductMatches(
+        IDictionary<string, object?> d,
+        string productName, HashSet<string> productTokens,
+        string? quoteReference, string? productSearchKey)
+    {
+        // Strong match: same quote reference + same catalog product key.
+        // If the supplier attached the same quote PDF twice (or it was forwarded
+        // to multiple mailboxes), this reliably identifies the same line without
+        // relying on raw product name extraction being identical.
+        var spQuoteRef  = d.TryGetValue("QuoteReference",  out var qr) ? qr?.ToString() : null;
+        var spSearchKey = d.TryGetValue("ProductSearchKey", out var sk) ? sk?.ToString() : null;
+        if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(spQuoteRef)
+            && string.Equals(quoteReference, spQuoteRef, StringComparison.OrdinalIgnoreCase))
+        {
+            // Same quote  -- match by catalog key + numeric tokens when available, else by name.
+            // We must check numeric tokens even when the catalog key matches because two line items
+            // on the same quote can share an MSPC but differ in cut size
+            // (e.g. 4'×8' and 4'×10' cold-rolled sheet are both CSHCQ/048).
+            // A pure catalog-key comparison would incorrectly collapse them into one row.
+            var spProduct2 = d.TryGetValue("ProductName", out var p2) ? p2?.ToString() : null;
+            if (!string.IsNullOrEmpty(productSearchKey) && !string.IsNullOrEmpty(spSearchKey))
+            {
+                if (!string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase))
+                    return false; // different catalog products
+                // Same MSPC: still verify dimensions match so distinct cut sizes are kept separate.
+                var spTok3 = ProductTokens(spProduct2 ?? string.Empty);
+                return NumericTokensCompatible(productTokens, spTok3)
+                    && ProductJaccard(spTok3, productTokens) >= 0.4;
+            }
+            if (NormalizeMatch(spProduct2, productName)) return true;
+            var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
+            return NumericTokensCompatible(productTokens, spTok2)
+                && ProductJaccard(spTok2, productTokens) >= 0.4;
+        }
+
+        // Standard fuzzy match by product name.
+        var spProduct = d.TryGetValue("ProductName", out var p) ? p?.ToString() : null;
+        if (NormalizeMatch(spProduct, productName)) return true;
+        var spTokens = ProductTokens(spProduct ?? string.Empty);
+        return NumericTokensCompatible(productTokens, spTokens)
+            && ProductJaccard(spTokens, productTokens) >= 0.5;
     }
 
     // ??"?????"??? Purge stale no-MessageId SLI rows ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???

@@ -26,6 +26,7 @@ public class MailPollerService : BackgroundService
     private readonly AiServiceFactory _aiFactory;
     private readonly SharePointService         _sp;
     private readonly ProductCatalogService     _catalog;
+    private readonly SupplierCacheService      _supplierCache;
     private readonly RfqNotificationService    _notifications;
     private readonly ILogger<MailPollerService> _log;
 
@@ -40,6 +41,14 @@ public class MailPollerService : BackgroundService
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     private static readonly Regex JobRefBareRegex =
         new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Shredder tracking token — embedded in every outgoing RFQ email and follow-up.
+    // Format: [SHR:{rfqId}]  e.g. [SHR:HQABC123]
+    // When found in an incoming email, the reply is routed to SupplierConversations
+    // instead of being processed as a new price quote.
+    private static readonly Regex ShrTokenRegex =
+        new(@"\[SHR:(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // Subject prefixes to strip before PO detection (RE:, FW:, [EXTERNAL], etc.)
@@ -357,17 +366,19 @@ public class MailPollerService : BackgroundService
     public MailPollerService(
         IConfiguration             config,
         MailService                mail,
-        AiServiceFactory aiFactory,
+        AiServiceFactory           aiFactory,
         SharePointService          sp,
         ProductCatalogService      catalog,
+        SupplierCacheService       supplierCache,
         RfqNotificationService     notifications,
         ILogger<MailPollerService> log)
     {
         _config        = config;
         _mail          = mail;
-        _aiFactory = aiFactory;
+        _aiFactory     = aiFactory;
         _sp            = sp;
         _catalog       = catalog;
+        _supplierCache = supplierCache;
         _notifications = notifications;
         _log           = log;
     }
@@ -582,6 +593,49 @@ public class MailPollerService : BackgroundService
             if (jobRefs.Count > 0)
                 _log.LogInformation("[Mail] Job ref found via bare pattern (no brackets): [{Refs}] in \"{Subject}\"",
                     string.Join(", ", jobRefs), subject);
+        }
+
+        // ── SHR conversation tracking token ──────────────────────────────────────
+        // Outgoing RFQ emails and follow-ups embed [SHR:{rfqId}] in the body so that
+        // supplier replies can be routed back into the conversation thread instead of
+        // being processed as new price quotes.
+        var shrMatch = ShrTokenRegex.Match(searchText);
+        if (shrMatch.Success)
+        {
+            var shrRfqId     = shrMatch.Groups[1].Value.ToUpperInvariant();
+            var supplierName = ResolveSupplierFromEmail(fromAddr);
+
+            if (supplierName is not null)
+            {
+                _log.LogInformation("[Mail] SHR token [{RfqId}] from {From} — storing as conversation reply (supplier: {Supplier})",
+                    shrRfqId, fromAddr, supplierName);
+
+                await _sp.WriteConversationMessageAsync(new ConversationMessage
+                {
+                    RfqId            = shrRfqId,
+                    SupplierName     = supplierName,
+                    Direction        = "in",
+                    MessageId        = msg.Id,
+                    SentAt           = msg.ReceivedDateTime ?? DateTimeOffset.UtcNow,
+                    Subject          = subject,
+                    BodyText         = body[..Math.Min(body.Length, 4_000)],
+                    HasAttachments   = msg.HasAttachments == true,
+                    ExtractedPricing = false,
+                    ContactEmail     = fromAddr,
+                });
+
+                if (msg.Id is not null)
+                    await _mail.MarkProcessedAsync(mailbox, msg.Id, "conv-in");
+
+                return;
+            }
+
+            // Supplier domain not in cache — fall through to normal AI processing but
+            // seed the rfqId so the SR row is routed correctly.
+            _log.LogInformation("[Mail] SHR token [{RfqId}] found but supplier domain '{Domain}' not in cache — processing as normal SR",
+                shrRfqId, fromAddr);
+            if (!jobRefs.Contains(shrRfqId, StringComparer.OrdinalIgnoreCase))
+                jobRefs.Insert(0, shrRfqId);
         }
 
         // Decide whether to call the AI.
@@ -1041,6 +1095,30 @@ public class MailPollerService : BackgroundService
             _log.LogError(ex, "[Mail] Extraction failed for {Source} ({File})", source, fileName ?? "body");
             return false;
         }
+    }
+
+    // ── SHR token helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Resolves a canonical supplier name from the sender's email address using
+    /// the SupplierCacheService domain map, falling back to domain substring matching.
+    /// Returns null when the domain is not recognisable.
+    /// </summary>
+    private string? ResolveSupplierFromEmail(string fromAddr)
+    {
+        if (string.IsNullOrWhiteSpace(fromAddr)) return null;
+        var at = fromAddr.IndexOf('@');
+        if (at < 0) return null;
+        var domain = fromAddr[(at + 1)..].ToLowerInvariant();
+
+        // Skip our own domain — we never want to record ourselves as a supplier.
+        if (domain.Equals("mithrilmetals.com", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var map = _supplierCache.DomainMap;
+        if (map.TryGetValue(domain, out var name)) return name;
+
+        return _supplierCache.ResolveByDomainSubstring(domain);
     }
 }
 
