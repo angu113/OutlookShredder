@@ -97,6 +97,49 @@ public sealed class ShrConvInRouter
         return Result.WrittenToConv(rfqId, supplier);
     }
 
+    /// <summary>
+    /// Post-extraction hook: logs the inbound email as a conv-in row after the
+    /// mail poller or add-in extract endpoint has finished writing SR+SLI.
+    /// Lets the conversation viewer treat SC as the single source of thread truth
+    /// — SR+SLI become pricing-only records, never read for thread display.
+    /// WriteConversationMessageAsync dedupes on MessageId, so this is safe to call
+    /// even when the SHR bypass already wrote a row for the same message.
+    /// </summary>
+    public async Task WriteConvInFromExtractionAsync(
+        string?        rfqId,
+        string?        supplierName,
+        string?        messageId,
+        string?        subject,
+        string?        body,
+        DateTimeOffset receivedAt,
+        bool           hasAttachments,
+        string?        fromAddr)
+    {
+        if (string.IsNullOrEmpty(rfqId)       ||
+            string.IsNullOrEmpty(supplierName) ||
+            string.IsNullOrEmpty(messageId))
+        {
+            // Need all three to produce a useful thread entry. Drop silently so
+            // "orphan" / unknown-supplier extractions don't clutter the conv list.
+            return;
+        }
+
+        var b = body ?? string.Empty;
+        await _sp.WriteConversationMessageAsync(new ConversationMessage
+        {
+            RfqId            = rfqId,
+            SupplierName     = supplierName,
+            Direction        = "in",
+            MessageId        = messageId,
+            SentAt           = receivedAt,
+            Subject          = subject,
+            BodyText         = b[..Math.Min(b.Length, 4_000)],
+            HasAttachments   = hasAttachments,
+            ExtractedPricing = true,
+            ContactEmail     = fromAddr,
+        });
+    }
+
     // Sender-domain resolver — identical semantics to the prior
     // MailPollerService.ResolveSupplierFromEmail helper. Skips our own
     // mithrilmetals.com domain so we never record ourselves as a supplier.

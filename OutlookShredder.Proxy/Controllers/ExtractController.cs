@@ -145,6 +145,23 @@ public class ExtractController : ControllerBase
                                    }).ToList(),
             });
 
+            // Log the inbound email to SupplierConversations so the thread viewer
+            // has a canonical record. Dedup is on MessageId inside WriteConversationMessageAsync.
+            var firstGood = rows.FirstOrDefault(r => r.Success && !r.SupplierUnknown);
+            if (firstGood is not null)
+            {
+                var convReceivedAt = DateTimeOffset.TryParse(req.ReceivedAt, out var crt) ? crt : DateTimeOffset.UtcNow;
+                await _shrRouter.WriteConvInFromExtractionAsync(
+                    rfqId:          firstGood.RfqId,
+                    supplierName:   firstGood.SupplierName,
+                    messageId:      req.ItemId,
+                    subject:        req.EmailSubject,
+                    body:           req.EmailBody ?? req.Content,
+                    receivedAt:     convReceivedAt,
+                    hasAttachments: req.HasAttachment,
+                    fromAddr:       req.EmailFrom);
+            }
+
             // Stamp "RFQ-Processed" on the mailbox message so the background poller
             // skips it on its next cycle.  Without this stamp the poller would re-run
             // the AI on the same email and write a second (duplicate) SR row.

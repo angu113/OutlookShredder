@@ -1067,6 +1067,24 @@ public class MailPollerService : BackgroundService
                 _notifications.NotifyRfqProcessed(notification);
             }
 
+            // Log the inbound email to SupplierConversations so the thread viewer
+            // can treat SC as the single source of truth. Dedup is handled by
+            // WriteConversationMessageAsync — safe if the SHR bypass already wrote a row.
+            var firstGood = rows.FirstOrDefault(r => r.Success && !r.SupplierUnknown);
+            if (firstGood is not null)
+            {
+                var receivedAt = DateTimeOffset.TryParse(req.ReceivedAt, out var rt) ? rt : DateTimeOffset.UtcNow;
+                await _shrRouter.WriteConvInFromExtractionAsync(
+                    rfqId:          firstGood.RfqId,
+                    supplierName:   firstGood.SupplierName,
+                    messageId:      messageId,
+                    subject:        req.EmailSubject,
+                    body:           req.EmailBody,
+                    receivedAt:     receivedAt,
+                    hasAttachments: req.HasAttachment,
+                    fromAddr:       req.EmailFrom);
+            }
+
             return anyUnknown;
         }
         catch (Exception ex)
