@@ -658,14 +658,15 @@ public class MailPollerService : BackgroundService
             // No attachments — extract pricing from body; always write at least one row.
             supplierUnknown = await RunExtractionAsync(new ExtractRequest
             {
-                Content       = body[..Math.Min(body.Length, 12_000)],
-                EmailBody     = body,
-                SourceType    = "body",
-                JobRefs       = jobRefs,
-                EmailSubject  = subject,
-                EmailFrom     = fromAddr,
-                ReceivedAt    = received,
-                HasAttachment = false,
+                Content                = body[..Math.Min(body.Length, 12_000)],
+                EmailBody              = body,
+                SourceType             = "body",
+                JobRefs                = jobRefs,
+                EmailSubject           = subject,
+                EmailFrom              = fromAddr,
+                ReceivedAt             = received,
+                HasAttachment          = false,
+                ResolvedSupplierName   = shrResult.ResolvedSupplier,
             }, "body", null, maxPerMinute, ct, msg.Id);
         }
         else
@@ -723,18 +724,19 @@ public class MailPollerService : BackgroundService
 
                 supplierUnknown = await RunExtractionAsync(new ExtractRequest
                 {
-                    Content      = string.Empty,
-                    EmailBody    = body,
-                    SourceType   = "attachment",
-                    FileName     = fa.Name,
-                    ContentType  = contentType,
-                    Base64Data   = Convert.ToBase64String(fa.ContentBytes),
-                    BodyContext  = bodySnippet,
-                    JobRefs      = jobRefs,
-                    EmailSubject = subject,
-                    EmailFrom    = fromAddr,
-                    ReceivedAt   = received,
-                    HasAttachment = true,
+                    Content              = string.Empty,
+                    EmailBody            = body,
+                    SourceType           = "attachment",
+                    FileName             = fa.Name,
+                    ContentType          = contentType,
+                    Base64Data           = Convert.ToBase64String(fa.ContentBytes),
+                    BodyContext          = bodySnippet,
+                    JobRefs              = jobRefs,
+                    EmailSubject         = subject,
+                    EmailFrom            = fromAddr,
+                    ReceivedAt           = received,
+                    HasAttachment        = true,
+                    ResolvedSupplierName = shrResult.ResolvedSupplier,
                 }, "attachment", fa.Name, maxPerMinute, ct, msg.Id);
 
                 processedAny = true;
@@ -745,14 +747,15 @@ public class MailPollerService : BackgroundService
             {
                 supplierUnknown = await RunExtractionAsync(new ExtractRequest
                 {
-                    Content       = body[..Math.Min(body.Length, 12_000)],
-                    EmailBody     = body,
-                    SourceType    = "body",
-                    JobRefs       = jobRefs,
-                    EmailSubject  = subject,
-                    EmailFrom     = fromAddr,
-                    ReceivedAt    = received,
-                    HasAttachment = true,
+                    Content              = body[..Math.Min(body.Length, 12_000)],
+                    EmailBody            = body,
+                    SourceType           = "body",
+                    JobRefs              = jobRefs,
+                    EmailSubject         = subject,
+                    EmailFrom            = fromAddr,
+                    ReceivedAt           = received,
+                    HasAttachment        = true,
+                    ResolvedSupplierName = shrResult.ResolvedSupplier,
                 }, "body", null, maxPerMinute, ct, msg.Id);
             }
         }

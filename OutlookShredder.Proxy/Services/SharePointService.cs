@@ -1479,6 +1479,40 @@ public class SharePointService
                     string.IsNullOrEmpty(rawJobRef) ? "(none)" : rawJobRef);
 
             // ??"?????"??? Resolve supplier name ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+            // Fast path: ShrConvInRouter already resolved the supplier authoritatively (domain map
+            // or historical SR lookup). Use it directly so the SLI lands under the same name as the
+            // SupplierConversations row and any existing SLI rows from the supplier's original quote.
+            if (!string.IsNullOrEmpty(emailMeta.ResolvedSupplierName))
+            {
+                var resolvedSup = emailMeta.ResolvedSupplierName;
+                result.SupplierName = resolvedSup;
+
+                var srListId2                = await GetSupplierResponsesListIdAsync();
+                var (srId2, srNew2, _)       = await EnsureSupplierResponseAsync(
+                    siteId, srListId2, jobRef, resolvedSup, header, emailMeta, source, sourceFile, messageId);
+                result.SpItemId = srId2;
+                result.Updated  = !srNew2;
+                result.RfqId    = jobRef;
+
+                if (result.SpItemId is not null &&
+                    emailMeta.SourceType == "attachment" &&
+                    !string.IsNullOrEmpty(emailMeta.FileName) &&
+                    !string.IsNullOrEmpty(emailMeta.Base64Data))
+                {
+                    try { await UpsertItemAttachmentAsync(srId2, srListId2, emailMeta.FileName, Convert.FromBase64String(emailMeta.Base64Data)); }
+                    catch (Exception ex) { _log.LogError(ex, "[SP] Attachment upload FAILED for SR {Id} ('{File}')", srId2, emailMeta.FileName); }
+                }
+
+                var sliListId2 = await GetSupplierLineItemsListIdAsync();
+                if (messageId is not null && rowIndex == 0)
+                    await PurgeNoMessageIdSliForSrAsync(siteId, sliListId2, srId2);
+                await WriteSupplierLineItemAsync(
+                    siteId, sliListId2, srId2, jobRef, resolvedSup, product, rowIndex,
+                    sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
+                result.Success = true;
+                return result;
+            }
+
             var rawSupplier = header.SupplierName;
 
             // Discard AI-extracted names that are our own company — Claude sometimes picks
@@ -1968,8 +2002,17 @@ public class SharePointService
             else if (string.IsNullOrWhiteSpace(newComments))
                 update.Remove("SupplierProductComments"); // nothing to write
 
-            // Strip null values  -- don't null out fields that are already populated
-            foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
+            // Pricing fields: when the new extraction has ANY pricing, include all price fields in
+            // the PATCH even if null — this clears stale values when a supplier changes their format
+            // (e.g. previously quoted $/lb, now quoting total-only).
+            var pricingKeys = new HashSet<string>
+                { "PricePerPound", "PricePerFoot", "PricePerPiece", "TotalPrice",
+                  "UnitsQuoted", "LengthPerUnit", "LengthUnit", "WeightPerUnit", "WeightUnit" };
+            bool hasNewPricing = pricingKeys.Any(k => update.TryGetValue(k, out var v) && v is not null);
+
+            // Strip null values from non-pricing fields (don't null out other populated fields).
+            // Preserve null pricing fields when hasNewPricing so stale price columns get cleared.
+            foreach (var key in update.Keys.Where(k => update[k] is null && (!hasNewPricing || !pricingKeys.Contains(k))).ToList())
                 update.Remove(key);
 
             await GetGraph().Sites[siteId].Lists[listId].Items[existing.Id!].Fields

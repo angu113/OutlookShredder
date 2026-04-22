@@ -43,6 +43,14 @@ public class ExtractRequest
     public string? AttachId  { get; set; }
 
     /// <summary>
+    /// Supplier name pre-resolved by ShrConvInRouter (domain map or historical SR lookup).
+    /// When set, WriteProductRowAsync uses this as the authoritative supplier name instead of
+    /// re-resolving from the AI output or email domain, preventing WHOIS misroutes on
+    /// follow-up emails where the AI might mis-identify the supplier from quoted reply text.
+    /// </summary>
+    public string? ResolvedSupplierName { get; set; }
+
+    /// <summary>
     /// RFQ line items (what was originally requested) for the matched RFQ.
     /// Injected by MailPollerService before calling the AI so it can
     /// anchor each extracted supplier product to the nearest requested item.
