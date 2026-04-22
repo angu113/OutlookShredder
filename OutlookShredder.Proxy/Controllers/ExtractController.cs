@@ -245,15 +245,29 @@ public class ExtractController : ControllerBase
     /// </summary>
     [HttpGet("items")]
     public async Task<IActionResult> GetItems(
-        [FromQuery] int     top      = 5000,
-        [FromQuery] string? nextLink = null,
-        [FromQuery] bool    raw      = false)
+        [FromQuery] int     top               = 5000,
+        [FromQuery] string? nextLink          = null,
+        [FromQuery] bool    raw               = false,
+        [FromQuery] bool    includeCompleted  = false)
     {
         try
         {
             var (items, next) = await _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw);
-            // Return a wrapper so clients can detect whether more pages exist.
-            // nextLink is null when this is the last (or only) page.
+
+            if (!includeCompleted)
+            {
+                var completed = await GetCompletedRfqIdsAsync();
+                if (completed.Count > 0)
+                {
+                    items = items.Where(row =>
+                    {
+                        if (!row.TryGetValue("RFQ_ID", out var idv)) return true;
+                        var rid = idv?.ToString();
+                        return string.IsNullOrEmpty(rid) || !completed.Contains(rid!);
+                    }).ToList();
+                }
+            }
+
             return Ok(new { items, nextLink = next });
         }
         catch (Exception ex)
@@ -262,6 +276,32 @@ public class ExtractController : ControllerBase
             return StatusCode(500, new { success = false, error = ex.Message });
         }
     }
+
+    // Builds a HashSet of RFQ IDs whose RFQ Reference row has Complete=true.
+    // Used by list endpoints that hide completed RFQs by default. Cached per
+    // request (controller instance lifetime) so a single list fetch per call.
+    private HashSet<string>? _completedCache;
+    private async Task<HashSet<string>> GetCompletedRfqIdsAsync()
+    {
+        if (_completedCache is not null) return _completedCache;
+
+        var refs = await _sp.ReadRfqReferencesAsync();
+        var set  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in refs)
+        {
+            if (!IsTrueBool(r.TryGetValue("Complete", out var cv) ? cv : null)) continue;
+            var rid = r.TryGetValue("RFQ_ID", out var idv) ? idv?.ToString() : null;
+            if (!string.IsNullOrEmpty(rid)) set.Add(rid!);
+        }
+        return _completedCache = set;
+    }
+
+    private static bool IsTrueBool(object? v) => v switch
+    {
+        bool b                                       => b,
+        string s when bool.TryParse(s, out var p)    => p,
+        _                                            => false,
+    };
 
     // ── GET /api/items/by-rfq/{rfqId} ────────────────────────────────────────
     /// <summary>
@@ -296,11 +336,15 @@ public class ExtractController : ControllerBase
     /// Returns RFQ References records (RFQ_ID + Notes) for the dashboard header display.
     /// </summary>
     [HttpGet("rfq-references")]
-    public async Task<IActionResult> GetRfqReferences()
+    public async Task<IActionResult> GetRfqReferences(
+        [FromQuery] bool includeCompleted = false)
     {
         try
         {
             var refs = await _sp.ReadRfqReferencesAsync();
+            if (!includeCompleted)
+                refs = refs.Where(r => !IsTrueBool(
+                    r.TryGetValue("Complete", out var cv) ? cv : null)).ToList();
             return Ok(refs);
         }
         catch (Exception ex)
