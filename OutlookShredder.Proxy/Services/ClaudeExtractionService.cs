@@ -52,12 +52,15 @@ public class ClaudeExtractionService : IAiExtractionService
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number, typically in square brackets in the email
-        subject line. Two formats are valid:
-          - New:    [HQXXXXXX] — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy: [XXXXXX]   — exactly 6 alphanumeric chars
-        Extract the content inside the brackets (including "HQ" when present), without
-        the brackets themselves. NOT the supplier's quote number.
+        Metal Supermarkets' internal job number. Two formats are valid:
+          - New:    HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy: XXXXXX   — exactly 6 alphanumeric chars
+        It appears in three ways — extract the ID in all cases, return without brackets:
+          1. In email subject: [HQXXXXXX] or [XXXXXX] inside square brackets
+          2. In supplier PDFs: labelled "JOB: HQXXXXXX", "JOB #: XXXXXX", "JOB REF: XXXXXX",
+             or similar label followed by the bare ID (no brackets)
+          3. Pre-identified: the prompt may provide a hint like "Job reference(s): HQXXXXXX"
+        NOT the supplier's own quote/order number (that goes in quoteReference).
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number assigned to this quote — NOT the
@@ -154,7 +157,7 @@ public class ClaudeExtractionService : IAiExtractionService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "6-char alphanumeric from [XXXXXX] pattern, no brackets" },
+              "jobReference":   { "type": ["string","null"], "description": "Metal Supermarkets job ID — 8-char HQ-prefixed (e.g. HQ4RCAPR) or 6-char legacy. Found as [HQXXXXXX] in subject, or as 'JOB: HQXXXXXX' in supplier PDFs. Return the ID only, no brackets." },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },

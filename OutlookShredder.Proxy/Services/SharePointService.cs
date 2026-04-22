@@ -1451,11 +1451,11 @@ public class SharePointService
             var regexRef = emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']');
             var aiRef    = header.JobReference?.Trim();
 
-            // Our RFQ IDs are exactly 6 alphanumeric characters (e.g. BX9EWM, UA2ZJC).
-            // Reject AI-extracted values that don't match this format.
+            // RFQ IDs: legacy 6-char alphanumeric (e.g. BX9EWM) or new HQ-prefixed 8-char (e.g. HQ4RCAPR).
+            // Reject AI-extracted values that don't match either format.
             static bool IsValidRfqId(string? s) =>
-                !string.IsNullOrEmpty(s) && s.Length == 6 &&
-                s.All(c => char.IsLetterOrDigit(c));
+                !string.IsNullOrEmpty(s) && s.All(char.IsLetterOrDigit) &&
+                (s.Length == 6 || (s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase)));
 
             var rawJobRef = (regexRef
                 ?? (IsValidRfqId(aiRef) ? aiRef : null)
