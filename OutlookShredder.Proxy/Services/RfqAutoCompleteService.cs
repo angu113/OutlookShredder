@@ -17,17 +17,20 @@ namespace OutlookShredder.Proxy.Services;
 public sealed class RfqAutoCompleteService : BackgroundService
 {
     private readonly SharePointService              _sp;
+    private readonly RfqNotificationService         _notifications;
     private readonly IConfiguration                 _config;
     private readonly ILogger<RfqAutoCompleteService> _log;
 
     public RfqAutoCompleteService(
         SharePointService                 sp,
+        RfqNotificationService            notifications,
         IConfiguration                    config,
         ILogger<RfqAutoCompleteService>   log)
     {
-        _sp     = sp;
-        _config = config;
-        _log    = log;
+        _sp            = sp;
+        _notifications = notifications;
+        _config        = config;
+        _log           = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -109,6 +112,20 @@ public sealed class RfqAutoCompleteService : BackgroundService
         _log.LogInformation(
             "[AutoComplete] Cycle finished — scanned {Scanned}, auto-completed {Completed} (threshold {Days}d)",
             scanned, completed, days);
+
+        // Nudge any connected Shredder client to refresh its grid so the freshly
+        // completed RFQs drop from view. One summary event per cycle instead of
+        // N per-RFQ events to avoid bus/toast noise.
+        if (completed > 0)
+        {
+            _notifications.NotifyRfqProcessed(new Models.RfqProcessedNotification
+            {
+                EventType    = "RFQ_AUTOCOMPLETE",
+                RfqId        = null,
+                SupplierName = $"{completed} RFQ(s) auto-completed (>{days}d)",
+                Products     = [],
+            });
+        }
     }
 
     // ── Config ────────────────────────────────────────────────────────────────
