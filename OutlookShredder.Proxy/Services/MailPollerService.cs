@@ -30,17 +30,19 @@ public class MailPollerService : BackgroundService
     private readonly ShrConvInRouter           _shrRouter;
     private readonly ILogger<MailPollerService> _log;
 
-    // Accepts two formats:
-    //   New:    HQ + 6 alphanumeric (e.g. HQBX9EWM) — 8 chars total
-    //   Legacy: 6 alphanumeric       (e.g. UA2ZJC)
-    // HQ alt is listed first so 8-char matches aren't truncated to 6.
+    // Accepts three formats:
+    //   Initials: 2 alpha letters + 5 Crockford Base32 digits (e.g. AW00001) — 7 chars
+    //   HQ:       HQ + 6 alphanumeric (e.g. HQBX9EWM) — 8 chars
+    //   Legacy:   6 alphanumeric (e.g. UA2ZJC)
+    // Initials format listed first; HQ listed before legacy so 8-char matches aren't truncated.
     private static readonly Regex JobRefRegex =
-        new(@"\[(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        new(@"\[([A-Z]{2}[0-9A-HJKMNP-TV-Z]{5}|HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // Fallback: bare ID appearing after "RFQ" or "Job" (no brackets). Same two formats.
+    // Fallback: bare ID appearing after "RFQ" or "Job" (no brackets). Same three formats.
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+([A-Z]{2}[0-9A-HJKMNP-TV-Z]{5}|HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*([A-Z]{2}[0-9A-HJKMNP-TV-Z]{5}|HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the

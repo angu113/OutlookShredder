@@ -59,14 +59,15 @@ public class GeminiExtractionService : IAiExtractionService
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number. Two formats are valid:
-          - New:    HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy: XXXXXX   — exactly 6 alphanumeric chars
+        Metal Supermarkets' internal job number. Three formats are valid:
+          - Initials: IIXXXXX — 2-letter user initials + 5 Crockford Base32 digits (e.g. AW00001)
+          - HQ:       HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy:   XXXXXX — exactly 6 alphanumeric chars
         It appears in three ways — extract the ID in all cases, return without brackets:
-          1. In email subject: [HQXXXXXX] or [XXXXXX] inside square brackets
-          2. In supplier PDFs: labelled "JOB: HQXXXXXX", "JOB #: XXXXXX", "JOB REF: XXXXXX",
+          1. In email subject: [AW00001] or [HQXXXXXX] or [XXXXXX] inside square brackets
+          2. In supplier PDFs: labelled "JOB: AW00001", "JOB #: XXXXXX", "JOB REF: XXXXXX",
              or similar label followed by the bare ID (no brackets)
-          3. Pre-identified: the prompt may provide a hint like "Job reference(s): HQXXXXXX"
+          3. Pre-identified: the prompt may provide a hint like "Job reference(s): AW00001"
         NOT the supplier's own quote/order number (that goes in quoteReference).
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
@@ -159,11 +160,12 @@ public class GeminiExtractionService : IAiExtractionService
         within the document itself.
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number, in square brackets. Two formats are valid:
-          - New:    [HQXXXXXX]  — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy: [XXXXXX]    — exactly 6 alphanumeric chars
-        Extract the content inside the brackets (including "HQ" when present), without
-        the brackets themselves. When a hint is provided, use it to confirm.
+        Metal Supermarkets' internal job number, in square brackets. Three formats are valid:
+          - Initials: [IIXXXXX]  — 2-letter initials + 5 Crockford Base32 digits (e.g. [AW00001])
+          - HQ:       [HQXXXXXX] — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy:   [XXXXXX]   — exactly 6 alphanumeric chars
+        Extract the content inside the brackets, without the brackets themselves.
+        When a hint is provided, use it to confirm.
 
         ── PO NUMBER ──────────────────────────────────────────────────────────────────────
         The purchase order number assigned by Metal Supermarkets (e.g. PO-12345).

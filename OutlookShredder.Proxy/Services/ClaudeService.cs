@@ -133,7 +133,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "Job reference from [XXXXXX] pattern — either HQ+6 alphanumeric (e.g. HQABC123) or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
+              "jobReference":   { "type": ["string","null"], "description": "Job reference from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQABC123), or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },
@@ -427,12 +427,12 @@ public class ClaudeService
 
         ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
         Look for a bracketed alphanumeric job reference anywhere in the document
-        (subject line, PO header, line item descriptions, or email body context). Two
+        (subject line, PO header, line item descriptions, or email body context). Three
         formats are valid:
-          - New:    [HQXXXXXX]  — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy: [XXXXXX]    — exactly 6 alphanumeric chars
-        Extract the content inside the brackets (including "HQ" when present), without
-        the brackets themselves.
+          - Initials: [IIXXXXX]  — 2-letter initials + 5 Crockford Base32 digits (e.g. [AW00001])
+          - HQ:       [HQXXXXXX] — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy:   [XXXXXX]   — exactly 6 alphanumeric chars
+        Extract the content inside the brackets, without the brackets themselves.
 
         ── SUPPLIER NAME ──────────────────────────────────────────────────────────
         The company this PO is addressed TO (the vendor/supplier receiving the order).
@@ -463,7 +463,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference": { "type": ["string","null"], "description": "Job reference from [XXXXXX] pattern — either HQ+6 alphanumeric (e.g. HQABC123) or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
+              "jobReference": { "type": ["string","null"], "description": "Job reference from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQABC123), or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
               "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
               "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
               "lineItems": {

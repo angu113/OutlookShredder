@@ -52,14 +52,15 @@ public class ClaudeExtractionService : IAiExtractionService
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number. Two formats are valid:
-          - New:    HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy: XXXXXX   — exactly 6 alphanumeric chars
+        Metal Supermarkets' internal job number. Three formats are valid:
+          - Initials: IIXXXXX — 2-letter user initials + 5 Crockford Base32 digits (e.g. AW00001)
+          - HQ:       HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
+          - Legacy:   XXXXXX — exactly 6 alphanumeric chars
         It appears in three ways — extract the ID in all cases, return without brackets:
-          1. In email subject: [HQXXXXXX] or [XXXXXX] inside square brackets
-          2. In supplier PDFs: labelled "JOB: HQXXXXXX", "JOB #: XXXXXX", "JOB REF: XXXXXX",
+          1. In email subject: [AW00001] or [HQXXXXXX] or [XXXXXX] inside square brackets
+          2. In supplier PDFs: labelled "JOB: AW00001", "JOB #: XXXXXX", "JOB REF: XXXXXX",
              or similar label followed by the bare ID (no brackets)
-          3. Pre-identified: the prompt may provide a hint like "Job reference(s): HQXXXXXX"
+          3. Pre-identified: the prompt may provide a hint like "Job reference(s): AW00001"
         NOT the supplier's own quote/order number (that goes in quoteReference).
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
@@ -157,7 +158,7 @@ public class ClaudeExtractionService : IAiExtractionService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "Metal Supermarkets job ID — 8-char HQ-prefixed (e.g. HQ4RCAPR) or 6-char legacy. Found as [HQXXXXXX] in subject, or as 'JOB: HQXXXXXX' in supplier PDFs. Return the ID only, no brackets." },
+              "jobReference":   { "type": ["string","null"], "description": "Metal Supermarkets job ID — 7-char initials+base32 (e.g. AW00001), 8-char HQ-prefixed (e.g. HQ4RCAPR), or 6-char legacy. Found as [AWXXXXX] in subject/body or 'JOB: AWXXXXX' in supplier PDFs. Return the ID only, no brackets." },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },
@@ -472,9 +473,10 @@ public class ClaudeExtractionService : IAiExtractionService
         sent by Metal Supermarkets to a supplier.
 
         ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
-        Look for a 6-character alphanumeric code in [XXXXXX] brackets anywhere in the
+        Look for a Metal Supermarkets job reference in [...] brackets anywhere in the
         document (subject line, PO header, line item descriptions, or email body context).
-        Extract just the 6 characters without brackets.
+        Three valid formats: 7-char initials+base32 (e.g. [AW00001]), 8-char HQ-prefixed
+        (e.g. [HQ4RCAPR]), or 6-char legacy (e.g. [BX9EWM]). Extract the ID without brackets.
 
         ── SUPPLIER NAME ──────────────────────────────────────────────────────────
         The company this PO is addressed TO (the vendor/supplier receiving the order).
@@ -505,7 +507,7 @@ public class ClaudeExtractionService : IAiExtractionService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference": { "type": ["string","null"], "description": "6-char alphanumeric from [XXXXXX] pattern, no brackets" },
+              "jobReference": { "type": ["string","null"], "description": "Metal Supermarkets job ref from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQ4RCAPR), or 6-char legacy; no brackets" },
               "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
               "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
               "lineItems": {
