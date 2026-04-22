@@ -95,6 +95,7 @@ try
     builder.Services.AddSingleton<SharePointService>();
     builder.Services.AddSingleton<MailService>();
     builder.Services.AddSingleton<RfqNotificationService>();
+    builder.Services.AddSingleton<ShrConvInRouter>();
     builder.Services.AddSingleton<MailPollerService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());

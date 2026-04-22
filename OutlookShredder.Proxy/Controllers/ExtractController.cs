@@ -16,6 +16,7 @@ public class ExtractController : ControllerBase
     private readonly SupplierCacheService       _suppliers;
     private readonly ProductCatalogService      _catalog;
     private readonly RfqNotificationService     _notifications;
+    private readonly ShrConvInRouter            _shrRouter;
     private readonly IConfiguration             _config;
     private readonly ILogger<ExtractController> _log;
 
@@ -28,6 +29,7 @@ public class ExtractController : ControllerBase
         SupplierCacheService        suppliers,
         ProductCatalogService       catalog,
         RfqNotificationService      notifications,
+        ShrConvInRouter             shrRouter,
         IConfiguration              config,
         ILogger<ExtractController>  log)
     {
@@ -39,6 +41,7 @@ public class ExtractController : ControllerBase
         _suppliers     = suppliers;
         _catalog       = catalog;
         _notifications = notifications;
+        _shrRouter     = shrRouter;
         _config        = config;
         _log           = log;
     }
@@ -54,6 +57,48 @@ public class ExtractController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(req.Content) && string.IsNullOrWhiteSpace(req.Base64Data))
             return BadRequest(new ExtractResponse { Success = false, Error = "Content or Base64Data is required." });
+
+        // ── SHR conversation short-circuit ───────────────────────────────────────
+        // Shared with MailPollerService: supplier replies carrying [SHR:{rfqId}]
+        // route straight to SupplierConversations instead of producing another SLI.
+        var searchText = string.Join(" ", new[] { req.EmailSubject, req.EmailBody, req.Content }
+            .Where(s => !string.IsNullOrEmpty(s)));
+        var receivedAt = DateTimeOffset.TryParse(req.ReceivedAt, out var rt) ? rt : DateTimeOffset.UtcNow;
+        var shrResult = await _shrRouter.TryRouteAsync(
+            searchText:     searchText,
+            fromAddr:       req.EmailFrom   ?? string.Empty,
+            subject:        req.EmailSubject ?? string.Empty,
+            body:           req.EmailBody   ?? req.Content ?? string.Empty,
+            messageId:      req.ItemId,
+            hasAttachments: req.HasAttachment,
+            receivedAt:     receivedAt);
+
+        if (shrResult.Routed)
+        {
+            var mailbox = _config["Mail:MailboxAddress"];
+            if (!string.IsNullOrEmpty(mailbox) && !string.IsNullOrEmpty(req.ItemId))
+            {
+                try { await _mail.MarkProcessedAsync(mailbox, req.ItemId, "conv-in"); }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Extract] Could not stamp RFQ-Processed on conv-in message {Id}", req.ItemId);
+                }
+            }
+            return Ok(new ExtractResponse
+            {
+                Success   = true,
+                Extracted = new RfqExtraction { JobReference = shrResult.ShrRfqId, SupplierName = shrResult.ResolvedSupplier },
+                Rows      = [],
+            });
+        }
+
+        // Token present but supplier unresolvable — seed the rfqId so AI extraction
+        // still files the row under the correct RFQ.
+        if (shrResult.ShrRfqId is not null &&
+            !req.JobRefs.Contains(shrResult.ShrRfqId, StringComparer.OrdinalIgnoreCase))
+        {
+            req.JobRefs.Insert(0, shrResult.ShrRfqId);
+        }
 
         RfqExtraction? extraction;
         try

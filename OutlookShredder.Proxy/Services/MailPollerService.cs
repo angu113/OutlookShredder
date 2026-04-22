@@ -26,8 +26,8 @@ public class MailPollerService : BackgroundService
     private readonly AiServiceFactory _aiFactory;
     private readonly SharePointService         _sp;
     private readonly ProductCatalogService     _catalog;
-    private readonly SupplierCacheService      _supplierCache;
     private readonly RfqNotificationService    _notifications;
+    private readonly ShrConvInRouter           _shrRouter;
     private readonly ILogger<MailPollerService> _log;
 
     // Accepts two formats:
@@ -43,13 +43,8 @@ public class MailPollerService : BackgroundService
         new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob(?:\s*Ref(?:erence)?)?\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // Shredder tracking token — embedded in every outgoing RFQ email and follow-up.
-    // Format: [SHR:{rfqId}]  e.g. [SHR:HQABC123]
-    // When found in an incoming email, the reply is routed to SupplierConversations
-    // instead of being processed as a new price quote.
-    private static readonly Regex ShrTokenRegex =
-        new(@"\[SHR:(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the
+    // add-in extract endpoint can honour it too — see Services/ShrConvInRouter.cs.
 
     // Subject prefixes to strip before PO detection (RE:, FW:, [EXTERNAL], etc.)
     private static readonly Regex SubjectPrefixRegex =
@@ -369,8 +364,8 @@ public class MailPollerService : BackgroundService
         AiServiceFactory           aiFactory,
         SharePointService          sp,
         ProductCatalogService      catalog,
-        SupplierCacheService       supplierCache,
         RfqNotificationService     notifications,
+        ShrConvInRouter            shrRouter,
         ILogger<MailPollerService> log)
     {
         _config        = config;
@@ -378,8 +373,8 @@ public class MailPollerService : BackgroundService
         _aiFactory     = aiFactory;
         _sp            = sp;
         _catalog       = catalog;
-        _supplierCache = supplierCache;
         _notifications = notifications;
+        _shrRouter     = shrRouter;
         _log           = log;
     }
 
@@ -596,47 +591,30 @@ public class MailPollerService : BackgroundService
         }
 
         // ── SHR conversation tracking token ──────────────────────────────────────
-        // Outgoing RFQ emails and follow-ups embed [SHR:{rfqId}] in the body so that
-        // supplier replies can be routed back into the conversation thread instead of
-        // being processed as new price quotes.
-        var shrMatch = ShrTokenRegex.Match(searchText);
-        if (shrMatch.Success)
+        // Routing is shared with the add-in extract endpoint via ShrConvInRouter
+        // so both ingest paths honour the same short-circuit.
+        var shrResult = await _shrRouter.TryRouteAsync(
+            searchText:     searchText,
+            fromAddr:       fromAddr,
+            subject:        subject,
+            body:           body,
+            messageId:      msg.Id,
+            hasAttachments: msg.HasAttachments == true,
+            receivedAt:     msg.ReceivedDateTime ?? DateTimeOffset.UtcNow);
+
+        if (shrResult.Routed)
         {
-            var shrRfqId     = shrMatch.Groups[1].Value.ToUpperInvariant();
-            var supplierName = ResolveSupplierFromEmail(fromAddr)
-                               ?? await _sp.ResolveSupplierNameFromSrAsync(shrRfqId, fromAddr);
+            if (msg.Id is not null)
+                await _mail.MarkProcessedAsync(mailbox, msg.Id, "conv-in");
+            return;
+        }
 
-            if (supplierName is not null)
-            {
-                _log.LogInformation("[Mail] SHR token [{RfqId}] from {From} — storing as conversation reply (supplier: {Supplier})",
-                    shrRfqId, fromAddr, supplierName);
-
-                await _sp.WriteConversationMessageAsync(new ConversationMessage
-                {
-                    RfqId            = shrRfqId,
-                    SupplierName     = supplierName,
-                    Direction        = "in",
-                    MessageId        = msg.Id,
-                    SentAt           = msg.ReceivedDateTime ?? DateTimeOffset.UtcNow,
-                    Subject          = subject,
-                    BodyText         = body[..Math.Min(body.Length, 4_000)],
-                    HasAttachments   = msg.HasAttachments == true,
-                    ExtractedPricing = false,
-                    ContactEmail     = fromAddr,
-                });
-
-                if (msg.Id is not null)
-                    await _mail.MarkProcessedAsync(mailbox, msg.Id, "conv-in");
-
-                return;
-            }
-
-            // Supplier domain not in cache and no existing SR for this rfqId —
-            // fall through to normal AI processing but seed the rfqId.
-            _log.LogInformation("[Mail] SHR token [{RfqId}] found but supplier unresolvable from '{From}' — processing as normal SR",
-                shrRfqId, fromAddr);
-            if (!jobRefs.Contains(shrRfqId, StringComparer.OrdinalIgnoreCase))
-                jobRefs.Insert(0, shrRfqId);
+        // Token present but supplier unresolvable — seed the rfqId so AI extraction
+        // still files the row under the correct RFQ.
+        if (shrResult.ShrRfqId is not null &&
+            !jobRefs.Contains(shrResult.ShrRfqId, StringComparer.OrdinalIgnoreCase))
+        {
+            jobRefs.Insert(0, shrResult.ShrRfqId);
         }
 
         // Decide whether to call the AI.
@@ -1098,54 +1076,6 @@ public class MailPollerService : BackgroundService
         }
     }
 
-    // ── SHR token helpers ─────────────────────────────────────────────────────
-
-    // ── INVESTIGATE (2026-04-21, updated): SHR bypass missing on add-in path ──
-    // Correction to earlier checkpoint. The domain resolver below is fine;
-    // `gmail.com → Angus` was in `DomainMap` at the time of the HQ3LJPTW test
-    // (confirmed via `GET /api/supplier-domains` — 22 entries). The replies
-    // that produced duplicate SLIs carried `[SHR:HQ3LJPTW]` in the body and
-    // would have routed correctly here.
-    //
-    // Actual root cause: the replies never reached this service. They were
-    // extracted by the Outlook add-in taskpane via `POST /api/extract`
-    // (ExtractController.Extract), which runs AI extraction unconditionally
-    // and has no SHR-token short-circuit. MailPollerService then saw the
-    // messages already stamped "RFQ-Processed" and skipped them — zero
-    // `[Mail] Processing:` log lines for the whole session.
-    //
-    // Decisions still standing:
-    //   • Authoritative supplier-identity match remains sender domain ↔
-    //     Suppliers list `ContactEmail` domain (via `DomainMap`).
-    //   • RLI `SupplierEmails`-domain fallback rejected as too imprecise.
-    //
-    // Next step: hoist the SHR-token routing (regex match, supplier resolve,
-    // `WriteConversationMessageAsync`, return) out of `ProcessMessageAsync`
-    // into a shared pre-extraction step invoked by both MailPollerService
-    // and ExtractController.Extract. Audit Suppliers-list coverage as part
-    // of the same change.
-
-    /// <summary>
-    /// Resolves a canonical supplier name from the sender's email address using
-    /// the SupplierCacheService domain map, falling back to domain substring matching.
-    /// Returns null when the domain is not recognisable.
-    /// </summary>
-    private string? ResolveSupplierFromEmail(string fromAddr)
-    {
-        if (string.IsNullOrWhiteSpace(fromAddr)) return null;
-        var at = fromAddr.IndexOf('@');
-        if (at < 0) return null;
-        var domain = fromAddr[(at + 1)..].ToLowerInvariant();
-
-        // Skip our own domain — we never want to record ourselves as a supplier.
-        if (domain.Equals("mithrilmetals.com", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        var map = _supplierCache.DomainMap;
-        if (map.TryGetValue(domain, out var name)) return name;
-
-        return _supplierCache.ResolveByDomainSubstring(domain);
-    }
 }
 
 
