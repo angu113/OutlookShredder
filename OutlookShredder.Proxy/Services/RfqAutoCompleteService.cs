@@ -134,10 +134,19 @@ public sealed class RfqAutoCompleteService : BackgroundService
                   r.TryGetValue("Created",     out var cv)  ? cv?.ToString()  : null;
         if (string.IsNullOrEmpty(raw)) return null;
 
-        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture,
-                DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal, out var dt))
-            return dt.ToUniversalTime();
+        // RoundtripKind preserves the Z/offset suffix on ISO 8601 strings. For strings
+        // with no timezone info we treat the Kind=Unspecified value as UTC — safer
+        // than letting ToUniversalTime apply a local-time assumption on a server
+        // whose locale we don't control.
+        if (!DateTime.TryParse(raw, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out var dt))
+            return null;
 
-        return null;
+        return dt.Kind switch
+        {
+            DateTimeKind.Utc         => dt,
+            DateTimeKind.Local       => dt.ToUniversalTime(),
+            _ /* Unspecified */      => DateTime.SpecifyKind(dt, DateTimeKind.Utc),
+        };
     }
 }
