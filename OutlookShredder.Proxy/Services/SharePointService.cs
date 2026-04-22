@@ -4905,6 +4905,8 @@ public class SharePointService
     /// <summary>
     /// Appends one message (inbound or outbound) to the SupplierConversations list.
     /// Dedupes on MessageId when provided so re-runs and the mail poller don't duplicate.
+    /// If a duplicate exists and msg.ExtractedPricing is true, patches ExtractedPricing on
+    /// the existing row (so a SHR-routed row written before extraction can be promoted).
     /// Returns the new SP item ID, or null if a duplicate was skipped.
     /// </summary>
     public async Task<string?> WriteConversationMessageAsync(Models.ConversationMessage msg)
@@ -4917,14 +4919,31 @@ public class SharePointService
             var existing = await GetGraph().Sites[siteId].Lists[listId].Items
                 .GetAsync(req =>
                 {
-                    req.QueryParameters.Expand = ["fields($select=MessageId)"];
+                    req.QueryParameters.Expand = ["fields($select=MessageId,ExtractedPricing)"];
                     req.QueryParameters.Top    = 1;
                     req.QueryParameters.Filter = $"fields/MessageId eq '{msg.MessageId.Replace("'", "''")}'";
 
                 });
             if (existing?.Value?.Count > 0)
             {
-                _log.LogDebug("[Conv] Skipping duplicate message  --  MessageId already in SP: {Id}", msg.MessageId);
+                var existingItem = existing.Value[0];
+                // If this write carries ExtractedPricing=true (post-extraction hook) and the
+                // existing row was written before extraction ran (ExtractedPricing=false), patch it.
+                if (msg.ExtractedPricing &&
+                    existingItem.Fields?.AdditionalData.TryGetValue("ExtractedPricing", out var ep) == true &&
+                    ep is false or null)
+                {
+                    await GetGraph().Sites[siteId].Lists[listId].Items[existingItem.Id].Fields
+                        .PatchAsync(new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?> { ["ExtractedPricing"] = true }
+                        });
+                    _log.LogDebug("[Conv] Patched ExtractedPricing=true on existing row for MessageId {Id}", msg.MessageId);
+                }
+                else
+                {
+                    _log.LogDebug("[Conv] Skipping duplicate message  --  MessageId already in SP: {Id}", msg.MessageId);
+                }
                 return null;
             }
         }
