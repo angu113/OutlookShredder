@@ -591,8 +591,9 @@ public class MailPollerService : BackgroundService
         }
 
         // ── SHR conversation tracking token ──────────────────────────────────────
-        // Routing is shared with the add-in extract endpoint via ShrConvInRouter
-        // so both ingest paths honour the same short-circuit.
+        // ShrConvInRouter writes to SupplierConversations when the supplier resolves.
+        // We never early-return on Routed: the token appears in quoted reply bodies
+        // of initial RFQ emails so short-circuiting would silently drop pricing rows.
         var shrResult = await _shrRouter.TryRouteAsync(
             searchText:     searchText,
             fromAddr:       fromAddr,
@@ -602,15 +603,7 @@ public class MailPollerService : BackgroundService
             hasAttachments: msg.HasAttachments == true,
             receivedAt:     msg.ReceivedDateTime ?? DateTimeOffset.UtcNow);
 
-        if (shrResult.Routed)
-        {
-            if (msg.Id is not null)
-                await _mail.MarkProcessedAsync(mailbox, msg.Id, "conv-in");
-            return;
-        }
-
-        // Token present but supplier unresolvable — seed the rfqId so AI extraction
-        // still files the row under the correct RFQ.
+        // Seed the rfqId so AI extraction files the row under the correct RFQ.
         if (shrResult.ShrRfqId is not null &&
             !jobRefs.Contains(shrResult.ShrRfqId, StringComparer.OrdinalIgnoreCase))
         {
