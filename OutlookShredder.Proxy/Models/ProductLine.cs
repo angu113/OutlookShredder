@@ -23,4 +23,10 @@ public class ProductLine
     /// the fuzzy catalog matcher on the supplier's product name.
     /// </summary>
     public string? ProductSearchKey        { get; set; }
+
+    /// <summary>
+    /// True when the supplier is offering an alternate/substitute product rather than
+    /// the originally requested item (e.g. different size, grade, or form).
+    /// </summary>
+    public bool    IsSubstitute            { get; set; }
 }

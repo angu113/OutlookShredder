@@ -107,9 +107,9 @@ public class ClaudeExtractionService : IAiExtractionService
         "1\" and 2\" flat bar" → two entries. "304 and 316 sheet" → two entries.
 
         ── COMMENTS ───────────────────────────────────────────────────────────────
-        Capture in supplierProductComments: partial availability, alternates offered,
-        spec deviations, cut charges, surcharges, minimum order quantities, certification
-        details, freight notes, and any dimension detail not already in productName.
+        Capture in supplierProductComments: partial availability, spec deviations,
+        cut charges, surcharges, minimum order quantities, certification details,
+        freight notes, and any dimension detail not already in productName.
 
         ── NO QUOTE / REGRET ──────────────────────────────────────────────────────
         If the email is an acknowledgement, out-of-office reply, or clearly contains no
@@ -117,6 +117,18 @@ public class ClaudeExtractionService : IAiExtractionService
         the situation in supplierProductComments (e.g. "Out of office until 2026-05-01"
         or "Supplier regrets — unable to supply this material").
         Always return at least one entry in products[].
+
+        ── SUBSTITUTES ────────────────────────────────────────────────────────────
+        When a supplier cannot supply the requested product but offers an alternate
+        (different grade, size, form, or specification), extract the alternate as a
+        SEPARATE products entry with isSubstitute = true. Also include the regret
+        entry (no price, null numerics) for the originally requested item so it is
+        clear what was declined.
+        Example: Supplier says "We don't carry 6061-T6 flat bar in .25x2.5 but we
+        can offer .25x2 instead at $3.50/lb" → two entries:
+          1. productName = requested spec, all prices null, isSubstitute = false,
+             supplierProductComments = "Cannot supply requested size; see substitute"
+          2. productName = alternate spec, pricePerPound = 3.50, isSubstitute = true
 
         ── REQUESTED ITEMS (RLI ANCHORING) ────────────────────────────────────────
         If the prompt includes a "Requested items for this RFQ" section, each line is
@@ -166,7 +178,8 @@ public class ClaudeExtractionService : IAiExtractionService
                     "totalPrice":              { "type": ["number","null"] },
                     "leadTimeText":            { "type": ["string","null"], "description": "Verbatim lead time as stated, e.g. '4-6 weeks ARO' or 'In Stock'" },
                     "certifications":          { "type": ["string","null"], "description": "e.g. MTR Included / ASTM / AMS / Certified" },
-                    "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, alternates, surcharges, etc." }
+                    "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, surcharges, etc." },
+                    "isSubstitute":            { "type": "boolean", "description": "True when this is an alternate the supplier offered instead of (or in addition to) the requested product" }
                   }
                 }
               }
