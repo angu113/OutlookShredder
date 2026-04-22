@@ -1451,21 +1451,13 @@ public class SharePointService
             var regexRef = emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']');
             var aiRef    = header.JobReference?.Trim();
 
-            // RFQ IDs — three valid formats:
-            //   Initials: 2 alpha letters + 5 Crockford Base32 digits (e.g. AW00001) — 7 chars
-            //   HQ:       "HQ" + 6 alphanumeric chars (e.g. HQ4RCAPR) — 8 chars
-            //   Legacy:   exactly 6 alphanumeric chars (e.g. BX9EWM)
-            // Reject AI-extracted values that don't match any format.
-            static bool IsValidRfqId(string? s)
-            {
-                if (string.IsNullOrEmpty(s)) return false;
-                const string C32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-                if (s.Length == 6 && s.All(char.IsLetterOrDigit)) return true;
-                if (s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase) && s.All(char.IsLetterOrDigit)) return true;
-                if (s.Length == 7 && char.IsLetter(s[0]) && char.IsLetter(s[1]) &&
-                    s[2..].ToUpperInvariant().All(c => C32.IndexOf(c) >= 0)) return true;
-                return false;
-            }
+            // RFQ IDs — two valid lengths:
+            //   6 chars — legacy alphanumeric (e.g. BX9EWM) or new initials+Crockford4 (e.g. AW0001)
+            //   8 chars — "HQ" + 6 alphanumeric (e.g. HQ4RCAPR)
+            // Reject AI-extracted values that don't match either format.
+            static bool IsValidRfqId(string? s) =>
+                !string.IsNullOrEmpty(s) && s.All(char.IsLetterOrDigit) &&
+                (s.Length == 6 || (s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase)));
 
             var rawJobRef = (regexRef
                 ?? (IsValidRfqId(aiRef) ? aiRef : null)
