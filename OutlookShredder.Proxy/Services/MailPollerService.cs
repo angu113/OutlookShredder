@@ -1100,21 +1100,30 @@ public class MailPollerService : BackgroundService
 
     // ── SHR token helpers ─────────────────────────────────────────────────────
 
-    // ── INVESTIGATE (2026-04-21): supplier-domain resolution for SHR-tagged replies ──
-    // Checkpoint before further exploration. Decision made with Angus:
-    //   • Authoritative match is inbound sender domain ↔ Suppliers list
-    //     `ContactEmail` domain — i.e. this method's existing path via
-    //     `_supplierCache.DomainMap` (populated by SupplierCacheService from
-    //     the Suppliers SP list's ContactEmail column).
-    //   • RLI `SupplierEmails`-domain fallback was rejected as too imprecise.
-    //   • Observed failure (HQ3LJPTW test, 2026-04-21): sender
-    //     `angus.w.wathen@gmail.com` — `gmail.com` not present in Suppliers
-    //     list → DomainMap miss, substring fallback also null → SHR-token path
-    //     fell through to AI extraction and produced a duplicate SLI instead
-    //     of a conv-in row.
-    // Next step: audit Suppliers-list `ContactEmail` coverage, then adjust
-    // and test this resolver. Do NOT expand the match to RLI recipient
-    // domains.
+    // ── INVESTIGATE (2026-04-21, updated): SHR bypass missing on add-in path ──
+    // Correction to earlier checkpoint. The domain resolver below is fine;
+    // `gmail.com → Angus` was in `DomainMap` at the time of the HQ3LJPTW test
+    // (confirmed via `GET /api/supplier-domains` — 22 entries). The replies
+    // that produced duplicate SLIs carried `[SHR:HQ3LJPTW]` in the body and
+    // would have routed correctly here.
+    //
+    // Actual root cause: the replies never reached this service. They were
+    // extracted by the Outlook add-in taskpane via `POST /api/extract`
+    // (ExtractController.Extract), which runs AI extraction unconditionally
+    // and has no SHR-token short-circuit. MailPollerService then saw the
+    // messages already stamped "RFQ-Processed" and skipped them — zero
+    // `[Mail] Processing:` log lines for the whole session.
+    //
+    // Decisions still standing:
+    //   • Authoritative supplier-identity match remains sender domain ↔
+    //     Suppliers list `ContactEmail` domain (via `DomainMap`).
+    //   • RLI `SupplierEmails`-domain fallback rejected as too imprecise.
+    //
+    // Next step: hoist the SHR-token routing (regex match, supplier resolve,
+    // `WriteConversationMessageAsync`, return) out of `ProcessMessageAsync`
+    // into a shared pre-extraction step invoked by both MailPollerService
+    // and ExtractController.Extract. Audit Suppliers-list coverage as part
+    // of the same change.
 
     /// <summary>
     /// Resolves a canonical supplier name from the sender's email address using
