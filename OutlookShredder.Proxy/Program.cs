@@ -103,6 +103,7 @@ try
     builder.Services.AddSingleton<OutlookComPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
     builder.Services.AddHostedService<LqUpdateService>();
+    builder.Services.AddHostedService<RfqAutoCompleteService>();
 
     var app = builder.Build();
 
