@@ -1100,6 +1100,22 @@ public class MailPollerService : BackgroundService
 
     // ── SHR token helpers ─────────────────────────────────────────────────────
 
+    // ── INVESTIGATE (2026-04-21): supplier-domain resolution for SHR-tagged replies ──
+    // Checkpoint before further exploration. Decision made with Angus:
+    //   • Authoritative match is inbound sender domain ↔ Suppliers list
+    //     `ContactEmail` domain — i.e. this method's existing path via
+    //     `_supplierCache.DomainMap` (populated by SupplierCacheService from
+    //     the Suppliers SP list's ContactEmail column).
+    //   • RLI `SupplierEmails`-domain fallback was rejected as too imprecise.
+    //   • Observed failure (HQ3LJPTW test, 2026-04-21): sender
+    //     `angus.w.wathen@gmail.com` — `gmail.com` not present in Suppliers
+    //     list → DomainMap miss, substring fallback also null → SHR-token path
+    //     fell through to AI extraction and produced a duplicate SLI instead
+    //     of a conv-in row.
+    // Next step: audit Suppliers-list `ContactEmail` coverage, then adjust
+    // and test this resolver. Do NOT expand the match to RLI recipient
+    // domains.
+
     /// <summary>
     /// Resolves a canonical supplier name from the sender's email address using
     /// the SupplierCacheService domain map, falling back to domain substring matching.
