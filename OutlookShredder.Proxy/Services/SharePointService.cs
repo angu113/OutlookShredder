@@ -1455,9 +1455,18 @@ public class SharePointService
             //   6 chars — legacy alphanumeric (e.g. BX9EWM) or new initials+Crockford4 (e.g. AW0001)
             //   8 chars — "HQ" + 6 alphanumeric (e.g. HQ4RCAPR)
             // Reject AI-extracted values that don't match either format.
-            static bool IsValidRfqId(string? s) =>
-                !string.IsNullOrEmpty(s) && s.All(char.IsLetterOrDigit) &&
-                (s.Length == 6 || (s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase)));
+            static bool IsValidRfqId(string? s)
+            {
+                if (string.IsNullOrEmpty(s)) return false;
+                if (!s.All(char.IsLetterOrDigit)) return false;
+                if (s.Length != 6 && !(s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase))) return false;
+                // Reject common English words that AI may infer from prose
+                var upper = s.ToUpperInvariant();
+                return upper is not ("PLEASE" or "THANKS" or "QUOTES" or "URGENT" or "ATTACH" or
+                                     "REVIEW" or "ORDERS" or "FOLLOW" or "PRICES" or "UPDATE" or
+                                     "NOTICE" or "KINDLY" or "HEREIN" or "RETURN" or "SUBMIT" or
+                                     "CANNOT" or "SHOULD" or "ALWAYS" or "BEFORE" or "WITHIN");
+            }
 
             var rawJobRef = (regexRef
                 ?? (IsValidRfqId(aiRef) ? aiRef : null)
