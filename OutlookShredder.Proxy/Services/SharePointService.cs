@@ -1550,14 +1550,21 @@ public class SharePointService
             // by AI reading quoted original messages. AI-extracted names are a last resort.
 
             // Step 1: resolve from sender domain (DomainMap exact → token-substring).
-            // Use the original sender from the forwarded body when available; fall back
-            // to emailMeta.EmailFrom for direct supplier replies.
+            // Direct supplier replies: use emailMeta.EmailFrom as-is (it IS the supplier's address).
+            // Forwarded emails (from internal staff): parse the original sender from the body,
+            // because the internal Hackensack/Jay address is never in the supplier reference list.
+            static bool IsInternalDomain(string? addr) =>
+                addr is not null && (
+                    addr.EndsWith("@mithrilmetals.com",      StringComparison.OrdinalIgnoreCase) ||
+                    addr.EndsWith("@metalsupermarkets.com",  StringComparison.OrdinalIgnoreCase));
+
             string? supplier = null;
             string  supplierFromDomain = string.Empty;   // for WHOIS warning
             {
-                var resolveEmail = TryExtractForwardedSenderEmail(
-                                       emailMeta.EmailBody ?? emailMeta.BodyContext)
-                                   ?? emailMeta.EmailFrom;
+                var resolveEmail = IsInternalDomain(emailMeta.EmailFrom)
+                    ? TryExtractForwardedSenderEmail(emailMeta.EmailBody ?? emailMeta.BodyContext)
+                      ?? emailMeta.EmailFrom
+                    : emailMeta.EmailFrom;
 
                 if (!string.IsNullOrWhiteSpace(resolveEmail) && resolveEmail.Contains('@'))
                 {
