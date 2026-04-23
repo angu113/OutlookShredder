@@ -1545,88 +1545,78 @@ public class SharePointService
                 return result;
             }
 
-            var rawSupplier = header.SupplierName;
+            // ── Supplier resolution: email domain is always the primary source ──────
+            // The sender's email domain is the canonical identifier — it cannot be confused
+            // by AI reading quoted original messages. AI-extracted names are a last resort.
 
-            // Discard AI-extracted names that are our own company — Claude sometimes picks
-            // these up from the quoted original message embedded in supplier reply chains.
-            static bool IsOurCompanyName(string? s) =>
-                s is not null && (
-                    s.Contains("mithril", StringComparison.OrdinalIgnoreCase) ||
-                    s.Contains("metal supermarket", StringComparison.OrdinalIgnoreCase) ||
-                    s.Contains("hackensack", StringComparison.OrdinalIgnoreCase));
-            if (IsOurCompanyName(rawSupplier))
-                rawSupplier = null;
-
-            if (string.IsNullOrWhiteSpace(rawSupplier) && !string.IsNullOrWhiteSpace(emailMeta.EmailFrom))
-            {
-                var addr = emailMeta.EmailFrom;
-                if (addr.Contains('@'))
-                {
-                    var domain = addr.Split('@').Last();
-                    var parts  = domain.Split('.');
-                    rawSupplier = parts.Length >= 2 ? parts[^2] : parts[0];
-                }
-                else rawSupplier = addr;
-            }
-            rawSupplier ??= string.Empty;
-            var supplier = _suppliers.ResolveSupplierName(rawSupplier);
-
-            // Strategy 3: exact email-domain lookup against ContactEmail in Suppliers list.
-            // Runs when Jaccard + containment both fail.
-            //
-            // Because all supplier emails arrive as Outlook-rule forwards from an internal
-            // staff address (Hackensack@ / Jmalhi@), emailMeta.EmailFrom is always an
-            // internal domain that will never be in DomainMap.  We therefore:
-            //   (a) first try to parse the *original* sender's email from the forwarded body
-            //       (Outlook embeds "From: name <email>" in the body of every forwarded email),
-            //   (b) fall back to emailMeta.EmailFrom for direct (non-forwarded) supplier emails.
-            //
-            // Internal domains that are not in DomainMap simply fall through to WHOIS.
-            if (supplier is null)
+            // Step 1: resolve from sender domain (DomainMap exact → token-substring).
+            // Use the original sender from the forwarded body when available; fall back
+            // to emailMeta.EmailFrom for direct supplier replies.
+            string? supplier = null;
+            string  supplierFromDomain = string.Empty;   // for WHOIS warning
             {
                 var resolveEmail = TryExtractForwardedSenderEmail(
                                        emailMeta.EmailBody ?? emailMeta.BodyContext)
                                    ?? emailMeta.EmailFrom;
 
-                if (!string.IsNullOrWhiteSpace(resolveEmail))
+                if (!string.IsNullOrWhiteSpace(resolveEmail) && resolveEmail.Contains('@'))
                 {
-                    var atIdx        = resolveEmail.IndexOf('@');
-                    var senderDomain = atIdx >= 0
-                        ? resolveEmail[(atIdx + 1)..].ToLowerInvariant()
-                        : null;
+                    var senderDomain = resolveEmail[(resolveEmail.IndexOf('@') + 1)..].ToLowerInvariant();
+                    supplierFromDomain = senderDomain;
+                    string resolveSource = resolveEmail == emailMeta.EmailFrom
+                        ? "direct sender domain"
+                        : "forwarded-body sender domain";
 
-                    if (senderDomain is not null)
+                    if (_suppliers.DomainMap.TryGetValue(senderDomain, out var domainMatch))
                     {
-                        string? domainResolved = null;
-                        string  resolveSource  = resolveEmail == emailMeta.EmailFrom
-                            ? "direct sender domain"
-                            : "forwarded-body sender domain";
-
-                        if (_suppliers.DomainMap.TryGetValue(senderDomain, out var domainMatch))
+                        supplier = domainMatch;
+                        _log.LogDebug("[SP] Supplier '{Supplier}' resolved by {Source} (exact) '{Domain}'",
+                            supplier, resolveSource, senderDomain);
+                    }
+                    else
+                    {
+                        var tld2 = senderDomain.Split('.')[0];
+                        var substringMatch = _suppliers.ResolveByDomainSubstring(tld2);
+                        if (substringMatch is not null)
                         {
-                            domainResolved = domainMatch;
+                            supplier = substringMatch;
+                            _log.LogDebug("[SP] Supplier '{Supplier}' resolved by {Source} (substring) '{Tld2}'",
+                                supplier, resolveSource, tld2);
                         }
                         else
                         {
-                            // Domain not in map — try substring matching: all canonical tokens
-                            // must appear somewhere in the domain TLD-2 part.
-                            // e.g. "certifiedsteel.com" → TLD-2 "certifiedsteel"
-                            //      matches "Certified Steel" tokens ["certified","steel"].
-                            var tld2 = senderDomain.Split('.')[0].ToLowerInvariant();
-                            domainResolved = _suppliers.ResolveByDomainSubstring(tld2);
-                            if (domainResolved is not null)
-                                resolveSource += " (token-substring)";
-                        }
-
-                        if (domainResolved is not null)
-                        {
-                            supplier = domainResolved;
-                            _log.LogInformation(
-                                "[SP] Supplier resolved by {Source} '{Domain}' -> '{Supplier}' " +
-                                "(name match failed for '{Raw}'). Subject='{Subject}'",
-                                resolveSource, senderDomain, supplier, rawSupplier, emailMeta.EmailSubject);
+                            _log.LogDebug(
+                                "[SP] Domain lookup failed '{Domain}' (tld2='{Tld2}') — trying AI name fallback. " +
+                                "Known suppliers: [{Known}]",
+                                senderDomain, tld2,
+                                string.Join(", ", _suppliers.CachedNames));
                         }
                     }
+                }
+            }
+
+            // Step 2: AI-extracted name fallback — only when domain resolution failed.
+            // Discard names that are our own company (AI reads quoted original messages
+            // and may extract "Mithril Metals" or "Metal Supermarkets" as the supplier).
+            if (supplier is null)
+            {
+                var rawAiSupplier = header.SupplierName;
+                static bool IsOurCompanyName(string? s) =>
+                    s is not null && (
+                        s.Contains("mithril", StringComparison.OrdinalIgnoreCase) ||
+                        s.Contains("metal supermarket", StringComparison.OrdinalIgnoreCase) ||
+                        s.Contains("hackensack", StringComparison.OrdinalIgnoreCase));
+                if (IsOurCompanyName(rawAiSupplier))
+                    rawAiSupplier = null;
+
+                if (!string.IsNullOrWhiteSpace(rawAiSupplier))
+                {
+                    supplier = _suppliers.ResolveSupplierName(rawAiSupplier);
+                    if (supplier is not null)
+                        _log.LogInformation(
+                            "[SP] Supplier '{Supplier}' resolved by AI name '{Raw}' (domain lookup failed). " +
+                            "Subject='{Subject}'",
+                            supplier, rawAiSupplier, emailMeta.EmailSubject);
                 }
             }
 
@@ -1636,9 +1626,9 @@ public class SharePointService
                 supplier = "Unknown";
                 jobRef   = "WHOIS";
                 _log.LogWarning(
-                    "[SP] Supplier '{Raw}' not in reference list  -- writing under [WHOIS]. " +
+                    "[SP] Supplier not in reference list (domain='{Domain}', AI='{AiName}') — writing under [WHOIS]. " +
                     "Subject='{Subject}'  From='{From}'",
-                    rawSupplier, emailMeta.EmailSubject, emailMeta.EmailFrom);
+                    supplierFromDomain, header.SupplierName, emailMeta.EmailSubject, emailMeta.EmailFrom);
             }
 
             result.SupplierName = supplier;
