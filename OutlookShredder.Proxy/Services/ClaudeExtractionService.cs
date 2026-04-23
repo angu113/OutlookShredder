@@ -237,7 +237,10 @@ public class ClaudeExtractionService : IAiExtractionService
         var model       = _config["Claude:Model"] ?? "claude-sonnet-4-6";
 
         var jobHint = req.JobRefs.Count > 0
-            ? $"Job reference(s) pre-identified by pattern scan: {string.Join(", ", req.JobRefs)}. Use these to confirm the jobReference field."
+            ? $"Job reference(s) found in the email subject/body: {string.Join(", ", req.JobRefs)}. " +
+              $"When processing a PDF attachment, prefer any job reference printed in the document itself over these — " +
+              $"a supplier may batch quotes for multiple RFQs into one email and each PDF will carry its own job ID. " +
+              $"Only fall back to the email-scanned refs if the document contains no recognisable job reference."
             : null;
 
         var contentType = (req.ContentType ?? string.Empty).ToLowerInvariant();

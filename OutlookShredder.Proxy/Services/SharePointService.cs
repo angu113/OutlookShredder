@@ -1445,9 +1445,12 @@ public class SharePointService
             var siteId = await GetSiteIdAsync();
 
             // ?????? Resolve job reference ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-            // Prefer the regex-matched refs from the email subject/body (reliable 6-char
-            // alphanumeric IDs in brackets) over the AI-extracted JobReference, which may
-            // contain a supplier quote number or PO number instead of our RFQ ID.
+            // Priority: AI-extracted ref from the PDF document > email subject/body regex ref.
+            // PDF content is per-attachment, so when a supplier batches quotes for multiple RFQs
+            // into one email (e.g. two PDFs each referencing different job IDs), Claude's per-PDF
+            // extraction routes each attachment to the correct RFQ. The email subject regex acts
+            // as a fallback for PDFs that don't embed our job number (supplier quote sheets, etc.)
+            // — those yield a supplier quote number that fails IsValidRfqId, so we fall through.
             var regexRef = emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']');
             var aiRef    = header.JobReference?.Trim();
 
@@ -1468,8 +1471,8 @@ public class SharePointService
                                      "CANNOT" or "SHOULD" or "ALWAYS" or "BEFORE" or "WITHIN");
             }
 
-            var rawJobRef = (regexRef
-                ?? (IsValidRfqId(aiRef) ? aiRef : null)
+            var rawJobRef = ((IsValidRfqId(aiRef) ? aiRef : null)
+                ?? regexRef
                 ?? string.Empty).ToUpperInvariant();
             var jobRef = string.IsNullOrEmpty(rawJobRef) ? "000000" : rawJobRef;
 
