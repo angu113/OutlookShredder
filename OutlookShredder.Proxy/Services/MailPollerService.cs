@@ -49,7 +49,7 @@ public class MailPollerService : BackgroundService
     //     (?>(?:Number\b\s*)?) and (?>(?:\s+Number\b)?\s*...) atomically absorb the optional
     //     "Number" label so it can never fall through into the ID capture group.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the
