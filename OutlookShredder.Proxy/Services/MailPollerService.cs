@@ -41,14 +41,15 @@ public class MailPollerService : BackgroundService
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     //
     // "Ref" is required (not optional) to prevent "job number" matching "number" as an ID.
-    // (?:erence|\b) forces the engine to either consume the full "erence" suffix or assert a word
-    // boundary immediately after "Ref". The atomic-group approach (?>erence)? doesn't work here
-    // because the outer ? lets the engine skip the group entirely, leaving "ERENCE" to be
-    // captured as the ID. With (?:erence|\b), if the "erence" branch is taken it is committed;
-    // if "Ref" is at a word boundary the zero-width \b branch is taken instead — neither path
-    // allows the engine to un-consume "erence" and re-offer it as an ID.
+    // Two false-positive classes fixed via atomic groups:
+    //   ERENCE — "JOB REFERENCE" (no ID follows): (?:erence|\b) forces the engine to consume
+    //     the full "erence" suffix or stop at a word boundary; neither path lets it un-consume
+    //     "erence" and re-offer it as a 6-char ID.
+    //   NUMBER — "Job Reference Number" or "RFQ Number" where "Number" is a 6-char label word:
+    //     (?>(?:Number\b\s*)?) and (?>(?:\s+Number\b)?\s*...) atomically absorb the optional
+    //     "Number" label so it can never fall through into the ID capture group.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the
