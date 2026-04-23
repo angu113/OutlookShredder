@@ -40,11 +40,15 @@ public class MailPollerService : BackgroundService
     // Fallback: bare ID appearing after "RFQ" or "Job Ref" (no brackets). Same two formats.
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     //
-    // "Ref" is required (not optional) to prevent "job number" matching with "number" as the ID.
-    // A separator (colon, hash, or #) is required after the label to prevent the regex backtracking
-    // through "erence" and capturing "ERENCE" from "JOB REFERENCE" as an ID.
+    // "Ref" is required (not optional) to prevent "job number" matching "number" as an ID.
+    // (?:erence|\b) forces the engine to either consume the full "erence" suffix or assert a word
+    // boundary immediately after "Ref". The atomic-group approach (?>erence)? doesn't work here
+    // because the outer ? lets the engine skip the group entirely, leaving "ERENCE" to be
+    // captured as the ID. With (?:erence|\b), if the "erence" branch is taken it is committed;
+    // if "Ref" is at a word boundary the zero-width \b branch is taken instead — neither path
+    // allows the engine to un-consume "erence" and re-offer it as an ID.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence)?\s*[:#]\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)\s*[:#]?\s*(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the
