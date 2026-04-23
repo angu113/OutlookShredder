@@ -1561,9 +1561,11 @@ public class SharePointService
             string? supplier = null;
             string  supplierFromDomain = string.Empty;   // for WHOIS warning
             {
+                // For forwarded emails (internal EmailFrom) the first "From:" line in the
+                // body is always the supplier — Outlook places it first in the quoted block.
+                // Do NOT fall back to EmailFrom; the internal staff address will never resolve.
                 var resolveEmail = IsInternalDomain(emailMeta.EmailFrom)
                     ? TryExtractForwardedSenderEmail(emailMeta.EmailBody ?? emailMeta.BodyContext)
-                      ?? emailMeta.EmailFrom
                     : emailMeta.EmailFrom;
 
                 if (!string.IsNullOrWhiteSpace(resolveEmail) && resolveEmail.Contains('@'))
@@ -2277,14 +2279,15 @@ public class SharePointService
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// Scans <paramref name="body"/> for the original sender's email address embedded
-    /// by Outlook when it forwards a message (the "From: ..." line in the forwarded block).
-    /// Returns the first email address found, or <see langword="null"/> if none is present.
+    /// Scans <paramref name="body"/> for the supplier's email address in the first
+    /// "From:" line of the forwarded block. Outlook places the original supplier's
+    /// "From:" first in the quoted message — that first match is always the supplier.
+    /// Returns <see langword="null"/> if no "From:" line is found.
     /// </summary>
     private static string? TryExtractForwardedSenderEmail(string? body)
     {
         if (string.IsNullOrWhiteSpace(body)) return null;
-        var m = _forwardedFromRegex.Match(body);
+        var m = _forwardedFromRegex.Match(body);   // first match = supplier
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
