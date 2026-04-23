@@ -1476,6 +1476,22 @@ public class SharePointService
                 ?? string.Empty).ToUpperInvariant();
             var jobRef = string.IsNullOrEmpty(rawJobRef) ? "000000" : rawJobRef;
 
+            // Detect mismatch: PDF has a valid RFQ ID that differs from the email subject ref.
+            // This happens when a supplier batches quotes for multiple RFQs, or sends a quote PDF
+            // for the wrong job. Flag every SLI with a visible warning so the user can verify.
+            string? jobRefMismatchWarning = null;
+            if (IsValidRfqId(aiRef) && !string.IsNullOrEmpty(regexRef) &&
+                !string.Equals(aiRef, regexRef, StringComparison.OrdinalIgnoreCase))
+            {
+                jobRefMismatchWarning =
+                    $"⚠ Quote job ref [{aiRef?.ToUpperInvariant()}] differs from email ref [{regexRef.ToUpperInvariant()}] — verify this quote is for the correct RFQ.";
+                _log.LogWarning(
+                    "[SP] Job ref mismatch: PDF extracted [{AiRef}] but email subject has [{RegexRef}]. " +
+                    "Filing under [{JobRef}]. Subject='{Subject}'  From='{From}'",
+                    aiRef?.ToUpperInvariant(), regexRef.ToUpperInvariant(), jobRef,
+                    emailMeta.EmailSubject, emailMeta.EmailFrom);
+            }
+
             if (!string.IsNullOrEmpty(aiRef) && !IsValidRfqId(aiRef) && string.IsNullOrEmpty(regexRef))
             {
                 _log.LogInformation(
@@ -1523,7 +1539,8 @@ public class SharePointService
                     await PurgeNoMessageIdSliForSrAsync(siteId, sliListId2, srId2);
                 await WriteSupplierLineItemAsync(
                     siteId, sliListId2, srId2, jobRef, resolvedSup, product, rowIndex,
-                    sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
+                    sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
+                    jobRefMismatchWarning);
                 result.Success = true;
                 return result;
             }
@@ -1665,7 +1682,8 @@ public class SharePointService
 
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
-                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference);
+                sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
+                jobRefMismatchWarning);
 
             result.Success = true;
         }
@@ -1930,7 +1948,7 @@ public class SharePointService
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
         string? sourceFile, string? emailFrom, string? messageId = null,
-        string? quoteReference = null)
+        string? quoteReference = null, string? jobRefMismatchWarning = null)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -1989,7 +2007,11 @@ public class SharePointService
             ["TotalPrice"]               = product.TotalPrice ?? ComputeTotalPrice(product),
             ["LeadTimeText"]             = product.LeadTimeText,
             ["Certifications"]           = product.Certifications,
-            ["SupplierProductComments"]  = product.SupplierProductComments,
+            ["SupplierProductComments"]  = string.IsNullOrEmpty(jobRefMismatchWarning)
+                                               ? product.SupplierProductComments
+                                               : string.IsNullOrEmpty(product.SupplierProductComments)
+                                                   ? jobRefMismatchWarning
+                                                   : $"{jobRefMismatchWarning} {product.SupplierProductComments}",
             // A quoted price means the supplier IS supplying — don't mark regret even if
             // cross-product comments contain regret language (e.g. "regrets on the pipe").
             ["IsRegret"]                 = !HasPrice(product) && HasRegretPhrase(product.SupplierProductComments),

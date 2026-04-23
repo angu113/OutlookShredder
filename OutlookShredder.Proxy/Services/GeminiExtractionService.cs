@@ -66,7 +66,7 @@ public class GeminiExtractionService : IAiExtractionService
         It appears in three specific ways — extract the ID in all cases, return without brackets:
           1. In email subject: [AW00001] or [HQXXXXXX] or [XXXXXX] inside square brackets
           2. In supplier PDFs: labelled "JOB: AW00001", "JOB #: XXXXXX", "JOB REF: XXXXXX",
-             or similar label followed by the bare ID (no brackets)
+             "STATION: XXXXXX", "STATION NO: XXXXXX", or similar label followed by the bare ID (no brackets)
           3. Pre-identified: the prompt may provide a hint like "Job reference(s): AW00001"
         If none of the above apply, return null. Do NOT extract a job reference from regular
         prose — a word appearing in a sentence (e.g. "Please confirm...", "Thanks for your
