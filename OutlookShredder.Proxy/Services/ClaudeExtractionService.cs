@@ -64,6 +64,9 @@ public class ClaudeExtractionService : IAiExtractionService
         If none of the above apply, return null. Do NOT extract a job reference from regular
         prose — a word appearing in a sentence (e.g. "Please confirm...", "Thanks for your
         order") is never a job reference, even if it happens to be 6 alphanumeric characters.
+        IMPORTANT: Our job reference is NEVER preceded by a "#" symbol. If you see "#XXXXXX"
+        or "#JXXXXX" (hash before the ID), it is the supplier's own reference number — put it
+        in quoteReference if appropriate, never in jobReference.
         NOT the supplier's own quote/order number (that goes in quoteReference).
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────

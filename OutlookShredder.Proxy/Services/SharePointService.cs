@@ -1466,6 +1466,13 @@ public class SharePointService
             // — those yield a supplier quote number that fails IsValidRfqId, so we fall through.
             var regexRef = emailMeta.JobRefs.FirstOrDefault()?.Trim('[', ']');
             var aiRef    = header.JobReference?.Trim();
+            // Supplier references are sometimes prefixed with '#' (e.g. Eastern Metal's #J06601).
+            // Our IDs never start with '#' — discard any AI-extracted ref that has one.
+            if (aiRef?.StartsWith('#') == true)
+            {
+                _log.LogDebug("[SP] Discarding hash-prefixed AI job ref '{Ref}' — supplier's own reference", aiRef);
+                aiRef = null;
+            }
 
             // RFQ IDs — two valid lengths:
             //   6 chars — legacy alphanumeric (e.g. BX9EWM) or new initials+Crockford4 (e.g. AW0001)
