@@ -2355,8 +2355,16 @@ public class SharePointService
             // with standalone plain-digit tokens gives the same number set for both.
             var plainDigitA = numA.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
             var plainDigitB = numB.Where(t => !IsDimToken(t) && t.All(char.IsDigit)).ToHashSet();
-            var allNumsA = ExtractDimNumbers(dimA).Union(plainDigitA).ToHashSet();
-            var allNumsB = ExtractDimNumbers(dimB).Union(plainDigitB).ToHashSet();
+            // Also include the leading digit run from mixed alloy/temper tokens like "3003h14" → "3003".
+            // Without this, one extraction writing "3003H14" and another writing "3003" produce
+            // different allNums sets, causing a false incompatibility for the same product.
+            static IEnumerable<string> LeadingDigits(IEnumerable<string> tokens) =>
+                tokens
+                    .Where(t => !IsDimToken(t) && !t.All(char.IsDigit) && t.Length > 0 && char.IsDigit(t[0]))
+                    .Select(t => new string(t.TakeWhile(char.IsDigit).ToArray()))
+                    .Where(s => s.Length > 0);
+            var allNumsA = ExtractDimNumbers(dimA).Union(plainDigitA).Union(LeadingDigits(numA)).ToHashSet();
+            var allNumsB = ExtractDimNumbers(dimB).Union(plainDigitB).Union(LeadingDigits(numB)).ToHashSet();
             if (!allNumsA.SetEquals(allNumsB)) return false;
 
             var gradeA = numA.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
