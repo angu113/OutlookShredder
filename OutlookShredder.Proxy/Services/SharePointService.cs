@@ -840,7 +840,20 @@ public class SharePointService
 
         if (matches.Count == 0)
         {
-            _log.LogWarning("[SP] SetRfqCompleteAsync: RFQ Reference '{Id}' not found", rfqId);
+            _log.LogInformation("[SP] SetRfqCompleteAsync: RFQ Reference '{Id}' not found — creating stub with Complete={Complete}", rfqId, complete);
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem
+                {
+                    Fields = new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            [col]          = rfqId,
+                            ["Complete"]   = complete,
+                        }
+                    }
+                });
+            _log.LogInformation("[SP] Created stub RFQ Reference '{Id}' with Complete={Complete}", rfqId, complete);
             return;
         }
 
