@@ -393,7 +393,15 @@ public class ClaudeExtractionService : IAiExtractionService
 
             var status = (int)lastResponse.StatusCode;
 
-            // Retryable: rate limit (429) or server errors (5xx)
+            // 503 / 529 = provider overloaded — switch providers immediately, don't burn retries
+            if (status == 503 || status == 529)
+            {
+                var body = await lastResponse.Content.ReadAsStringAsync();
+                throw new AiServiceOverloadedException("Claude",
+                    new HttpRequestException($"HTTP {status}: {(body.Length > 200 ? body[..200] : body)}"));
+            }
+
+            // Retryable: rate limit (429) or other server errors (5xx)
             if (attempt < maxRetries && (status == 429 || status >= 500))
             {
                 var snippet = await lastResponse.Content.ReadAsStringAsync();

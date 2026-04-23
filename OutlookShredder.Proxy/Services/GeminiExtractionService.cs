@@ -257,20 +257,34 @@ public class GeminiExtractionService : IAiExtractionService
                     extraction.SupplierName, extraction.Products.Count);
                 return extraction;
             }
-            catch (Exception ex) when (attempt < maxRetries)
-            {
-                _log.LogWarning(ex, "[Gemini] Attempt {Attempt} failed, retrying", attempt + 1);
-                await DelayAsync(attempt);
-            }
             catch (Exception ex)
             {
-                _log.LogError(ex, "[Gemini] All {Max} attempts exhausted", maxRetries + 1);
-                throw;
+                if (IsOverloadException(ex))
+                {
+                    _log.LogWarning("[Gemini] Overloaded on attempt {Attempt} — switching provider", attempt + 1);
+                    throw new AiServiceOverloadedException("Gemini", ex);
+                }
+                if (attempt < maxRetries)
+                {
+                    _log.LogWarning(ex, "[Gemini] Attempt {Attempt} failed, retrying", attempt + 1);
+                    await DelayAsync(attempt);
+                }
+                else
+                {
+                    _log.LogError(ex, "[Gemini] All {Max} attempts exhausted", maxRetries + 1);
+                    throw;
+                }
             }
         }
 
         return null;
     }
+
+    private static bool IsOverloadException(Exception ex) =>
+        ex is GeminiApiTimeoutException ||
+        ex.Message.Contains("503",          StringComparison.Ordinal) ||
+        ex.Message.Contains("high demand",  StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("UNAVAILABLE",  StringComparison.OrdinalIgnoreCase);
 
     public async Task<PoExtraction?> ExtractPurchaseOrderAsync(
         string base64Pdf, string fileName, string emailBodyContext,
@@ -326,15 +340,23 @@ public class GeminiExtractionService : IAiExtractionService
                 _log.LogInformation("[Gemini PO] Extracted PO from {FileName}", fileName);
                 return extraction;
             }
-            catch (Exception ex) when (attempt < maxRetries)
-            {
-                _log.LogWarning(ex, "[Gemini PO] Attempt {Attempt} failed, retrying", attempt + 1);
-                await DelayAsync(attempt);
-            }
             catch (Exception ex)
             {
-                _log.LogError(ex, "[Gemini PO] All {Max} attempts exhausted for {File}", maxRetries + 1, fileName);
-                throw;
+                if (IsOverloadException(ex))
+                {
+                    _log.LogWarning("[Gemini PO] Overloaded on attempt {Attempt} — switching provider", attempt + 1);
+                    throw new AiServiceOverloadedException("Gemini", ex);
+                }
+                if (attempt < maxRetries)
+                {
+                    _log.LogWarning(ex, "[Gemini PO] Attempt {Attempt} failed, retrying", attempt + 1);
+                    await DelayAsync(attempt);
+                }
+                else
+                {
+                    _log.LogError(ex, "[Gemini PO] All {Max} attempts exhausted for {File}", maxRetries + 1, fileName);
+                    throw;
+                }
             }
         }
 
