@@ -1008,20 +1008,28 @@ public class MailPollerService : BackgroundService
                         .Select(r => r.Mspc!)
                         .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                    // Null out any productSearchKey that isn't in the RLI set — the AI drifted
-                    // to a catalog entry outside the requested items, so fall back to fuzzy match.
-                    if (validMspcs.Count > 0)
+                    // Null out any productSearchKey that doesn't exist in the catalog at all —
+                    // the AI hallucinated an MSPC that isn't real. A valid catalog entry is
+                    // accepted even if the RLI consistency check stripped it from validMspcs
+                    // (e.g. user edited the RFQ name after catalog selection — the MSPC is still
+                    // correct and the AI's match is better than falling back to null).
+                    foreach (var p in products.Where(p => !string.IsNullOrEmpty(p.ProductSearchKey)))
                     {
-                        foreach (var p in products.Where(p =>
-                            !string.IsNullOrEmpty(p.ProductSearchKey) &&
-                            !validMspcs.Contains(p.ProductSearchKey!)))
+                        if (_catalog.FindBySearchKey(p.ProductSearchKey) is null)
                         {
                             _log.LogWarning(
                                 "[Mail] RLI drift: AI returned productSearchKey '{Key}' for '{Name}' " +
-                                "which is not in the RLI set [{Rli}] — nulling, falling back to fuzzy match",
+                                "which is not a known catalog MSPC — nulling",
+                                p.ProductSearchKey, p.ProductName);
+                            p.ProductSearchKey = null;
+                        }
+                        else if (!validMspcs.Contains(p.ProductSearchKey!))
+                        {
+                            _log.LogWarning(
+                                "[Mail] RLI off-list: AI returned productSearchKey '{Key}' for '{Name}' " +
+                                "outside the RLI set [{Rli}] — accepting (valid catalog entry)",
                                 p.ProductSearchKey, p.ProductName,
                                 string.Join(", ", validMspcs));
-                            p.ProductSearchKey = null;
                         }
                     }
 
@@ -1029,8 +1037,7 @@ public class MailPollerService : BackgroundService
                     foreach (var p in products.Where(p => string.IsNullOrEmpty(p.ProductSearchKey)))
                         _log.LogWarning(
                             "[Mail] RLI unmatched: AI returned no productSearchKey for '{Name}' " +
-                            "despite {Count} RLI item(s) — will fall back to fuzzy match. " +
-                            "RLI=[{Rli}]",
+                            "despite {Count} RLI item(s). RLI=[{Rli}]",
                             p.ProductName,
                             req.RliItems.Count,
                             string.Join(" | ", req.RliItems.Select(r =>
