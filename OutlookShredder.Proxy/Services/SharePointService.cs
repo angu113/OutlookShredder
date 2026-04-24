@@ -2173,10 +2173,14 @@ public class SharePointService
             {
                 if (!string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase))
                     return false; // different catalog products
-                // Same MSPC: still verify dimensions match so distinct cut sizes are kept separate.
+                // Same PDF + same MSPC: rely on numeric dimension compatibility alone.
+                // Jaccard is intentionally omitted here — dim-token merging can suppress name token
+                // overlap (e.g. "16GA" merged into a single "2x2x16gax24" token vs "16" kept
+                // separate), pushing Jaccard below threshold for the same product.
+                // allowSubset=true handles PDFs where one structural section (description block)
+                // includes a dimension (e.g. wall thickness) that another section omits.
                 var spTok3 = ProductTokens(spProduct2 ?? string.Empty);
-                return NumericTokensCompatible(productTokens, spTok3)
-                    && ProductJaccard(spTok3, productTokens) >= 0.4;
+                return NumericTokensCompatible(productTokens, spTok3, allowSubset: true);
             }
             if (NormalizeMatch(spProduct2, productName)) return true;
             var spTok2 = ProductTokens(spProduct2 ?? string.Empty);
@@ -2393,7 +2397,7 @@ public class SharePointService
     private static bool IsDimToken(string t) =>
         t.Any(char.IsDigit) && t.Any(c => c == 'x' || c == 'f' || c == 'd');
 
-    private static bool NumericTokensCompatible(HashSet<string> a, HashSet<string> b)
+    private static bool NumericTokensCompatible(HashSet<string> a, HashSet<string> b, bool allowSubset = false)
     {
         var numA = a.Where(HasDigit).ToHashSet();
         var numB = b.Where(HasDigit).ToHashSet();
@@ -2419,7 +2423,12 @@ public class SharePointService
                     .Where(s => s.Length > 0);
             var allNumsA = ExtractDimNumbers(dimA).Union(plainDigitA).Union(LeadingDigits(numA)).ToHashSet();
             var allNumsB = ExtractDimNumbers(dimB).Union(plainDigitB).Union(LeadingDigits(numB)).ToHashSet();
-            if (!allNumsA.SetEquals(allNumsB)) return false;
+            // allowSubset: one structural section of a PDF may omit a dimension that another includes
+            // (e.g. wall thickness in description block vs pricing grid). When same QuoteRef + same MSPC
+            // already anchor the identity, allow the smaller set to be a subset of the larger.
+            bool numsOk = allNumsA.SetEquals(allNumsB)
+                || (allowSubset && (allNumsA.IsSubsetOf(allNumsB) || allNumsB.IsSubsetOf(allNumsA)));
+            if (!numsOk) return false;
 
             var gradeA = numA.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
             var gradeB = numB.Where(t => !IsDimToken(t) && !t.All(char.IsDigit)).ToHashSet();
