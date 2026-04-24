@@ -467,6 +467,11 @@ public class SharePointService
         {
             if (sli.Fields?.AdditionalData is null) continue;
 
+            // Skip logically deleted SLI rows
+            if (sli.Fields.AdditionalData.TryGetValue("IsDeleted", out var delFlag) &&
+                delFlag is true or JsonElement { ValueKind: JsonValueKind.True })
+                continue;
+
             var row = sli.Fields.AdditionalData
                 .Where(kv => IsAppField(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
@@ -1555,8 +1560,8 @@ public class SharePointService
                 }
 
                 var sliListId2 = await GetSupplierLineItemsListIdAsync();
-                if (messageId is not null && rowIndex == 0)
-                    await PurgeNoMessageIdSliForSrAsync(siteId, sliListId2, srId2);
+                if (!srNew2 && rowIndex == 0)
+                    await SoftDeleteSlisBySrIdAsync(siteId, sliListId2, srId2);
                 await WriteSupplierLineItemAsync(
                     siteId, sliListId2, srId2, jobRef, resolvedSup, product, rowIndex,
                     sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
@@ -1690,14 +1695,12 @@ public class SharePointService
             // ??"?????"??? Upsert SupplierLineItems ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
             var sliListId = await GetSupplierLineItemsListIdAsync();
 
-            // On the first product of a MessageId-bearing reprocess, purge any existing SLI
-            // rows for this SR that have no MessageId.  These are stale rows from an earlier
-            // extraction whose product names may differ enough to fail the fuzzy match, causing
-            // the new extraction to insert duplicates instead of replacing them.
-            // We only reach here after the AI has already returned
-            // is safe  -- the new rows are about to be written immediately after.
-            if (messageId is not null && rowIndex == 0)
-                await PurgeNoMessageIdSliForSrAsync(siteId, sliListId, srId);
+            // On the first product of an SR update, soft-delete all existing SLIs for this SR.
+            // Stale rows (from earlier extractions with different product names or MSPCs) cannot
+            // be reliably matched by the fuzzy dedup and would otherwise accumulate as duplicates.
+            // Soft-delete preserves the rows for audit; read queries filter IsDeleted=true.
+            if (!srNew && rowIndex == 0)
+                await SoftDeleteSlisBySrIdAsync(siteId, sliListId, srId);
 
             await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
@@ -2035,6 +2038,7 @@ public class SharePointService
             // cross-product comments contain regret language (e.g. "regrets on the pipe").
             ["IsRegret"]                 = !HasPrice(product) && HasRegretPhrase(product.SupplierProductComments),
             ["IsSubstitute"]             = product.IsSubstitute,
+            ["IsDeleted"]               = false,
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
@@ -2099,7 +2103,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,RFQ_ID,SupplierName,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,RFQ_ID,SupplierName,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments,IsDeleted)"];
                 r.QueryParameters.Top    = 2000;
             });
 
@@ -2116,6 +2120,11 @@ public class SharePointService
             {
                 var d = item.Fields?.AdditionalData;
                 if (d is null) continue;
+
+                // Skip logically deleted rows — they've been superseded by a newer extraction
+                if (d.TryGetValue("IsDeleted", out var itemDel) &&
+                    itemDel is true or JsonElement { ValueKind: JsonValueKind.True })
+                    continue;
 
                 var srId  = d.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() : null;
                 bool sameSr = string.Equals(srId, supplierResponseId, StringComparison.OrdinalIgnoreCase);
@@ -2236,6 +2245,49 @@ public class SharePointService
         {
             await GetGraph().Sites[siteId].Lists[listId].Items[id].DeleteAsync();
             _log.LogInformation("[SP] Purged stale no-MessageId SLI {Id} for SR {SrId}", id, srId);
+        }
+    }
+
+    /// <summary>
+    /// Soft-deletes all non-deleted SupplierLineItems for the given SR.
+    /// Called before writing a fresh set of SLIs when an existing SR is updated,
+    /// so stale rows with divergent product names or MSPCs don't survive as duplicates.
+    /// Rows are retained in SharePoint with IsDeleted=true for audit purposes.
+    /// </summary>
+    private async Task SoftDeleteSlisBySrIdAsync(string siteId, string listId, string srId)
+    {
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,IsDeleted)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        var toSoftDelete = new List<string>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null || item.Id is null) continue;
+                var itemSrId = d.TryGetValue("SupplierResponseId", out var s) ? s?.ToString() : null;
+                if (!string.Equals(itemSrId, srId, StringComparison.OrdinalIgnoreCase)) continue;
+                var alreadyDeleted = d.TryGetValue("IsDeleted", out var del) &&
+                                     del is true or JsonElement { ValueKind: JsonValueKind.True };
+                if (!alreadyDeleted)
+                    toSoftDelete.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        foreach (var id in toSoftDelete)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[id].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["IsDeleted"] = true } });
+            _log.LogInformation("[SP] Soft-deleted SLI {Id} for SR {SrId} (SR update)", id, srId);
         }
     }
 
@@ -3659,6 +3711,7 @@ public class SharePointService
                 ("IsSubstitute",             "boolean"),
                 ("IsPurchased",              "boolean"),
                 ("PurchaseRecordId",         "text"),
+                ("IsDeleted",               "boolean"),
             ]),
             ["RFQ Line Items"] = await EnsureListColumnsAsync(siteId,
                 _config["SharePoint:ListName"] ?? "RFQ Line Items",
