@@ -90,6 +90,10 @@ public class MailPollerService : BackgroundService
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Subject, string From, DateTimeOffset StartedAt)>
         _inFlight = new();
 
+    // Application shutdown token — set once by ExecuteAsync so reprocess batches survive
+    // HTTP client disconnections (which cancel the per-request CancellationToken).
+    private CancellationToken _shutdownToken = CancellationToken.None;
+
     // Last poll cycle summary.
     private volatile int        _lastPollFound   = 0;
     private DateTimeOffset?     _lastPollAt      = null;
@@ -158,8 +162,11 @@ public class MailPollerService : BackgroundService
 
         try
         {
+            // Use the app shutdown token (not the HTTP request token) so a client
+            // disconnect doesn't abort in-progress extraction and SP writes.
+            var batchCt = _shutdownToken;
             await Parallel.ForEachAsync(idList,
-                new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+                new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = batchCt },
                 async (messageId, _ct) =>
                 {
                     var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
@@ -389,6 +396,7 @@ public class MailPollerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _shutdownToken = stoppingToken;
         var mailbox         = _config["Mail:MailboxAddress"]
             ?? throw new InvalidOperationException(
                 "Mail:MailboxAddress is not configured. " +
@@ -968,6 +976,35 @@ public class MailPollerService : BackgroundService
             var extraction = await _aiFactory.GetService().ExtractRfqAsync(req);
             _log.LogInformation("[Mail] Extracted: supplier={Supplier} quoteRef={QuoteRef}",
                 extraction?.SupplierName, extraction?.QuoteReference ?? "(none)");
+
+            // Late RLI inject: the subject had no job ref so we couldn't pre-fetch RLI,
+            // but the AI extracted one from the email body. If any product lacks an MSPC,
+            // fetch RLI now and re-run extraction so the AI can anchor against catalog items.
+            if (req.RliItems.Count == 0
+                && extraction?.JobReference is string lateJobRef
+                && lateJobRef != "000000" && lateJobRef != "WHOIS"
+                && extraction.Products.Any(p => string.IsNullOrEmpty(p.ProductSearchKey)))
+            {
+                try
+                {
+                    var rliItems = await _sp.ReadRfqLineItemsByRfqIdAsync(lateJobRef);
+                    if (rliItems.Count > 0)
+                    {
+                        _log.LogInformation(
+                            "[Mail] Late RLI inject: re-extracting with {Count} item(s) for [{RfqId}]",
+                            rliItems.Count, lateJobRef);
+                        req.RliItems = rliItems;
+                        await AcquireRateSlotAsync(maxPerMinute, ct);
+                        extraction = await _aiFactory.GetService().ExtractRfqAsync(req);
+                        _log.LogInformation("[Mail] Late re-extract: supplier={Supplier} quoteRef={QuoteRef}",
+                            extraction?.SupplierName, extraction?.QuoteReference ?? "(none)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Mail] Late RLI inject failed for [{RfqId}] — keeping first-pass result", lateJobRef);
+                }
+            }
 
             // Always write at least one row — even when nothing useful could be extracted —
             // so every processed email has a visible record in SharePoint.
