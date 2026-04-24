@@ -1000,9 +1000,32 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Extracted {Count} product(s) from {Source}", products.Count, source);
                 products = ProductDeduplicator.Deduplicate(products, source, dedupDryRun, _log);
 
-                // Warn for each product the AI couldn't anchor to an RLI item despite context being available.
+                // Validate and warn when RLI context was provided.
                 if (req.RliItems.Count > 0)
                 {
+                    var validMspcs = req.RliItems
+                        .Where(r => !string.IsNullOrEmpty(r.Mspc))
+                        .Select(r => r.Mspc!)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    // Null out any productSearchKey that isn't in the RLI set — the AI drifted
+                    // to a catalog entry outside the requested items, so fall back to fuzzy match.
+                    if (validMspcs.Count > 0)
+                    {
+                        foreach (var p in products.Where(p =>
+                            !string.IsNullOrEmpty(p.ProductSearchKey) &&
+                            !validMspcs.Contains(p.ProductSearchKey!)))
+                        {
+                            _log.LogWarning(
+                                "[Mail] RLI drift: AI returned productSearchKey '{Key}' for '{Name}' " +
+                                "which is not in the RLI set [{Rli}] — nulling, falling back to fuzzy match",
+                                p.ProductSearchKey, p.ProductName,
+                                string.Join(", ", validMspcs));
+                            p.ProductSearchKey = null;
+                        }
+                    }
+
+                    // Warn for each product the AI couldn't anchor despite context being available.
                     foreach (var p in products.Where(p => string.IsNullOrEmpty(p.ProductSearchKey)))
                         _log.LogWarning(
                             "[Mail] RLI unmatched: AI returned no productSearchKey for '{Name}' " +
