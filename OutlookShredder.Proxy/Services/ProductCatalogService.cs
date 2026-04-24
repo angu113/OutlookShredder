@@ -503,6 +503,13 @@ public class ProductCatalogService : BackgroundService
         s = _dimSeparator.Replace(s, m =>
             $"{NormDimPart(m.Groups[1].Value)}x{NormDimPart(m.Groups[2].Value)}");
 
+        // Normalise remaining 1-2 digit standalone integers to "Nd0" dim form so they
+        // participate in dimension overlap. This handles nominal pipe/tube sizes (e.g.
+        // "Pipe 1 SCH 40" → "1d0" to match catalog "1.000" → "1d0") and standalone
+        // schedule numbers ("40" → "40d0"). Integers with 3+ digits are skipped to
+        // preserve grade tokens (6061, 304, etc.) as non-dim tokens.
+        s = Regex.Replace(s, @"\b(\d{1,2})\b", m => m.Groups[1].Value + "d0");
+
         s = Regex.Replace(s, @"[""']", "");
         return _dimSplit.Split(s)
             .Where(t => t.Length > 1 || (t.Length == 1 && char.IsDigit(t[0])))
