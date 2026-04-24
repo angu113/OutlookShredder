@@ -1990,14 +1990,11 @@ public class SharePointService
         }
         else
         {
-            var catalogMatch   = _catalog.ResolveProduct(prodName);
-            productSearchKey   = catalogMatch?.SearchKey;
-            catalogProductName = catalogMatch?.Name;
-
-            if (productSearchKey is null)
-                _log.LogWarning(
-                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}'  -- ProductSearchKey will be null",
-                    jobRef, supplier, prodName);
+            productSearchKey   = null;
+            catalogProductName = null;
+            _log.LogWarning(
+                "[SP] No RLI anchor for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null",
+                jobRef, supplier, prodName);
         }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";
