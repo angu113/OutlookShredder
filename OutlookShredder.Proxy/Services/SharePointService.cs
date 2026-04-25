@@ -400,6 +400,24 @@ public class SharePointService
         return (result, nextLink);
     }
 
+    // ── Count: total SLI rows (for progress bar on first page) ───────────────
+
+    /// <summary>
+    /// Returns the total number of SupplierLineItem rows in SharePoint.
+    /// Called in parallel with the first page fetch; result is returned as
+    /// <c>totalCount</c> in the /api/items response so Shredder can drive a
+    /// determinate progress bar.  This is a raw count (pre-filter, pre-dedup)
+    /// so it is an upper bound on the items actually returned after filtering.
+    /// </summary>
+    public async Task<int> GetSupplierLineItemCountAsync()
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var count     = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .Count.GetAsync();
+        return count ?? 0;
+    }
+
     // ??"?????"??? Read: all supplier items for one RFQ ID (targeted refresh) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
     /// <summary>

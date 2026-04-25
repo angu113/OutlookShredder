@@ -252,7 +252,21 @@ public class ExtractController : ControllerBase
     {
         try
         {
-            var (items, next) = await _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw);
+            bool isFirstPage = nextLink is null;
+
+            // Fetch items and (on first page only) total count in parallel.
+            // The count is a raw SLI row count — an upper bound used by Shredder
+            // to drive a determinate progress bar.  Zero latency added because
+            // site/list ID lookups are cached after the first request.
+            var itemsTask = _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw);
+            var countTask = isFirstPage
+                ? _sp.GetSupplierLineItemCountAsync()
+                : Task.FromResult(0);
+
+            await Task.WhenAll(itemsTask, countTask);
+
+            var (items, next) = itemsTask.Result;
+            int? totalCount   = isFirstPage ? countTask.Result : null;
 
             if (!includeCompleted)
             {
@@ -268,7 +282,7 @@ public class ExtractController : ControllerBase
                 }
             }
 
-            return Ok(new { items, nextLink = next });
+            return Ok(new { items, nextLink = next, totalCount });
         }
         catch (Exception ex)
         {
