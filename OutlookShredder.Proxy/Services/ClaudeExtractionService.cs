@@ -109,8 +109,24 @@ public class ClaudeExtractionService : IAiExtractionService
         - Linear-feet pricing: when quantity is expressed as total linear footage
           (e.g. "100 LF", "500 linear feet") rather than pieces, set unitsQuoted = that
           footage number, lengthPerUnit = 1, lengthUnit = "ft".
-        - ALWAYS extract lengthPerUnit when pricing is per foot ($/ft, $/LF) — it is
-          required to compute the line total.
+        - For Long products, ALWAYS extract lengthPerUnit (piece length) — required for
+          $/ft line total computation and dimension comparison.
+
+        ── DIMENSIONS ─────────────────────────────────────────────────────────────
+        For each product, extract dimensions based on the product form:
+
+        Flat products (Sheet, Plate, Coil, Strip):
+          - dimWidth:  shorter cut dimension in inches (e.g. 48 for a 48" x 96" sheet)
+          - dimLength: longer cut dimension in inches (e.g. 96)
+          - Leave lengthPerUnit null for flat products.
+
+        Long products (Bar, Rod, Tube, Pipe, Angle, Channel, I-Beam, Beam):
+          - ALWAYS extract lengthPerUnit (piece/bar/tube length), regardless of pricing unit.
+          - Use lengthUnit "ft" for feet, "in" for inches.
+          - Leave dimWidth and dimLength null.
+
+        Unit products (discrete items sold per unit with no continuous length):
+          - Leave dimWidth, dimLength, and lengthPerUnit null.
 
         ── MULTIPLE PRODUCTS ──────────────────────────────────────────────────────
         Every distinct grade, form, size, or finish is a SEPARATE entry in products[].
@@ -180,6 +196,8 @@ public class ClaudeExtractionService : IAiExtractionService
                     "unitsQuoted":             { "type": ["number","null"] },
                     "lengthPerUnit":           { "type": ["number","null"] },
                     "lengthUnit":              { "type": ["string","null"], "enum": ["ft","m","in","mm","cm",null] },
+                    "dimWidth":                { "type": ["number","null"], "description": "Flat products only — shorter cut dimension in inches (e.g. 48)" },
+                    "dimLength":               { "type": ["number","null"], "description": "Flat products only — longer cut dimension in inches (e.g. 96)" },
                     "weightPerUnit":           { "type": ["number","null"] },
                     "weightUnit":              { "type": ["string","null"], "enum": ["lb","kg","oz","g",null] },
                     "pricePerPound":           { "type": ["number","null"] },

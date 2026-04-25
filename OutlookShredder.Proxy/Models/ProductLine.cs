@@ -7,6 +7,8 @@ public class ProductLine
     public double? UnitsQuoted             { get; set; }
     public double? LengthPerUnit           { get; set; }
     public string? LengthUnit              { get; set; }
+    public double? DimWidth               { get; set; }
+    public double? DimLength              { get; set; }
     public double? WeightPerUnit           { get; set; }
     public string? WeightUnit              { get; set; }
     public double? PricePerPound           { get; set; }
