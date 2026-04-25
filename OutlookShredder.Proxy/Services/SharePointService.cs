@@ -411,16 +411,26 @@ public class SharePointService
     /// </summary>
     public async Task<int> GetSupplierLineItemCountAsync()
     {
-        var siteId    = await GetSiteIdAsync();
-        var sliListId = await GetSupplierLineItemsListIdAsync();
-        var response  = await GetGraph().Sites[siteId].Lists[sliListId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Count = true;
-                req.QueryParameters.Top   = 0;
-                req.Headers.Add("ConsistencyLevel", "eventual");
-            });
-        return (int)(response?.OdataCount ?? 0);
+        // SharePoint Graph list-items endpoint does not support $count — return 0
+        // so the progress bar shows indeterminate rather than crashing with a 500.
+        try
+        {
+            var siteId    = await GetSiteIdAsync();
+            var sliListId = await GetSupplierLineItemsListIdAsync();
+            var response  = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Count = true;
+                    req.QueryParameters.Top   = 0;
+                    req.Headers.Add("ConsistencyLevel", "eventual");
+                });
+            return (int)(response?.OdataCount ?? 0);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning("[SP] GetSupplierLineItemCountAsync failed ({Msg}); progress bar will be indeterminate", ex.Message);
+            return 0;
+        }
     }
 
     // ??"?????"??? Read: all supplier items for one RFQ ID (targeted refresh) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
