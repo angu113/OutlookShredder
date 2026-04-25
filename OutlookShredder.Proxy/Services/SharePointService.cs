@@ -413,9 +413,14 @@ public class SharePointService
     {
         var siteId    = await GetSiteIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
-        var count     = await GetGraph().Sites[siteId].Lists[sliListId].Items
-            .Count.GetAsync();
-        return count ?? 0;
+        var response  = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Count = true;
+                req.QueryParameters.Top   = 0;
+                req.Headers.Add("ConsistencyLevel", "eventual");
+            });
+        return (int)(response?.OdataCount ?? 0);
     }
 
     // ??"?????"??? Read: all supplier items for one RFQ ID (targeted refresh) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
