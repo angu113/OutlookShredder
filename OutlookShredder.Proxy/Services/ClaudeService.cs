@@ -85,8 +85,10 @@ public class ClaudeService
 
         ── QUANTITIES ─────────────────────────────────────────────────────────────
         - unitsRequested: pieces/bars/sheets asked for in the original RFQ.
-        - unitsQuoted: what the supplier can actually supply (may be less).
-        - If the supplier gives no separate quantity, assume unitsQuoted = unitsRequested.
+        - unitsQuoted: the quantity the supplier explicitly states they can supply. Extract
+          this from the document — do NOT infer or substitute unitsRequested when the supplier
+          has not stated a quantity. Leave null if the supplier's document shows no quantity
+          for this row (e.g. an alternate product offered without an explicit qty column).
         - Linear-feet pricing: when quantity is expressed as total linear footage
           (e.g. "100 LF", "500 linear feet") rather than pieces, set unitsQuoted = that
           footage number, lengthPerUnit = 1, lengthUnit = "ft".
