@@ -418,14 +418,24 @@ public class MailService
     /// </summary>
     public async Task<Message?> GetMessageByIdAsync(string mailbox, string messageId)
     {
-        return await GetGraph()
-            .Users[mailbox]
-            .Messages[messageId]
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Select = ["id", "subject", "from", "receivedDateTime",
-                                              "body", "hasAttachments", "bodyPreview", "categories"];
-            });
+        try
+        {
+            return await GetGraph()
+                .Users[mailbox]
+                .Messages[messageId]
+                .GetAsync(req =>
+                {
+                    req.QueryParameters.Select = ["id", "subject", "from", "receivedDateTime",
+                                                  "body", "hasAttachments", "bodyPreview", "categories"];
+                });
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+            when (ex.ResponseStatusCode is 404 or 400)
+        {
+            _log.LogWarning("[Mail] Message {Id} not found in mailbox (HTTP {Status}) — skipping",
+                messageId, ex.ResponseStatusCode);
+            return null;
+        }
     }
 
     /// <summary>
