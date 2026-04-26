@@ -1,0 +1,106 @@
+[
+  {
+    "canonical": "#4 Brushed Finish",
+    "category": "finish",
+    "variants": [
+      "#4 Brushed", "#4 Polish", "#4POL", "#4 POL", "#4 Polished", "Brushed #4",
+      "#3/#4", "#3/#4 POL", "#3/#4 Polished",
+      "#3/#4 POL FIBER OPT LASER PVC O/S", "#3/#4 Polished Fiber Opt Laser PVC O/S",
+      "Ornamental", "ORN"
+    ]
+  },
+  {
+    "canonical": "Mill Finish",
+    "category": "finish",
+    "variants": ["M/F", "MF", "2B", "2B Mill Finish"]
+  },
+  {
+    "canonical": "PVC One Side",
+    "category": "coating",
+    "variants": ["PVC O/S", "Laser PVC", "PVC 1S", "PVC O.S.", "1S PVC"]
+  },
+  {
+    "canonical": "Aluminum Tread Plate",
+    "category": "product",
+    "variants": [
+      "Tread Brite", "Tread Brite Sheet", "Tread Brite Sheets",
+      "Diamond Tread Plate", "Aluminum Diamond Tread Plate",
+      "3003 Aluminum Tread Brite", "3003 Tread Brite"
+    ]
+  },
+  {
+    "canonical": "Random Lengths",
+    "category": "length",
+    "variants": ["RL", "Random", "random lengths", "Full Length", "Full Lengths", "full length", "mill lengths"]
+  },
+  {
+    "canonical": "Cold Finished",
+    "category": "condition",
+    "variants": ["Cold Rolled", "CF", "C.F.", "Cold Drawn", "CD"]
+  },
+  {
+    "canonical": "6061-T651",
+    "category": "alloy",
+    "variants": ["6061 T651", "6061T651", "6061-T-651"]
+  },
+  {
+    "canonical": "6061-T6511",
+    "category": "alloy",
+    "variants": ["6061 T6511", "6061T6511", "6061-T-6511"]
+  },
+  {
+    "canonical": "6061-T6",
+    "category": "alloy",
+    "variants": ["6061 T6", "6061T6", "6061-T-6"]
+  },
+  {
+    "canonical": "6063-T52",
+    "category": "alloy",
+    "variants": ["6063 T52", "6063T52", "6063-T-52"]
+  },
+  {
+    "canonical": "3003-H14",
+    "category": "alloy",
+    "variants": ["3003 H14", "3003H14", "3003-H-14"]
+  },
+  {
+    "canonical": "A36/A572",
+    "category": "grade",
+    "variants": ["A36", "A572", "ASTM A36", "ASTM-A36", "MULTI-GRADE"]
+  },
+  {
+    "canonical": "A500/A513",
+    "category": "grade",
+    "variants": ["A500", "A513", "A500B", "A500 Grade B", "A500B/C", "CQ", "Structural"]
+  },
+  {
+    "canonical": "Schedule 40",
+    "category": "pipe-schedule",
+    "variants": ["SCH 40", "SCH40", "Sch40", "Sch. 40"]
+  },
+  {
+    "canonical": "Galvanized G90",
+    "category": "coating",
+    "variants": ["G90", "G-90", "Galv G90", "Galv G-90", "G90 Galvanized"]
+  },
+  {
+    "canonical": "Hot Rolled",
+    "category": "condition",
+    "variants": ["HR", "H.R.", "HRPO", "Hot Roll"]
+  },
+  {
+    "canonical": "Cold Rolled Sheet",
+    "category": "condition",
+    "variants": ["CR Sheet", "C.R. Sheet", "Cold Rolled CQ", "CS-B CR"]
+  },
+  {
+    "canonical": "ERW / Welded",
+    "category": "tube-type",
+    "variants": ["ERW", "Welded", "Electric Resistance Welded", "W"]
+  },
+  {
+    "canonical": "DOM",
+    "category": "tube-type",
+    "variants": ["Drawn Over Mandrel", "D.O.M."]
+  }
+]

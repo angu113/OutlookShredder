@@ -85,6 +85,7 @@ try
             sp.GetRequiredService<ILogger<AiRateLimitHandler>>()));
 
     // Register AI extraction services (pluggable)
+    builder.Services.AddSingleton<ProductSynonymService>();
     builder.Services.AddSingleton<ClaudeExtractionService>();
     builder.Services.AddSingleton<GeminiExtractionService>();
     builder.Services.AddSingleton<AiServiceFactory>();

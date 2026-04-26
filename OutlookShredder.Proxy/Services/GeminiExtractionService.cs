@@ -17,6 +17,7 @@ public class GeminiExtractionService : IAiExtractionService
     private readonly ILogger<GeminiExtractionService> _log;
     private readonly AiRateLimitTracker _rateLimits;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly ProductSynonymService _synonyms;
 
     public string ProviderName => "Gemini";
 
@@ -208,12 +209,14 @@ public class GeminiExtractionService : IAiExtractionService
         IConfiguration config,
         ILogger<GeminiExtractionService> log,
         AiRateLimitTracker rateLimits,
-        IHttpClientFactory httpFactory)
+        IHttpClientFactory httpFactory,
+        ProductSynonymService synonyms)
     {
-        _config     = config;
-        _log        = log;
-        _rateLimits = rateLimits;
+        _config      = config;
+        _log         = log;
+        _rateLimits  = rateLimits;
         _httpFactory = httpFactory;
+        _synonyms    = synonyms;
     }
 
     // ── IAiExtractionService ──────────────────────────────────────────────────
@@ -243,11 +246,16 @@ public class GeminiExtractionService : IAiExtractionService
             ResponseSchema   = BuildRfqSchema(),
         };
 
+        var synonymBlock   = _synonyms.BuildPromptBlock();
+        var systemPrompt   = string.IsNullOrEmpty(synonymBlock)
+            ? RfqSystemPrompt
+            : RfqSystemPrompt + synonymBlock;
+
         var googleAi = new GoogleAI(apiKey: apiKey, httpClientFactory: _httpFactory);
         var model    = googleAi.GenerativeModel(
             model:             modelName,
             generationConfig:  genConfig,
-            systemInstruction: new Content { Parts = [new Part { Text = RfqSystemPrompt }] });
+            systemInstruction: new Content { Parts = [new Part { Text = systemPrompt }] });
 
         for (var attempt = 0; attempt <= maxRetries; attempt++)
         {

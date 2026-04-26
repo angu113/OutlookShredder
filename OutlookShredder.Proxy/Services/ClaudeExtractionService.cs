@@ -16,6 +16,7 @@ public class ClaudeExtractionService : IAiExtractionService
     private readonly ILogger<ClaudeExtractionService> _log;
     private readonly AiRateLimitTracker _rateLimits;
     private readonly HttpClient _http;
+    private readonly ProductSynonymService _synonyms;
 
     private const string ApiUrl = "https://api.anthropic.com/v1/messages";
 
@@ -234,11 +235,13 @@ public class ClaudeExtractionService : IAiExtractionService
         IConfiguration config,
         ILogger<ClaudeExtractionService> log,
         AiRateLimitTracker rateLimits,
-        ILogger<AiRateLimitHandler> handlerLog)
+        ILogger<AiRateLimitHandler> handlerLog,
+        ProductSynonymService synonyms)
     {
         _config     = config;
         _log        = log;
         _rateLimits = rateLimits;
+        _synonyms   = synonyms;
         var timeoutSeconds = int.TryParse(_config["Claude:TimeoutSeconds"], out var t) ? t : 60;
         var handler = new AiRateLimitHandler("Claude", rateLimits, handlerLog)
         {
@@ -311,11 +314,22 @@ public class ClaudeExtractionService : IAiExtractionService
 
         // ── Assemble request body ────────────────────────────────────────────
         // system is an array so we can attach cache_control to the static block.
+        // A second block carries the synonym dictionary; it also gets cache_control
+        // so it is cached as long as the file content doesn't change.
+        var synonymBlock = _synonyms.BuildPromptBlock();
+        var systemBlocks = string.IsNullOrEmpty(synonymBlock)
+            ? new object[] { new { type = "text", text = SystemPromptText, cache_control = new { type = "ephemeral" } } }
+            : new object[]
+              {
+                  new { type = "text", text = SystemPromptText,  cache_control = new { type = "ephemeral" } },
+                  new { type = "text", text = synonymBlock,       cache_control = new { type = "ephemeral" } }
+              };
+
         var body = new
         {
             model,
             max_tokens  = maxTokens,
-            system      = new object[] { new { type = "text", text = SystemPromptText, cache_control = new { type = "ephemeral" } } },
+            system      = systemBlocks,
             tools       = new[] { _toolJson },
             tool_choice = new { type = "tool", name = "extract_rfq" },
             messages    = new[] { new { role = "user", content = userContent } }
