@@ -30,6 +30,8 @@ public class RfqProcessedNotification
     /// </summary>
     public string? MessageId    { get; set; }
     public List<RfqNotificationProduct> Products { get; set; } = [];
+    /// <summary>Populated only when EventType = "Synonym".</summary>
+    public SynonymGroup? SynonymGroup { get; set; }
 }
 
 public class RfqNotificationProduct

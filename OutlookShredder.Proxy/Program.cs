@@ -159,6 +159,11 @@ try
             {
                 var sp = app.Services.GetRequiredService<SharePointService>();
                 await sp.PrewarmAsync();
+
+                // Load synonym dictionary from SP into the AI extraction cache.
+                // Seeds from product-synonyms.json on first run if SP list is empty.
+                var synonyms = app.Services.GetRequiredService<ProductSynonymService>();
+                await synonyms.LoadAsync();
             }
             catch (Exception ex)
             {

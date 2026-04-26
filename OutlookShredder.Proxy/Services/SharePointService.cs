@@ -39,6 +39,7 @@ public class SharePointService
     private string? _qcListId;            // QC list
     private string? _shredderConfigListId; // ShredderConfig
     private string? _poListId;            // PurchaseOrders
+    private string? _synonymListId;       // ProductSynonyms
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 60 s eliminates repeated full-table fetches during paginated loads
@@ -3840,6 +3841,11 @@ public class SharePointService
                 ("HasAttachments",     "boolean"),
                 ("ExtractedPricing",   "boolean"),
             ]),
+            ["ProductSynonyms"] = await EnsureListColumnsAsync(siteId, "ProductSynonyms",
+            [
+                ("Category", "text"),
+                ("Variants",  "note"),
+            ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
             poMap is Dictionary<string, string> poDict &&
@@ -5028,6 +5034,107 @@ public class SharePointService
         if (_poListId is not null) return _poListId;
         _poListId = await ResolveListIdAsync("PurchaseOrders");
         return _poListId;
+    }
+
+    private async Task<string> GetSynonymListIdAsync()
+    {
+        if (_synonymListId is not null) return _synonymListId;
+        _synonymListId = await ResolveListIdAsync("ProductSynonyms");
+        return _synonymListId;
+    }
+
+    // ── ProductSynonyms SP methods ────────────────────────────────────────────
+
+    public async Task<List<Models.SynonymGroup>> ReadSynonymsAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSynonymListIdAsync();
+        var groups = new List<Models.SynonymGroup>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r => {
+                r.QueryParameters.Expand = ["fields($select=id,Title,Category,Variants)"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var data = item.Fields?.AdditionalData;
+                if (data is null) continue;
+                var canonical = data.TryGetValue("Title",    out var t) ? t?.ToString() : null;
+                var category  = data.TryGetValue("Category", out var c) ? c?.ToString() : null;
+                var variantsJson = data.TryGetValue("Variants", out var v) ? v?.ToString() : null;
+                if (string.IsNullOrEmpty(canonical)) continue;
+
+                string[] variants = [];
+                if (!string.IsNullOrEmpty(variantsJson))
+                {
+                    try { variants = System.Text.Json.JsonSerializer.Deserialize<string[]>(variantsJson) ?? []; }
+                    catch { /* malformed — skip variants */ }
+                }
+
+                groups.Add(new Models.SynonymGroup
+                {
+                    SpItemId  = item.Id ?? string.Empty,
+                    Canonical = canonical,
+                    Category  = category,
+                    Variants  = variants,
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+        return groups;
+    }
+
+    public async Task<Models.SynonymGroup> WriteSynonymAsync(Models.SynonymGroup group, CancellationToken ct = default)
+    {
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await GetSynonymListIdAsync();
+        var variants = System.Text.Json.JsonSerializer.Serialize(group.Variants);
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object>
+                    {
+                        ["Title"]    = group.Canonical,
+                        ["Category"] = group.Category ?? string.Empty,
+                        ["Variants"] = variants,
+                    }
+                }
+            }, cancellationToken: ct);
+
+        _log.LogInformation("[SP] Synonym written: '{Canonical}' ({Variants} variants)", group.Canonical, group.Variants.Length);
+        group.SpItemId = item?.Id ?? string.Empty;
+        return group;
+    }
+
+    public async Task<Models.SynonymGroup> UpdateSynonymAsync(string spItemId, Models.SynonymGroup group, CancellationToken ct = default)
+    {
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await GetSynonymListIdAsync();
+        var variants = System.Text.Json.JsonSerializer.Serialize(group.Variants);
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields.PatchAsync(
+            new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object>
+                {
+                    ["Title"]    = group.Canonical,
+                    ["Category"] = group.Category ?? string.Empty,
+                    ["Variants"] = variants,
+                }
+            }, cancellationToken: ct);
+
+        _log.LogInformation("[SP] Synonym updated: '{Canonical}' ({Variants} variants)", group.Canonical, group.Variants.Length);
+        group.SpItemId = spItemId;
+        return group;
     }
 
     /// <summary>

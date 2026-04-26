@@ -71,6 +71,17 @@ public class RfqNotificationService
     public void NotifyRfqProcessed() => NotifyRfqProcessed(new RfqProcessedNotification());
 
     /// <summary>
+    /// Publishes a "Synonym" event to Service Bus so all Shredder clients update
+    /// their local synonym caches without restarting.
+    /// </summary>
+    public void NotifySynonym(Models.SynonymGroup group) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType    = "Synonym",
+            SynonymGroup = group,
+        });
+
+    /// <summary>
     /// Broadcasts an <c>rfq-processed</c> SSE event carrying supplier + product data
     /// to all connected SSE clients, and publishes the same payload to Azure Service Bus
     /// so Shredder instances on other machines are notified.
