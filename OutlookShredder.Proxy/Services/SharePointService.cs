@@ -2610,6 +2610,69 @@ public class SharePointService
     /// Safe to run repeatedly  -- idempotent patch, no rows created or deleted.
     /// Returns (total rows visited, rows updated, rows with a match).
     /// </summary>
+    /// <summary>
+    /// Pages all SupplierLineItem rows and returns the distinct Graph MessageIds of rows
+    /// that have a valid RFQ ID but a null ProductSearchKey (MSPC).
+    /// These are candidates for reprocessing via <c>ReprocessMessagesAsync</c>.
+    /// Rows under sentinel RFQ IDs (000000, WHOIS) and rows with no MessageId are skipped.
+    /// </summary>
+    public async Task<List<string>> FindNullMspcMessageIdsAsync(CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var messageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int total = 0, skippedSentinel = 0, skippedNoMsgId = 0;
+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,ProductSearchKey,MessageId)"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                ct.ThrowIfCancellationRequested();
+                total++;
+
+                var data = item.Fields?.AdditionalData;
+                if (data is null) continue;
+
+                var psk = data.TryGetValue("ProductSearchKey", out var p) ? p?.ToString() : null;
+                if (!string.IsNullOrEmpty(psk)) continue;
+
+                var rfqId = data.TryGetValue("RFQ_ID", out var r) ? r?.ToString() : null;
+                if (string.IsNullOrEmpty(rfqId) || rfqId is "000000" or "WHOIS")
+                {
+                    skippedSentinel++;
+                    continue;
+                }
+
+                var msgId = data.TryGetValue("MessageId", out var m) ? m?.ToString() : null;
+                if (string.IsNullOrEmpty(msgId))
+                {
+                    skippedNoMsgId++;
+                    continue;
+                }
+
+                messageIds.Add(msgId);
+            }
+
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation(
+            "[SP] FindNullMspc: {Total} SLI rows scanned, {Found} distinct message IDs to reprocess, " +
+            "{Sentinel} sentinel rows skipped, {NoMsgId} rows skipped (no MessageId)",
+            total, messageIds.Count, skippedSentinel, skippedNoMsgId);
+        return [.. messageIds];
+    }
+
     public async Task<(int Total, int Updated, int Matched)> BackfillCatalogMatchesAsync(
         CancellationToken ct = default)
     {

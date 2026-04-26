@@ -704,6 +704,33 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/mail/reprocess-null-mspc ──────────────────────────────────
+    /// <summary>
+    /// Finds all SupplierLineItem rows with a valid RFQ ID but null ProductSearchKey (MSPC),
+    /// then re-runs the full extraction pipeline on their source emails so the late-RLI-inject
+    /// path can assign correct MSPCs.  Pass ?dryRun=true to count candidates without reprocessing.
+    /// </summary>
+    [HttpPost("mail/reprocess-null-mspc")]
+    public async Task<IActionResult> ReprocessNullMspc(
+        [FromQuery] bool dryRun = false,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var messageIds = await _sp.FindNullMspcMessageIdsAsync(ct);
+            if (dryRun || messageIds.Count == 0)
+                return Ok(new { found = messageIds.Count, reprocessed = 0, dryRun = true });
+
+            await _poller.ReprocessMessagesAsync(messageIds, ct);
+            return Ok(new { found = messageIds.Count, reprocessed = messageIds.Count, dryRun = false });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ReprocessNullMspc failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── GET /api/rfq-import/scan ─────────────────────────────────────────────
     /// <summary>
     /// Scans a named mail folder in the given mailbox and returns raw email data
