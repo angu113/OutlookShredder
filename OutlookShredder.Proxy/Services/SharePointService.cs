@@ -2024,11 +2024,18 @@ public class SharePointService
         }
         else
         {
-            productSearchKey   = null;
-            catalogProductName = null;
-            _log.LogWarning(
-                "[SP] No RLI anchor for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null",
-                jobRef, supplier, prodName);
+            // No MSPC from RLI — fall back to fuzzy catalog match on supplier's product name.
+            var match = _catalog.ResolveProduct(prodName);
+            productSearchKey   = match?.SearchKey;
+            catalogProductName = match?.Name;
+            if (match is not null)
+                _log.LogInformation(
+                    "[SP] Fuzzy-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} catalog='{Catalog}'",
+                    jobRef, supplier, prodName, productSearchKey, catalogProductName);
+            else
+                _log.LogWarning(
+                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null",
+                    jobRef, supplier, prodName);
         }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";

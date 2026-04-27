@@ -400,9 +400,9 @@ public class ProductCatalogService : BackgroundService
         // Runs before decimal steps so e.g. "0.104" (the decimal thickness) is not affected.
         (new Regex(@"\b(\d{1,2})\s*(?:ga(?:uge)?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "$1ga"),
 
-        // AR400 abrasion-resistant plate: normalise "AR 400" and "AR400" to "ar400".
+        // AR400 abrasion-resistant plate: normalise "AR 400", "AR400", "A.R. 400", "A.R.400" to "ar400".
         // "Abrasion Resistant" is a redundant English descriptor for AR400 — remove as noise.
-        (new Regex(@"\bar\s*400\b",             RegexOptions.IgnoreCase | RegexOptions.Compiled), "ar400"),
+        (new Regex(@"\ba\.?r\.?\s*400\b",       RegexOptions.IgnoreCase | RegexOptions.Compiled), "ar400"),
         (new Regex(@"\babrasion\s+resistant\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), ""),
 
         // Rebar noise: "Grade 60" is the universal rebar grade and adds no matching value.
