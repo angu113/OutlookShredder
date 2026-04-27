@@ -95,6 +95,20 @@ public class ClaudeService
         - ALWAYS extract lengthPerUnit when pricing is per foot ($/ft, $/LF) -- it is
           required to compute the line total.
 
+        ── DIMENSIONS ─────────────────────────────────────────────────────────────
+        For long products (Bar, Rod, Tube, Pipe, Angle, Channel, Beam):
+          - ALWAYS extract lengthPerUnit (piece/bar length), regardless of pricing unit.
+          - Use lengthUnit "ft" for feet, "in" for inches.
+          - The length COMMONLY appears inside the product name/description itself —
+            look for it there even when there is no separate length column.
+            Common patterns: "x 20'", "x 20 FT", "x 240\"", "x 240 in", "x 288 inch".
+            A bare number at the end of a cross-section spec (e.g. ".25 x 2.5 x 20")
+            is almost always a length in feet for typical bar stock — extract as ft.
+          - Leave lengthPerUnit null only if no length information appears anywhere.
+        For flat products (Sheet, Plate, Coil):
+          - dimWidth: shorter cut dimension in inches. dimLength: longer cut dimension.
+          - Leave lengthPerUnit null.
+
         ── MULTIPLE PRODUCTS ──────────────────────────────────────────────────────
         Every distinct grade, form, size, or finish is a SEPARATE entry in products[].
         "1\" and 2\" flat bar" -> two entries. "304 and 316 sheet" -> two entries.

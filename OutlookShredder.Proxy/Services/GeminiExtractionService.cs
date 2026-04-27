@@ -134,6 +134,20 @@ public class GeminiExtractionService : IAiExtractionService
           - ALWAYS extract lengthPerUnit (piece/bar/tube length), regardless of pricing unit.
           - Use lengthUnit "ft" for feet, "in" for inches.
           - Leave dimWidth and dimLength null.
+          - The length COMMONLY appears inside the product name/description itself —
+            look for it there even when there is no separate length column or field.
+            Common patterns (anywhere in the product string):
+              "x 20'"          → lengthPerUnit=20, lengthUnit="ft"
+              "x 20 FT"        → lengthPerUnit=20, lengthUnit="ft"
+              "x 240\""        → lengthPerUnit=240, lengthUnit="in"
+              "x 240 in"       → lengthPerUnit=240, lengthUnit="in"
+              "x 288 inch"     → lengthPerUnit=288, lengthUnit="in"
+              "20 foot"        → lengthPerUnit=20,  lengthUnit="ft"
+              A bare number at the end of a cross-section spec (e.g. ".25 x 2.5 x 20")
+              is almost always a length in feet for typical bar stock — extract it as ft.
+          - If the email contains NO length information for a long product (no length in
+            the product name, no length column, no length mentioned anywhere), leave
+            lengthPerUnit null.
 
         Unit products (discrete items sold per unit with no continuous length):
           - Leave dimWidth, dimLength, and lengthPerUnit null.
