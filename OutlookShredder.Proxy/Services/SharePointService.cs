@@ -4607,7 +4607,192 @@ public class SharePointService
     }
 
     /// <summary>
-    /// Reads items from the first matching list name and returns a map of item-ID ?????' text value
+    /// Loads new catalog products from a CSV stream into the "Product Catalog" SharePoint list.
+    /// Deduplicates by Line No. (MSPC) — only rows whose Line No. is absent from SP are written.
+    /// Expected CSV columns: "Line No.", "Product", "Product SearchKey", "Product Category", "Product Shape".
+    /// </summary>
+    public async Task<(int Added, int Skipped)> LoadCatalogFromCsvAsync(Stream csv, CancellationToken ct)
+    {
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await ResolveListIdAsync(listName);
+
+        _log.LogInformation("[SP] LoadCatalogFromCsv: list='{Name}'", listName);
+
+        // Build reverse lookup maps: display text -> SP integer item ID
+        var catFwd   = await BuildLookupMapAsync(siteId, ["Metals", "Metal", "Product Categories"], "Title");
+        var shapeFwd = await BuildLookupMapAsync(siteId, ["Shapes", "Shape"], "ProductShape", "Title");
+
+        var catByName   = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var shapeByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, name) in catFwd)
+            if (!catByName.ContainsKey(name) && int.TryParse(id, out var n)) catByName[name] = n;
+        foreach (var (id, name) in shapeFwd)
+            if (!shapeByName.ContainsKey(name) && int.TryParse(id, out var n)) shapeByName[name] = n;
+
+        _log.LogInformation("[SP] LoadCatalogFromCsv: {C} category lookups, {S} shape lookups",
+            catByName.Count, shapeByName.Count);
+
+        // Normalise a Line No. string to a canonical form ("10", "20.5") for comparison.
+        // SP may return numeric fields as "10.0"; the CSV exports them as "10".
+        static string NormLineNo(string s)
+        {
+            if (double.TryParse(s.Trim(), System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var d))
+                return d % 1 == 0 ? ((long)d).ToString() : d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return s.Trim();
+        }
+
+        // Read existing Line No. values from SP catalog (dedup key).
+        // Expand all fields so we can try multiple internal name variants.
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Top    = 5000;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var d2   = item.Fields?.AdditionalData;
+                if (d2 is null) continue;
+                var raw = RfqField(d2, "Line_x0020_No", "MSPC", "mspc", "Mspc");
+                if (!string.IsNullOrWhiteSpace(raw)) existing.Add(NormLineNo(raw));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[SP] LoadCatalogFromCsv: {N} existing MSPCs in SP", existing.Count);
+
+        // Parse CSV
+        var toAdd = new List<(string LineNo, string Product, string SearchKey, string Category, string Shape)>();
+        int skipped = 0;
+
+        // Register Windows code-page provider so cp1252 (common export encoding) is available.
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+        var enc1252 = System.Text.Encoding.GetEncoding(1252);
+        using var reader = new StreamReader(csv, enc1252,
+            detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+
+        var headers = CsvSplit(reader.ReadLine() ?? "");
+        int iLineNo    = Array.FindIndex(headers, h => h == "Line No.");
+        int iProduct   = Array.FindIndex(headers, h => h == "Product");
+        int iSearchKey = Array.FindIndex(headers, h => h == "Product SearchKey");
+        int iCategory  = Array.FindIndex(headers, h => h == "Product Category");
+        int iShape     = Array.FindIndex(headers, h => h == "Product Shape");
+
+        if (iLineNo < 0 || iProduct < 0 || iSearchKey < 0)
+            throw new InvalidOperationException(
+                "CSV missing required columns 'Line No.', 'Product', 'Product SearchKey'.");
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var f = CsvSplit(line);
+
+            var lineNo  = iLineNo  < f.Length ? NormLineNo(f[iLineNo])        : "";
+            var product = iProduct < f.Length ? f[iProduct].Trim()           : "";
+            if (string.IsNullOrWhiteSpace(lineNo) || string.IsNullOrWhiteSpace(product)) continue;
+
+            if (existing.Contains(lineNo)) { skipped++; continue; }
+
+            toAdd.Add((
+                lineNo,
+                product,
+                iSearchKey < f.Length ? f[iSearchKey].Trim() : "",
+                iCategory  < f.Length ? f[iCategory].Trim()  : "",
+                iShape     < f.Length ? f[iShape].Trim()     : ""
+            ));
+        }
+
+        _log.LogInformation("[SP] LoadCatalogFromCsv: {New} to add, {Skip} skipped (already exist)",
+            toAdd.Count, skipped);
+
+        int added = 0;
+        await Parallel.ForEachAsync(toAdd,
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+            async (row, token) =>
+            {
+                var data = new Dictionary<string, object?>
+                {
+                    ["Title"]                   = row.Product,
+                    ["Product"]                 = row.Product,
+                    ["Product_x0020_SearchKey"] = row.SearchKey,
+                    ["Line_x0020_No"]           = row.LineNo,
+                };
+
+                if (!string.IsNullOrWhiteSpace(row.Category))
+                {
+                    if (catByName.TryGetValue(row.Category, out var catId))
+                        data["Product_x0020_CategoryLookupId"] = catId;
+                    else
+                        _log.LogWarning("[SP] LoadCatalogFromCsv: unknown category '{C}'", row.Category);
+                }
+                if (!string.IsNullOrWhiteSpace(row.Shape))
+                {
+                    if (shapeByName.TryGetValue(row.Shape, out var shapeId))
+                        data["Product_x0020_ShapeLookupId"] = shapeId;
+                    else
+                        _log.LogWarning("[SP] LoadCatalogFromCsv: unknown shape '{S}'", row.Shape);
+                }
+
+                await GetGraph().Sites[siteId].Lists[listId].Items
+                    .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } },
+                        cancellationToken: token);
+
+                var n = Interlocked.Increment(ref added);
+                if (n % 100 == 0)
+                    _log.LogInformation("[SP] LoadCatalogFromCsv: {N}/{Total} written", n, toAdd.Count);
+            });
+
+        _log.LogInformation("[SP] LoadCatalogFromCsv complete: {Added} added, {Skipped} skipped",
+            added, skipped);
+        return (added, skipped);
+    }
+
+    // RFC-4180 CSV line splitter used by LoadCatalogFromCsvAsync.
+    private static string[] CsvSplit(string line)
+    {
+        var fields = new List<string>();
+        int i = 0;
+        while (i <= line.Length)
+        {
+            if (i == line.Length) { fields.Add(""); break; }
+            if (line[i] == '"')
+            {
+                var sb = new System.Text.StringBuilder();
+                i++;
+                while (i < line.Length)
+                {
+                    if (line[i] == '"' && i + 1 < line.Length && line[i + 1] == '"')
+                    { sb.Append('"'); i += 2; }
+                    else if (line[i] == '"')
+                    { i++; break; }
+                    else
+                    { sb.Append(line[i++]); }
+                }
+                fields.Add(sb.ToString());
+                if (i < line.Length && line[i] == ',') i++;
+            }
+            else
+            {
+                int start = i;
+                while (i < line.Length && line[i] != ',') i++;
+                fields.Add(line[start..i]);
+                if (i < line.Length) i++;
+            }
+        }
+        return [.. fields];
+    }
+
+    /// <summary>
+    /// Reads items from the first matching list name and returns a map of item-ID → text value
     /// (tries each field key in order; used to resolve SharePoint lookup column IDs).
     /// </summary>
     private async Task<Dictionary<string, string>> BuildLookupMapAsync(

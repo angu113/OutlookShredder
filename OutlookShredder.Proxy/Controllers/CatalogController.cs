@@ -48,6 +48,30 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     /// <summary>
+    /// POST /api/catalog/load — loads new products from a CSV file sent as the request body.
+    /// Deduplicates by Line No. (MSPC); only rows absent from SharePoint are written.
+    /// Send the CSV as the raw request body (Content-Type: text/csv or application/octet-stream).
+    /// </summary>
+    [HttpPost("load")]
+    [RequestSizeLimit(50_000_000)]
+    public async Task<IActionResult> Load(CancellationToken ct)
+    {
+        if (Request.ContentLength is 0)
+            return BadRequest("Send the CSV file as the request body.");
+
+        // Buffer into MemoryStream — Kestrel disallows synchronous reads on the request stream.
+        using var ms = new System.IO.MemoryStream();
+        await Request.Body.CopyToAsync(ms, ct);
+        ms.Position = 0;
+
+        var (added, skipped) = await sp.LoadCatalogFromCsvAsync(ms, ct);
+
+        await catalog.RefreshAsync();
+
+        return Ok(new { added, skipped, total = added + skipped });
+    }
+
+    /// <summary>
     /// GET /api/catalog/resolve?name=foo — resolves a vendor description against the cache.
     /// Returns the matched catalog entry, or 404 with the raw name if no match.
     /// </summary>
