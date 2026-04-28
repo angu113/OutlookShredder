@@ -324,6 +324,7 @@ public class FileWatcherService : BackgroundService
             SpItemId       = spItemId,
             DocumentNumber = extraction.DocumentNumber,
             DocumentType   = extraction.DocumentType,
+            DocumentDate   = extraction.DocumentDate,
             CustomerName   = extraction.CustomerName,
             FileName       = fileName,
             PdfUrl         = pdfUrl,
