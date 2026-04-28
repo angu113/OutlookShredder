@@ -7026,9 +7026,9 @@ public class SharePointService
 
         if (daysBack.HasValue)
         {
-            var cutoff = DateTimeOffset.UtcNow.AddDays(-daysBack.Value);
+            var cutoff = DateTime.UtcNow.AddDays(-daysBack.Value).Date;
             results = results.Where(r =>
-                DateTimeOffset.TryParse(r.ReceivedAt, out var dt) && dt >= cutoff).ToList();
+                DateTime.TryParse(r.DocumentDate, out var dt) && dt.Date >= cutoff).ToList();
         }
 
         return [.. results.OrderByDescending(r => r.ReceivedAt)];
