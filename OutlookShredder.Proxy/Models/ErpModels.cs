@@ -58,6 +58,7 @@ public class ErpDocumentRecord
     public string? ReceivedAt { get; set; }
     public bool IsArchived { get; set; }
     public string? SourceMachine { get; set; }
+    public string? SourceUser { get; set; }
 }
 
 public class ErpScanResult
@@ -65,6 +66,7 @@ public class ErpScanResult
     public string Folder { get; set; } = "";
     public int FilesFound { get; set; }
     public int AlreadyProcessed { get; set; }
+    public int NonErpFiles { get; set; }
     public int ErpDocuments { get; set; }
     public int Errors { get; set; }
     public List<string> ProcessedFiles { get; set; } = [];

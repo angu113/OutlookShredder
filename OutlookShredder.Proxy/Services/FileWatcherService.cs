@@ -75,8 +75,9 @@ public class FileWatcherService : BackgroundService
 
         _log.LogInformation("[FW] Watching {Path} for ERP PDFs", watchPath);
 
-        // Batch scan on startup to catch any files that landed while the proxy was down
-        await ScanFolderAsync(watchPath, ct);
+        // Batch scan on startup — only files from the last 30 days to avoid re-sending
+        // the entire downloads folder through Claude every time the proxy restarts.
+        await ScanFolderAsync(watchPath, ct, maxAgeDays: 30);
 
         // Real-time FileSystemWatcher
         using var fsw = new FileSystemWatcher(watchPath, "*.pdf")
@@ -107,7 +108,8 @@ public class FileWatcherService : BackgroundService
 
     // ── Public batch-scan API ────────────────────────────────────────────────
 
-    public async Task<ErpScanResult> ScanFolderAsync(string folder, CancellationToken ct = default)
+    public async Task<ErpScanResult> ScanFolderAsync(
+        string folder, CancellationToken ct = default, int? maxAgeDays = null)
     {
         var result = new ErpScanResult { Folder = folder };
 
@@ -119,11 +121,27 @@ public class FileWatcherService : BackgroundService
 
         var files = Directory.GetFiles(folder, "*.pdf", SearchOption.TopDirectoryOnly);
         result.FilesFound = files.Length;
-        _log.LogInformation("[FW] Batch scan: {Count} PDF(s) in {Folder}", files.Length, folder);
+
+        var cutoff = maxAgeDays.HasValue
+            ? DateTime.UtcNow.AddDays(-maxAgeDays.Value)
+            : (DateTime?)null;
+
+        _log.LogInformation("[FW] Batch scan: {Count} PDF(s) in {Folder}{Age}",
+            files.Length, folder, cutoff.HasValue ? $" (last {maxAgeDays}d only)" : "");
 
         foreach (var file in files)
         {
             if (ct.IsCancellationRequested) break;
+
+            // Age filter — skip files older than cutoff on startup scans
+            if (cutoff.HasValue)
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < cutoff.Value) continue;
+                }
+                catch { /* ignore stat errors */ }
+            }
 
             var key = GetFileKey(file);
             if (key is not null)
@@ -146,6 +164,10 @@ public class FileWatcherService : BackgroundService
                     result.ErpDocuments++;
                     result.ProcessedFiles.Add(Path.GetFileName(file));
                 }
+                else
+                {
+                    result.NonErpFiles++;
+                }
             }
             catch (Exception ex)
             {
@@ -155,8 +177,8 @@ public class FileWatcherService : BackgroundService
             }
         }
 
-        _log.LogInformation("[FW] Scan complete — erp={Erp} skipped={Skip} errors={Err}",
-            result.ErpDocuments, result.AlreadyProcessed, result.Errors);
+        _log.LogInformation("[FW] Scan complete — erp={Erp} nonErp={NonErp} skipped={Skip} errors={Err}",
+            result.ErpDocuments, result.NonErpFiles, result.AlreadyProcessed, result.Errors);
         return result;
     }
 
@@ -254,7 +276,7 @@ public class FileWatcherService : BackgroundService
         try
         {
             spItemId = await _sp.WriteErpDocumentAsync(
-                extraction, fileName, DateTimeOffset.UtcNow, Environment.MachineName, pdfUrl, ct);
+                extraction, fileName, DateTimeOffset.UtcNow, Environment.MachineName, Environment.UserName, pdfUrl, ct);
         }
         catch (Exception ex)
         {

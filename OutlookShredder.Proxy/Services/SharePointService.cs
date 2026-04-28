@@ -6819,6 +6819,7 @@ public class SharePointService
             ("PdfUrl",         "text"),
             ("IsArchived",     "boolean"),
             ("SourceMachine",  "text"),
+            ("SourceUser",     "text"),
             ("LineItemsJson",  "note"),
             ("ExtractionLog",  "note"),
         };
@@ -6855,6 +6856,7 @@ public class SharePointService
         string fileName,
         DateTimeOffset receivedAt,
         string sourceMachine,
+        string sourceUser,
         string? pdfUrl,
         CancellationToken ct = default)
     {
@@ -6879,6 +6881,7 @@ public class SharePointService
             ["PdfUrl"]         = pdfUrl,
             ["IsArchived"]     = false,
             ["SourceMachine"]  = sourceMachine,
+            ["SourceUser"]     = sourceUser,
             ["LineItemsJson"]  = lineItemsJson,
             ["ExtractionLog"]  = System.Text.Json.JsonSerializer.Serialize(extraction),
         };
@@ -6986,7 +6989,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,CustomerName,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,CustomerName,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -7014,6 +7017,7 @@ public class SharePointService
                 ReceivedAt     = Get("ReceivedAt"),
                 IsArchived     = isArchived,
                 SourceMachine  = Get("SourceMachine"),
+                SourceUser     = Get("SourceUser"),
             });
         }
 
