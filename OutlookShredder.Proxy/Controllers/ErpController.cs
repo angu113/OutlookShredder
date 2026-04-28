@@ -75,4 +75,17 @@ public class ErpController : ControllerBase
         await _sp.EnsureErpDocumentsListAsync(ct);
         return Ok(new { success = true, message = "ErpDocuments list ensured" });
     }
+
+    /// <summary>
+    /// Deletes all records from the ErpDocuments SharePoint list.
+    /// Also clears the local processed-file cache so a subsequent scan re-processes everything.
+    /// </summary>
+    [HttpDelete("/api/erp/clean")]
+    public async Task<IActionResult> Clean(CancellationToken ct)
+    {
+        _fw.ClearProcessedCache();
+        var deleted = await _sp.DeleteAllErpDocumentsAsync(ct);
+        _log.LogInformation("[ERP] Clean: deleted {Count} SP records and cleared processed-file cache", deleted);
+        return Ok(new { deleted });
+    }
 }

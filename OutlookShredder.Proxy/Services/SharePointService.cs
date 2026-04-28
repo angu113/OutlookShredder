@@ -7034,6 +7034,39 @@ public class SharePointService
         return [.. results.OrderByDescending(r => r.ReceivedAt)];
     }
 
+    /// <summary>
+    /// Deletes all items from the ErpDocuments list. Returns the count deleted.
+    /// </summary>
+    public async Task<int> DeleteAllErpDocumentsAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Select = ["id"];
+                req.QueryParameters.Top    = 999;
+            }, ct);
+
+        var ids = (items?.Value ?? []).Select(i => i.Id).Where(i => i is not null).ToList();
+        int deleted = 0;
+        foreach (var id in ids)
+        {
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[id].DeleteAsync(cancellationToken: ct);
+                deleted++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[SP] Failed to delete ErpDocument item {Id}", id);
+            }
+        }
+        _log.LogInformation("[SP] Deleted {Count} ERP document records", deleted);
+        return deleted;
+    }
+
 }
 
 public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds, DateTime? LastModified = null);

@@ -172,7 +172,7 @@ public class FileWatcherService : BackgroundService
             {
                 try
                 {
-                    if (File.GetLastWriteTimeUtc(file) < cutoff.Value) continue;
+                    if (File.GetCreationTimeUtc(file) < cutoff.Value) continue;
                 }
                 catch { /* ignore stat errors */ }
             }
