@@ -35,6 +35,12 @@ public class FileWatcherService : BackgroundService
     private readonly HashSet<string> _inQueue = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _inQueueLock = new();
 
+    // Health state — set during ExecuteAsync, read by HealthController
+    private bool    _enabled;
+    private string? _watchPath;
+    private bool    _fswActive;
+    private bool    _watchPathExists;
+
     // Persistent processed-file tracking: key = "{name}|{size}|{lastWriteTicks}"
     private readonly HashSet<string> _processedKeys = new(StringComparer.Ordinal);
     private readonly object _processedLock = new();
@@ -59,18 +65,24 @@ public class FileWatcherService : BackgroundService
         if ("false".Equals(_config["FileWatcher:Enabled"], StringComparison.OrdinalIgnoreCase))
         {
             _log.LogInformation("[FW] File watcher disabled via FileWatcher:Enabled=false");
+            _enabled = false;
             return;
         }
+
+        _enabled = true;
 
         var cfgPath   = _config["FileWatcher:WatchPath"];
         var watchPath = !string.IsNullOrWhiteSpace(cfgPath)
             ? cfgPath
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
+        _watchPath = watchPath;
+
         _processedFilePath = Path.Combine(AppContext.BaseDirectory, "erp-processed.json");
         LoadProcessedLog();
 
-        if (!Directory.Exists(watchPath))
+        _watchPathExists = Directory.Exists(watchPath);
+        if (!_watchPathExists)
         {
             _log.LogWarning("[FW] Watch path does not exist: {Path} — file watcher inactive", watchPath);
             return;
@@ -83,6 +95,7 @@ public class FileWatcherService : BackgroundService
         await ScanFolderAsync(watchPath, ct, maxAgeDays: 30);
 
         // Real-time FileSystemWatcher
+        _fswActive = true;
         using var fsw = new FileSystemWatcher(watchPath, "*.pdf")
         {
             NotifyFilter        = NotifyFilters.FileName | NotifyFilters.LastWrite,
@@ -110,6 +123,13 @@ public class FileWatcherService : BackgroundService
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
+
+    public FileWatcherHealthStatus GetHealthStatus()
+    {
+        int processed;
+        lock (_processedLock) processed = _processedKeys.Count;
+        return new FileWatcherHealthStatus(_enabled, _watchPath, _watchPathExists, _fswActive, processed);
+    }
 
     public void ClearProcessedCache()
     {
@@ -385,3 +405,10 @@ public class FileWatcherService : BackgroundService
         }
     }
 }
+
+public record FileWatcherHealthStatus(
+    bool    Enabled,
+    string? WatchPath,
+    bool    WatchPathExists,
+    bool    FswActive,
+    int     ProcessedCount);

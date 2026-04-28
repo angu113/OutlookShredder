@@ -14,15 +14,18 @@ public class HealthController : ControllerBase
     private readonly IConfiguration _config;
     private readonly ProductCatalogService _catalog;
     private readonly AiServiceFactory _aiFactory;
+    private readonly FileWatcherService _fileWatcher;
 
     public HealthController(
         IConfiguration config,
         ProductCatalogService catalog,
-        AiServiceFactory aiFactory)
+        AiServiceFactory aiFactory,
+        FileWatcherService fileWatcher)
     {
         _config = config;
         _catalog = catalog;
         _aiFactory = aiFactory;
+        _fileWatcher = fileWatcher;
     }
 
     [HttpGet]
@@ -36,6 +39,7 @@ public class HealthController : ControllerBase
             CheckClaude(),
             CheckGemini(),
             CheckAiRouting(),
+            CheckFileWatcher(),
         };
         return Ok(new HealthReport(services));
     }
@@ -116,6 +120,27 @@ public class HealthController : ControllerBase
         {
             return new("aiRouting", "AI Routing", "fail", ex.Message);
         }
+    }
+
+    private ServiceHealth CheckFileWatcher()
+    {
+        var fw = _fileWatcher.GetHealthStatus();
+
+        if (!fw.Enabled)
+            return new("fileWatcher", "File Watcher", "disabled",
+                "FileWatcher:Enabled = false");
+
+        if (!fw.WatchPathExists)
+            return new("fileWatcher", "File Watcher", "fail",
+                $"Watch path not found: {fw.WatchPath ?? "(none)"}");
+
+        if (!fw.FswActive)
+            return new("fileWatcher", "File Watcher", "degraded",
+                $"Watcher starting… path: {fw.WatchPath}");
+
+        var dir = Path.GetFileName(fw.WatchPath?.TrimEnd(Path.DirectorySeparatorChar));
+        return new("fileWatcher", "File Watcher", "ok",
+            $"Watching {dir}  •  {fw.ProcessedCount} file{(fw.ProcessedCount == 1 ? "" : "s")} processed");
     }
 
     private static string FormatAge(TimeSpan age)
