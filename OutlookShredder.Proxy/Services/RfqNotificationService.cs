@@ -82,6 +82,17 @@ public class RfqNotificationService
         });
 
     /// <summary>
+    /// Publishes an "ERP" event to Service Bus so all Shredder clients update
+    /// their local ERP document cache.
+    /// </summary>
+    public void NotifyErpDocument(Models.ErpBusRecord record) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType   = "ERP",
+            ErpDocument = record,
+        });
+
+    /// <summary>
     /// Broadcasts an <c>rfq-processed</c> SSE event carrying supplier + product data
     /// to all connected SSE clients, and publishes the same payload to Azure Service Bus
     /// so Shredder instances on other machines are notified.

@@ -6981,6 +6981,7 @@ public class SharePointService
     public async Task<List<OutlookShredder.Proxy.Models.ErpDocumentRecord>> ReadErpDocumentsAsync(
         int top = 50,
         bool includeArchived = false,
+        int? daysBack = null,
         CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
@@ -7019,6 +7020,13 @@ public class SharePointService
                 SourceMachine  = Get("SourceMachine"),
                 SourceUser     = Get("SourceUser"),
             });
+        }
+
+        if (daysBack.HasValue)
+        {
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-daysBack.Value);
+            results = results.Where(r =>
+                DateTimeOffset.TryParse(r.ReceivedAt, out var dt) && dt >= cutoff).ToList();
         }
 
         return [.. results.OrderByDescending(r => r.ReceivedAt)];

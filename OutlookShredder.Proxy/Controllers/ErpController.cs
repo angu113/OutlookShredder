@@ -57,11 +57,12 @@ public class ErpController : ControllerBase
     /// </summary>
     [HttpGet("/api/erp/documents")]
     public async Task<IActionResult> GetDocuments(
-        [FromQuery] int top = 50,
+        [FromQuery] int top = 200,
         [FromQuery] bool includeArchived = false,
+        [FromQuery] int? daysBack = null,
         CancellationToken ct = default)
     {
-        var docs = await _sp.ReadErpDocumentsAsync(top, includeArchived, ct);
+        var docs = await _sp.ReadErpDocumentsAsync(top, includeArchived, daysBack, ct);
         return Ok(docs);
     }
 

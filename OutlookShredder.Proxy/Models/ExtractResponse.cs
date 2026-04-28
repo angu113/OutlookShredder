@@ -19,7 +19,7 @@ public class ExtractResponse
 /// <summary>Payload broadcast via SSE and Azure Service Bus when RFQ data changes.</summary>
 public class RfqProcessedNotification
 {
-    /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference; "PO" = purchase order received.</summary>
+    /// <summary>"SR" = new/updated Supplier Response; "RFQ" = new/updated RFQ Reference; "PO" = purchase order received; "ERP" = ERP document processed.</summary>
     public string  EventType    { get; set; } = "SR";
     public string? SupplierName { get; set; }
     public string? RfqId        { get; set; }
@@ -32,6 +32,28 @@ public class RfqProcessedNotification
     public List<RfqNotificationProduct> Products { get; set; } = [];
     /// <summary>Populated only when EventType = "Synonym".</summary>
     public SynonymGroup? SynonymGroup { get; set; }
+    /// <summary>Populated only when EventType = "ERP".</summary>
+    public ErpBusRecord? ErpDocument { get; set; }
+}
+
+/// <summary>
+/// ERP document data carried on EventType="ERP" bus messages.
+/// Mirrors ErpDocumentRecord but excludes the PDF attachment bytes.
+/// IsNew=true means first write; IsNew=false means the record was updated (e.g. archived).
+/// </summary>
+public class ErpBusRecord
+{
+    public string? SpItemId       { get; set; }
+    public string? DocumentNumber { get; set; }
+    public string? DocumentType   { get; set; }
+    public string? CustomerName   { get; set; }
+    public string? FileName       { get; set; }
+    public string? PdfUrl         { get; set; }
+    public string? ReceivedAt     { get; set; }
+    public bool    IsArchived     { get; set; }
+    public bool    IsNew          { get; set; }
+    public string? SourceMachine  { get; set; }
+    public string? SourceUser     { get; set; }
 }
 
 public class RfqNotificationProduct

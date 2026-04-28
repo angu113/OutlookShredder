@@ -25,6 +25,7 @@ public class FileWatcherService : BackgroundService
     private readonly IConfiguration _config;
     private readonly ErpAiService _ai;
     private readonly SharePointService _sp;
+    private readonly RfqNotificationService _notify;
     private readonly ILogger<FileWatcherService> _log;
 
     // Files waiting to be processed (real-time FSW events queue to this)
@@ -43,12 +44,14 @@ public class FileWatcherService : BackgroundService
         IConfiguration config,
         ErpAiService ai,
         SharePointService sp,
+        RfqNotificationService notify,
         ILogger<FileWatcherService> log)
     {
-        _config = config;
-        _ai     = ai;
-        _sp     = sp;
-        _log    = log;
+        _config  = config;
+        _ai      = ai;
+        _sp      = sp;
+        _notify  = notify;
+        _log     = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -294,6 +297,22 @@ public class FileWatcherService : BackgroundService
             _log.LogError(ex, "[FW] SP write failed for {File}", fileName);
             return false;
         }
+
+        // Notify all Shredder clients via Service Bus
+        _notify.NotifyErpDocument(new OutlookShredder.Proxy.Models.ErpBusRecord
+        {
+            SpItemId       = spItemId,
+            DocumentNumber = extraction.DocumentNumber,
+            DocumentType   = extraction.DocumentType,
+            CustomerName   = extraction.CustomerName,
+            FileName       = fileName,
+            PdfUrl         = pdfUrl,
+            ReceivedAt     = DateTimeOffset.UtcNow.ToString("o"),
+            IsArchived     = false,
+            IsNew          = true,
+            SourceMachine  = Environment.MachineName,
+            SourceUser     = Environment.UserName,
+        });
 
         // Archive older duplicates for the same document number
         if (spItemId is not null && !string.IsNullOrEmpty(extraction.DocumentNumber))
