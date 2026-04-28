@@ -59,8 +59,10 @@ public class FileWatcherService : BackgroundService
             return;
         }
 
-        var watchPath = _config["FileWatcher:WatchPath"]
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+        var cfgPath   = _config["FileWatcher:WatchPath"];
+        var watchPath = !string.IsNullOrWhiteSpace(cfgPath)
+            ? cfgPath
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
         _processedFilePath = Path.Combine(AppContext.BaseDirectory, "erp-processed.json");
         LoadProcessedLog();

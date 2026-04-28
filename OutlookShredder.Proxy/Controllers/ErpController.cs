@@ -30,9 +30,10 @@ public class ErpController : ControllerBase
     [HttpPost("/api/erp/scan")]
     public async Task<IActionResult> Scan([FromQuery] string? folder, CancellationToken ct)
     {
-        var path = folder
-            ?? _config["FileWatcher:WatchPath"]
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+        var cfgPath = _config["FileWatcher:WatchPath"];
+        var path = !string.IsNullOrWhiteSpace(folder) ? folder
+            : !string.IsNullOrWhiteSpace(cfgPath)    ? cfgPath
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
         _log.LogInformation("[ERP] Manual scan triggered for {Path}", path);
         var result = await _fw.ScanFolderAsync(path, ct);
