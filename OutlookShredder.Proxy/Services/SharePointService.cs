@@ -6990,7 +6990,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -7009,17 +7009,18 @@ public class SharePointService
 
             results.Add(new OutlookShredder.Proxy.Models.ErpDocumentRecord
             {
-                SpItemId       = item.Id,
-                DocumentNumber = Get("Title"),
-                DocumentType   = Get("DocumentType"),
-                DocumentDate   = Get("DocumentDate"),
-                CustomerName   = Get("CustomerName"),
-                FileName       = Get("FileName"),
-                PdfUrl         = Get("PdfUrl"),
-                ReceivedAt     = Get("ReceivedAt"),
-                IsArchived     = isArchived,
-                SourceMachine  = Get("SourceMachine"),
-                SourceUser     = Get("SourceUser"),
+                SpItemId          = item.Id,
+                DocumentNumber    = Get("Title"),
+                DocumentType      = Get("DocumentType"),
+                DocumentDate      = Get("DocumentDate"),
+                CustomerName      = Get("CustomerName"),
+                CustomerReference = Get("CustomerRef"),
+                FileName          = Get("FileName"),
+                PdfUrl            = Get("PdfUrl"),
+                ReceivedAt        = Get("ReceivedAt"),
+                IsArchived        = isArchived,
+                SourceMachine     = Get("SourceMachine"),
+                SourceUser        = Get("SourceUser"),
             });
         }
 

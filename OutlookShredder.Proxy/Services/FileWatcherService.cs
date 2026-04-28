@@ -289,6 +289,18 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
+        // Validate that the extracted number is actually our reference (HSK- or 020803- prefix).
+        // If AI mistakenly put a customer PO number here, reject the record rather than store bad data.
+        var docNum = extraction.DocumentNumber;
+        if (!string.IsNullOrEmpty(docNum) &&
+            !docNum.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) &&
+            !docNum.StartsWith("020803-", StringComparison.OrdinalIgnoreCase))
+        {
+            _log.LogWarning("[FW] {File} — document_number '{Num}' lacks HSK-/020803- prefix; rejecting (likely a customer reference was misidentified)",
+                fileName, docNum);
+            return false;
+        }
+
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
@@ -323,9 +335,10 @@ public class FileWatcherService : BackgroundService
         {
             SpItemId       = spItemId,
             DocumentNumber = extraction.DocumentNumber,
-            DocumentType   = extraction.DocumentType,
-            DocumentDate   = extraction.DocumentDate,
-            CustomerName   = extraction.CustomerName,
+            DocumentType      = extraction.DocumentType,
+            DocumentDate      = extraction.DocumentDate,
+            CustomerName      = extraction.CustomerName,
+            CustomerReference = extraction.CustomerReference,
             FileName       = fileName,
             PdfUrl         = pdfUrl,
             ReceivedAt     = DateTimeOffset.UtcNow.ToString("o"),
