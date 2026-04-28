@@ -40,6 +40,7 @@ public class SharePointService
     private string? _shredderConfigListId; // ShredderConfig
     private string? _poListId;            // PurchaseOrders
     private string? _synonymListId;       // ProductSynonyms
+    private string? _erpDocumentsListId;  // ErpDocuments
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
@@ -6764,6 +6765,259 @@ public class SharePointService
         _log.LogInformation("[PO] Backfill complete  -- processed={Processed}, skipped={Skipped}",
             processed, skipped);
         return (processed, skipped);
+    }
+
+    // ── ERP Documents list ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the ErpDocuments list ID, creating the list and columns on first call if absent.
+    /// </summary>
+    private async Task<string> GetOrCreateErpDocumentsListIdAsync(CancellationToken ct = default)
+    {
+        if (_erpDocumentsListId is not null) return _erpDocumentsListId;
+
+        var siteId    = await GetSiteIdAsync();
+        const string listName = "ErpDocuments";
+
+        var existing = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (existing?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+            _log.LogInformation("[SP] ErpDocuments list found: {Id}", listId);
+        }
+        else
+        {
+            var created = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new Microsoft.Graph.Models.ListInfo { Template = "genericList" }
+            }, cancellationToken: ct);
+
+            listId = created?.Id ?? throw new Exception("ErpDocuments list creation returned no ID");
+            _log.LogInformation("[SP] Created ErpDocuments list: {Id}", listId);
+        }
+
+        // Ensure columns
+        var cols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var byName = (cols?.Value ?? [])
+            .Where(c => c.Name is not null)
+            .ToDictionary(c => c.Name!, c => c, StringComparer.OrdinalIgnoreCase);
+
+        var schema = new (string Name, string Type)[]
+        {
+            ("DocumentType",   "text"),
+            ("CustomerName",   "text"),
+            ("CustomerRef",    "text"),
+            ("DocumentDate",   "text"),
+            ("TotalAmount",    "text"),
+            ("Currency",       "text"),
+            ("ReceivedAt",     "text"),
+            ("FileName",       "text"),
+            ("PdfUrl",         "text"),
+            ("IsArchived",     "boolean"),
+            ("SourceMachine",  "text"),
+            ("LineItemsJson",  "note"),
+            ("ExtractionLog",  "note"),
+        };
+
+        foreach (var (name, type) in schema)
+        {
+            if (byName.ContainsKey(name)) continue;
+            var def = type switch
+            {
+                "boolean" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean  = new Microsoft.Graph.Models.BooleanColumn() },
+                "note"    => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
+                _         => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn() }
+            };
+            await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
+            _log.LogInformation("[SP] Created ErpDocuments column '{Col}' ({Type})", name, type);
+        }
+
+        return _erpDocumentsListId = listId;
+    }
+
+    /// <summary>
+    /// Idempotent: ensures the ErpDocuments list and columns exist.
+    /// Called by POST /api/erp/setup.
+    /// </summary>
+    public async Task EnsureErpDocumentsListAsync(CancellationToken ct = default)
+        => await GetOrCreateErpDocumentsListIdAsync(ct);
+
+    /// <summary>
+    /// Writes one ERP document record to the ErpDocuments list.
+    /// Returns the new SharePoint item ID.
+    /// </summary>
+    public async Task<string?> WriteErpDocumentAsync(
+        OutlookShredder.Proxy.Models.ErpExtraction extraction,
+        string fileName,
+        DateTimeOffset receivedAt,
+        string sourceMachine,
+        string? pdfUrl,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var lineItemsJson = extraction.LineItems.Count > 0
+            ? System.Text.Json.JsonSerializer.Serialize(extraction.LineItems)
+            : null;
+
+        var fields = new Dictionary<string, object?>
+        {
+            ["Title"]          = extraction.DocumentNumber ?? Path.GetFileNameWithoutExtension(fileName),
+            ["DocumentType"]   = extraction.DocumentType,
+            ["CustomerName"]   = extraction.CustomerName,
+            ["CustomerRef"]    = extraction.CustomerReference,
+            ["DocumentDate"]   = extraction.DocumentDate,
+            ["TotalAmount"]    = extraction.TotalAmount,
+            ["Currency"]       = extraction.Currency ?? "USD",
+            ["ReceivedAt"]     = receivedAt.ToString("o"),
+            ["FileName"]       = fileName,
+            ["PdfUrl"]         = pdfUrl,
+            ["IsArchived"]     = false,
+            ["SourceMachine"]  = sourceMachine,
+            ["LineItemsJson"]  = lineItemsJson,
+            ["ExtractionLog"]  = System.Text.Json.JsonSerializer.Serialize(extraction),
+        };
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }
+            }, cancellationToken: ct);
+
+        var id = item?.Id;
+        _log.LogInformation("[SP] Wrote ErpDocument {Number} ({Type}) → item {Id}",
+            extraction.DocumentNumber, extraction.DocumentType, id);
+        return id;
+    }
+
+    /// <summary>
+    /// Uploads an ERP PDF to the site drive under ErpDocuments/{documentNumber}/{fileName}.
+    /// Returns the web URL, or null on failure.
+    /// </summary>
+    public async Task<string?> UploadErpPdfAsync(
+        string documentNumber,
+        string fileName,
+        byte[] pdfBytes,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var siteId  = await GetSiteIdAsync();
+            var drive   = await GetGraph().Sites[siteId].Drive.GetAsync(cancellationToken: ct);
+            var driveId = drive?.Id ?? throw new Exception("Could not resolve site drive ID");
+
+            var safeNum  = string.Join("_", documentNumber.Split(Path.GetInvalidFileNameChars()));
+            var safeName = string.Join("_", fileName.Split(Path.GetInvalidFileNameChars()));
+            var itemKey  = $"root:/ErpDocuments/{safeNum}/{safeName}:";
+
+            var driveItem = await GetGraph().Drives[driveId].Items[itemKey].Content
+                .PutAsync(new MemoryStream(pdfBytes), cancellationToken: ct);
+
+            var url = driveItem?.WebUrl;
+            _log.LogInformation("[SP] Uploaded ERP PDF {Number}/{File} → {Url}", documentNumber, fileName, url);
+            return url;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SP] ERP PDF upload failed for {Number}/{File}", documentNumber, fileName);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Marks all ErpDocuments records with the same document number (other than currentSpItemId)
+    /// as IsArchived=true, so only the newest record is current.
+    /// </summary>
+    public async Task ArchiveOlderErpDocumentsAsync(
+        string documentNumber,
+        string currentSpItemId,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,IsArchived)"];
+                r.QueryParameters.Top    = 100;
+            }, ct);
+
+        var toArchive = (items?.Value ?? [])
+            .Where(i =>
+            {
+                var d = i.Fields?.AdditionalData;
+                if (d is null || i.Id == currentSpItemId) return false;
+                var title = d.TryGetValue("Title", out var t) ? t?.ToString() : null;
+                var archived = d.TryGetValue("IsArchived", out var a) &&
+                               a is true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
+                return string.Equals(title, documentNumber, StringComparison.OrdinalIgnoreCase) && !archived;
+            })
+            .Select(i => i.Id!)
+            .ToList();
+
+        foreach (var id in toArchive)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[id].Fields
+                .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?> { ["IsArchived"] = true }
+                }, cancellationToken: ct);
+            _log.LogInformation("[SP] Archived older ErpDocument {Id} for {Number}", id, documentNumber);
+        }
+    }
+
+    /// <summary>
+    /// Returns ERP document records from SharePoint, newest first.
+    /// </summary>
+    public async Task<List<OutlookShredder.Proxy.Models.ErpDocumentRecord>> ReadErpDocumentsAsync(
+        int top = 50,
+        bool includeArchived = false,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,CustomerName,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine)"];
+                r.QueryParameters.Top    = top;
+            }, ct);
+
+        var results = new List<OutlookShredder.Proxy.Models.ErpDocumentRecord>();
+        foreach (var item in (items?.Value ?? []))
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null) continue;
+
+            string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
+            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
+                                      v is true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
+
+            var isArchived = GetBool("IsArchived");
+            if (!includeArchived && isArchived) continue;
+
+            results.Add(new OutlookShredder.Proxy.Models.ErpDocumentRecord
+            {
+                SpItemId       = item.Id,
+                DocumentNumber = Get("Title"),
+                DocumentType   = Get("DocumentType"),
+                CustomerName   = Get("CustomerName"),
+                FileName       = Get("FileName"),
+                PdfUrl         = Get("PdfUrl"),
+                ReceivedAt     = Get("ReceivedAt"),
+                IsArchived     = isArchived,
+                SourceMachine  = Get("SourceMachine"),
+            });
+        }
+
+        return [.. results.OrderByDescending(r => r.ReceivedAt)];
     }
 
 }

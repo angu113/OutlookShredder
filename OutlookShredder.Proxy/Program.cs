@@ -99,8 +99,11 @@ try
     builder.Services.AddSingleton<RfqNotificationService>();
     builder.Services.AddSingleton<ShrConvInRouter>();
     builder.Services.AddSingleton<MailPollerService>();
+    builder.Services.AddSingleton<ErpAiService>();
+    builder.Services.AddSingleton<FileWatcherService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<FileWatcherService>());
 
     builder.Services.AddSingleton<OutlookComPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
