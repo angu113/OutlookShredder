@@ -5,8 +5,8 @@ using OutlookShredder.Proxy.Models;
 namespace OutlookShredder.Proxy.Services;
 
 /// <summary>
-/// Calls Claude to classify a PDF as an ERP document and extract its structured data.
-/// Uses tool-use for deterministic JSON output and prompt caching.
+/// Calls Claude (primary) or Gemini (fallback) to classify a PDF as an ERP document
+/// and extract its structured data.
 /// Separate from IAiExtractionService — ERP documents are outbound company records,
 /// not inbound supplier quotes, and require a different extraction schema.
 /// </summary>
@@ -15,9 +15,12 @@ public class ErpAiService
     private readonly IConfiguration _config;
     private readonly ILogger<ErpAiService> _log;
     private readonly AiRateLimitTracker _rateLimits;
-    private readonly HttpClient _http;
+    private readonly HttpClient _claudeHttp;
+    private readonly HttpClient _geminiHttp;
 
-    private const string ApiUrl = "https://api.anthropic.com/v1/messages";
+    private const string ClaudeApiUrl = "https://api.anthropic.com/v1/messages";
+    private const string GeminiApiUrlTemplate =
+        "https://generativelanguage.googleapis.com/v1beta/models/{0}:generateContent?key={1}";
 
     private const string SystemPromptText = """
         You are a document classification assistant for Metal Supermarkets Hackensack, a metals
@@ -61,6 +64,7 @@ public class ErpAiService
         Extract the document grand total and currency (default USD if not stated).
         """;
 
+    // Claude tool definition
     private static readonly JsonElement _toolJson = JsonDocument.Parse("""
         {
           "name": "record_erp_document",
@@ -97,12 +101,49 @@ public class ErpAiService
         }
         """).RootElement;
 
+    // Gemini JSON-mode response schema (nullable: true instead of ["type","null"])
+    private static readonly JsonElement _geminiSchema = JsonDocument.Parse("""
+        {
+          "type": "object",
+          "required": ["is_erp_document"],
+          "properties": {
+            "is_erp_document":    { "type": "boolean" },
+            "document_type":      { "type": "string",  "nullable": true, "enum": ["Quotation","SalesOrder","Invoice","CreditNote","Payment","ShippingNote","Unknown"] },
+            "document_number":    { "type": "string",  "nullable": true },
+            "customer_name":      { "type": "string",  "nullable": true },
+            "customer_reference": { "type": "string",  "nullable": true },
+            "document_date":      { "type": "string",  "nullable": true },
+            "total_amount":       { "type": "string",  "nullable": true },
+            "currency":           { "type": "string",  "nullable": true },
+            "line_items": {
+              "type": "array",
+              "nullable": true,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "description": { "type": "string", "nullable": true },
+                  "code":        { "type": "string", "nullable": true },
+                  "quantity":    { "type": "string", "nullable": true },
+                  "unit":        { "type": "string", "nullable": true },
+                  "unit_price":  { "type": "string", "nullable": true },
+                  "total_price": { "type": "string", "nullable": true }
+                }
+              }
+            },
+            "notes": { "type": "string", "nullable": true }
+          }
+        }
+        """).RootElement;
+
     private static readonly (int MinMs, int MaxMs)[] RetryDelays =
     [
         (2_000,  4_000),
         (5_000, 10_000),
         (15_000, 25_000),
     ];
+
+    private static readonly JsonSerializerOptions _jsonOpts =
+        new() { PropertyNameCaseInsensitive = true };
 
     public ErpAiService(
         IConfiguration config,
@@ -115,23 +156,38 @@ public class ErpAiService
         _rateLimits = rateLimits;
 
         var timeoutSeconds = int.TryParse(_config["Claude:TimeoutSeconds"], out var t) ? t : 60;
+
         var handler = new AiRateLimitHandler("Claude", rateLimits, handlerLog)
         {
             InnerHandler = new HttpClientHandler()
         };
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+        _claudeHttp = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+        _geminiHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
     /// <summary>
     /// Classifies the PDF and extracts its ERP data.
-    /// Returns null on API failure. Returns an extraction with IsErpDocument=false for non-ERP PDFs.
+    /// Tries Claude first; falls back to Gemini if Claude is unavailable or fails.
+    /// Returns null only when both providers are unavailable or both fail.
+    /// Returns an extraction with IsErpDocument=false for non-ERP PDFs.
     /// </summary>
     public async Task<ErpExtraction?> ExtractAsync(string base64Pdf, string fileName, CancellationToken ct = default)
+    {
+        var result = await TryClaudeAsync(base64Pdf, fileName, ct);
+        if (result is not null) return result;
+
+        _log.LogWarning("[ERP] Claude unavailable or failed for {File} — trying Gemini fallback", fileName);
+        return await TryGeminiAsync(base64Pdf, fileName, ct);
+    }
+
+    // ── Claude ────────────────────────────────────────────────────────────────
+
+    private async Task<ErpExtraction?> TryClaudeAsync(string base64Pdf, string fileName, CancellationToken ct)
     {
         var apiKey = _config["Anthropic:ApiKey"];
         if (string.IsNullOrEmpty(apiKey))
         {
-            _log.LogWarning("[ERP] Anthropic:ApiKey not configured — skipping AI extraction");
+            _log.LogDebug("[ERP] Anthropic:ApiKey not configured");
             return null;
         }
 
@@ -166,7 +222,7 @@ public class ErpAiService
         HttpResponseMessage response;
         try
         {
-            response = await SendWithRetryAsync(apiKey, bodyJson, maxRetries, ct);
+            response = await SendClaudeWithRetryAsync(apiKey, bodyJson, maxRetries, ct);
         }
         catch (Exception ex)
         {
@@ -196,8 +252,7 @@ public class ErpAiService
             if (!block.TryGetProperty("name", out var nameEl) || nameEl.GetString() != "record_erp_document") continue;
             if (!block.TryGetProperty("input", out var inputEl)) continue;
 
-            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var extraction = JsonSerializer.Deserialize<ErpExtraction>(inputEl.GetRawText(), opts);
+            var extraction = JsonSerializer.Deserialize<ErpExtraction>(inputEl.GetRawText(), _jsonOpts);
             if (extraction is not null)
                 _log.LogInformation("[ERP] Claude: IsErp={IsErp} Type={Type} Number={Number} File={File}",
                     extraction.IsErpDocument, extraction.DocumentType, extraction.DocumentNumber, fileName);
@@ -208,7 +263,7 @@ public class ErpAiService
         return null;
     }
 
-    private async Task<HttpResponseMessage> SendWithRetryAsync(
+    private async Task<HttpResponseMessage> SendClaudeWithRetryAsync(
         string apiKey, string bodyJson, int maxRetries, CancellationToken ct)
     {
         HttpResponseMessage? last = null;
@@ -217,7 +272,7 @@ public class ErpAiService
         {
             await _rateLimits.ThrottleIfNeededAsync("Claude", ct);
 
-            var req = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
+            var req = new HttpRequestMessage(HttpMethod.Post, ClaudeApiUrl);
             req.Headers.Add("x-api-key", apiKey);
             req.Headers.Add("anthropic-version", "2023-06-01");
             req.Headers.Add("anthropic-beta", "prompt-caching-2024-07-31");
@@ -225,7 +280,7 @@ public class ErpAiService
 
             try
             {
-                last = await _http.SendAsync(req, ct);
+                last = await _claudeHttp.SendAsync(req, ct);
             }
             catch (Exception ex) when (attempt < maxRetries)
             {
@@ -249,6 +304,118 @@ public class ErpAiService
 
         return last!;
     }
+
+    // ── Gemini fallback ───────────────────────────────────────────────────────
+
+    private async Task<ErpExtraction?> TryGeminiAsync(string base64Pdf, string fileName, CancellationToken ct)
+    {
+        var apiKey = _config["Google:ApiKey"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            _log.LogDebug("[ERP] Google:ApiKey not configured — Gemini fallback unavailable");
+            return null;
+        }
+
+        var model = _config["Gemini:Model"] ?? "gemini-2.0-flash";
+        var url   = string.Format(GeminiApiUrlTemplate, model, apiKey);
+
+        var body = new
+        {
+            systemInstruction = new
+            {
+                parts = new[] { new { text = SystemPromptText } }
+            },
+            contents = new[]
+            {
+                new
+                {
+                    role  = "user",
+                    parts = new object[]
+                    {
+                        new { inlineData = new { mimeType = "application/pdf", data = base64Pdf } },
+                        new { text = $"Classify and extract data from the attached PDF: {fileName}" }
+                    }
+                }
+            },
+            generationConfig = new
+            {
+                responseMimeType = "application/json",
+                responseSchema   = _geminiSchema
+            }
+        };
+
+        var bodyJson = JsonSerializer.Serialize(body);
+        var maxRetries = int.TryParse(_config["Gemini:MaxRetries"], out var mr) ? mr : 3;
+
+        HttpResponseMessage? response = null;
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            if (attempt > 0) await DelayAsync(attempt - 1, ct);
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
+                };
+                response = await _geminiHttp.SendAsync(req, ct);
+            }
+            catch (Exception ex) when (attempt < maxRetries)
+            {
+                _log.LogWarning(ex, "[ERP] Gemini attempt {A}/{T} threw — retrying", attempt + 1, maxRetries + 1);
+                continue;
+            }
+
+            if (response is null) continue;
+
+            var status = (int)response.StatusCode;
+            if (response.IsSuccessStatusCode) break;
+            if ((status == 429 || status >= 500) && attempt < maxRetries)
+            {
+                _log.LogWarning("[ERP] Gemini {Status} attempt {A}/{T} — retrying", status, attempt + 1, maxRetries + 1);
+                response = null;
+                continue;
+            }
+            break;
+        }
+
+        if (response is null) return null;
+
+        var raw = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            _log.LogError("[ERP] Gemini API error {Status} for {File}: {Body}", response.StatusCode, fileName, raw);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+
+            // Gemini wraps the JSON text in candidates[0].content.parts[0].text
+            var jsonText = root
+                .GetProperty("candidates")[0]
+                .GetProperty("content")
+                .GetProperty("parts")[0]
+                .GetProperty("text")
+                .GetString();
+
+            if (string.IsNullOrWhiteSpace(jsonText)) return null;
+
+            var extraction = JsonSerializer.Deserialize<ErpExtraction>(jsonText, _jsonOpts);
+            if (extraction is not null)
+                _log.LogInformation("[ERP] Gemini: IsErp={IsErp} Type={Type} Number={Number} File={File}",
+                    extraction.IsErpDocument, extraction.DocumentType, extraction.DocumentNumber, fileName);
+            return extraction;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[ERP] Failed to parse Gemini response for {File}: {Body}", fileName, raw);
+            return null;
+        }
+    }
+
+    // ── Shared ────────────────────────────────────────────────────────────────
 
     private async Task DelayAsync(int attempt, CancellationToken ct)
     {
