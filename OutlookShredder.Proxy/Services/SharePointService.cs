@@ -42,11 +42,18 @@ public class SharePointService
     private string? _synonymListId;       // ProductSynonyms
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
-    // Caching for 60 s eliminates repeated full-table fetches during paginated loads
+    // Caching for 5 min eliminates repeated full-table fetches during paginated loads
     // and concurrent startup requests. Write paths call InvalidateSrCache().
     private List<Microsoft.Graph.Models.ListItem>? _srRowCache;
     private DateTime                               _srRowCacheExpiry = DateTime.MinValue;
     private readonly SemaphoreSlim                 _srRowCacheLock   = new(1, 1);
+
+    // Completed-RFQ ID cache  --  used by GetItems to strip completed rows.
+    // Short TTL (30 s) so it's shared across all pages of one paginated load
+    // without keeping stale data across multiple refresh cycles.
+    private HashSet<string>? _completedRfqCache;
+    private DateTime          _completedRfqCacheExpiry = DateTime.MinValue;
+    private readonly SemaphoreSlim _completedRfqCacheLock = new(1, 1);
 
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "not available", "out of stock",
@@ -147,8 +154,9 @@ public class SharePointService
         {
             var siteId = await GetSiteIdAsync();
 
-            // Resolve list IDs in parallel. Missing lists are OK here  --  they'll fail on
-            // first real use with a clearer error if setup-supplier-lists wasn't run yet.
+            // Resolve list IDs and issue a throwaway Graph query in parallel.
+            // Missing lists are OK here  --  they'll fail on first real use with a
+            // clearer error if setup-supplier-lists wasn't run yet.
             var tasks = new List<Task>
             {
                 TrySwallowAsync(() => GetSupplierResponsesListIdAsync()),
@@ -157,6 +165,15 @@ public class SharePointService
                     .GetAsync(r => r.QueryParameters.Top = 1, ct)),
             };
             await Task.WhenAll(tasks);
+
+            // Pre-populate the SR row cache so the first /api/items call doesn't pay
+            // the cold-start penalty (2-3 s to fetch all SupplierResponse rows).
+            await TrySwallowAsync(async () =>
+            {
+                var srListId = await GetSupplierResponsesListIdAsync();
+                await GetCachedSrItemsAsync(siteId, srListId);
+                _log.LogInformation("[SP] SR cache pre-warmed: {Count} rows", _srRowCache?.Count ?? 0);
+            });
 
             _log.LogInformation("[SP] Pre-warm complete");
         }
@@ -229,7 +246,7 @@ public class SharePointService
             var resp = await GetGraph().Sites[siteId].Lists[srListId].Items
                 .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
             _srRowCache    = resp?.Value ?? [];
-            _srRowCacheExpiry = DateTime.UtcNow.AddSeconds(60);
+            _srRowCacheExpiry = DateTime.UtcNow.AddMinutes(5);
             _log.LogDebug("[SP] SR cache populated: {Count} rows", _srRowCache.Count);
             return _srRowCache;
         }
@@ -243,6 +260,39 @@ public class SharePointService
     {
         _srRowCache       = null;
         _srRowCacheExpiry = DateTime.MinValue;
+    }
+
+    // Returns the set of RFQ IDs marked Complete=true.  Cached for 30 s so all pages of a
+    // single paginated load share one fetch rather than hitting SP on every page.
+    public async Task<HashSet<string>> GetCompletedRfqIdsAsync()
+    {
+        if (_completedRfqCache is not null && DateTime.UtcNow < _completedRfqCacheExpiry)
+            return _completedRfqCache;
+
+        await _completedRfqCacheLock.WaitAsync();
+        try
+        {
+            if (_completedRfqCache is not null && DateTime.UtcNow < _completedRfqCacheExpiry)
+                return _completedRfqCache;
+
+            var refs = await ReadRfqReferencesAsync();
+            var set  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in refs)
+            {
+                var complete = r.TryGetValue("Complete", out var cv) && cv is
+                    true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
+                if (!complete) continue;
+                var rid = r.TryGetValue("RFQ_ID", out var idv) ? idv?.ToString() : null;
+                if (!string.IsNullOrEmpty(rid)) set.Add(rid!);
+            }
+            _completedRfqCacheExpiry = DateTime.UtcNow.AddSeconds(30);
+            _log.LogDebug("[SP] Completed-RFQ cache: {Count} completed RFQs", set.Count);
+            return _completedRfqCache = set;
+        }
+        finally
+        {
+            _completedRfqCacheLock.Release();
+        }
     }
 
     private async Task<string> GetRfqReferencesListIdAsync()
@@ -290,7 +340,8 @@ public class SharePointService
     /// supported approach.
     /// </summary>
     public async Task<(List<Dictionary<string, object?>> Items, string? NextLink)>
-        ReadSupplierItemsAsync(int top = 5000, string? sliNextLink = null, bool skipDedup = false)
+        ReadSupplierItemsAsync(int top = 5000, string? sliNextLink = null, bool skipDedup = false,
+                               DateTime? since = null)
     {
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
@@ -301,6 +352,9 @@ public class SharePointService
 
         // SLI: first page uses standard request; subsequent pages follow the @odata.nextLink.
         // Graph SharePoint list items don't support $skip  -- cursor pagination only.
+        // When `since` is provided on the first page, a $filter on the list item Created
+        // date is applied.  The @odata.nextLink URL carries the filter into all subsequent
+        // pages automatically, so `since` is ignored on continuation requests.
         Task<Microsoft.Graph.Models.ListItemCollectionResponse?> sliTask;
         if (sliNextLink is null)
         {
@@ -309,6 +363,12 @@ public class SharePointService
                 {
                     req.QueryParameters.Expand = ["fields"];
                     req.QueryParameters.Top    = top;
+                    if (since.HasValue)
+                    {
+                        var cutoffUtc = since.Value.ToUniversalTime();
+                        req.QueryParameters.Filter =
+                            $"fields/Created ge '{cutoffUtc:yyyy-MM-ddTHH:mm:ss}Z'";
+                    }
                 });
         }
         else

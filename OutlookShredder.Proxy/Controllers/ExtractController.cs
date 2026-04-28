@@ -245,10 +245,11 @@ public class ExtractController : ControllerBase
     /// </summary>
     [HttpGet("items")]
     public async Task<IActionResult> GetItems(
-        [FromQuery] int     top               = 5000,
-        [FromQuery] string? nextLink          = null,
-        [FromQuery] bool    raw               = false,
-        [FromQuery] bool    includeCompleted  = false)
+        [FromQuery] int       top              = 5000,
+        [FromQuery] string?   nextLink         = null,
+        [FromQuery] bool      raw              = false,
+        [FromQuery] bool      includeCompleted = false,
+        [FromQuery] DateTime? since            = null)
     {
         try
         {
@@ -258,7 +259,10 @@ public class ExtractController : ControllerBase
             // The count is a raw SLI row count — an upper bound used by Shredder
             // to drive a determinate progress bar.  Zero latency added because
             // site/list ID lookups are cached after the first request.
-            var itemsTask = _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw);
+            // `since` is passed on the first page only; subsequent pages follow the
+            // @odata.nextLink which already carries the $filter.
+            var itemsTask = _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw,
+                                                       since: isFirstPage ? since : null);
             var countTask = isFirstPage
                 ? _sp.GetSupplierLineItemCountAsync()
                 : Task.FromResult(0);
@@ -270,7 +274,9 @@ public class ExtractController : ControllerBase
 
             if (!includeCompleted)
             {
-                var completed = await GetCompletedRfqIdsAsync();
+                // Service-level cache shared across all pages of a single load —
+                // avoids a separate ReadRfqReferences SP call per page.
+                var completed = await _sp.GetCompletedRfqIdsAsync();
                 if (completed.Count > 0)
                 {
                     items = items.Where(row =>
@@ -289,25 +295,6 @@ public class ExtractController : ControllerBase
             _log.LogError(ex, "Failed to read supplier items");
             return StatusCode(500, new { success = false, error = ex.Message });
         }
-    }
-
-    // Builds a HashSet of RFQ IDs whose RFQ Reference row has Complete=true.
-    // Used by list endpoints that hide completed RFQs by default. Cached per
-    // request (controller instance lifetime) so a single list fetch per call.
-    private HashSet<string>? _completedCache;
-    private async Task<HashSet<string>> GetCompletedRfqIdsAsync()
-    {
-        if (_completedCache is not null) return _completedCache;
-
-        var refs = await _sp.ReadRfqReferencesAsync();
-        var set  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in refs)
-        {
-            if (!IsTrueBool(r.TryGetValue("Complete", out var cv) ? cv : null)) continue;
-            var rid = r.TryGetValue("RFQ_ID", out var idv) ? idv?.ToString() : null;
-            if (!string.IsNullOrEmpty(rid)) set.Add(rid!);
-        }
-        return _completedCache = set;
     }
 
     private static bool IsTrueBool(object? v) => v switch
