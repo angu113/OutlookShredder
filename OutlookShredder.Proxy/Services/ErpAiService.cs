@@ -37,12 +37,19 @@ public class ErpAiService
         Document types and typical label text:
           Quotation     — "Quote", "Quotation" heading; no binding commitment
           SalesOrder    — "Sales Order", "Order Confirmation", "SO" in number
-          PickingSlip   — "Picking Slip", "Pick List", "Pick Ticket"; internal warehouse/dispatch document listing items to pick for an order
+          PickingSlip   — "Picking Slip", "Pick List", "Pick Ticket"; purely internal warehouse document listing items to PICK for an order — no customer pricing or delivery address
           PurchaseOrder — "Purchase Order" issued BY us TO a supplier; "PO" in number — NOT a supplier's invoice sent to us
           Invoice       — "Invoice", "Tax Invoice", "INV" in number
           CreditNote    — "Credit Note", "Credit Memo", "CR" in number
           Payment       — "Receipt", "Payment Confirmation", "PAY" in number
-          ShippingNote  — "Delivery Note", "Dispatch Note", "SHP"/"DN" in number (NOT a picking slip)
+          ShippingNote  — "Delivery Note", "Shipping Slip", "Goods Shipment", "Dispatch Note", "SHP"/"DN" in number; customer-facing document confirming goods were dispatched/delivered
+
+        PICKING SLIP vs SHIPPING
+        A PickingSlip is an INTERNAL warehouse pick list — it tells staff what to collect from
+        shelves. It has no customer delivery address and is never sent to the customer.
+        A ShippingNote (Shipping Slip / Goods Shipment / Delivery Note) is a customer-facing
+        document that travels WITH the goods to confirm what was shipped. If in doubt and the
+        document addresses or accompanies a delivery to a customer, use ShippingNote.
 
         Return is_erp_document = false for:
           • Supplier invoices / quotes received FROM external companies
