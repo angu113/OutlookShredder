@@ -26,17 +26,29 @@ public class ErpController : ControllerBase
     /// <summary>
     /// Scans a folder for PDFs and runs them through ERP detection.
     /// Defaults to the configured FileWatcher:WatchPath (or Downloads if unset).
+    /// Pass maxAgeDays to skip files older than N days.
+    /// Pass reset=true to clear the processed-file cache before scanning (re-processes everything in window).
     /// </summary>
     [HttpPost("/api/erp/scan")]
-    public async Task<IActionResult> Scan([FromQuery] string? folder, CancellationToken ct)
+    public async Task<IActionResult> Scan(
+        [FromQuery] string? folder,
+        [FromQuery] int? maxAgeDays,
+        [FromQuery] bool reset,
+        CancellationToken ct)
     {
         var cfgPath = _config["FileWatcher:WatchPath"];
         var path = !string.IsNullOrWhiteSpace(folder) ? folder
             : !string.IsNullOrWhiteSpace(cfgPath)    ? cfgPath
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
-        _log.LogInformation("[ERP] Manual scan triggered for {Path}", path);
-        var result = await _fw.ScanFolderAsync(path, ct);
+        if (reset)
+        {
+            _fw.ClearProcessedCache();
+            _log.LogInformation("[ERP] Processed-file cache cleared by manual scan request");
+        }
+
+        _log.LogInformation("[ERP] Manual scan triggered for {Path} (maxAgeDays={Days} reset={Reset})", path, maxAgeDays, reset);
+        var result = await _fw.ScanFolderAsync(path, ct, maxAgeDays);
         return Ok(result);
     }
 

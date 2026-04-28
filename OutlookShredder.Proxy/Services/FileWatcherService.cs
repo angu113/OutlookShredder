@@ -106,6 +106,17 @@ public class FileWatcherService : BackgroundService
         }
     }
 
+    // ── Public API ───────────────────────────────────────────────────────────
+
+    public void ClearProcessedCache()
+    {
+        lock (_processedLock)
+        {
+            _processedKeys.Clear();
+            SaveProcessedLog();
+        }
+    }
+
     // ── Public batch-scan API ────────────────────────────────────────────────
 
     public async Task<ErpScanResult> ScanFolderAsync(
