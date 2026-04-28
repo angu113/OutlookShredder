@@ -10,6 +10,7 @@ public class ExtractController : ControllerBase
 {
     private readonly AiServiceFactory            _aiFactory;
     private readonly SharePointService          _sp;
+    private readonly SliCacheService            _sliCache;
     private readonly MailService                _mail;
     private readonly MailPollerService          _poller;
     private readonly OutlookComPollerService    _comPoller;
@@ -23,6 +24,7 @@ public class ExtractController : ControllerBase
     public ExtractController(
         AiServiceFactory            aiFactory,
         SharePointService           sp,
+        SliCacheService             sliCache,
         MailService                 mail,
         MailPollerService           poller,
         OutlookComPollerService     comPoller,
@@ -35,6 +37,7 @@ public class ExtractController : ControllerBase
     {
         _aiFactory     = aiFactory;
         _sp            = sp;
+        _sliCache      = sliCache;
         _mail          = mail;
         _poller        = poller;
         _comPoller     = comPoller;
@@ -249,18 +252,32 @@ public class ExtractController : ControllerBase
         [FromQuery] string?   nextLink         = null,
         [FromQuery] bool      raw              = false,
         [FromQuery] bool      includeCompleted = false,
-        [FromQuery] DateTime? since            = null)
+        [FromQuery] DateTime? since            = null,
+        [FromQuery] bool      forceRefresh     = false)
     {
         try
         {
-            bool isFirstPage = nextLink is null;
+            // Cache path: first page, not raw, not forced → serve from in-memory snapshot.
+            // Returns all items in one shot so the page loop exits immediately.
+            if (nextLink is null && !raw && !forceRefresh)
+            {
+                var cached = _sliCache.TryGet();
+                if (cached is not null)
+                {
+                    var items = FilterCompleted(cached, includeCompleted
+                        ? null : await _sp.GetCompletedRfqIdsAsync());
+                    _log.LogInformation("[SliCache] Serving {Count} items from cache", items.Count);
+                    return Ok(new { items, nextLink = (string?)null, totalCount = items.Count });
+                }
+            }
 
-            // Fetch items and (on first page only) total count in parallel.
-            // The count is a raw SLI row count — an upper bound used by Shredder
-            // to drive a determinate progress bar.  Zero latency added because
-            // site/list ID lookups are cached after the first request.
-            // `since` is passed on the first page only; subsequent pages follow the
-            // @odata.nextLink which already carries the $filter.
+            // Live SP path: cache miss, raw mode, or force-refresh.
+            // forceRefresh also kicks off a background cache repopulation so the
+            // next normal load is fast again.
+            if (forceRefresh)
+                _ = Task.Run(() => _sliCache.PopulateAsync(force: true));
+
+            bool isFirstPage = nextLink is null;
             var itemsTask = _sp.ReadSupplierItemsAsync(top, nextLink, skipDedup: raw,
                                                        since: isFirstPage ? since : null);
             var countTask = isFirstPage
@@ -269,32 +286,31 @@ public class ExtractController : ControllerBase
 
             await Task.WhenAll(itemsTask, countTask);
 
-            var (items, next) = itemsTask.Result;
-            int? totalCount   = isFirstPage ? countTask.Result : null;
+            var (liveItems, next) = itemsTask.Result;
+            int? totalCount       = isFirstPage ? countTask.Result : null;
 
-            if (!includeCompleted)
-            {
-                // Service-level cache shared across all pages of a single load —
-                // avoids a separate ReadRfqReferences SP call per page.
-                var completed = await _sp.GetCompletedRfqIdsAsync();
-                if (completed.Count > 0)
-                {
-                    items = items.Where(row =>
-                    {
-                        if (!row.TryGetValue("RFQ_ID", out var idv)) return true;
-                        var rid = idv?.ToString();
-                        return string.IsNullOrEmpty(rid) || !completed.Contains(rid!);
-                    }).ToList();
-                }
-            }
+            liveItems = FilterCompleted(liveItems, includeCompleted
+                ? null : await _sp.GetCompletedRfqIdsAsync());
 
-            return Ok(new { items, nextLink = next, totalCount });
+            return Ok(new { items = liveItems, nextLink = next, totalCount });
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to read supplier items");
             return StatusCode(500, new { success = false, error = ex.Message });
         }
+    }
+
+    private static List<Dictionary<string, object?>> FilterCompleted(
+        List<Dictionary<string, object?>> items, HashSet<string>? completed)
+    {
+        if (completed is null || completed.Count == 0) return items;
+        return items.Where(row =>
+        {
+            if (!row.TryGetValue("RFQ_ID", out var idv)) return true;
+            var rid = idv?.ToString();
+            return string.IsNullOrEmpty(rid) || !completed.Contains(rid!);
+        }).ToList();
     }
 
     private static bool IsTrueBool(object? v) => v switch

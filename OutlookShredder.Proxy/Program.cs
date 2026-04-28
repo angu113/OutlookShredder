@@ -94,6 +94,7 @@ try
     builder.Services.AddSingleton<ProductCatalogService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<SharePointService>();
+    builder.Services.AddSingleton<SliCacheService>();
     builder.Services.AddSingleton<MailService>();
     builder.Services.AddSingleton<RfqNotificationService>();
     builder.Services.AddSingleton<ShrConvInRouter>();
@@ -164,6 +165,11 @@ try
                 // Seeds from product-synonyms.json on first run if SP list is empty.
                 var synonyms = app.Services.GetRequiredService<ProductSynonymService>();
                 await synonyms.LoadAsync();
+
+                // Pre-populate the SLI cache so the first /api/items request
+                // is served from memory rather than paginating SP live.
+                var sliCache = app.Services.GetRequiredService<SliCacheService>();
+                await sliCache.PopulateAsync();
             }
             catch (Exception ex)
             {

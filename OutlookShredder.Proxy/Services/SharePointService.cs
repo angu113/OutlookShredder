@@ -175,6 +175,14 @@ public class SharePointService
                 _log.LogInformation("[SP] SR cache pre-warmed: {Count} rows", _srRowCache?.Count ?? 0);
             });
 
+            // Ensure the Created column on SupplierLineItems is indexed so the date
+            // filter on /api/items doesn't require HonorNonIndexedQueries.
+            await TrySwallowAsync(async () =>
+            {
+                var r = await EnsureColumnIndexesAsync(siteId, "SupplierLineItems", "Created");
+                _log.LogInformation("[SP] SLI Created index: {Status}", r.GetValueOrDefault("Created", "?"));
+            });
+
             _log.LogInformation("[SP] Pre-warm complete");
         }
         catch (Exception ex)
@@ -3930,7 +3938,7 @@ public class SharePointService
         results["Indexes:SupplierResponses"] = await EnsureColumnIndexesAsync(
             siteId, "SupplierResponses",     "RFQ_ID", "SupplierName", "MessageId");
         results["Indexes:SupplierLineItems"] = await EnsureColumnIndexesAsync(
-            siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId");
+            siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId", "Created");
         results["Indexes:PurchaseOrders"] = await EnsureColumnIndexesAsync(
             siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
 
