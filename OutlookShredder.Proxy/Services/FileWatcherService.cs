@@ -291,6 +291,14 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
+        // Payment and Quotation files are not needed — mark processed and skip
+        if (erpInfo.DocumentType is "Payment" or "Quotation")
+        {
+            _log.LogDebug("[FW] {File} — {Type} ignored; marked as processed", fileName, erpInfo.DocumentType);
+            if (key is not null) MarkProcessed(key);
+            return false;
+        }
+
         _log.LogInformation("[FW] ERP filename matched: {Type} {DocNum} in {File}",
             erpInfo.DocumentType, erpInfo.DocumentNumber ?? "(no record id)", fileName);
 
