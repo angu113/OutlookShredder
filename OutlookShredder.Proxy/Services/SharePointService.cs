@@ -7069,6 +7069,70 @@ public class SharePointService
         return deleted;
     }
 
+    /// <summary>
+    /// Deletes the PDF file from the site drive and clears the PdfUrl field on ERP document
+    /// records whose DocumentDate is older than <paramref name="olderThan"/>.
+    /// Returns the number of records cleaned.
+    /// </summary>
+    public async Task<int> RemoveOldErpPdfsAsync(TimeSpan olderThan, CancellationToken ct = default)
+    {
+        var siteId  = await GetSiteIdAsync();
+        var listId  = await GetOrCreateErpDocumentsListIdAsync(ct);
+        var drive   = await GetGraph().Sites[siteId].Drive.GetAsync(cancellationToken: ct);
+        var driveId = drive?.Id ?? throw new Exception("Could not resolve site drive ID");
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,FileName,DocumentDate,PdfUrl)"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        var cutoff = DateTime.UtcNow - olderThan;
+        int cleaned = 0;
+
+        foreach (var item in (items?.Value ?? []))
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null || item.Id is null) continue;
+
+            string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
+
+            var pdfUrl = Get("PdfUrl");
+            if (string.IsNullOrEmpty(pdfUrl)) continue;
+
+            var dateStr = Get("DocumentDate");
+            if (!DateTime.TryParse(dateStr, out var docDate)) continue;
+            if (docDate >= cutoff) continue;
+
+            var docNum   = Get("Title") ?? "";
+            var fileName = Get("FileName") ?? "";
+
+            try
+            {
+                var safeNum  = string.Join("_", docNum.Split(Path.GetInvalidFileNameChars()));
+                var safeName = string.Join("_", fileName.Split(Path.GetInvalidFileNameChars()));
+                await GetGraph().Drives[driveId].Items[$"root:/ErpDocuments/{safeNum}/{safeName}:"]
+                    .DeleteAsync(cancellationToken: ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "[SP] ERP PDF delete skipped for {File} — may already be removed", fileName);
+            }
+
+            await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?> { ["PdfUrl"] = null }
+                }, cancellationToken: ct);
+
+            _log.LogInformation("[SP] Cleared PDF for old ERP document {Num} (date: {Date})", docNum, dateStr);
+            cleaned++;
+        }
+
+        return cleaned;
+    }
+
 }
 
 public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds, DateTime? LastModified = null);

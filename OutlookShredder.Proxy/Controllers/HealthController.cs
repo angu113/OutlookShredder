@@ -135,8 +135,8 @@ public class HealthController : ControllerBase
                 $"Watch path not found: {fw.WatchPath ?? "(none)"}");
 
         if (!fw.FswActive)
-            return new("fileWatcher", "File Watcher", "degraded",
-                $"Watcher starting… path: {fw.WatchPath}");
+            return new("fileWatcher", "File Watcher", "ok",
+                $"Initializing… path: {fw.WatchPath}");
 
         var dir = Path.GetFileName(fw.WatchPath?.TrimEnd(Path.DirectorySeparatorChar));
         return new("fileWatcher", "File Watcher", "ok",

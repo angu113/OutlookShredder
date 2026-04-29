@@ -62,6 +62,9 @@ public class FileWatcherService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
+        // PDF attachment cleanup runs regardless of whether file watching is enabled
+        _ = RunPdfCleanupLoopAsync(ct);
+
         if ("false".Equals(_config["FileWatcher:Enabled"], StringComparison.OrdinalIgnoreCase))
         {
             _log.LogInformation("[FW] File watcher disabled via FileWatcher:Enabled=false");
@@ -92,7 +95,7 @@ public class FileWatcherService : BackgroundService
 
         // Batch scan on startup — only files from the last 30 days to avoid re-sending
         // the entire downloads folder through Claude every time the proxy restarts.
-        await ScanFolderAsync(watchPath, ct, maxAgeDays: 30);
+        await ScanFolderAsync(watchPath, ct, maxAgeDays: 1);
 
         // Real-time FileSystemWatcher
         _fswActive = true;
@@ -437,6 +440,33 @@ public class FileWatcherService : BackgroundService
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[FW] Could not save erp-processed.json");
+        }
+    }
+
+    // ── PDF cleanup ───────────────────────────────────────────────────────────
+
+    private async Task RunPdfCleanupLoopAsync(CancellationToken ct)
+    {
+        // Wait a few minutes after startup before the first pass
+        try { await Task.Delay(TimeSpan.FromMinutes(3), ct); }
+        catch (OperationCanceledException) { return; }
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var count = await _sp.RemoveOldErpPdfsAsync(TimeSpan.FromHours(48), ct);
+                if (count > 0)
+                    _log.LogInformation("[FW] PDF cleanup: cleared attachments from {Count} old ERP document(s)", count);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] PDF cleanup error");
+            }
+
+            try { await Task.Delay(TimeSpan.FromHours(1), ct); }
+            catch (OperationCanceledException) { return; }
         }
     }
 }
