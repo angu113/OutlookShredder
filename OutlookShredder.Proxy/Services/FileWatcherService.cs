@@ -338,6 +338,13 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
+        // Stamp picking slips with the customer name at top-left
+        if (extraction.DocumentType == "PickingSlip" && !string.IsNullOrWhiteSpace(extraction.CustomerName))
+        {
+            try { bytes = StampCustomerName(bytes, extraction.CustomerName); }
+            catch (Exception ex) { _log.LogWarning(ex, "[FW] PDF stamp failed for {File} — uploading original", fileName); }
+        }
+
         // Upload PDF
         string? pdfUrl = null;
         try
@@ -408,6 +415,40 @@ public class FileWatcherService : BackgroundService
         }
 
         return true;
+    }
+
+    // ── PDF stamping ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Draws a bold customer-name label (~3" wide × 1" tall) at the top-left of page 1.
+    /// Returns the modified PDF bytes, or throws on failure so the caller can fall back.
+    /// </summary>
+    private static byte[] StampCustomerName(byte[] pdfBytes, string customerName)
+    {
+        using var inputStream = new System.IO.MemoryStream(pdfBytes);
+        var doc  = PdfSharp.Pdf.IO.PdfReader.Open(inputStream, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify);
+        var page = doc.Pages[0];
+
+        // PDF coordinates: origin bottom-left, Y increases upward.
+        // Box: x=18pt (0.25"), y = pageHeight - 90pt from top, width=216pt (3"), height=72pt (1")
+        const double boxX      = 18;
+        const double boxWidth  = 216;
+        const double boxHeight = 72;
+        var boxY = page.Height.Point - boxHeight - 18; // 0.25" from top
+
+        using var gfx  = PdfSharp.Drawing.XGraphics.FromPdfPage(page);
+        var font       = new PdfSharp.Drawing.XFont("Arial", 18, PdfSharp.Drawing.XFontStyleEx.Bold);
+        var rect       = new PdfSharp.Drawing.XRect(boxX, boxY, boxWidth, boxHeight);
+
+        // White fill so the label is readable over any background
+        gfx.DrawRectangle(PdfSharp.Drawing.XBrushes.White, rect);
+        gfx.DrawRectangle(new PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColors.Black, 0.5), rect);
+        gfx.DrawString(customerName, font, PdfSharp.Drawing.XBrushes.Black, rect,
+            PdfSharp.Drawing.XStringFormats.Center);
+
+        using var outputStream = new System.IO.MemoryStream();
+        doc.Save(outputStream);
+        return outputStream.ToArray();
     }
 
     // ── Processed-file tracking ───────────────────────────────────────────────
