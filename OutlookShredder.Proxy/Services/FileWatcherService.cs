@@ -477,7 +477,7 @@ public class FileWatcherService : BackgroundService
         // Box: 0.25" from top-left, 3" wide, 1" tall.
         const double boxX      = 18;   // 0.25" from left
         const double boxY      = 18;   // 0.25" from top
-        const double boxWidth  = 216;  // 3"
+        const double boxWidth  = 180;  // 2.5"
         const double boxHeight = 72;   // 1"
 
         using var gfx  = PdfSharp.Drawing.XGraphics.FromPdfPage(page);
