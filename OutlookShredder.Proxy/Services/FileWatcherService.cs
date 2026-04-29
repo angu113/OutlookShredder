@@ -275,30 +275,49 @@ public class FileWatcherService : BackgroundService
             }
         }
 
-        var base64 = Convert.ToBase64String(bytes);
-
-        // AI classification + extraction
-        var extraction = await _ai.ExtractAsync(base64, fileName, ct);
-
-        // Mark processed regardless of outcome so we don't re-run AI on the same bytes
-        if (key is not null) MarkProcessed(key);
-
-        if (extraction is null || !extraction.IsErpDocument)
+        // Gate on filename pattern — avoids calling AI on non-ERP files entirely.
+        var erpInfo = ErpFilenameParser.Parse(fileName);
+        if (erpInfo is null)
         {
-            _log.LogDebug("[FW] {File} — not an ERP document", fileName);
+            _log.LogDebug("[FW] {File} — filename does not match ERP pattern, skipping", fileName);
+            if (key is not null) MarkProcessed(key);
             return false;
         }
 
-        // Validate that the extracted number is actually our reference (HSK- or 020803- prefix).
-        // If AI mistakenly put a customer PO number here, reject the record rather than store bad data.
-        var docNum = extraction.DocumentNumber;
-        if (!string.IsNullOrEmpty(docNum) &&
-            !docNum.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) &&
-            !docNum.StartsWith("020803-", StringComparison.OrdinalIgnoreCase))
+        _log.LogInformation("[FW] ERP filename matched: {Type} {DocNum} in {File}",
+            erpInfo.DocumentType, erpInfo.DocumentNumber ?? "(no record id)", fileName);
+
+        var base64 = Convert.ToBase64String(bytes);
+
+        // Call AI to extract detail fields only (CustomerName, TotalAmount, DocumentDate, LineItems).
+        // The filename already provides DocumentType and DocumentNumber — AI output for those is ignored.
+        var extraction = await _ai.ExtractAsync(base64, fileName, ct);
+
+        // Mark processed after the AI call so re-scans don't repeat the work.
+        if (key is not null) MarkProcessed(key);
+
+        if (extraction is null)
         {
-            _log.LogWarning("[FW] {File} — document_number '{Num}' lacks HSK-/020803- prefix; rejecting (likely a customer reference was misidentified)",
-                fileName, docNum);
-            return false;
+            _log.LogWarning("[FW] {File} — AI returned null; recording with filename data only", fileName);
+            extraction = new OutlookShredder.Proxy.Models.ErpExtraction { IsErpDocument = true };
+        }
+
+        // Always override with filename-derived identity (more reliable than AI for these fields).
+        extraction.IsErpDocument = true;
+        extraction.DocumentType  = erpInfo.DocumentType;
+        if (erpInfo.HasDocNumber)
+        {
+            extraction.DocumentNumber = erpInfo.DocumentNumber;
+        }
+        else if (!string.IsNullOrEmpty(extraction.DocumentNumber) &&
+                 !extraction.DocumentNumber.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) &&
+                 !extraction.DocumentNumber.StartsWith("020803-", StringComparison.OrdinalIgnoreCase))
+        {
+            // PurchaseOrder without filename record info: AI gave a number that looks like a
+            // customer PO, not ours — discard it and let the SP title fall back to the filename.
+            _log.LogWarning("[FW] {File} — AI returned DocumentNumber '{Num}' without HSK-/020803- prefix; discarding",
+                fileName, extraction.DocumentNumber);
+            extraction.DocumentNumber = null;
         }
 
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
