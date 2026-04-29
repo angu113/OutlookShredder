@@ -333,19 +333,21 @@ public class FileWatcherService : BackgroundService
         // Notify all Shredder clients via Service Bus
         _notify.NotifyErpDocument(new OutlookShredder.Proxy.Models.ErpBusRecord
         {
-            SpItemId       = spItemId,
-            DocumentNumber = extraction.DocumentNumber,
+            SpItemId          = spItemId,
+            DocumentNumber    = extraction.DocumentNumber,
             DocumentType      = extraction.DocumentType,
             DocumentDate      = extraction.DocumentDate,
             CustomerName      = extraction.CustomerName,
             CustomerReference = extraction.CustomerReference,
-            FileName       = fileName,
-            PdfUrl         = pdfUrl,
-            ReceivedAt     = DateTimeOffset.UtcNow.ToString("o"),
-            IsArchived     = false,
-            IsNew          = true,
-            SourceMachine  = Environment.MachineName,
-            SourceUser     = Environment.UserName,
+            TotalAmount       = extraction.TotalAmount,
+            Currency          = extraction.Currency ?? "USD",
+            FileName          = fileName,
+            PdfUrl            = pdfUrl,
+            ReceivedAt        = DateTimeOffset.UtcNow.ToString("o"),
+            IsArchived        = false,
+            IsNew             = true,
+            SourceMachine     = Environment.MachineName,
+            SourceUser        = Environment.UserName,
         });
 
         // Archive older duplicates for the same document number

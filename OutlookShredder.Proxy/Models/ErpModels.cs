@@ -55,6 +55,8 @@ public class ErpDocumentRecord
     public string? DocumentDate { get; set; }
     public string? CustomerName { get; set; }
     public string? CustomerReference { get; set; }
+    public string? TotalAmount { get; set; }
+    public string? Currency    { get; set; }
     public string? FileName { get; set; }
     public string? PdfUrl { get; set; }
     public string? ReceivedAt { get; set; }

@@ -43,19 +43,21 @@ public class RfqProcessedNotification
 /// </summary>
 public class ErpBusRecord
 {
-    public string? SpItemId       { get; set; }
-    public string? DocumentNumber { get; set; }
-    public string? DocumentType       { get; set; }
-    public string? DocumentDate       { get; set; }
-    public string? CustomerName       { get; set; }
-    public string? CustomerReference  { get; set; }
-    public string? FileName           { get; set; }
-    public string? PdfUrl         { get; set; }
-    public string? ReceivedAt     { get; set; }
-    public bool    IsArchived     { get; set; }
-    public bool    IsNew          { get; set; }
-    public string? SourceMachine  { get; set; }
-    public string? SourceUser     { get; set; }
+    public string? SpItemId          { get; set; }
+    public string? DocumentNumber    { get; set; }
+    public string? DocumentType      { get; set; }
+    public string? DocumentDate      { get; set; }
+    public string? CustomerName      { get; set; }
+    public string? CustomerReference { get; set; }
+    public string? TotalAmount       { get; set; }
+    public string? Currency          { get; set; }
+    public string? FileName          { get; set; }
+    public string? PdfUrl            { get; set; }
+    public string? ReceivedAt        { get; set; }
+    public bool    IsArchived        { get; set; }
+    public bool    IsNew             { get; set; }
+    public string? SourceMachine     { get; set; }
+    public string? SourceUser        { get; set; }
 }
 
 public class RfqNotificationProduct

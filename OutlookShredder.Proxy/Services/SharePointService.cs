@@ -6990,7 +6990,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -7015,6 +7015,8 @@ public class SharePointService
                 DocumentDate      = Get("DocumentDate"),
                 CustomerName      = Get("CustomerName"),
                 CustomerReference = Get("CustomerRef"),
+                TotalAmount       = Get("TotalAmount"),
+                Currency          = Get("Currency"),
                 FileName          = Get("FileName"),
                 PdfUrl            = Get("PdfUrl"),
                 ReceivedAt        = Get("ReceivedAt"),
