@@ -5410,7 +5410,7 @@ public class SharePointService
         var siteId  = await GetSiteIdAsync();
         var listId  = await GetPurchaseOrdersListIdAsync();
 
-        // Dedup: skip if this exact email was already processed
+        // Dedup by MessageId (email-originated POs)
         if (!string.IsNullOrEmpty(messageId))
         {
             var existing = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -5424,6 +5424,28 @@ public class SharePointService
             {
                 _log.LogInformation("[PO] Skipping duplicate PO  -- MessageId already in SP: {Id}", messageId);
                 return null;
+            }
+        }
+
+        // Dedup by PoNumber (ERP file-originated POs that have no messageId)
+        if (string.IsNullOrEmpty(messageId) && !string.IsNullOrEmpty(poNumber))
+        {
+            var allPos = await GetGraph().Sites[siteId].Lists[listId].Items
+                .GetAsync(r =>
+                {
+                    r.QueryParameters.Expand = ["fields($select=PoNumber)"];
+                    r.QueryParameters.Top    = 5000;
+                });
+            var dupItem = (allPos?.Value ?? []).FirstOrDefault(i =>
+            {
+                var d = i.Fields?.AdditionalData;
+                return d is not null &&
+                       string.Equals(GetStr(d, "PoNumber"), poNumber, StringComparison.OrdinalIgnoreCase);
+            });
+            if (dupItem is not null)
+            {
+                _log.LogInformation("[PO] Skipping duplicate ERP PO — PoNumber {Num} already in SP: {Id}", poNumber, dupItem.Id);
+                return dupItem.Id;
             }
         }
 
@@ -7131,6 +7153,58 @@ public class SharePointService
         }
 
         return cleaned;
+    }
+
+    /// <summary>
+    /// Searches SupplierLineItems for unpurchased rows from <paramref name="supplierName"/>
+    /// and returns the rfqId with the most recent activity — used to link an ERP PO to the
+    /// most likely open RFQ when no MSPC codes are available for exact matching.
+    /// </summary>
+    public async Task<string?> FindOpenRfqForSupplierAsync(string supplierName, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,IsPurchased,ReceivedAt)"];
+                r.QueryParameters.Top    = 2000;
+            }, ct);
+
+        var rfqActivity = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+
+                var itemSupplier = GetStr(d, "SupplierName") ?? "";
+                if (!string.Equals(itemSupplier, supplierName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (d.TryGetValue("IsPurchased", out var ip) &&
+                    ip is true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True }) continue;
+
+                var rfqId = GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID") ?? "";
+                if (string.IsNullOrEmpty(rfqId) || rfqId is "000000" or "UNKNOWN") continue;
+
+                var received = GetStr(d, "ReceivedAt") ?? "";
+                if (!rfqActivity.TryGetValue(rfqId, out var prev) ||
+                    string.Compare(received, prev, StringComparison.Ordinal) > 0)
+                    rfqActivity[rfqId] = received;
+            }
+
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        var best = rfqActivity.OrderByDescending(kv => kv.Value).FirstOrDefault();
+        if (best.Key is not null)
+            _log.LogInformation("[SP] FindOpenRfq: '{Supplier}' → {RfqId}", supplierName, best.Key);
+        return best.Key;
     }
 
 }

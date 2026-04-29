@@ -387,6 +387,14 @@ public class FileWatcherService : BackgroundService
 
         _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id}",
             extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);
+
+        // For PurchaseOrders, also run the RFQ purchase-matching pipeline
+        if (extraction.DocumentType == "PurchaseOrder" && !string.IsNullOrEmpty(extraction.CustomerName))
+        {
+            try { await TriggerPoMatchingAsync(extraction, fileName, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[FW] PO matching failed for {File}", fileName); }
+        }
+
         return true;
     }
 
@@ -441,6 +449,70 @@ public class FileWatcherService : BackgroundService
         {
             _log.LogWarning(ex, "[FW] Could not save erp-processed.json");
         }
+    }
+
+    // ── ERP PO → RFQ matching ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called after a PurchaseOrder ERP document is written to SP.
+    /// Writes a PurchaseOrders list record, tries to link the PO to the matching
+    /// open RFQ by MSPC code or supplier fallback, then publishes a "PO" bus event
+    /// so the RFQ tab updates its purchase markers.
+    /// </summary>
+    private async Task TriggerPoMatchingAsync(
+        ErpExtraction extraction, string fileName, CancellationToken ct)
+    {
+        var supplierName = extraction.CustomerName!;
+        var poNumber     = extraction.DocumentNumber;
+
+        // Map ERP line items to PoLineItem; treat product codes containing '/' as MSPC codes
+        var poLineItems = extraction.LineItems.Select(li => new PoLineItem
+        {
+            Product  = li.Description,
+            Quantity = double.TryParse(li.Quantity, out var q) ? q : null,
+            Mspc     = li.Code?.Contains('/') == true ? li.Code : null,
+            Size     = li.Description,
+        }).ToList();
+
+        var lineItemsJson = JsonSerializer.Serialize(poLineItems,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+
+        // Try MSPC-based matching first — resolves rfqId when ERP codes are our MSPCs
+        string? rfqId = null;
+        var matched = await _sp.MatchAndMarkRliByMspcAsync(supplierName, poNumber, poLineItems);
+        if (matched.Count > 0)
+            rfqId = matched.First();
+
+        // Fallback: find the most recently active open RFQ for this supplier
+        if (rfqId is null)
+            rfqId = await _sp.FindOpenRfqForSupplierAsync(supplierName, ct);
+
+        // Write the PurchaseOrders SP record (deduped by PoNumber)
+        var poSpItemId = await _sp.WritePurchaseOrderAsync(
+            rfqId ?? "UNKNOWN", supplierName, poNumber,
+            DateTimeOffset.UtcNow.ToString("o"), messageId: null, lineItemsJson);
+
+        // Mark SLI rows as purchased and check for RFQ completion
+        if (poSpItemId is not null && rfqId is not null)
+            await _sp.UpdateRliPurchaseStatusAsync(rfqId, supplierName, poSpItemId, poLineItems, poNumber);
+
+        // Publish PO bus event → RFQ tab updates purchase markers on affected rows
+        _notify.NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType    = "PO",
+            RfqId        = rfqId,
+            SupplierName = supplierName,
+            MessageId    = null,
+            Products     = poLineItems.Select(li => new RfqNotificationProduct
+            {
+                Name = li.Product,
+                Mspc = li.Mspc,
+                Size = li.Size,
+            }).ToList(),
+        });
+
+        _log.LogInformation("[FW] PO {Num}: RFQ={RfqId} supplier={Supplier} ({Items} items)",
+            poNumber, rfqId ?? "unmatched", supplierName, poLineItems.Count);
     }
 
     // ── PDF cleanup ───────────────────────────────────────────────────────────

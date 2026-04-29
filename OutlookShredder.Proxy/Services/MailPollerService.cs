@@ -564,14 +564,8 @@ public class MailPollerService : BackgroundService
         if (msg.Id is not null)
             await _mail.MarkClaimingAsync(mailbox, msg.Id);
 
-        // ── Purchase Order routing ────────────────────────────────────────────
-        // Strip reply/forward/external-tag prefixes before matching the PO subject pattern.
-        var cleanSubject = SubjectPrefixRegex.Replace(subject, "").Trim();
-        if (cleanSubject.StartsWith("Purchase Order #HSK-PO", StringComparison.OrdinalIgnoreCase))
-        {
-            await ProcessPurchaseOrderAsync(mailbox, msg, subject, ct);
-            return;
-        }
+        // PO documents are sourced directly from the ERP via FileWatcherService.
+        // Email-based PO routing removed — see FileWatcherService.TriggerPoMatchingAsync.
 
         var rawBody = msg.Body?.Content ?? string.Empty;
         if (msg.Body?.ContentType == BodyType.Html)
