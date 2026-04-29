@@ -6955,6 +6955,34 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Downloads an ERP PDF via the Graph SDK — mirrors UploadErpPdfAsync exactly.
+    /// Direct HTTP with a SP-scoped Bearer token fails for OneDrive personal (/personal/...) URLs;
+    /// going through Graph (graph.microsoft.com scope) works with Sites.FullControl.All.
+    /// </summary>
+    public async Task<byte[]> DownloadSpFileAsync(string webUrl, CancellationToken ct = default)
+    {
+        // Both OneDrive (/personal/user/Library/...) and SharePoint (/sites/site/Library/...)
+        // have exactly 4 leading path segments before the drive-relative portion.
+        var uri      = new Uri(Uri.UnescapeDataString(webUrl));
+        var segments = uri.AbsolutePath.Split('/');
+        if (segments.Length < 5)
+            throw new InvalidOperationException($"Cannot parse drive path from WebUrl: {webUrl}");
+        var relativePath = string.Join("/", segments.Skip(4));
+
+        var siteId  = await GetSiteIdAsync();
+        var drive   = await GetGraph().Sites[siteId].Drive.GetAsync(cancellationToken: ct);
+        var driveId = drive?.Id ?? throw new InvalidOperationException("Cannot resolve site drive ID");
+
+        var stream = await GetGraph().Drives[driveId].Items[$"root:/{relativePath}:"]
+            .Content.GetAsync(cancellationToken: ct);
+
+        if (stream is null) throw new InvalidOperationException("File content stream was null.");
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms, ct);
+        return ms.ToArray();
+    }
+
+    /// <summary>
     /// Marks all ErpDocuments records with the same document number (other than currentSpItemId)
     /// as IsArchived=true, so only the newest record is current.
     /// </summary>

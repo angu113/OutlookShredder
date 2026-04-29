@@ -53,6 +53,28 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Proxies a SharePoint PDF download using app-only credentials.
+    /// Clients cannot fetch SharePoint WebUrls directly (no auth); this endpoint adds the Bearer token.
+    /// </summary>
+    [HttpGet("/api/erp/pdf")]
+    public async Task<IActionResult> GetPdf([FromQuery] string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return BadRequest(new { error = "url query parameter is required" });
+
+        try
+        {
+            var bytes = await _sp.DownloadSpFileAsync(url, ct);
+            return File(bytes, "application/pdf");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[ERP] PDF proxy download failed for {Url}", url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Returns recent ERP document records from SharePoint.
     /// </summary>
     [HttpGet("/api/erp/documents")]
