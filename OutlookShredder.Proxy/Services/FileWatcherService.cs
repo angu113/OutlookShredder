@@ -81,7 +81,11 @@ public class FileWatcherService : BackgroundService
 
         _watchPath = watchPath;
 
-        _processedFilePath = Path.Combine(AppContext.BaseDirectory, "erp-processed.json");
+        // Store in %APPDATA%\Shredder\ so reinstalls don't wipe the processed-file list
+        var dataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Shredder");
+        Directory.CreateDirectory(dataDir);
+        _processedFilePath = Path.Combine(dataDir, "erp-processed.json");
         LoadProcessedLog();
 
         _watchPathExists = Directory.Exists(watchPath);
