@@ -473,12 +473,12 @@ public class FileWatcherService : BackgroundService
         var doc  = PdfSharp.Pdf.IO.PdfReader.Open(inputStream, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify);
         var page = doc.Pages[0];
 
-        // PDF coordinates: origin bottom-left, Y increases upward.
-        // Box: x=18pt (0.25"), y = pageHeight - 90pt from top, width=216pt (3"), height=72pt (1")
-        const double boxX      = 18;
-        const double boxWidth  = 216;
-        const double boxHeight = 72;
-        var boxY = page.Height.Point - boxHeight - 18; // 0.25" from top
+        // XGraphics.FromPdfPage uses top-left origin, Y increases downward.
+        // Box: 0.25" from top-left, 3" wide, 1" tall.
+        const double boxX      = 18;   // 0.25" from left
+        const double boxY      = 18;   // 0.25" from top
+        const double boxWidth  = 216;  // 3"
+        const double boxHeight = 72;   // 1"
 
         using var gfx  = PdfSharp.Drawing.XGraphics.FromPdfPage(page);
         var font       = new PdfSharp.Drawing.XFont("Arial", 18, PdfSharp.Drawing.XFontStyleEx.Bold);
