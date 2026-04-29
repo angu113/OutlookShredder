@@ -97,9 +97,9 @@ public class FileWatcherService : BackgroundService
 
         _log.LogInformation("[FW] Watching {Path} for ERP PDFs", watchPath);
 
-        // Batch scan on startup — only files from the last 30 days to avoid re-sending
-        // the entire downloads folder through Claude every time the proxy restarts.
-        await ScanFolderAsync(watchPath, ct, maxAgeDays: 1);
+        // On startup, mark every existing PDF as already processed so they are silently
+        // ignored. Only PDFs that arrive after this point will be sent through the AI pipeline.
+        SeedExistingFilesAsProcessed(watchPath);
 
         // Real-time FileSystemWatcher
         _fswActive = true;
@@ -224,6 +224,27 @@ public class FileWatcherService : BackgroundService
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Adds every PDF currently in the folder to the processed cache without sending any
+    /// of them through AI. Called once on startup so the watcher only processes new arrivals.
+    /// </summary>
+    private void SeedExistingFilesAsProcessed(string folder)
+    {
+        var files = Directory.GetFiles(folder, "*.pdf", SearchOption.TopDirectoryOnly);
+        int added = 0;
+        lock (_processedLock)
+        {
+            foreach (var file in files)
+            {
+                var key = GetFileKey(file);
+                if (key is not null && _processedKeys.Add(key))
+                    added++;
+            }
+            if (added > 0) SaveProcessedLog();
+        }
+        _log.LogInformation("[FW] Seeded {Count} pre-existing PDF(s) as processed — only new arrivals will be extracted", added);
+    }
 
     private void EnqueueFile(string path)
     {
@@ -675,7 +696,7 @@ public class FileWatcherService : BackgroundService
         {
             try
             {
-                var count = await _sp.RemoveOldErpPdfsAsync(TimeSpan.FromHours(48), ct);
+                var count = await _sp.RemoveOldErpPdfsAsync(TimeSpan.FromDays(7), ct);
                 if (count > 0)
                     _log.LogInformation("[FW] PDF cleanup: cleared attachments from {Count} old ERP document(s)", count);
             }

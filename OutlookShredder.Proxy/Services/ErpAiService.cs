@@ -60,11 +60,12 @@ public class ErpAiService
         Leave document_type and document_number as null — they are set from the filename automatically.
         """;
 
-    // Claude tool definition
+    // Claude tool definition — cache_control marks this for prompt caching alongside the system prompt.
     private static readonly JsonElement _toolJson = JsonDocument.Parse("""
         {
           "name": "record_erp_document",
           "description": "Record detail data extracted from a confirmed Metal Supermarkets ERP PDF. Document type and reference number are already known from the filename — focus on customer, date, totals, and line items.",
+          "cache_control": { "type": "ephemeral" },
           "input_schema": {
             "type": "object",
             "required": ["is_erp_document"],
