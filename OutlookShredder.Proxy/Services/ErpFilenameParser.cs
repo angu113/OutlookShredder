@@ -32,7 +32,7 @@ public static class ErpFilenameParser
     // Alternatives are ordered longest-first to avoid prefix ambiguity (SalesConfirmation > Sales,
     // Purchase_Order > PurchaseOrder, GoodsShipment > ShippingSlip > PickingSlip).
     private static readonly Regex _full = new(
-        @"^(?<type>SalesConfirmation|Purchase_Order|GoodsShipment|ShippingSlip|PurchaseOrder|PickingSlip|PaymentIn|Invoice|Order|Sales)" +
+        @"^(?<type>SalesConfirmation|Purchase_Order|GoodsShipment|ShippingSlip|PurchaseOrder|PickingSlip|PickList|PaymentIn|Invoice|Order|Sales)" +
         @"_(?<org>020803|HSK)" +
         @"_(?<rt>[A-Za-z]{1,5})(?<rn>\d{7})" +
         @"(?:[_.].*)?$",
@@ -90,6 +90,7 @@ public static class ErpFilenameParser
             "sales"             => "Quotation",
             "paymentin"         => "Payment",
             "pickingslip"       => "PickingSlip",
+            "picklist"          => "PickingSlip",
             "shippingslip"      => "ShippingNote",
             "goodsshipment"     => "ShippingNote",
             "purchase_order"    => "PurchaseOrder",
