@@ -7059,6 +7059,50 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Deletes ErpDocuments records whose DocumentType is in <paramref name="types"/>.
+    /// Returns the number of records deleted.
+    /// </summary>
+    public async Task<int> DeleteErpDocumentsByTypeAsync(IEnumerable<string> types, CancellationToken ct = default)
+    {
+        var typeSet = new HashSet<string>(types, StringComparer.OrdinalIgnoreCase);
+        var siteId  = await GetSiteIdAsync();
+        var listId  = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=DocumentType)"];
+                req.QueryParameters.Top    = 999;
+            }, ct);
+
+        var ids = (items?.Value ?? [])
+            .Where(i => {
+                var dt = i.Fields?.AdditionalData?.TryGetValue("DocumentType", out var v) == true ? v?.ToString() : null;
+                return dt is not null && typeSet.Contains(dt);
+            })
+            .Select(i => i.Id)
+            .Where(id => id is not null)
+            .ToList();
+
+        int deleted = 0;
+        foreach (var id in ids)
+        {
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[id].DeleteAsync(cancellationToken: ct);
+                deleted++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[SP] Failed to delete ErpDocument item {Id}", id);
+            }
+        }
+        _log.LogInformation("[SP] Deleted {Count} ErpDocument records of types [{Types}]",
+            deleted, string.Join(", ", typeSet));
+        return deleted;
+    }
+
+    /// <summary>
     /// Deletes all items from the ErpDocuments list. Returns the count deleted.
     /// </summary>
     public async Task<int> DeleteAllErpDocumentsAsync(CancellationToken ct = default)

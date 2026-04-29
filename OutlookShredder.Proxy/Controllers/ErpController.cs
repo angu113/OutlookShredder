@@ -77,6 +77,23 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Deletes ErpDocuments records matching the given document types (comma-separated).
+    /// Example: DELETE /api/erp/clean-by-type?types=Payment,Quotation
+    /// Does NOT clear the processed-file cache — ignored files remain ignored.
+    /// </summary>
+    [HttpDelete("/api/erp/clean-by-type")]
+    public async Task<IActionResult> CleanByType([FromQuery] string types, CancellationToken ct)
+    {
+        var typeList = (types ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (typeList.Length == 0)
+            return BadRequest(new { error = "Provide at least one type via ?types=Payment,Quotation" });
+
+        _log.LogInformation("[ERP] CleanByType: deleting types [{Types}]", string.Join(", ", typeList));
+        var deleted = await _sp.DeleteErpDocumentsByTypeAsync(typeList, ct);
+        return Ok(new { deleted, types = typeList });
+    }
+
+    /// <summary>
     /// Deletes all records from the ErpDocuments SharePoint list.
     /// Also clears the local processed-file cache so a subsequent scan re-processes everything.
     /// </summary>
