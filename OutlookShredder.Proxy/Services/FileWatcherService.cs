@@ -419,12 +419,56 @@ public class FileWatcherService : BackgroundService
 
     // ── PDF stamping ──────────────────────────────────────────────────────────
 
+    // PdfSharp 6.x requires an explicit font resolver on Windows — set once.
+    private static readonly object _fontResolverLock = new();
+    private static bool _fontResolverSet;
+
+    private static void EnsureFontResolver()
+    {
+        if (_fontResolverSet) return;
+        lock (_fontResolverLock)
+        {
+            if (_fontResolverSet) return;
+            PdfSharp.Fonts.GlobalFontSettings.FontResolver = new ArialFontResolver();
+            _fontResolverSet = true;
+        }
+    }
+
+    // Reads Arial variants directly from %WINDIR%\Fonts — works in service/task context.
+    private sealed class ArialFontResolver : PdfSharp.Fonts.IFontResolver
+    {
+        private static readonly string FontsDir =
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts");
+
+        public PdfSharp.Fonts.FontResolverInfo? ResolveTypeface(string familyName, bool isBold, bool isItalic)
+        {
+            if (!familyName.Equals("Arial", StringComparison.OrdinalIgnoreCase)) return null;
+            var face = (isBold, isItalic) switch
+            {
+                (true,  true)  => "arialbi",
+                (true,  false) => "arialbd",
+                (false, true)  => "ariali",
+                _              => "arial",
+            };
+            return new PdfSharp.Fonts.FontResolverInfo(face);
+        }
+
+        public byte[]? GetFont(string faceName) =>
+            new[] { $"{faceName}.ttf", $"{faceName}.ttc", $"{faceName}.otf" }
+                .Select(f => Path.Combine(FontsDir, f))
+                .Where(File.Exists)
+                .Select(File.ReadAllBytes)
+                .FirstOrDefault();
+    }
+
     /// <summary>
     /// Draws a bold customer-name label (~3" wide × 1" tall) at the top-left of page 1.
     /// Returns the modified PDF bytes, or throws on failure so the caller can fall back.
     /// </summary>
     private static byte[] StampCustomerName(byte[] pdfBytes, string customerName)
     {
+        EnsureFontResolver();
+
         using var inputStream = new System.IO.MemoryStream(pdfBytes);
         var doc  = PdfSharp.Pdf.IO.PdfReader.Open(inputStream, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify);
         var page = doc.Pages[0];
