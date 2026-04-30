@@ -6857,8 +6857,26 @@ public class SharePointService
                 "note"    => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
                 _         => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn() }
             };
-            await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
+            var created = await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
+            if (created is not null) byName[name] = created;
             _log.LogInformation("[SP] Created ErpDocuments column '{Col}' ({Type})", name, type);
+        }
+
+        // Ensure columns used in $filter queries are indexed — never use HonorNonIndexedQueries header.
+        foreach (var colName in new[] { "Title", "IsArchived" })
+        {
+            if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
+            if (col.Indexed == true) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Microsoft.Graph.Models.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[SP] Indexed ErpDocuments column '{Col}'", colName);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[SP] Could not index ErpDocuments column '{Col}'", colName);
+            }
         }
 
         return _erpDocumentsListId = listId;
