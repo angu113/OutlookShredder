@@ -116,6 +116,42 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Retroactively archives all duplicate ErpDocuments records in SharePoint.
+    /// For each DocumentNumber that has more than one non-archived record, keeps the most
+    /// recently received and marks the rest IsArchived=true.
+    /// Safe to call multiple times; idempotent.
+    /// </summary>
+    [HttpPost("/api/erp/archive-duplicates")]
+    public async Task<IActionResult> ArchiveDuplicates(CancellationToken ct)
+    {
+        var all = await _sp.ReadErpDocumentsAsync(top: 1000, includeArchived: false, ct: ct);
+
+        var dupeGroups = all
+            .Where(d => !string.IsNullOrEmpty(d.DocumentNumber))
+            .GroupBy(d => d.DocumentNumber!)
+            .Where(g => g.Count() > 1)
+            .ToList();
+
+        int totalArchived = 0;
+        foreach (var group in dupeGroups)
+        {
+            var winner = group
+                .OrderByDescending(d => DateTimeOffset.TryParse(d.ReceivedAt, out var t) ? t : DateTimeOffset.MinValue)
+                .First();
+
+            if (winner.SpItemId is null) continue;
+
+            await _sp.ArchiveOlderErpDocumentsAsync(group.Key, winner.SpItemId, ct);
+            totalArchived += group.Count() - 1;
+
+            _log.LogInformation("[ERP] archive-duplicates: kept {Id} for {Number}, archived {Count} older record(s)",
+                winner.SpItemId, group.Key, group.Count() - 1);
+        }
+
+        return Ok(new { duplicateGroups = dupeGroups.Count, archived = totalArchived });
+    }
+
+    /// <summary>
     /// Deletes all records from the ErpDocuments SharePoint list.
     /// Also clears the local processed-file cache so a subsequent scan re-processes everything.
     /// </summary>

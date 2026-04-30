@@ -395,6 +395,20 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
+        // Archive older duplicates before notifying so Shredder sees a clean SP state
+        // if it calls Prewarm in response to the bus event.
+        if (spItemId is not null && !string.IsNullOrEmpty(extraction.DocumentNumber))
+        {
+            try
+            {
+                await _sp.ArchiveOlderErpDocumentsAsync(extraction.DocumentNumber, spItemId, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] Archive-older step failed for {Number}", extraction.DocumentNumber);
+            }
+        }
+
         // Notify all Shredder clients via Service Bus
         _notify.NotifyErpDocument(new OutlookShredder.Proxy.Models.ErpBusRecord
         {
@@ -414,19 +428,6 @@ public class FileWatcherService : BackgroundService
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
         });
-
-        // Archive older duplicates for the same document number
-        if (spItemId is not null && !string.IsNullOrEmpty(extraction.DocumentNumber))
-        {
-            try
-            {
-                await _sp.ArchiveOlderErpDocumentsAsync(extraction.DocumentNumber, spItemId, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "[FW] Archive-older step failed for {Number}", extraction.DocumentNumber);
-            }
-        }
 
         _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id}",
             extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);

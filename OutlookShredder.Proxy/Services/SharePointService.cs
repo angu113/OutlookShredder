@@ -6999,23 +6999,20 @@ public class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+        // Filter server-side by Title (= DocumentNumber) and IsArchived=false so we never
+        // have to page through the whole list; previous code fetched top=100 unfiltered
+        // and missed duplicates beyond the first page.
+        var safe   = documentNumber.Replace("'", "''");
+        var items  = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=Title,IsArchived)"];
-                r.QueryParameters.Top    = 100;
+                r.QueryParameters.Filter = $"fields/Title eq '{safe}' and fields/IsArchived ne true";
+                r.QueryParameters.Top    = 50;
             }, ct);
 
         var toArchive = (items?.Value ?? [])
-            .Where(i =>
-            {
-                var d = i.Fields?.AdditionalData;
-                if (d is null || i.Id == currentSpItemId) return false;
-                var title = d.TryGetValue("Title", out var t) ? t?.ToString() : null;
-                var archived = d.TryGetValue("IsArchived", out var a) &&
-                               a is true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
-                return string.Equals(title, documentNumber, StringComparison.OrdinalIgnoreCase) && !archived;
-            })
+            .Where(i => i.Id != currentSpItemId)
             .Select(i => i.Id!)
             .ToList();
 
