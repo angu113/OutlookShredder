@@ -45,11 +45,10 @@ internal static class PickingSlipEnricher
 
     // ── Structure parsing (PdfPig) ───────────────────────────────────────────
 
-    // MSPC lines: letters-slash-digits, e.g. HP/375, HTSQ/22120, AF6061/2502500
-    // The MSPC and product name share the same visual row, so text may continue
-    // after the code — we only check the start of the grouped line.
+    // MSPC lines: alphanumeric-slash-digits, e.g. HP/375, HTSQ/22120, SP304/250, AF6061/2502500
+    // Pre-slash part starts with a capital letter and may contain digits (e.g. SP304, AF6061).
     private static readonly Regex _mspcRegex =
-        new(@"^[A-Z]{1,8}/\d{2,8}", RegexOptions.Compiled);
+        new(@"^[A-Z][A-Z0-9]{0,9}/\d{2,8}", RegexOptions.Compiled);
 
     // Balance / order line — starts with "B: " followed by a digit or letter
     private static readonly Regex _bLineRegex =
