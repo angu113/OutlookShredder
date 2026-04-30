@@ -60,6 +60,12 @@ internal static class PickingSlipEnricher
     private static readonly Regex _cutInstructionRegex =
         new(@"^(?:S\d+:|B\d+:|OC\d*:|TB\d*:|SC\d*:|C\d+:)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Service-item lines: all-caps identifier(s) in the MSPC column with no slash,
+    // e.g. "BENDING Bending", "LASER CUTTING Laser Cutting", "SETUP CHARGE Setup Charge".
+    // Minimum 3 chars per word to avoid matching short comment prefixes.
+    private static readonly Regex _serviceLineRegex =
+        new(@"^[A-Z]{3,}(?:\s+[A-Z]{2,})*(?:\s|$)", RegexOptions.Compiled);
+
     private sealed record CommentBlock(
         int PageIndex,
         IReadOnlyList<TextLine> Lines,
@@ -119,11 +125,10 @@ internal static class PickingSlipEnricher
                         {
                             // Additional B: line — not a comment
                         }
-                        else if (_cutInstructionRegex.IsMatch(text))
+                        else if (_cutInstructionRegex.IsMatch(text) || _serviceLineRegex.IsMatch(text))
                         {
-                            // First cut instruction ends the comment zone for this product.
-                            // Flush and move to DoneWithProduct so service lines that follow
-                            // (e.g. "LASER CUTTING Laser Cutting") are not mistaken for comments.
+                            // Cut instruction (S1:, B1:, TB: …) or service-item line (BENDING, LASER CUTTING …)
+                            // both mark the end of the comment zone for this product.
                             MaybeAddBlock(result, pageIdx, commentLines);
                             commentLines = [];
                             state = ParseState.DoneWithProduct;
