@@ -111,24 +111,34 @@ internal static class PickingSlipEnricher
                     case ParseState.AfterBLine:
                         if (_mspcRegex.IsMatch(text))
                         {
-                            // New product block starts
                             MaybeAddBlock(result, pageIdx, commentLines);
                             commentLines = [];
                             state = ParseState.InProduct;
                         }
                         else if (_bLineRegex.IsMatch(text))
                         {
-                            // Additional B: line (multiple order rows) — stay in state, not a comment
+                            // Additional B: line — not a comment
                         }
                         else if (_cutInstructionRegex.IsMatch(text))
                         {
-                            // S1:, B1:, OC1:, TB:, SC: etc. — cut instructions, not comments
+                            // First cut instruction ends the comment zone for this product.
+                            // Flush and move to DoneWithProduct so service lines that follow
+                            // (e.g. "LASER CUTTING Laser Cutting") are not mistaken for comments.
+                            MaybeAddBlock(result, pageIdx, commentLines);
+                            commentLines = [];
+                            state = ParseState.DoneWithProduct;
                         }
                         else
                         {
-                            // Free-text line after the order row → shop comment
                             commentLines.Add(line);
                         }
+                        break;
+
+                    case ParseState.DoneWithProduct:
+                        // Ignore everything — service lines, extra cut rows, dividers —
+                        // until the next MSPC with a slash format starts a new product block.
+                        if (_mspcRegex.IsMatch(text))
+                            state = ParseState.InProduct;
                         break;
                 }
             }
@@ -155,7 +165,7 @@ internal static class PickingSlipEnricher
         result.Add(new CommentBlock(pageIdx, lines, keywords));
     }
 
-    private enum ParseState { Preamble, InProduct, AfterBLine }
+    private enum ParseState { Preamble, InProduct, AfterBLine, DoneWithProduct }
 
     // ── Word → line grouping ─────────────────────────────────────────────────
 
