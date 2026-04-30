@@ -162,10 +162,14 @@ public class GeminiExtractionService : IAiExtractionService
         freight notes, and any dimension detail not already in productName.
 
         ── NO QUOTE / REGRET ──────────────────────────────────────────────────────
-        If the email is an acknowledgement, out-of-office reply, or clearly contains no
-        price quote, return one products entry with all numeric fields null and explain
-        the situation in supplierProductComments (e.g. "Out of office until 2026-05-01"
-        or "Supplier regrets — unable to supply this material").
+        Set isRegret = true on any product entry where the supplier explicitly states
+        they cannot or will not quote that product — including phrases like "cannot be
+        quoted", "unable to quote", "not something we carry", "no longer available",
+        "we don't stock this", "out of scope", or any clear statement of inability to
+        supply. Also set isRegret = true for the whole email when it is an OOF reply,
+        acknowledgement with no pricing, or blanket regret.
+        Leave all numeric price fields null on regret entries.
+        Explain the reason in supplierProductComments.
         Always return at least one entry in products[].
 
         ── SUBSTITUTES ────────────────────────────────────────────────────────────
@@ -511,6 +515,7 @@ public class GeminiExtractionService : IAiExtractionService
                         ["certifications"]          = Nullable(ParameterType.String),
                         ["supplierProductComments"] = Nullable(ParameterType.String),
                         ["isSubstitute"]            = new Schema { Type = ParameterType.Boolean },
+                        ["isRegret"]                = new Schema { Type = ParameterType.Boolean },
                     },
                 }
             },

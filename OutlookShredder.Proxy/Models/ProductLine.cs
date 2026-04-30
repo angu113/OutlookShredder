@@ -31,4 +31,10 @@ public class ProductLine
     /// the originally requested item (e.g. different size, grade, or form).
     /// </summary>
     public bool    IsSubstitute            { get; set; }
+
+    /// <summary>
+    /// True when the AI explicitly determined this product cannot be quoted / supplied,
+    /// even when no standard regret phrase appears in supplierProductComments.
+    /// </summary>
+    public bool    IsRegret                { get; set; }
 }

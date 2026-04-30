@@ -119,10 +119,14 @@ public class ClaudeService
         details, freight notes, and any dimension detail not already in productName.
 
         ── NO QUOTE / REGRET ──────────────────────────────────────────────────────
-        If the email is an acknowledgement, out-of-office reply, or clearly contains no
-        price quote, return one products entry with all numeric fields null and explain
-        the situation in supplierProductComments (e.g. "Out of office until 2026-05-01"
-        or "Supplier regrets — unable to supply this material").
+        Set isRegret = true on any product entry where the supplier explicitly states
+        they cannot or will not quote that product — including phrases like "cannot be
+        quoted", "unable to quote", "not something we carry", "no longer available",
+        "we don't stock this", "out of scope", or any clear statement of inability to
+        supply. Also set isRegret = true for the whole email when it is an OOF reply,
+        acknowledgement with no pricing, or blanket regret.
+        Leave all numeric price fields null on regret entries.
+        Explain the reason in supplierProductComments.
         Always return at least one entry in products[].
 
         ── REQUESTED ITEMS (RLI ANCHORING) ────────────────────────────────────────
@@ -173,7 +177,9 @@ public class ClaudeService
                     "totalPrice":              { "type": ["number","null"] },
                     "leadTimeText":            { "type": ["string","null"], "description": "Verbatim lead time as stated, e.g. '4-6 weeks ARO' or 'In Stock'" },
                     "certifications":          { "type": ["string","null"], "description": "e.g. MTR Included / ASTM / AMS / Certified" },
-                    "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, alternates, surcharges, etc." }
+                    "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, alternates, surcharges, etc." },
+                    "isSubstitute":            { "type": "boolean", "description": "True when supplier offers an alternate product instead of the requested one" },
+                    "isRegret":                { "type": "boolean", "description": "True when the supplier explicitly cannot or will not quote this product" }
                   }
                 }
               }

@@ -2143,9 +2143,10 @@ public class SharePointService
                                                : string.IsNullOrEmpty(product.SupplierProductComments)
                                                    ? jobRefMismatchWarning
                                                    : $"{jobRefMismatchWarning} {product.SupplierProductComments}",
-            // A quoted price means the supplier IS supplying — don't mark regret even if
-            // cross-product comments contain regret language (e.g. "regrets on the pipe").
-            ["IsRegret"]                 = !HasPrice(product) && HasRegretPhrase(product.SupplierProductComments),
+            // AI-explicit regret takes precedence; phrase detection catches cases where AI
+            // didn't set the flag but the comment text is clearly a regret.
+            // Priced rows are never regrets regardless of what comments say.
+            ["IsRegret"]                 = !HasPrice(product) && (product.IsRegret || HasRegretPhrase(product.SupplierProductComments)),
             ["IsSubstitute"]             = product.IsSubstitute,
             ["IsDeleted"]               = false,
         };
