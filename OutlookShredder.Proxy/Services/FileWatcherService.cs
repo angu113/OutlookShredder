@@ -359,11 +359,14 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
-        // Stamp picking slips with the customer name at top-left
+        // Stamp picking slips with the customer name at top-left, then enrich with bold comments + callout page
         if (extraction.DocumentType == "PickingSlip" && !string.IsNullOrWhiteSpace(extraction.CustomerName))
         {
             try { bytes = StampCustomerName(bytes, extraction.CustomerName); }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] PDF stamp failed for {File} — uploading original", fileName); }
+
+            try { bytes = PickingSlipEnricher.Enrich(bytes); }
+            catch (Exception ex) { _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File} — uploading without callouts", fileName); }
         }
 
         // Upload PDF
