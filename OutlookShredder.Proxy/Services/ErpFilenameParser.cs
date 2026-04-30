@@ -48,9 +48,15 @@ public static class ErpFilenameParser
     /// Returns an <see cref="ErpFilenameResult"/> if the filename matches an ERP naming pattern,
     /// or <c>null</c> if the file should be skipped.
     /// </summary>
+    // Matches Windows duplicate-file counter: " (1)", " (2)", " (10)", etc.
+    private static readonly Regex _dupCounter =
+        new(@"\s+\(\d+\)$", RegexOptions.Compiled);
+
     public static ErpFilenameResult? Parse(string fileName)
     {
-        var stem = Path.GetFileNameWithoutExtension(fileName);
+        // Strip Windows duplicate counter before matching so "PickingSlip_HSK_PS1234567 (1).pdf"
+        // resolves to the same document number as "PickingSlip_HSK_PS1234567.pdf".
+        var stem = _dupCounter.Replace(Path.GetFileNameWithoutExtension(fileName), "");
 
         var m = _full.Match(stem);
         if (m.Success)
