@@ -2111,12 +2111,6 @@ public class SharePointService
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
-        _log.LogInformation("[SP] SLI regret check [{RfqId}] {Supplier} '{Product}': aiFlag={AiRegret} hasPrice={HasPrice} comment='{Comment}'",
-            jobRef, supplier, prodName, product.IsRegret, HasPrice(product),
-            (product.SupplierProductComments ?? "").Length > 60
-                ? product.SupplierProductComments![..60]
-                : product.SupplierProductComments ?? "");
-
         var fieldData = new Dictionary<string, object?>
         {
             ["Title"]                    = title,
