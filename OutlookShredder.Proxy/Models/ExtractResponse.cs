@@ -34,6 +34,10 @@ public class RfqProcessedNotification
     public SynonymGroup? SynonymGroup { get; set; }
     /// <summary>Populated only when EventType = "ERP".</summary>
     public ErpBusRecord? ErpDocument { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall".</summary>
+    public string? CallerName  { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". Normalized, e.g. "(973) 752-2193".</summary>
+    public string? CallerPhone { get; set; }
 }
 
 /// <summary>

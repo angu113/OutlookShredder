@@ -81,6 +81,15 @@ public class RfqNotificationService
             SynonymGroup = group,
         });
 
+    /// <summary>Publishes an "IncomingCall" event so Shredder shows a toast with caller name and number.</summary>
+    public void NotifyIncomingCall(string callerName, string callerPhone) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType   = "IncomingCall",
+            CallerName  = callerName,
+            CallerPhone = callerPhone,
+        });
+
     /// <summary>
     /// Publishes an "ERP" event to Service Bus so all Shredder clients update
     /// their local ERP document cache.
