@@ -365,7 +365,7 @@ public class FileWatcherService : BackgroundService
             try { bytes = StampCustomerName(bytes, extraction.CustomerName); }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] PDF stamp failed for {File} — uploading original", fileName); }
 
-            try { bytes = PickingSlipEnricher.Enrich(bytes); }
+            try { bytes = PickingSlipEnricher.Enrich(bytes, _log); }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File} — uploading without callouts", fileName); }
         }
 

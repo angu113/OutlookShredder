@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
 using UglyToad.PdfPig.Content;
@@ -24,9 +25,9 @@ internal static class PickingSlipEnricher
 
     // ── Public entry point ───────────────────────────────────────────────────
 
-    public static byte[] Enrich(byte[] pdfBytes)
+    public static byte[] Enrich(byte[] pdfBytes, ILogger? log = null)
     {
-        var blocks = ParseCommentBlocks(pdfBytes);
+        var blocks = ParseCommentBlocks(pdfBytes, log);
         if (blocks.Count == 0) return pdfBytes;
 
         // Collect all keywords across all blocks.
@@ -59,11 +60,19 @@ internal static class PickingSlipEnricher
     private static readonly Regex _cutInstructionRegex =
         new(@"^(?:S\d+:|B\d+:|OC\d*:|TB\d*:|SC\d*:|C\d+:)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // Service-item lines: all-caps identifier(s) in the MSPC column with no slash,
-    // e.g. "BENDING Bending", "LASER CUTTING Laser Cutting", "SETUP CHARGE Setup Charge".
-    // Minimum 3 chars per word to avoid matching short comment prefixes.
+    // Picking-slip footer markers — appear after the last product block and signal that
+    // the rest of the page is delivery/summary info, not shop comments.
+    private static readonly Regex _footerMarkerRegex =
+        new(@"^(TOTAL[\s:]+\d|Description\s*\(Special|Contact\s*:\s*\w|Delivery\s+Services)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Service-item lines: all-caps code word(s) FOLLOWED BY a Title Case description,
+    // or the code alone at end of line. e.g. "BENDING Bending", "LASER CUTTING Laser Cutting".
+    // The Title Case requirement (uppercase letter then lowercase) prevents matching
+    // all-caps shop comments like "DRILL 1/4" HOLES , 6 IN EACH FLANGE" which contain
+    // digits/punctuation after the first word and never have a Title Case continuation.
     private static readonly Regex _serviceLineRegex =
-        new(@"^[A-Z]{3,}(?:\s+[A-Z]{2,})*(?:\s|$)", RegexOptions.Compiled);
+        new(@"^[A-Z]{3,}(?:\s+[A-Z]{2,})*(?:\s+[A-Z][a-z]|\s*$)", RegexOptions.Compiled);
 
     private sealed record CommentBlock(
         int PageIndex,
@@ -72,7 +81,7 @@ internal static class PickingSlipEnricher
 
     private sealed record TextLine(string Text, double X, double Y, double Width, double Height);
 
-    private static List<CommentBlock> ParseCommentBlocks(byte[] pdfBytes)
+    private static List<CommentBlock> ParseCommentBlocks(byte[] pdfBytes, ILogger? log = null)
     {
         var result = new List<CommentBlock>();
 
@@ -94,6 +103,8 @@ internal static class PickingSlipEnricher
             {
                 var text = line.Text.Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
+
+                log?.LogDebug("[PSE] p{Page} [{State}] {Text}", pageIdx, state, text);
 
                 switch (state)
                 {
@@ -124,16 +135,19 @@ internal static class PickingSlipEnricher
                         {
                             // Additional B: line — not a comment
                         }
-                        else if (_cutInstructionRegex.IsMatch(text) || _serviceLineRegex.IsMatch(text))
+                        else if (_cutInstructionRegex.IsMatch(text) || _serviceLineRegex.IsMatch(text)
+                                 || _footerMarkerRegex.IsMatch(text))
                         {
-                            // Cut instruction (S1:, B1:, TB: …) or service-item line (BENDING, LASER CUTTING …)
-                            // both mark the end of the comment zone for this product.
+                            // Cut instruction (S1:, B1:, TB: …), service-item line (BENDING, LASER CUTTING …),
+                            // or footer marker (Delivery Services, Contact, TOTAL, Description) —
+                            // all mark the end of the comment zone for this product.
                             MaybeAddBlock(result, pageIdx, commentLines);
                             commentLines = [];
                             state = ParseState.DoneWithProduct;
                         }
                         else
                         {
+                            log?.LogInformation("[PSE] COMMENT p{Page}: {Text}", pageIdx, text);
                             commentLines.Add(line);
                         }
                         break;
@@ -237,9 +251,12 @@ internal static class PickingSlipEnricher
                 // Convert PdfPig bottom-left coords to PdfSharp top-left
                 double psY = pageH - line.Y - line.Height;
 
-                // White out original text
-                var rect = new XRect(line.X - 2, psY - 1, line.Width + 4, line.Height + 3);
-                gfx.DrawRectangle(XBrushes.White, rect);
+                // White out original text — generous padding on all sides, drawn twice
+                // to guarantee full opacity regardless of PDF compositing order.
+                var whiteBrush = new XSolidBrush(XColors.White);
+                var rect = new XRect(line.X - 10, psY - 4, line.Width + 80, line.Height + 8);
+                gfx.DrawRectangle(whiteBrush, rect);
+                gfx.DrawRectangle(whiteBrush, rect);
 
                 // Redraw bold
                 var textRect = new XRect(line.X, psY, line.Width + 20, line.Height + 4);

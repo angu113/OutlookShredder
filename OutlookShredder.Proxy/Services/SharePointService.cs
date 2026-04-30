@@ -6965,11 +6965,14 @@ public class SharePointService
     {
         // Both OneDrive (/personal/user/Library/...) and SharePoint (/sites/site/Library/...)
         // have exactly 4 leading path segments before the drive-relative portion.
-        var uri      = new Uri(Uri.UnescapeDataString(webUrl));
+        // Keep the original percent-encoding in AbsolutePath, then decode the relative path once
+        // so that spaces/parens arrive as literal characters.  If we passed %20 directly as the
+        // Graph item-key string the SDK would double-encode it to %2520 and Graph would return 404.
+        var uri      = new Uri(webUrl);
         var segments = uri.AbsolutePath.Split('/');
         if (segments.Length < 5)
             throw new InvalidOperationException($"Cannot parse drive path from WebUrl: {webUrl}");
-        var relativePath = string.Join("/", segments.Skip(4));
+        var relativePath = Uri.UnescapeDataString(string.Join("/", segments.Skip(4)));
 
         var siteId  = await GetSiteIdAsync();
         var drive   = await GetGraph().Sites[siteId].Drive.GetAsync(cancellationToken: ct);
@@ -7197,9 +7200,14 @@ public class SharePointService
             var pdfUrl = Get("PdfUrl");
             if (string.IsNullOrEmpty(pdfUrl)) continue;
 
-            var dateStr = Get("DocumentDate");
-            if (!DateTime.TryParse(dateStr, out var docDate)) continue;
-            if (docDate >= cutoff) continue;
+            // Use the SP item's last-modified time, not the ERP DocumentDate.
+            // An order may be old but the PDF was re-uploaded today (e.g. the picking slip
+            // was regenerated for a multi-phase fulfilment) — that file must survive until
+            // it goes untouched for the full retention window.
+            var itemModified = item.LastModifiedDateTime?.UtcDateTime ?? DateTime.MinValue;
+            if (itemModified >= cutoff) continue;
+
+            var dateStr = Get("DocumentDate") ?? "";
 
             var docNum   = Get("Title") ?? "";
             var fileName = Get("FileName") ?? "";
