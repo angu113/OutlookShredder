@@ -220,7 +220,7 @@ internal static class PickingSlipEnricher
         using var ms = new MemoryStream(pdfBytes);
         var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
 
-        var boxPen = new XPen(XColor.FromArgb(0, 100, 200), 0.75); // blue outline
+        var boxPen = new XPen(XColors.Black, 0.75) { DashStyle = XDashStyle.Dash };
 
         foreach (var block in blocks)
         {
@@ -228,7 +228,7 @@ internal static class PickingSlipEnricher
             double pageH = page.Height.Point;
 
             using var gfx = XGraphics.FromPdfPage(page);
-            var boldFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+            var boldFont = new XFont("Arial", 11, XFontStyleEx.Bold);
 
             // Compute the union bounding box for the whole block so we can draw one
             // enclosing rectangle around all comment lines in this product block.
