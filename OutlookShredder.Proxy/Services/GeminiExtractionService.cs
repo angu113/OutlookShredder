@@ -162,11 +162,14 @@ public class GeminiExtractionService : IAiExtractionService
         freight notes, and any dimension detail not already in productName.
 
         ── NO QUOTE / REGRET ──────────────────────────────────────────────────────
-        Set isRegret = true on any product entry where the supplier explicitly states
-        they cannot or will not quote that product — including phrases like "cannot be
-        quoted", "unable to quote", "not something we carry", "no longer available",
-        "we don't stock this", "out of scope", or any clear statement of inability to
-        supply. Also set isRegret = true for the whole email when it is an OOF reply,
+        Set isRegret = true on any product entry where the supplier states (explicitly
+        OR implicitly) that they cannot or will not quote that product — including:
+        - Direct: "cannot quote", "unable to quote", "cannot supply", "unable to supply",
+          "don't stock", "do not carry", "not available", "out of stock"
+        - Indirect: "I can only quote the [other product]", "we only have [different item]",
+          "only quoting [other product]", or any statement that prices only OTHER products
+          listed in this same email, making it clear this product is excluded.
+        Also set isRegret = true for the whole email when it is an OOF reply,
         acknowledgement with no pricing, or blanket regret.
         Leave all numeric price fields null on regret entries.
         Explain the reason in supplierProductComments.
