@@ -220,22 +220,13 @@ internal static class PickingSlipEnricher
         using var ms = new MemoryStream(pdfBytes);
         var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
 
-        var boxPen = new XPen(XColors.Black, 0.75) { DashStyle = XDashStyle.Dash };
-
         foreach (var block in blocks)
         {
             var page = doc.Pages[block.PageIndex];
             double pageH = page.Height.Point;
 
             using var gfx = XGraphics.FromPdfPage(page);
-            var boldFont = new XFont("Arial", 11, XFontStyleEx.Bold);
-
-            // Compute the union bounding box for the whole block so we can draw one
-            // enclosing rectangle around all comment lines in this product block.
-            double bLeft   = block.Lines.Min(l => l.X) - 4;
-            double bBottom = block.Lines.Min(l => l.Y);
-            double bRight  = block.Lines.Max(l => l.X + l.Width) + 4;
-            double bTop    = block.Lines.Max(l => l.Y + l.Height);
+            var boldFont = new XFont("Arial", 13, XFontStyleEx.Bold);
 
             foreach (var line in block.Lines)
             {
@@ -251,13 +242,6 @@ internal static class PickingSlipEnricher
                 gfx.DrawString(line.Text, boldFont, XBrushes.Black,
                     textRect, XStringFormats.TopLeft);
             }
-
-            // Draw enclosing box around the entire comment block (PdfSharp top-left origin)
-            double boxX = bLeft;
-            double boxY = pageH - bTop - 3;
-            double boxW = bRight - bLeft;
-            double boxH = bTop - bBottom + 6;
-            gfx.DrawRectangle(boxPen, new XRect(boxX, boxY, boxW, boxH));
         }
 
         using var outMs = new MemoryStream();
