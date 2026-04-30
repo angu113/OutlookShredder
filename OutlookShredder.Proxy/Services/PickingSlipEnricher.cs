@@ -45,18 +45,20 @@ internal static class PickingSlipEnricher
 
     // ── Structure parsing (PdfPig) ───────────────────────────────────────────
 
-    // MSPC product lines start with a catalog search key pattern.
+    // MSPC lines: letters-slash-digits, e.g. HP/375, HTSQ/22120, AF6061/2502500
+    // The MSPC and product name share the same visual row, so text may continue
+    // after the code — we only check the start of the grouped line.
     private static readonly Regex _mspcRegex =
-        new(@"^[A-Z]{2}\d{4}", RegexOptions.Compiled);
+        new(@"^[A-Z]{1,8}/\d{2,8}", RegexOptions.Compiled);
 
-    // Cut list rows: one or more dimension tokens (digits / fractions / x separators)
-    // followed by 1–3 letter initials at end of line.
-    private static readonly Regex _cutListRegex =
-        new(@"^[\d\s./""'xX*(),-]+\b[A-Z]{1,3}\s*$", RegexOptions.Compiled);
+    // Balance / order line — starts with "B: " followed by a digit or letter
+    private static readonly Regex _bLineRegex =
+        new(@"^B:\s", RegexOptions.Compiled);
 
-    // TB: line
-    private static readonly Regex _tbRegex =
-        new(@"^TB\s*:", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Cut instruction lines: S1:, B1:, OC1:, TB:, SC:, C1: etc.
+    // B: (no digit) is the order/balance line and is handled separately above.
+    private static readonly Regex _cutInstructionRegex =
+        new(@"^(?:S\d+:|B\d+:|OC\d*:|TB\d*:|SC\d*:|C\d+:)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private sealed record CommentBlock(
         int PageIndex,
@@ -73,12 +75,13 @@ internal static class PickingSlipEnricher
 
         foreach (var page in doc.GetPages())
         {
-            int pageIdx = page.Number - 1; // 0-based
-
-            // Group words into visual lines by Y coordinate (tolerance 3 units).
+            int pageIdx = page.Number - 1;
             var rawLines = GroupIntoLines(page.GetWords().ToList());
 
-            // State machine per page.
+            // State machine per page:
+            //   Preamble   — scanning for an MSPC line
+            //   InProduct  — saw MSPC; waiting for the B: balance/order line
+            //   AfterBLine — saw B: line; any non-instruction line is a shop comment
             var state = ParseState.Preamble;
             var commentLines = new List<TextLine>();
 
@@ -95,43 +98,41 @@ internal static class PickingSlipEnricher
                         break;
 
                     case ParseState.InProduct:
-                        if (_cutListRegex.IsMatch(text))
-                            state = ParseState.InCutList;
-                        else if (_mspcRegex.IsMatch(text))
+                        if (_mspcRegex.IsMatch(text))
                         {
-                            // New product block — flush any accumulated comments
-                            MaybeAddBlock(result, pageIdx, commentLines);
-                            commentLines = new List<TextLine>();
+                            // Back-to-back MSPC (e.g. service line after product) — keep state
+                        }
+                        else if (_bLineRegex.IsMatch(text))
+                        {
+                            state = ParseState.AfterBLine;
                         }
                         break;
 
-                    case ParseState.InCutList:
-                        if (_cutListRegex.IsMatch(text))
-                            break; // still in cut list
+                    case ParseState.AfterBLine:
                         if (_mspcRegex.IsMatch(text))
                         {
+                            // New product block starts
                             MaybeAddBlock(result, pageIdx, commentLines);
-                            commentLines = new List<TextLine>();
+                            commentLines = [];
                             state = ParseState.InProduct;
-                            break;
                         }
-                        // Anything else after cut list rows = comment (or TB: or divider)
-                        if (!IsDoubleDivider(text))
+                        else if (_bLineRegex.IsMatch(text))
                         {
-                            commentLines.Add(line);
+                            // Additional B: line (multiple order rows) — stay in state, not a comment
+                        }
+                        else if (_cutInstructionRegex.IsMatch(text))
+                        {
+                            // S1:, B1:, OC1:, TB:, SC: etc. — cut instructions, not comments
                         }
                         else
                         {
-                            // Double divider ends the block
-                            MaybeAddBlock(result, pageIdx, commentLines);
-                            commentLines = new List<TextLine>();
-                            state = ParseState.Preamble;
+                            // Free-text line after the order row → shop comment
+                            commentLines.Add(line);
                         }
                         break;
                 }
             }
 
-            // Flush last block on page.
             MaybeAddBlock(result, pageIdx, commentLines);
         }
 
@@ -154,10 +155,7 @@ internal static class PickingSlipEnricher
         result.Add(new CommentBlock(pageIdx, lines, keywords));
     }
 
-    private static bool IsDoubleDivider(string text) =>
-        text.Length >= 4 && text.Replace("=", "").Length < text.Length / 2;
-
-    private enum ParseState { Preamble, InProduct, InCutList }
+    private enum ParseState { Preamble, InProduct, AfterBLine }
 
     // ── Word → line grouping ─────────────────────────────────────────────────
 
@@ -212,6 +210,8 @@ internal static class PickingSlipEnricher
         using var ms = new MemoryStream(pdfBytes);
         var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
 
+        var boxPen = new XPen(XColor.FromArgb(0, 100, 200), 0.75); // blue outline
+
         foreach (var block in blocks)
         {
             var page = doc.Pages[block.PageIndex];
@@ -219,6 +219,13 @@ internal static class PickingSlipEnricher
 
             using var gfx = XGraphics.FromPdfPage(page);
             var boldFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+
+            // Compute the union bounding box for the whole block so we can draw one
+            // enclosing rectangle around all comment lines in this product block.
+            double bLeft   = block.Lines.Min(l => l.X) - 4;
+            double bBottom = block.Lines.Min(l => l.Y);
+            double bRight  = block.Lines.Max(l => l.X + l.Width) + 4;
+            double bTop    = block.Lines.Max(l => l.Y + l.Height);
 
             foreach (var line in block.Lines)
             {
@@ -234,6 +241,13 @@ internal static class PickingSlipEnricher
                 gfx.DrawString(line.Text, boldFont, XBrushes.Black,
                     textRect, XStringFormats.TopLeft);
             }
+
+            // Draw enclosing box around the entire comment block (PdfSharp top-left origin)
+            double boxX = bLeft;
+            double boxY = pageH - bTop - 3;
+            double boxW = bRight - bLeft;
+            double boxH = bTop - bBottom + 6;
+            gfx.DrawRectangle(boxPen, new XRect(boxX, boxY, boxW, boxH));
         }
 
         using var outMs = new MemoryStream();
