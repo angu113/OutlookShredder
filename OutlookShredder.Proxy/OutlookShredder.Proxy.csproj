@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>OutlookShredder.Proxy</RootNamespace>
@@ -22,6 +22,12 @@
     <PackageReference Include="PdfPig" Version="0.1.14" />
     <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UIAutomation — needed by ZoomCallWatcherService. FrameworkReference (not UseWPF)
+         avoids breaking Web SDK implicit usings while still bringing in UIAutomation types. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 
 </Project>

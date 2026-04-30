@@ -109,6 +109,7 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
     builder.Services.AddHostedService<LqUpdateService>();
     builder.Services.AddHostedService<RfqAutoCompleteService>();
+    builder.Services.AddHostedService<ZoomCallWatcherService>();
 
     var app = builder.Build();
 
