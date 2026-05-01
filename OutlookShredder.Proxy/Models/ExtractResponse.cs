@@ -37,7 +37,13 @@ public class RfqProcessedNotification
     /// <summary>Populated only when EventType = "IncomingCall".</summary>
     public string? CallerName  { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". Normalized, e.g. "(973) 752-2193".</summary>
-    public string? CallerPhone { get; set; }
+    public string? CallerPhone   { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". Business partner name from CRM lookup.</summary>
+    public string? BpName        { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". BP popup message from CRM lookup.</summary>
+    public string? PopupMessage  { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". Matched contact name from CRM lookup.</summary>
+    public string? ContactName   { get; set; }
 }
 
 /// <summary>

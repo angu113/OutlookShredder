@@ -75,17 +75,20 @@ public class ZoomCallWatcherService : BackgroundService
     private readonly ILogger<ZoomCallWatcherService> _log;
     private readonly IConfiguration                  _config;
     private readonly RfqNotificationService          _notify;
+    private readonly SharePointService               _sp;
     // Held as a field so the GC never collects the delegate while the hook is live
     private WinEventProc? _winEventCallback;
 
     public ZoomCallWatcherService(
         ILogger<ZoomCallWatcherService> log,
         IConfiguration config,
-        RfqNotificationService notify)
+        RfqNotificationService notify,
+        SharePointService sp)
     {
         _log    = log;
         _config = config;
         _notify = notify;
+        _sp     = sp;
     }
 
     protected override Task ExecuteAsync(CancellationToken ct)
@@ -200,7 +203,27 @@ public class ZoomCallWatcherService : BackgroundService
                 {
                     var (callerName, callerPhone) = ParseIncomingCallTitle(name);
                     _log.LogInformation("[Zoom] Incoming call — name='{Name}' phone='{Phone}'", callerName, callerPhone);
-                    _notify.NotifyIncomingCall(callerName, callerPhone);
+                    // CRM lookup runs on a thread-pool thread; notify once it resolves
+                    _ = Task.Run(async () =>
+                    {
+                        CustomerLookupResult? crm = null;
+                        if (!string.IsNullOrWhiteSpace(callerPhone))
+                        {
+                            try
+                            {
+                                crm = await _sp.LookupCustomerByPhoneAsync(callerPhone, CancellationToken.None);
+                                if (crm is not null)
+                                    _log.LogInformation("[Zoom] CRM match — bp='{Bp}' contact='{Contact}'",
+                                        crm.BusinessPartner, crm.ContactName);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex, "[Zoom] CRM lookup failed for phone={Phone}", callerPhone);
+                            }
+                        }
+                        _notify.NotifyIncomingCall(callerName, callerPhone,
+                            crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName);
+                    });
                 }
 
                 var sb = new StringBuilder();

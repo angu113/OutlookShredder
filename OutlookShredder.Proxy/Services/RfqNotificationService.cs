@@ -81,13 +81,17 @@ public class RfqNotificationService
             SynonymGroup = group,
         });
 
-    /// <summary>Publishes an "IncomingCall" event so Shredder shows a toast with caller name and number.</summary>
-    public void NotifyIncomingCall(string callerName, string callerPhone) =>
+    /// <summary>Publishes an "IncomingCall" event so Shredder shows a toast with caller and CRM data.</summary>
+    public void NotifyIncomingCall(string callerName, string callerPhone,
+        string? bpName = null, string? popupMessage = null, string? contactName = null) =>
         NotifyRfqProcessed(new RfqProcessedNotification
         {
-            EventType   = "IncomingCall",
-            CallerName  = callerName,
-            CallerPhone = callerPhone,
+            EventType    = "IncomingCall",
+            CallerName   = callerName,
+            CallerPhone  = callerPhone,
+            BpName       = bpName,
+            PopupMessage = popupMessage,
+            ContactName  = contactName,
         });
 
     /// <summary>
