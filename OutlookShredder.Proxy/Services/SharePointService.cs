@@ -41,6 +41,8 @@ public class SharePointService
     private string? _poListId;            // PurchaseOrders
     private string? _synonymListId;       // ProductSynonyms
     private string? _erpDocumentsListId;  // ErpDocuments
+    private string? _customersListId;        // Customers
+    private string? _customerContactsListId; // CustomerContacts
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
@@ -7304,6 +7306,258 @@ public class SharePointService
         return best.Key;
     }
 
+    // ── Customer CRM ─────────────────────────────────────────────────────────
+
+    private async Task<string> GetCustomersListIdAsync() =>
+        _customersListId ??= await ResolveListIdAsync("Customers");
+
+    private async Task<string> GetCustomerContactsListIdAsync() =>
+        _customerContactsListId ??= await ResolveListIdAsync("CustomerContacts");
+
+    public async Task<Dictionary<string, object>> EnsureCustomerListsAsync(CancellationToken ct = default)
+    {
+        var siteId  = await GetSiteIdAsync();
+        var results = new Dictionary<string, object>
+        {
+            ["Customers"] = await EnsureListColumnsAsync(siteId, "Customers",
+            [
+                ("PopupMessage", "note"),
+            ]),
+            ["CustomerContacts"] = await EnsureListColumnsAsync(siteId, "CustomerContacts",
+            [
+                ("CustomerName", "text"),
+                ("ContactName",  "text"),
+                ("Phone",        "text"),
+            ]),
+        };
+
+        _customersListId        = await ResolveListIdAsync("Customers");
+        _customerContactsListId = await ResolveListIdAsync("CustomerContacts");
+
+        results["Indexes:CustomerContacts"] = await EnsureColumnIndexesAsync(
+            siteId, "CustomerContacts", "CustomerName", "Phone");
+
+        return results;
+    }
+
+    public async Task<(int Added, int Updated, int Skipped)> UpsertBusinessPartnersAsync(
+        IReadOnlyList<CustomerImportService.BpRow> rows, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+
+        // Read all existing: Title → (itemId, popupMessage)
+        var existing = new Dictionary<string, (string Id, string? Popup)>(StringComparer.OrdinalIgnoreCase);
+        var page     = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                existing[name] = (item.Id, GetStr(d, "PopupMessage"));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        int added = 0, updated = 0, skipped = 0;
+
+        await Parallel.ForEachAsync(rows,
+            new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
+            async (row, token) =>
+            {
+                if (existing.TryGetValue(row.Name, out var ex))
+                {
+                    if (string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal))
+                    {
+                        Interlocked.Increment(ref skipped);
+                        return;
+                    }
+                    await GetGraph().Sites[siteId].Lists[listId].Items[ex.Id].Fields
+                        .PatchAsync(new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?> { ["PopupMessage"] = row.PopupMessage }
+                        }, cancellationToken: token);
+                    var u = Interlocked.Increment(ref updated);
+                    if (u % 200 == 0)
+                        _log.LogInformation("[SP] UpsertPartners: {N} updated so far", u);
+                }
+                else
+                {
+                    await GetGraph().Sites[siteId].Lists[listId].Items
+                        .PostAsync(new ListItem
+                        {
+                            Fields = new FieldValueSet
+                            {
+                                AdditionalData = new Dictionary<string, object?>
+                                {
+                                    ["Title"]        = row.Name,
+                                    ["PopupMessage"] = row.PopupMessage,
+                                }
+                            }
+                        }, cancellationToken: token);
+                    var a = Interlocked.Increment(ref added);
+                    if (a % 200 == 0)
+                        _log.LogInformation("[SP] UpsertPartners: {N} added so far", a);
+                }
+            });
+
+        _log.LogInformation("[SP] UpsertPartners: {Added} added, {Updated} updated, {Skipped} skipped",
+            added, updated, skipped);
+        return (added, updated, skipped);
+    }
+
+    private static string ContactKey(string bp, string contact) =>
+        bp.ToLowerInvariant() + " " + contact.ToLowerInvariant();
+
+    public async Task<(int Added, int Deleted)> UpsertContactsAsync(
+        IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomerContactsListIdAsync();
+
+        // Read all existing: ContactKey(bp, contact) -> List<itemId>
+        var existing = new Dictionary<string, List<string>>();
+        var page     = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var bp      = GetStr(d, "CustomerName") ?? "";
+                var contact = GetStr(d, "ContactName")  ?? "";
+                if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact)) continue;
+                var key = ContactKey(bp, contact);
+                if (!existing.TryGetValue(key, out var ids)) existing[key] = ids = [];
+                ids.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        // Delete stale rows for all (bp, contact) pairs that appear in the import
+        var incomingKeys = rows
+            .Select(r => ContactKey(r.CustomerName, r.ContactName))
+            .ToHashSet();
+
+        var toDelete = existing
+            .Where(kv => incomingKeys.Contains(kv.Key))
+            .SelectMany(kv => kv.Value)
+            .ToList();
+
+        int deleted = 0;
+        if (toDelete.Count > 0)
+        {
+            await Parallel.ForEachAsync(toDelete,
+                new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
+                async (itemId, token) =>
+                {
+                    await GetGraph().Sites[siteId].Lists[listId].Items[itemId]
+                        .DeleteAsync(cancellationToken: token);
+                    Interlocked.Increment(ref deleted);
+                });
+            _log.LogInformation("[SP] UpsertContacts: {N} stale rows deleted", deleted);
+        }
+
+        // Insert all new rows
+        int added = 0;
+        await Parallel.ForEachAsync(rows,
+            new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
+            async (row, token) =>
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items
+                    .PostAsync(new ListItem
+                    {
+                        Fields = new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?>
+                            {
+                                ["Title"]        = row.ContactName,
+                                ["CustomerName"] = row.CustomerName,
+                                ["ContactName"]  = row.ContactName,
+                                ["Phone"]        = row.Phone,
+                            }
+                        }
+                    }, cancellationToken: token);
+                var n = Interlocked.Increment(ref added);
+                if (n % 500 == 0)
+                    _log.LogInformation("[SP] UpsertContacts: {N}/{Total} added", n, rows.Count);
+            });
+
+        _log.LogInformation("[SP] UpsertContacts: {Added} added, {Deleted} deleted", added, deleted);
+        return (added, deleted);
+    }
+
+    public async Task<CustomerLookupResult?> LookupCustomerByPhoneAsync(
+        string rawPhone, CancellationToken ct = default)
+    {
+        var phone = CustomerImportService.NormalizePhone(rawPhone);
+        if (phone is null) return null;
+
+        var siteId     = await GetSiteIdAsync();
+        var contactsId = await GetCustomerContactsListIdAsync();
+
+        var contactPage = await GetGraph().Sites[siteId].Lists[contactsId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Filter = $"fields/Phone eq '{phone}'";
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
+                r.QueryParameters.Top    = 50;
+            }, ct);
+
+        var contacts = new List<(string Bp, string Contact)>();
+        while (contactPage?.Value is not null)
+        {
+            foreach (var item in contactPage.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var bp      = GetStr(d, "CustomerName") ?? "";
+                var contact = GetStr(d, "ContactName")  ?? "";
+                if (!string.IsNullOrWhiteSpace(bp))
+                    contacts.Add((bp, contact));
+            }
+            if (contactPage.OdataNextLink is null) break;
+            contactPage = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                contactPage.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        if (contacts.Count == 0) return null;
+
+        var bpName      = contacts[0].Bp;
+        var contactName = contacts.Count == 1 ? contacts[0].Contact : null;
+
+        var customersId = await GetCustomersListIdAsync();
+        var safeFilter  = bpName.Replace("'", "''");
+        var bpPage      = await GetGraph().Sites[siteId].Lists[customersId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Filter = $"fields/Title eq '{safeFilter}'";
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Top    = 1;
+            }, ct);
+
+        var bpItem = bpPage?.Value?.FirstOrDefault();
+        var popup  = bpItem?.Fields?.AdditionalData is { } bd ? GetStr(bd, "PopupMessage") : null;
+
+        return new CustomerLookupResult(bpName, popup, contactName);
+    }
+
 }
 
 public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds, DateTime? LastModified = null);
@@ -7319,3 +7573,5 @@ public record LqMatch(
     int    QuoteCount,
     double MinPricePerPound,
     double MaxPricePerPound);
+
+public record CustomerLookupResult(string BusinessPartner, string? PopupMessage, string? ContactName);

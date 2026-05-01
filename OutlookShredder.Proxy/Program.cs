@@ -100,6 +100,7 @@ try
     builder.Services.AddSingleton<ShrConvInRouter>();
     builder.Services.AddSingleton<MailPollerService>();
     builder.Services.AddSingleton<ErpAiService>();
+    builder.Services.AddSingleton<CustomerImportService>();
     builder.Services.AddSingleton<FileWatcherService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
