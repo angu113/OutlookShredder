@@ -43,6 +43,7 @@ public class SharePointService
     private string? _erpDocumentsListId;  // ErpDocuments
     private string? _customersListId;        // Customers
     private string? _customerContactsListId; // CustomerContacts
+    private string? _callLogListId;          // PhoneCallLog
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
@@ -7615,6 +7616,124 @@ public class SharePointService
         }
 
         return result;
+    }
+
+    // ── Phone call log ────────────────────────────────────────────────────────
+
+    private async Task<string> GetOrCreateCallLogListIdAsync(CancellationToken ct = default)
+    {
+        if (_callLogListId is not null) return _callLogListId;
+
+        var siteId    = await GetSiteIdAsync();
+        const string listName = "PhoneCallLog";
+
+        var existing = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (existing?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+        }
+        else
+        {
+            var created = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new Microsoft.Graph.Models.ListInfo { Template = "genericList" }
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("PhoneCallLog list creation returned no ID");
+            _log.LogInformation("[SP] Created PhoneCallLog list: {Id}", listId);
+
+            // Add columns
+            var cols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+            var byName = (cols?.Value ?? [])
+                .Where(c => c.Name is not null)
+                .Select(c => c.Name!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var schema = new (string Name, string Type)[]
+            {
+                ("CallerPhone",  "text"),
+                ("BpName",       "text"),
+                ("ContactName",  "text"),
+                ("PopupMessage", "note"),
+                ("ReceivedAt",   "text"),
+            };
+            foreach (var (name, type) in schema)
+            {
+                if (byName.Contains(name)) continue;
+                var col = type == "note"
+                    ? new ColumnDefinition { Name = name, Text = new TextColumn { AllowMultipleLines = true, LinesForEditing = 3 } }
+                    : new ColumnDefinition { Name = name, Text = new TextColumn() };
+                try { await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct); }
+                catch (Exception ex) { _log.LogWarning("[SP] PhoneCallLog column '{Name}': {Err}", name, ex.Message); }
+            }
+        }
+
+        _callLogListId = listId;
+        return listId;
+    }
+
+    /// <summary>Writes one phone call entry to the PhoneCallLog SP list.  Non-fatal on error.</summary>
+    public async Task WritePhoneCallLogAsync(
+        string callerName, string callerPhone,
+        string? bpName, string? contactName, string? popupMessage,
+        DateTimeOffset receivedAt, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateCallLogListIdAsync(ct);
+
+        var fields = new Dictionary<string, object?>
+        {
+            ["Title"]        = callerName,
+            ["CallerPhone"]  = callerPhone,
+            ["BpName"]       = bpName,
+            ["ContactName"]  = contactName,
+            ["PopupMessage"] = popupMessage,
+            ["ReceivedAt"]   = receivedAt.ToString("o"),
+        };
+
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }
+            }, cancellationToken: ct);
+    }
+
+    /// <summary>Returns the most recent <paramref name="top"/> call log entries, newest first.</summary>
+    public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
+        int top = 200, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateCallLogListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt)"];
+                r.QueryParameters.Top    = top;
+                r.QueryParameters.Orderby = ["Created desc"];
+            }, ct);
+
+        var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();
+        foreach (var item in (items?.Value ?? []))
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null) continue;
+            string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
+            results.Add(new OutlookShredder.Proxy.Models.PhoneCallLogRecord
+            {
+                SpItemId     = item.Id ?? "",
+                CallerName   = Get("Title") ?? "",
+                CallerPhone  = Get("CallerPhone"),
+                BpName       = Get("BpName"),
+                ContactName  = Get("ContactName"),
+                PopupMessage = Get("PopupMessage"),
+                ReceivedAt   = Get("ReceivedAt"),
+            });
+        }
+        return results;
     }
 
 }

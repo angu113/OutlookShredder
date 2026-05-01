@@ -157,6 +157,18 @@ public class SrEmailRow
     public string? MessageId     { get; set; }
 }
 
+/// <summary>One entry in the phone call log stored in SharePoint.</summary>
+public class PhoneCallLogRecord
+{
+    public string  SpItemId     { get; set; } = "";
+    public string  CallerName   { get; set; } = "";
+    public string? CallerPhone  { get; set; }
+    public string? BpName       { get; set; }
+    public string? ContactName  { get; set; }
+    public string? PopupMessage { get; set; }
+    public string? ReceivedAt   { get; set; }
+}
+
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>
 public class SpWriteResult
 {

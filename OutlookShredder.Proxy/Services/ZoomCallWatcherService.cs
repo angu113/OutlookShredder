@@ -223,6 +223,19 @@ public class ZoomCallWatcherService : BackgroundService
                         }
                         _notify.NotifyIncomingCall(callerName, callerPhone,
                             crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName);
+
+                        // Write to call log — non-blocking (notify already sent above)
+                        try
+                        {
+                            await _sp.WritePhoneCallLogAsync(
+                                callerName, callerPhone ?? "",
+                                crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
+                                DateTimeOffset.UtcNow, CancellationToken.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.LogWarning(ex, "[Zoom] Call log write failed for {Name}", callerName);
+                        }
                     });
                 }
 
