@@ -7337,6 +7337,9 @@ public class SharePointService
         results["Indexes:CustomerContacts"] = await EnsureColumnIndexesAsync(
             siteId, "CustomerContacts", "CustomerName", "Phone");
 
+        results["Indexes:Customers"] = await EnsureColumnIndexesAsync(
+            siteId, "Customers", "Title");
+
         return results;
     }
 
@@ -7558,18 +7561,26 @@ public class SharePointService
         var bpName      = contacts[0].Bp;
         var contactName = contacts.Count == 1 ? contacts[0].Contact : null;
 
-        var customersId = await GetCustomersListIdAsync();
-        var safeFilter  = bpName.Replace("'", "''");
-        var bpPage      = await GetGraph().Sites[siteId].Lists[customersId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Filter = $"fields/Title eq '{safeFilter}'";
-                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
-                r.QueryParameters.Top    = 1;
-            }, ct);
+        string? popup = null;
+        try
+        {
+            var customersId = await GetCustomersListIdAsync();
+            var safeFilter  = bpName.Replace("'", "''");
+            var bpPage      = await GetGraph().Sites[siteId].Lists[customersId].Items
+                .GetAsync(r =>
+                {
+                    r.QueryParameters.Filter = $"fields/Title eq '{safeFilter}'";
+                    r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                    r.QueryParameters.Top    = 1;
+                }, ct);
 
-        var bpItem = bpPage?.Value?.FirstOrDefault();
-        var popup  = bpItem?.Fields?.AdditionalData is { } bd ? GetStr(bd, "PopupMessage") : null;
+            var bpItem = bpPage?.Value?.FirstOrDefault();
+            popup = bpItem?.Fields?.AdditionalData is { } bd ? GetStr(bd, "PopupMessage") : null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[CRM] Popup lookup failed for BP '{Bp}' — Title column may not be indexed yet", bpName);
+        }
 
         return new CustomerLookupResult(bpName, popup, contactName);
     }
