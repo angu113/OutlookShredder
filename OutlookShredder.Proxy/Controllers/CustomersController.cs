@@ -22,16 +22,15 @@ public class CustomersController(
 
     /// <summary>
     /// POST /api/customers/import-partners — reads a business-partner CSV (Name + Popup Message)
-    /// and upserts into the Customers SP list.  Send the CSV as a multipart file upload (field "file")
-    /// or as the raw request body.
+    /// and upserts into the Customers SP list.  Send the CSV as the raw request body.
     /// </summary>
     [HttpPost("import-partners")]
     [RequestSizeLimit(50_000_000)]
-    public async Task<IActionResult> ImportPartners(IFormFile? file, CancellationToken ct)
+    public async Task<IActionResult> ImportPartners(CancellationToken ct)
     {
-        var csv = await ReadCsvAsync(file, Request);
+        var csv = await ReadBodyAsync(ct);
         if (csv is null)
-            return BadRequest("Send the CSV as a multipart file (field 'file') or as the raw request body.");
+            return BadRequest("Send the CSV file as the raw request body.");
 
         var parsed = importer.ParsePartners(csv);
         if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
@@ -45,14 +44,15 @@ public class CustomersController(
     /// POST /api/customers/import-contacts — reads a contacts CSV (Customer Name, Contact Name, Phone)
     /// and upserts into the CustomerContacts SP list.  For each (CustomerName, ContactName) pair in
     /// the file, existing rows are wiped and replaced with the freshly parsed phones.
+    /// Send the CSV as the raw request body.
     /// </summary>
     [HttpPost("import-contacts")]
     [RequestSizeLimit(50_000_000)]
-    public async Task<IActionResult> ImportContacts(IFormFile? file, CancellationToken ct)
+    public async Task<IActionResult> ImportContacts(CancellationToken ct)
     {
-        var csv = await ReadCsvAsync(file, Request);
+        var csv = await ReadBodyAsync(ct);
         if (csv is null)
-            return BadRequest("Send the CSV as a multipart file (field 'file') or as the raw request body.");
+            return BadRequest("Send the CSV file as the raw request body.");
 
         var parsed = importer.ParseContacts(csv);
         if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
@@ -78,18 +78,11 @@ public class CustomersController(
         return Ok(result);
     }
 
-    private static async Task<string?> ReadCsvAsync(IFormFile? file, HttpRequest request)
+    private async Task<string?> ReadBodyAsync(CancellationToken ct)
     {
-        if (file is not null)
-        {
-            using var reader = new StreamReader(file.OpenReadStream());
-            return await reader.ReadToEndAsync();
-        }
-        if (request.ContentLength is > 0)
-        {
-            using var reader = new StreamReader(request.Body);
-            return await reader.ReadToEndAsync();
-        }
-        return null;
+        if (Request.ContentLength is 0 or null) return null;
+        using var ms = new System.IO.MemoryStream();
+        await Request.Body.CopyToAsync(ms, ct);
+        return ms.Length == 0 ? null : System.Text.Encoding.UTF8.GetString(ms.ToArray());
     }
 }

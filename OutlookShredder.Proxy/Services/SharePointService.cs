@@ -7465,7 +7465,7 @@ public class SharePointService
         if (toDelete.Count > 0)
         {
             await Parallel.ForEachAsync(toDelete,
-                new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
+                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
                 async (itemId, token) =>
                 {
                     await GetGraph().Sites[siteId].Lists[listId].Items[itemId]
@@ -7475,32 +7475,48 @@ public class SharePointService
             _log.LogInformation("[SP] UpsertContacts: {N} stale rows deleted", deleted);
         }
 
-        // Insert all new rows
-        int added = 0;
+        // Insert all new rows. Degree=4 to reduce SP throttle pressure.
+        // Per-row 45s timeout via linked CTS: if KIOTA's retry handler parks in a long
+        // Retry-After delay the row times out fast instead of sleeping for hours.
+        int added = 0, failed = 0;
         await Parallel.ForEachAsync(rows,
-            new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
             async (row, token) =>
             {
-                await GetGraph().Sites[siteId].Lists[listId].Items
-                    .PostAsync(new ListItem
-                    {
-                        Fields = new FieldValueSet
+                using var rowCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                rowCts.CancelAfter(TimeSpan.FromSeconds(45));
+                try
+                {
+                    await GetGraph().Sites[siteId].Lists[listId].Items
+                        .PostAsync(new ListItem
                         {
-                            AdditionalData = new Dictionary<string, object?>
+                            Fields = new FieldValueSet
                             {
-                                ["Title"]        = row.ContactName,
-                                ["CustomerName"] = row.CustomerName,
-                                ["ContactName"]  = row.ContactName,
-                                ["Phone"]        = row.Phone,
+                                AdditionalData = new Dictionary<string, object?>
+                                {
+                                    ["Title"]        = row.ContactName,
+                                    ["CustomerName"] = row.CustomerName,
+                                    ["ContactName"]  = row.ContactName,
+                                    ["Phone"]        = row.Phone,
+                                }
                             }
-                        }
-                    }, cancellationToken: token);
-                var n = Interlocked.Increment(ref added);
-                if (n % 500 == 0)
-                    _log.LogInformation("[SP] UpsertContacts: {N}/{Total} added", n, rows.Count);
+                        }, cancellationToken: rowCts.Token);
+                    var n = Interlocked.Increment(ref added);
+                    if (n % 500 == 0)
+                        _log.LogInformation("[SP] UpsertContacts: {N}/{Total} added", n, rows.Count);
+                }
+                catch (Exception ex) when (!token.IsCancellationRequested)
+                {
+                    _log.LogWarning("[SP] UpsertContacts: POST failed for {Bp}/{Contact}: {Err}",
+                        row.CustomerName, row.ContactName, ex.Message);
+                    Interlocked.Increment(ref failed);
+                }
             });
 
-        _log.LogInformation("[SP] UpsertContacts: {Added} added, {Deleted} deleted", added, deleted);
+        if (failed > 0)
+            _log.LogWarning("[SP] UpsertContacts: {Failed} rows failed to insert", failed);
+        _log.LogInformation("[SP] UpsertContacts: {Added} added, {Deleted} deleted, {Failed} failed",
+            added, deleted, failed);
         return (added, deleted);
     }
 
