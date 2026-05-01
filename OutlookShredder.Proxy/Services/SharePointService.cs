@@ -7585,7 +7585,41 @@ public class SharePointService
         return new CustomerLookupResult(bpName, popup, contactName);
     }
 
+    public async Task<List<CustomerContactRow>> ReadAllContactsAsync(CancellationToken ct = default)
+    {
+        var siteId     = await GetSiteIdAsync();
+        var contactsId = await GetCustomerContactsListIdAsync();
+        var result     = new List<CustomerContactRow>();
+
+        var page = await GetGraph().Sites[siteId].Lists[contactsId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var bp      = GetStr(d, "CustomerName") ?? "";
+                var contact = GetStr(d, "ContactName")  ?? "";
+                var phone   = GetStr(d, "Phone")        ?? "";
+                if (!string.IsNullOrWhiteSpace(phone))
+                    result.Add(new CustomerContactRow(bp, contact, phone));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        return result;
+    }
+
 }
+
+public record CustomerContactRow(string CustomerName, string ContactName, string Phone);
 
 public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds, DateTime? LastModified = null);
 

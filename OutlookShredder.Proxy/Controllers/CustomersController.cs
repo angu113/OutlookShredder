@@ -78,6 +78,16 @@ public class CustomersController(
         return Ok(result);
     }
 
+    /// <summary>
+    /// GET /api/customers/contacts — returns all CustomerContacts rows (CustomerName, ContactName, Phone).
+    /// </summary>
+    [HttpGet("contacts")]
+    public async Task<IActionResult> GetContacts(CancellationToken ct)
+    {
+        var rows = await sp.ReadAllContactsAsync(ct);
+        return Ok(rows);
+    }
+
     private async Task<string?> ReadBodyAsync(CancellationToken ct)
     {
         if (Request.ContentLength is 0 or null) return null;
