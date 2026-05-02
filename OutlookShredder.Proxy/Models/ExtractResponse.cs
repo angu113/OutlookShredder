@@ -175,6 +175,7 @@ public class PhoneCallLogRecord
     public string? ContactName  { get; set; }
     public string? PopupMessage { get; set; }
     public string? ReceivedAt   { get; set; }
+    public string? Notes        { get; set; }
 }
 
 /// <summary>SharePoint write outcome for a single extracted product line.</summary>

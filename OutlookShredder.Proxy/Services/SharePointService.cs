@@ -7660,6 +7660,7 @@ public class SharePointService
                 ("ContactName",  "text"),
                 ("PopupMessage", "note"),
                 ("ReceivedAt",   "text"),
+                ("Notes",        "note"),
             };
             foreach (var (name, type) in schema)
             {
@@ -7712,7 +7713,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt)"];
+                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
                 r.QueryParameters.Top    = top;
                 r.QueryParameters.Orderby = ["createdDateTime desc"];
             }, ct);
@@ -7732,9 +7733,22 @@ public class SharePointService
                 ContactName  = Get("ContactName"),
                 PopupMessage = Get("PopupMessage"),
                 ReceivedAt   = Get("ReceivedAt"),
+                Notes        = Get("Notes"),
             });
         }
         return results;
+    }
+
+    /// <summary>Patches the Notes field on an existing PhoneCallLog item.</summary>
+    public async Task UpdateCallLogNotesAsync(string spItemId, string notes, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateCallLogListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields.PatchAsync(
+            new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Notes"] = notes }
+            }, cancellationToken: ct);
     }
 
     // ── Messages list ─────────────────────────────────────────────────────────

@@ -33,4 +33,25 @@ public class PhoneController : ControllerBase
             return StatusCode(500, new { error = ex.Message });
         }
     }
+
+    /// <summary>Updates the free-text notes on a call log entry.</summary>
+    [HttpPatch("call-log/{spItemId}/notes")]
+    public async Task<IActionResult> UpdateNotes(
+        string spItemId,
+        [FromBody] UpdateNotesRequest req,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            await _sp.UpdateCallLogNotesAsync(spItemId, req.Notes ?? "", ct);
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Phone] Failed to update notes for {Id}", spItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
 }
+
+public record UpdateNotesRequest(string? Notes);
