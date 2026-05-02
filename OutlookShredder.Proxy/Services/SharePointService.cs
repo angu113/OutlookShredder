@@ -7714,7 +7714,7 @@ public class SharePointService
             {
                 r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt)"];
                 r.QueryParameters.Top    = top;
-                r.QueryParameters.Orderby = ["Created desc"];
+                r.QueryParameters.Orderby = ["createdDateTime desc"];
             }, ct);
 
         var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();
