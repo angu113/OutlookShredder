@@ -44,6 +44,7 @@ public class SharePointService
     private string? _customersListId;        // Customers
     private string? _customerContactsListId; // CustomerContacts
     private string? _callLogListId;          // PhoneCallLog
+    private string? _messagesListId;         // Messages
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
@@ -7736,6 +7737,251 @@ public class SharePointService
         return results;
     }
 
+    // ── Messages list ─────────────────────────────────────────────────────────
+
+    private async Task<string> GetOrCreateMessagesListIdAsync(CancellationToken ct = default)
+    {
+        if (_messagesListId is not null) return _messagesListId;
+
+        var siteId = await GetSiteIdAsync();
+        const string listName = "Messages";
+
+        var lists = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault() is null)
+        {
+            _log.LogInformation("[SP] Creating Messages list");
+            var newList = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new ListInfo { Template = "genericList" },
+            }, cancellationToken: ct);
+            listId = newList?.Id ?? throw new Exception("Failed to create Messages list");
+            _log.LogInformation("[SP] Created Messages list -> {Id}", listId);
+        }
+        else
+        {
+            listId = lists.Value.First().Id!;
+        }
+
+        var existing = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var existingNames = existing?.Value?
+            .Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        (string Name, string Type)[] cols =
+        [
+            ("MsgFrom",    "text"),
+            ("MsgTo",      "text"),
+            ("Channel",    "text"),
+            ("Direction",  "text"),
+            ("Body",       "note"),
+            ("ConvId",     "text"),
+            ("MsgTime",    "text"),
+            ("IsRead",     "boolean"),
+            ("ExternalId", "text"),
+        ];
+
+        foreach (var (name, type) in cols)
+        {
+            if (existingNames.Contains(name)) continue;
+            try
+            {
+                var col = type switch
+                {
+                    "note"    => new ColumnDefinition { Name = name, Text    = new TextColumn { AllowMultipleLines = true } },
+                    "boolean" => new ColumnDefinition { Name = name, Boolean = new BooleanColumn() },
+                    _         => new ColumnDefinition { Name = name, Text    = new TextColumn() },
+                };
+                await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
+                _log.LogInformation("[SP] Created Messages column '{Name}'", name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Failed to create Messages column '{Name}'", name); }
+        }
+
+        // Index ConvId and MsgTime for filtered/ordered queries
+        var allCols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        foreach (var col in allCols?.Value ?? [])
+        {
+            if (col.Name is not ("ConvId" or "MsgTime")) continue;
+            if (col.Indexed == true || col.Id is null) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[SP] Indexed Messages column '{Name}'", col.Name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Failed to index Messages column '{Name}'", col.Name); }
+        }
+
+        _messagesListId = listId;
+        return listId;
+    }
+
+    public async Task WriteMessageAsync(Models.MessageRecord msg, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+
+        var data = new Dictionary<string, object?>
+        {
+            ["Title"]      = msg.ConversationId,
+            ["MsgFrom"]    = msg.From,
+            ["MsgTo"]      = msg.To,
+            ["Channel"]    = msg.Channel,
+            ["Direction"]  = msg.Direction,
+            ["Body"]       = msg.Body,
+            ["ConvId"]     = msg.ConversationId,
+            ["MsgTime"]    = msg.TimestampUtc,
+            ["IsRead"]     = msg.IsRead,
+            ["ExternalId"] = msg.ExternalId,
+        };
+
+        var created = await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } }, cancellationToken: ct);
+        msg.SpItemId = int.TryParse(created?.Id, out var id) ? id : null;
+    }
+
+    public async Task<List<Models.ConversationSummary>> GetConversationSummariesAsync(int top = 200, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand  = ["fields"];
+                r.QueryParameters.Orderby = ["fields/MsgTime desc"];
+                r.QueryParameters.Top     = top;
+            }, ct);
+
+        var seen   = new Dictionary<string, Models.ConversationSummary>();
+        var unread = new Dictionary<string, int>();
+
+        foreach (var item in items?.Value ?? [])
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
+                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+
+            var convId = Get("ConvId");
+            var dir    = Get("Direction");
+            var isRead = GetBool("IsRead");
+            if (string.IsNullOrEmpty(convId)) continue;
+
+            if (!isRead && dir == "in")
+                unread[convId] = unread.GetValueOrDefault(convId) + 1;
+
+            if (seen.ContainsKey(convId)) continue;
+
+            var from    = Get("MsgFrom");
+            var to      = Get("MsgTo");
+            var channel = Get("Channel");
+            var body    = Get("Body");
+            var time    = Get("MsgTime");
+            var contact = convId.StartsWith("sms:") ? convId[4..] : DeriveInternalContact(convId, from, to);
+
+            seen[convId] = new Models.ConversationSummary
+            {
+                ConversationId  = convId,
+                Contact         = contact,
+                Channel         = channel,
+                LastMessageBody = body.Length > 60 ? body[..60] + "…" : body,
+                LastTimestamp   = time,
+                UnreadCount     = 0,
+            };
+        }
+
+        foreach (var (convId, count) in unread)
+            if (seen.TryGetValue(convId, out var s))
+                s.UnreadCount = count;
+
+        return [.. seen.Values];
+    }
+
+    private static string DeriveInternalContact(string convId, string from, string to)
+    {
+        if (!convId.StartsWith("internal:")) return from;
+        var parts = convId[9..].Split('|');
+        return parts.Length == 2 ? $"{parts[0]} & {parts[1]}" : convId[9..];
+    }
+
+    public async Task<List<Models.MessageRecord>> GetConversationMessagesAsync(
+        string conversationId, int top = 50, CancellationToken ct = default)
+    {
+        var siteId  = await GetSiteIdAsync();
+        var listId  = await GetOrCreateMessagesListIdAsync(ct);
+        var escaped = conversationId.Replace("'", "''");
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand  = ["fields"];
+                r.QueryParameters.Filter  = $"fields/ConvId eq '{escaped}'";
+                r.QueryParameters.Orderby = ["fields/MsgTime asc"];
+                r.QueryParameters.Top     = top;
+            }, ct);
+
+        var result = new List<Models.MessageRecord>();
+        foreach (var item in items?.Value ?? [])
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
+                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+
+            result.Add(new Models.MessageRecord
+            {
+                SpItemId       = int.TryParse(item.Id, out var id) ? id : null,
+                From           = Get("MsgFrom"),
+                To             = Get("MsgTo"),
+                Channel        = Get("Channel"),
+                Direction      = Get("Direction"),
+                Body           = Get("Body"),
+                ConversationId = Get("ConvId"),
+                TimestampUtc   = Get("MsgTime"),
+                IsRead         = GetBool("IsRead"),
+                ExternalId     = d.TryGetValue("ExternalId", out var ex) ? ex?.ToString() : null,
+            });
+        }
+        return result;
+    }
+
+    public async Task MarkConversationReadAsync(string conversationId, CancellationToken ct = default)
+    {
+        var siteId  = await GetSiteIdAsync();
+        var listId  = await GetOrCreateMessagesListIdAsync(ct);
+        var escaped = conversationId.Replace("'", "''");
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Filter = $"fields/ConvId eq '{escaped}'";
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Id is null) continue;
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            var dir    = d.TryGetValue("Direction", out var di) ? di?.ToString() : "";
+            var isRead = d.TryGetValue("IsRead",    out var ir) &&
+                         ir is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            if (dir != "in" || isRead) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?> { ["IsRead"] = true }
+                    }, cancellationToken: ct);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Failed to mark message {Id} read", item.Id); }
+        }
+    }
 }
 
 public record CustomerContactRow(string CustomerName, string ContactName, string Phone);

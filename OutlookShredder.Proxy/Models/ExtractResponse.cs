@@ -44,6 +44,14 @@ public class RfqProcessedNotification
     public string? PopupMessage  { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". Matched contact name from CRM lookup.</summary>
     public string? ContactName   { get; set; }
+    // Populated only when EventType = "Message"
+    public string? MsgFrom           { get; set; }
+    public string? MsgTo             { get; set; }
+    public string? MsgBody           { get; set; }
+    public string? MsgConversationId { get; set; }
+    public string? MsgChannel        { get; set; }
+    public string? MsgDirection      { get; set; }
+    public string? MsgTimestamp      { get; set; }
 }
 
 /// <summary>

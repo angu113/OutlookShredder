@@ -111,6 +111,8 @@ try
     builder.Services.AddHostedService<LqUpdateService>();
     builder.Services.AddHostedService<RfqAutoCompleteService>();
     builder.Services.AddHostedService<ZoomCallWatcherService>();
+    builder.Services.AddSingleton<SignalWireService>();
+    builder.Services.AddSingleton<MessagingService>();
 
     var app = builder.Build();
 

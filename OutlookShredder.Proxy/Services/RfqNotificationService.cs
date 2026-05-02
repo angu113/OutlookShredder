@@ -94,6 +94,20 @@ public class RfqNotificationService
             ContactName  = contactName,
         });
 
+    /// <summary>Publishes a "Message" event so all Shredder clients update their message thread.</summary>
+    public void NotifyMessage(Models.MessageRecord msg) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType         = "Message",
+            MsgFrom           = msg.From,
+            MsgTo             = msg.To,
+            MsgBody           = msg.Body,
+            MsgConversationId = msg.ConversationId,
+            MsgChannel        = msg.Channel,
+            MsgDirection      = msg.Direction,
+            MsgTimestamp      = msg.TimestampUtc,
+        });
+
     /// <summary>
     /// Publishes an "ERP" event to Service Bus so all Shredder clients update
     /// their local ERP document cache.
