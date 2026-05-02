@@ -83,15 +83,17 @@ public class RfqNotificationService
 
     /// <summary>Publishes an "IncomingCall" event so Shredder shows a toast with caller and CRM data.</summary>
     public void NotifyIncomingCall(string callerName, string callerPhone,
-        string? bpName = null, string? popupMessage = null, string? contactName = null) =>
+        string? bpName = null, string? popupMessage = null, string? contactName = null,
+        string? callLogSpItemId = null) =>
         NotifyRfqProcessed(new RfqProcessedNotification
         {
-            EventType    = "IncomingCall",
-            CallerName   = callerName,
-            CallerPhone  = callerPhone,
-            BpName       = bpName,
-            PopupMessage = popupMessage,
-            ContactName  = contactName,
+            EventType        = "IncomingCall",
+            CallerName       = callerName,
+            CallerPhone      = callerPhone,
+            BpName           = bpName,
+            PopupMessage     = popupMessage,
+            ContactName      = contactName,
+            CallLogSpItemId  = callLogSpItemId,
         });
 
     /// <summary>Publishes a "Message" event so all Shredder clients update their message thread.</summary>

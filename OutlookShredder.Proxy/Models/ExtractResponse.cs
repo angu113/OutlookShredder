@@ -43,7 +43,9 @@ public class RfqProcessedNotification
     /// <summary>Populated only when EventType = "IncomingCall". BP popup message from CRM lookup.</summary>
     public string? PopupMessage  { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". Matched contact name from CRM lookup.</summary>
-    public string? ContactName   { get; set; }
+    public string? ContactName       { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". SharePoint item ID of the call log entry.</summary>
+    public string? CallLogSpItemId   { get; set; }
     // Populated only when EventType = "Message"
     public string? MsgFrom           { get; set; }
     public string? MsgTo             { get; set; }

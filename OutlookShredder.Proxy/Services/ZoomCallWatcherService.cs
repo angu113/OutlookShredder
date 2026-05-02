@@ -221,13 +221,11 @@ public class ZoomCallWatcherService : BackgroundService
                                 _log.LogWarning(ex, "[Zoom] CRM lookup failed for phone={Phone}", callerPhone);
                             }
                         }
-                        _notify.NotifyIncomingCall(callerName, callerPhone,
-                            crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName);
-
-                        // Write to call log — non-blocking (notify already sent above)
+                        // Write call log first to get the SP item ID, then notify
+                        string spItemId = "";
                         try
                         {
-                            await _sp.WritePhoneCallLogAsync(
+                            spItemId = await _sp.WritePhoneCallLogAsync(
                                 callerName, callerPhone ?? "",
                                 crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
                                 DateTimeOffset.UtcNow, CancellationToken.None);
@@ -236,6 +234,9 @@ public class ZoomCallWatcherService : BackgroundService
                         {
                             _log.LogWarning(ex, "[Zoom] Call log write failed for {Name}", callerName);
                         }
+                        _notify.NotifyIncomingCall(callerName, callerPhone,
+                            crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
+                            callLogSpItemId: spItemId);
                     });
                 }
 

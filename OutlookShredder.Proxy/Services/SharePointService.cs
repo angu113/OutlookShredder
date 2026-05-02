@@ -7678,7 +7678,7 @@ public class SharePointService
     }
 
     /// <summary>Writes one phone call entry to the PhoneCallLog SP list.  Non-fatal on error.</summary>
-    public async Task WritePhoneCallLogAsync(
+    public async Task<string> WritePhoneCallLogAsync(
         string callerName, string callerPhone,
         string? bpName, string? contactName, string? popupMessage,
         DateTimeOffset receivedAt, CancellationToken ct = default)
@@ -7696,11 +7696,12 @@ public class SharePointService
             ["ReceivedAt"]   = receivedAt.ToString("o"),
         };
 
-        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+        var result = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
             new Microsoft.Graph.Models.ListItem
             {
                 Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }
             }, cancellationToken: ct);
+        return result?.Id ?? "";
     }
 
     /// <summary>Returns the most recent <paramref name="top"/> call log entries, newest first.</summary>
