@@ -95,6 +95,14 @@ public class MessagingService
         _notify.NotifyMessage(record);
     }
 
+    public async Task MarkReadAsync(string conversationId, CancellationToken ct = default)
+    {
+        try { await _sp.MarkConversationReadAsync(conversationId, ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "[Messaging] SP MarkRead failed for '{Id}'", conversationId); }
+
+        _notify.NotifyMessageRead(conversationId);
+    }
+
     public static string InternalConvId(string a, string b)
     {
         var parts = new[] { a.ToLowerInvariant(), b.ToLowerInvariant() };

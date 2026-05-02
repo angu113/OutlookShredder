@@ -108,6 +108,14 @@ public class RfqNotificationService
             MsgTimestamp      = msg.TimestampUtc,
         });
 
+    /// <summary>Publishes a "MessageRead" event so other Shredder instances clear the unread badge.</summary>
+    public void NotifyMessageRead(string conversationId) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType         = "MessageRead",
+            MsgConversationId = conversationId,
+        });
+
     /// <summary>
     /// Publishes an "ERP" event to Service Bus so all Shredder clients update
     /// their local ERP document cache.

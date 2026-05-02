@@ -66,7 +66,7 @@ public class MessagingController : ControllerBase
     [HttpPost("read/{conversationId}")]
     public async Task<IActionResult> MarkRead(string conversationId, CancellationToken ct = default)
     {
-        try   { await _sp.MarkConversationReadAsync(conversationId, ct); return Ok(); }
+        try   { await _messaging.MarkReadAsync(conversationId, ct); return Ok(); }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[Messaging] MarkRead failed for '{Id}'", conversationId);
