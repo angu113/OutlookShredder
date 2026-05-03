@@ -356,14 +356,38 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
-        // Stamp picking slips with the customer name at top-left, then enrich with bold comments + callout page
+        // Stamp picking slips with the customer name at top-left, then enrich with bold comments + callout page.
+        // Track whether bytes were modified so we can write a temp file for the immediate notification —
+        // the Focus view must render the stamped version, not the raw original.
+        bool bytesModified = false;
         if (extraction.DocumentType == "PickingSlip" && !string.IsNullOrWhiteSpace(extraction.CustomerName))
         {
-            try { bytes = StampCustomerName(bytes, extraction.CustomerName); }
+            try { bytes = StampCustomerName(bytes, extraction.CustomerName); bytesModified = true; }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] PDF stamp failed for {File} — uploading original", fileName); }
 
-            try { bytes = PickingSlipEnricher.Enrich(bytes, _log); }
+            try { bytes = PickingSlipEnricher.Enrich(bytes, _log); bytesModified = true; }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File} — uploading without callouts", fileName); }
+        }
+
+        // If bytes were modified, write the stamped PDF to a temp file so the immediate notification
+        // path points to the stamped version. Temp file is deleted by the background task after upload.
+        string notifyPath = path;
+        string? tempPath = null;
+        if (bytesModified)
+        {
+            tempPath = Path.Combine(Path.GetTempPath(), $"Shredder_{Guid.NewGuid():N}_{fileName}");
+            try
+            {
+                await File.WriteAllBytesAsync(tempPath, bytes, ct);
+                notifyPath = tempPath;
+                _log.LogDebug("[FW] Stamped temp file written: {Temp}", tempPath);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] Could not write stamped temp file for {File} — notifying with original", fileName);
+                tempPath = null;
+                notifyPath = path;
+            }
         }
 
         // Write SP record immediately (no PDF URL yet — upload happens in background)
@@ -377,12 +401,12 @@ public class FileWatcherService : BackgroundService
         catch (Exception ex)
         {
             _log.LogError(ex, "[FW] SP write failed for {File}", fileName);
+            if (tempPath is not null) try { File.Delete(tempPath); } catch { }
             return false;
         }
 
-        // Notify immediately — local file path lets this machine render from disk without waiting
-        // for the SharePoint upload. Other machines that reload later get the SP URL from the
-        // follow-up notification sent by the background task below.
+        // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
+        // Other machines that reload later get the SP URL from the follow-up notification below.
         var receivedAt = DateTimeOffset.UtcNow.ToString("o");
         _notify.NotifyErpDocument(new ErpBusRecord
         {
@@ -395,7 +419,7 @@ public class FileWatcherService : BackgroundService
             TotalAmount       = extraction.TotalAmount,
             Currency          = extraction.Currency ?? "USD",
             FileName          = fileName,
-            PdfUrl            = path,   // local file path — same machine renders instantly
+            PdfUrl            = notifyPath,
             ReceivedAt        = receivedAt,
             IsArchived        = false,
             IsNew             = true,
@@ -406,10 +430,12 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (upload pending)",
             extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);
 
-        // Background: upload PDF, patch SP URL, re-notify with SP URL, archive older duplicates
-        var bgBytes  = bytes;
-        var bgDocNum = extraction.DocumentNumber;
-        var bgSid    = spItemId;
+        // Background: upload PDF, patch SP URL, re-notify with SP URL, archive older duplicates.
+        // Also deletes the temp file once the upload succeeds (SP now owns the stamped copy).
+        var bgBytes   = bytes;
+        var bgDocNum  = extraction.DocumentNumber;
+        var bgSid     = spItemId;
+        var bgTempPath = tempPath;
         var bgRecord = new ErpBusRecord
         {
             SpItemId          = spItemId,
@@ -443,6 +469,12 @@ public class FileWatcherService : BackgroundService
                 }
             }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] Background PDF upload failed for {File}", fileName); }
+            finally
+            {
+                // SP now has the stamped PDF — delete the local temp file
+                if (bgTempPath is not null)
+                    try { File.Delete(bgTempPath); } catch { }
+            }
 
             if (bgSid is not null && !string.IsNullOrEmpty(bgDocNum))
             {
