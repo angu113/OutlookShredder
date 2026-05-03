@@ -6945,6 +6945,22 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Patches just the PdfUrl field on an existing ErpDocuments list item.
+    /// Called by the background upload task after <see cref="WriteErpDocumentAsync"/> returns.
+    /// </summary>
+    public async Task PatchErpDocumentPdfUrlAsync(string spItemId, string pdfUrl, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields.PatchAsync(
+            new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["PdfUrl"] = pdfUrl }
+            }, cancellationToken: ct);
+        _log.LogInformation("[SP] Patched PdfUrl on ErpDocument item {Id}", spItemId);
+    }
+
+    /// <summary>
     /// Uploads an ERP PDF to the site drive under ErpDocuments/{documentNumber}/{fileName}.
     /// Returns the web URL, or null on failure.
     /// </summary>

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Threading.Channels;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -28,8 +29,9 @@ public class FileWatcherService : BackgroundService
     private readonly RfqNotificationService _notify;
     private readonly ILogger<FileWatcherService> _log;
 
-    // Files waiting to be processed (real-time FSW events queue to this)
-    private readonly ConcurrentQueue<string> _pending = new();
+    // Files waiting to be processed — Channel gives immediate wake-up vs. poll loop
+    private readonly Channel<string> _fileChannel = Channel.CreateUnbounded<string>(
+        new UnboundedChannelOptions { SingleWriter = false, SingleReader = true });
 
     // Paths currently in the queue or being processed — prevents double-queuing
     private readonly HashSet<string> _inQueue = new(StringComparer.OrdinalIgnoreCase);
@@ -115,17 +117,12 @@ public class FileWatcherService : BackgroundService
                 EnqueueFile(e.FullPath);
         };
 
-        // Drain queue loop
-        while (!ct.IsCancellationRequested)
+        // Drain channel — wakes immediately when EnqueueFile writes, no polling delay
+        await foreach (var path in _fileChannel.Reader.ReadAllAsync(ct))
         {
-            while (_pending.TryDequeue(out var path))
-            {
-                lock (_inQueueLock) _inQueue.Remove(path);
-                try { await ProcessFileAsync(path, ct); }
-                catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
-            }
-            try { await Task.Delay(1_000, ct); }
-            catch (OperationCanceledException) { break; }
+            lock (_inQueueLock) _inQueue.Remove(path);
+            try { await ProcessFileAsync(path, ct); }
+            catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
         }
     }
 
@@ -252,7 +249,7 @@ public class FileWatcherService : BackgroundService
         {
             if (!_inQueue.Add(path)) return;
         }
-        _pending.Enqueue(path);
+        _fileChannel.Writer.TryWrite(path);
         _log.LogInformation("[FW] New PDF detected: {File}", Path.GetFileName(path));
     }
 
@@ -369,25 +366,13 @@ public class FileWatcherService : BackgroundService
             catch (Exception ex) { _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File} — uploading without callouts", fileName); }
         }
 
-        // Upload PDF
-        string? pdfUrl = null;
-        try
-        {
-            pdfUrl = await _sp.UploadErpPdfAsync(
-                extraction.DocumentNumber ?? Path.GetFileNameWithoutExtension(fileName),
-                fileName, bytes, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "[FW] PDF upload failed for {File} — continuing without URL", fileName);
-        }
-
-        // Write SP record
+        // Write SP record immediately (no PDF URL yet — upload happens in background)
         string? spItemId;
         try
         {
             spItemId = await _sp.WriteErpDocumentAsync(
-                extraction, fileName, DateTimeOffset.UtcNow, Environment.MachineName, Environment.UserName, pdfUrl, ct);
+                extraction, fileName, DateTimeOffset.UtcNow, Environment.MachineName, Environment.UserName,
+                pdfUrl: null, ct);
         }
         catch (Exception ex)
         {
@@ -395,22 +380,11 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
-        // Archive older duplicates before notifying so Shredder sees a clean SP state
-        // if it calls Prewarm in response to the bus event.
-        if (spItemId is not null && !string.IsNullOrEmpty(extraction.DocumentNumber))
-        {
-            try
-            {
-                await _sp.ArchiveOlderErpDocumentsAsync(extraction.DocumentNumber, spItemId, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "[FW] Archive-older step failed for {Number}", extraction.DocumentNumber);
-            }
-        }
-
-        // Notify all Shredder clients via Service Bus
-        _notify.NotifyErpDocument(new OutlookShredder.Proxy.Models.ErpBusRecord
+        // Notify immediately — local file path lets this machine render from disk without waiting
+        // for the SharePoint upload. Other machines that reload later get the SP URL from the
+        // follow-up notification sent by the background task below.
+        var receivedAt = DateTimeOffset.UtcNow.ToString("o");
+        _notify.NotifyErpDocument(new ErpBusRecord
         {
             SpItemId          = spItemId,
             DocumentNumber    = extraction.DocumentNumber,
@@ -421,16 +395,61 @@ public class FileWatcherService : BackgroundService
             TotalAmount       = extraction.TotalAmount,
             Currency          = extraction.Currency ?? "USD",
             FileName          = fileName,
-            PdfUrl            = pdfUrl,
-            ReceivedAt        = DateTimeOffset.UtcNow.ToString("o"),
+            PdfUrl            = path,   // local file path — same machine renders instantly
+            ReceivedAt        = receivedAt,
             IsArchived        = false,
             IsNew             = true,
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
         });
 
-        _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id}",
+        _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (upload pending)",
             extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);
+
+        // Background: upload PDF, patch SP URL, re-notify with SP URL, archive older duplicates
+        var bgBytes  = bytes;
+        var bgDocNum = extraction.DocumentNumber;
+        var bgSid    = spItemId;
+        var bgRecord = new ErpBusRecord
+        {
+            SpItemId          = spItemId,
+            DocumentNumber    = bgDocNum,
+            DocumentType      = extraction.DocumentType,
+            DocumentDate      = extraction.DocumentDate,
+            CustomerName      = extraction.CustomerName,
+            CustomerReference = extraction.CustomerReference,
+            TotalAmount       = extraction.TotalAmount,
+            Currency          = extraction.Currency ?? "USD",
+            FileName          = fileName,
+            ReceivedAt        = receivedAt,
+            IsArchived        = false,
+            IsNew             = false,  // update, not new — suppress auto-jump in Focus
+            SourceMachine     = Environment.MachineName,
+            SourceUser        = Environment.UserName,
+        };
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var pdfUrl = await _sp.UploadErpPdfAsync(
+                    bgDocNum ?? Path.GetFileNameWithoutExtension(fileName), fileName, bgBytes,
+                    CancellationToken.None);
+                if (pdfUrl is not null && bgSid is not null)
+                {
+                    await _sp.PatchErpDocumentPdfUrlAsync(bgSid, pdfUrl, CancellationToken.None);
+                    bgRecord.PdfUrl = pdfUrl;
+                    _notify.NotifyErpDocument(bgRecord);
+                    _log.LogInformation("[FW] PDF uploaded and SP patched for {File}", fileName);
+                }
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[FW] Background PDF upload failed for {File}", fileName); }
+
+            if (bgSid is not null && !string.IsNullOrEmpty(bgDocNum))
+            {
+                try { await _sp.ArchiveOlderErpDocumentsAsync(bgDocNum, bgSid, CancellationToken.None); }
+                catch (Exception ex) { _log.LogWarning(ex, "[FW] Archive-older failed for {Number}", bgDocNum); }
+            }
+        });
 
         // For PurchaseOrders, also run the RFQ purchase-matching pipeline
         if (extraction.DocumentType == "PurchaseOrder" && !string.IsNullOrEmpty(extraction.CustomerName))
