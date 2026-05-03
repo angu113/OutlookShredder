@@ -78,6 +78,8 @@ public class ErpBusRecord
     public bool    IsNew             { get; set; }
     public string? SourceMachine     { get; set; }
     public string? SourceUser        { get; set; }
+    /// <summary>JSON array of ErpAnnotation — carried on bus messages so the Focus view can display stamps without a round-trip.</summary>
+    public string? UserAnnotations   { get; set; }
 }
 
 public class RfqNotificationProduct

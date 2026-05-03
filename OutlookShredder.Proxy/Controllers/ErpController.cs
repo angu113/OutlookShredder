@@ -152,6 +152,21 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Saves user-applied stamp annotations for one ERP document.
+    /// Replaces the full annotation list — pass an empty array to clear all stamps.
+    /// </summary>
+    [HttpPatch("/api/erp/documents/{spItemId}/annotations")]
+    public async Task<IActionResult> PatchAnnotations(
+        string spItemId,
+        [FromBody] List<OutlookShredder.Proxy.Models.ErpAnnotation> annotations,
+        CancellationToken ct)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(annotations);
+        await _sp.PatchErpAnnotationsAsync(spItemId, json, ct);
+        return Ok(new { spItemId, count = annotations.Count });
+    }
+
+    /// <summary>
     /// Deletes all records from the ErpDocuments SharePoint list.
     /// Also clears the local processed-file cache so a subsequent scan re-processes everything.
     /// </summary>

@@ -63,6 +63,17 @@ public class ErpDocumentRecord
     public bool IsArchived { get; set; }
     public string? SourceMachine { get; set; }
     public string? SourceUser { get; set; }
+    /// <summary>JSON array of ErpAnnotation objects added by the user in the Focus view.</summary>
+    public string? UserAnnotations { get; set; }
+}
+
+/// <summary>User-applied stamp on an ERP document in the Focus view.</summary>
+public class ErpAnnotation
+{
+    public string Label   { get; set; } = "";
+    public string Color   { get; set; } = "#2E7D32";
+    public string AddedAt { get; set; } = "";
+    public string AddedBy { get; set; } = "";
 }
 
 public class ErpScanResult

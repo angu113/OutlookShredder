@@ -6848,8 +6848,9 @@ public class SharePointService
             ("IsArchived",     "boolean"),
             ("SourceMachine",  "text"),
             ("SourceUser",     "text"),
-            ("LineItemsJson",  "note"),
-            ("ExtractionLog",  "note"),
+            ("LineItemsJson",    "note"),
+            ("ExtractionLog",   "note"),
+            ("UserAnnotations", "note"),
         };
 
         foreach (var (name, type) in schema)
@@ -6960,6 +6961,18 @@ public class SharePointService
         _log.LogInformation("[SP] Patched PdfUrl on ErpDocument item {Id}", spItemId);
     }
 
+    public async Task PatchErpAnnotationsAsync(string spItemId, string annotationsJson, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields.PatchAsync(
+            new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["UserAnnotations"] = annotationsJson }
+            }, cancellationToken: ct);
+        _log.LogInformation("[SP] Patched UserAnnotations on ErpDocument item {Id}", spItemId);
+    }
+
     /// <summary>
     /// Uploads an ERP PDF to the site drive under ErpDocuments/{documentNumber}/{fileName}.
     /// Returns the web URL, or null on failure.
@@ -7037,31 +7050,55 @@ public class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
 
-        // Filter server-side by Title (= DocumentNumber) and IsArchived=false so we never
-        // have to page through the whole list; previous code fetched top=100 unfiltered
-        // and missed duplicates beyond the first page.
-        var safe   = documentNumber.Replace("'", "''");
-        var items  = await GetGraph().Sites[siteId].Lists[listId].Items
+        var safe  = documentNumber.Replace("'", "''");
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,IsArchived)"];
+                r.QueryParameters.Expand = ["fields($select=Title,IsArchived,UserAnnotations)"];
                 r.QueryParameters.Filter = $"fields/Title eq '{safe}' and fields/IsArchived ne true";
                 r.QueryParameters.Top    = 50;
             }, ct);
 
-        var toArchive = (items?.Value ?? [])
-            .Where(i => i.Id != currentSpItemId)
-            .Select(i => i.Id!)
-            .ToList();
+        var allItems  = items?.Value ?? [];
+        var toArchive = allItems.Where(i => i.Id != currentSpItemId).ToList();
 
-        foreach (var id in toArchive)
+        // Collect annotations from old records so they carry forward to the new version.
+        var inherited = new List<OutlookShredder.Proxy.Models.ErpAnnotation>();
+        foreach (var item in toArchive)
         {
-            await GetGraph().Sites[siteId].Lists[listId].Items[id].Fields
+            if (item.Fields?.AdditionalData?.TryGetValue("UserAnnotations", out var v) == true
+                && v?.ToString() is string json && !string.IsNullOrWhiteSpace(json))
+            {
+                try
+                {
+                    var anns = System.Text.Json.JsonSerializer.Deserialize<List<OutlookShredder.Proxy.Models.ErpAnnotation>>(json);
+                    if (anns is not null) inherited.AddRange(anns);
+                }
+                catch { }
+            }
+        }
+
+        // Deduplicate by label (first-seen wins) and patch new record if anything to inherit.
+        if (inherited.Count > 0)
+        {
+            var merged = inherited
+                .GroupBy(a => a.Label, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+            var mergedJson = System.Text.Json.JsonSerializer.Serialize(merged);
+            await PatchErpAnnotationsAsync(currentSpItemId, mergedJson, CancellationToken.None);
+            _log.LogInformation("[SP] Carried {Count} annotation(s) forward to ErpDocument {Id} for {Number}",
+                merged.Count, currentSpItemId, documentNumber);
+        }
+
+        foreach (var item in toArchive)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[item.Id!].Fields
                 .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
                 {
                     AdditionalData = new Dictionary<string, object?> { ["IsArchived"] = true }
                 }, cancellationToken: ct);
-            _log.LogInformation("[SP] Archived older ErpDocument {Id} for {Number}", id, documentNumber);
+            _log.LogInformation("[SP] Archived older ErpDocument {Id} for {Number}", item.Id, documentNumber);
         }
     }
 
@@ -7080,7 +7117,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -7113,6 +7150,7 @@ public class SharePointService
                 IsArchived        = isArchived,
                 SourceMachine     = Get("SourceMachine"),
                 SourceUser        = Get("SourceUser"),
+                UserAnnotations   = Get("UserAnnotations"),
             });
         }
 
