@@ -117,12 +117,19 @@ public class FileWatcherService : BackgroundService
                 EnqueueFile(e.FullPath);
         };
 
-        // Drain channel — wakes immediately when EnqueueFile writes, no polling delay
+        // Drain channel — process up to 3 files concurrently so two simultaneous ERP
+        // documents don't stall behind each other's AI calls.
+        using var sem = new SemaphoreSlim(3);
         await foreach (var path in _fileChannel.Reader.ReadAllAsync(ct))
         {
             lock (_inQueueLock) _inQueue.Remove(path);
-            try { await ProcessFileAsync(path, ct); }
-            catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
+            await sem.WaitAsync(ct);
+            _ = Task.Run(async () =>
+            {
+                try { await ProcessFileAsync(path, ct); }
+                catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
+                finally { sem.Release(); }
+            }, ct);
         }
     }
 
@@ -260,6 +267,7 @@ public class FileWatcherService : BackgroundService
     private async Task<bool> ProcessFileAsync(string path, CancellationToken ct)
     {
         var fileName = Path.GetFileName(path);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
         // Read bytes — retry up to 6 times to handle files still being written
         byte[]? bytes = null;
@@ -285,6 +293,9 @@ public class FileWatcherService : BackgroundService
             _log.LogWarning("[FW] Could not read {File} after retries — skipping", fileName);
             return false;
         }
+
+        _log.LogInformation("[FW] Timing {File}: read={Ms}ms ({Kb}KB)", fileName, sw.ElapsedMilliseconds, bytes.Length / 1024);
+        sw.Restart();
 
         // Check processed key AFTER reading (size/time is stable now)
         var key = GetFileKey(path);
@@ -322,9 +333,18 @@ public class FileWatcherService : BackgroundService
 
         var base64 = Convert.ToBase64String(bytes);
 
-        // Call AI to extract detail fields only (CustomerName, TotalAmount, DocumentDate, LineItems).
-        // The filename already provides DocumentType and DocumentNumber — AI output for those is ignored.
+        // For PickingSlips: fire PDF enrichment on a background thread concurrently with the AI
+        // call. Enrichment only needs raw bytes — PdfPig extracts the ship-to name independently.
+        Task<(byte[] Enriched, string? ShipToName)>? enrichTask = null;
+        if (erpInfo.DocumentType == "PickingSlip")
+            enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log), ct);
+
+        // Call AI to extract detail fields (CustomerName, TotalAmount, DocumentDate, LineItems).
+        // Filename already provides DocumentType and DocumentNumber — AI output for those is ignored.
         var extraction = await _ai.ExtractAsync(base64, fileName, ct);
+
+        _log.LogInformation("[FW] Timing {File}: ai={Ms}ms", fileName, sw.ElapsedMilliseconds);
+        sw.Restart();
 
         // Mark processed after the AI call so re-scans don't repeat the work.
         if (key is not null) MarkProcessed(key);
@@ -346,8 +366,6 @@ public class FileWatcherService : BackgroundService
                  !extraction.DocumentNumber.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) &&
                  !extraction.DocumentNumber.StartsWith("020803-", StringComparison.OrdinalIgnoreCase))
         {
-            // PurchaseOrder without filename record info: AI gave a number that looks like a
-            // customer PO, not ours — discard it and let the SP title fall back to the filename.
             _log.LogWarning("[FW] {File} — AI returned DocumentNumber '{Num}' without HSK-/020803- prefix; discarding",
                 fileName, extraction.DocumentNumber);
             extraction.DocumentNumber = null;
@@ -356,14 +374,15 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
-        // Stamp picking slips: single combined pass (1 PdfPig read + 1 PdfSharp write) extracts
-        // ship-to name, bolds comments, stamps rep name, and appends callout page in one shot.
+        // Await enrichment (already running in parallel with the AI call above).
         bool bytesModified = false;
-        if (extraction.DocumentType == "PickingSlip")
+        if (enrichTask is not null)
         {
             try
             {
-                var (enriched, shipToName) = PickingSlipEnricher.EnrichPickingSlip(bytes, extraction.CustomerName, _log);
+                var (enriched, shipToName) = await enrichTask;
+                _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms (ran parallel with AI)", fileName, sw.ElapsedMilliseconds);
+                sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
                 {
                     _log.LogInformation("[FW] Ship-to name from PDF: '{Name}'", shipToName);
@@ -416,6 +435,8 @@ public class FileWatcherService : BackgroundService
             if (tempPath is not null) try { File.Delete(tempPath); } catch { }
             return false;
         }
+
+        _log.LogInformation("[FW] Timing {File}: sp-write={Ms}ms → notifying", fileName, sw.ElapsedMilliseconds);
 
         // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
         // Other machines that reload later get the SP URL from the follow-up notification below.
