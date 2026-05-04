@@ -7473,18 +7473,22 @@ public class SharePointService
     private static string ContactKey(string bp, string contact) =>
         bp.ToLowerInvariant() + " " + contact.ToLowerInvariant();
 
-    public async Task<(int Added, int Deleted)> UpsertContactsAsync(
+    private static string ContactTripleKey(string bp, string contact, string phone) =>
+        bp.ToLowerInvariant() + "|" + contact.ToLowerInvariant() + "|" + phone;
+
+    public async Task<(int Added, int Unchanged)> UpsertContactsAsync(
         IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetCustomerContactsListIdAsync();
 
-        // Read all existing: ContactKey(bp, contact) -> List<itemId>
-        var existing = new Dictionary<string, List<string>>();
-        var page     = await GetGraph().Sites[siteId].Lists[listId].Items
+        // Read all existing as (bp, contact, phone) triples — never delete rows.
+        // A customer may have multiple phone numbers; we only add numbers not already stored.
+        var existingTriples = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName)"];
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
                 r.QueryParameters.Top    = 999;
             }, ct);
 
@@ -7492,48 +7496,26 @@ public class SharePointService
         {
             foreach (var item in page.Value)
             {
-                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                if (item.Fields?.AdditionalData is not { } d) continue;
                 var bp      = GetStr(d, "CustomerName") ?? "";
                 var contact = GetStr(d, "ContactName")  ?? "";
-                if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact)) continue;
-                var key = ContactKey(bp, contact);
-                if (!existing.TryGetValue(key, out var ids)) existing[key] = ids = [];
-                ids.Add(item.Id);
+                var phone   = GetStr(d, "Phone")        ?? "";
+                if (!string.IsNullOrWhiteSpace(bp) && !string.IsNullOrWhiteSpace(contact))
+                    existingTriples.Add(ContactTripleKey(bp, contact, phone));
             }
             if (page.OdataNextLink is null) break;
             page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
         }
 
-        // Delete stale rows for all (bp, contact) pairs that appear in the import
-        var incomingKeys = rows
-            .Select(r => ContactKey(r.CustomerName, r.ContactName))
-            .ToHashSet();
-
-        var toDelete = existing
-            .Where(kv => incomingKeys.Contains(kv.Key))
-            .SelectMany(kv => kv.Value)
+        // Only insert rows whose exact (bp, contact, phone) triple is not already present.
+        var toInsert = rows
+            .Where(r => !existingTriples.Contains(ContactTripleKey(r.CustomerName, r.ContactName, r.Phone)))
             .ToList();
+        int unchanged = rows.Count - toInsert.Count;
 
-        int deleted = 0;
-        if (toDelete.Count > 0)
-        {
-            await Parallel.ForEachAsync(toDelete,
-                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
-                async (itemId, token) =>
-                {
-                    await GetGraph().Sites[siteId].Lists[listId].Items[itemId]
-                        .DeleteAsync(cancellationToken: token);
-                    Interlocked.Increment(ref deleted);
-                });
-            _log.LogInformation("[SP] UpsertContacts: {N} stale rows deleted", deleted);
-        }
-
-        // Insert all new rows. Degree=4 to reduce SP throttle pressure.
-        // Per-row 45s timeout via linked CTS: if KIOTA's retry handler parks in a long
-        // Retry-After delay the row times out fast instead of sleeping for hours.
         int added = 0, failed = 0;
-        await Parallel.ForEachAsync(rows,
+        await Parallel.ForEachAsync(toInsert,
             new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
             async (row, token) =>
             {
@@ -7557,7 +7539,7 @@ public class SharePointService
                         }, cancellationToken: rowCts.Token);
                     var n = Interlocked.Increment(ref added);
                     if (n % 500 == 0)
-                        _log.LogInformation("[SP] UpsertContacts: {N}/{Total} added", n, rows.Count);
+                        _log.LogInformation("[SP] UpsertContacts: {N}/{Total} added", n, toInsert.Count);
                 }
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
@@ -7569,9 +7551,9 @@ public class SharePointService
 
         if (failed > 0)
             _log.LogWarning("[SP] UpsertContacts: {Failed} rows failed to insert", failed);
-        _log.LogInformation("[SP] UpsertContacts: {Added} added, {Deleted} deleted, {Failed} failed",
-            added, deleted, failed);
-        return (added, deleted);
+        _log.LogInformation("[SP] UpsertContacts: {Added} added, {Unchanged} already existed, {Failed} failed",
+            added, unchanged, failed);
+        return (added, unchanged);
     }
 
     // ── Dry-run diff helpers (read-only — no SP writes) ──────────────────────
@@ -7583,9 +7565,7 @@ public class SharePointService
 
     public sealed record BpUpdateSample(string Name, string? OldPopup, string? NewPopup);
 
-    public sealed record ContactDiffResult(
-        int PairsIncoming, int PairsExisting, int PairsNew,
-        int ExistingRowsToDelete, int RowsToAdd);
+    public sealed record ContactDiffResult(int RowsToAdd, int RowsUnchanged);
 
     public async Task<BpDiffResult> DiffBusinessPartnersAsync(
         IReadOnlyList<CustomerImportService.BpRow> rows, CancellationToken ct = default)
@@ -7649,11 +7629,11 @@ public class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetCustomerContactsListIdAsync();
 
-        var existing = new Dictionary<string, int>();  // ContactKey -> SP row count
+        var existingTriples = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName)"];
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
                 r.QueryParameters.Top    = 999;
             }, ct);
 
@@ -7664,31 +7644,19 @@ public class SharePointService
                 if (item.Fields?.AdditionalData is not { } d) continue;
                 var bp      = GetStr(d, "CustomerName") ?? "";
                 var contact = GetStr(d, "ContactName")  ?? "";
-                if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact)) continue;
-                var key = ContactKey(bp, contact);
-                existing[key] = existing.GetValueOrDefault(key) + 1;
+                var phone   = GetStr(d, "Phone")        ?? "";
+                if (!string.IsNullOrWhiteSpace(bp) && !string.IsNullOrWhiteSpace(contact))
+                    existingTriples.Add(ContactTripleKey(bp, contact, phone));
             }
             if (page.OdataNextLink is null) break;
             page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
         }
 
-        var incomingKeys = rows
-            .Select(r => ContactKey(r.CustomerName, r.ContactName))
-            .ToHashSet();
+        int toAdd     = rows.Count(r => !existingTriples.Contains(ContactTripleKey(r.CustomerName, r.ContactName, r.Phone)));
+        int unchanged = rows.Count - toAdd;
 
-        int pairsExisting       = incomingKeys.Count(k => existing.ContainsKey(k));
-        int pairsNew            = incomingKeys.Count(k => !existing.ContainsKey(k));
-        int existingRowsToDelete = incomingKeys
-            .Where(existing.ContainsKey)
-            .Sum(k => existing[k]);
-
-        return new ContactDiffResult(
-            PairsIncoming:       incomingKeys.Count,
-            PairsExisting:       pairsExisting,
-            PairsNew:            pairsNew,
-            ExistingRowsToDelete: existingRowsToDelete,
-            RowsToAdd:           rows.Count);
+        return new ContactDiffResult(RowsToAdd: toAdd, RowsUnchanged: unchanged);
     }
 
     public async Task<CustomerLookupResult?> LookupCustomerByPhoneAsync(

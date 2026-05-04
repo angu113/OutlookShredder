@@ -363,7 +363,7 @@ Drop CSV files into this folder, then POST to the endpoint. Processed files move
 - Phones are normalised to 10-digit US format (strips formatting, drops leading country code `1` if 11 digits)
 - Contacts with invalid/missing phones are skipped with a warning
 - Phones shared by 2+ contacts at the same BP are treated as company/general-line numbers and de-prioritised (contact's own unique phone is preferred)
-- On upsert: existing `(CustomerName, ContactName)` rows in SP are deleted then re-inserted with the current phones (full replace per pair)
+- On upsert: **additive only** — existing `(CustomerName, ContactName, Phone)` triples are never deleted. Only triples not already present in SP are inserted. Customers accumulate phone numbers over time.
 
 **Automation:** A `FileSystemWatcherImportService` (auto-trigger on file drop) is in `todos.md` as a future enhancement. Currently requires a manual `POST /api/import/run`.
 

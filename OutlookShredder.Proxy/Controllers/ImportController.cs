@@ -180,11 +180,11 @@ public class ImportController(
             return (new { file = filename, type = "contacts", parsed = 0,
                           warnings = parsed.Warnings }, parsed.Skipped);
 
-        var (added, deleted) = await sp.UpsertContactsAsync(parsed.Rows, ct);
-        log.LogInformation("[Import] {File} contacts: parsed={P} added={A} deleted={D}",
-            filename, parsed.Rows.Count, added, deleted);
+        var (added, unchanged) = await sp.UpsertContactsAsync(parsed.Rows, ct);
+        log.LogInformation("[Import] {File} contacts: parsed={P} added={A} unchanged={U}",
+            filename, parsed.Rows.Count, added, unchanged);
         return (new { file = filename, type = "contacts", parsed = parsed.Rows.Count,
-                      added, deleted, warnings = parsed.Warnings }, parsed.Skipped);
+                      added, unchanged, warnings = parsed.Warnings }, parsed.Skipped);
     }
 
     // ── Dry run ──────────────────────────────────────────────────────────────
@@ -225,16 +225,13 @@ public class ImportController(
         var diff = await sp.DiffContactsAsync(parsed.Rows, ct);
         return (new
         {
-            file     = filename,
-            type     = "contacts",
-            dryRun   = true,
-            parsed   = parsed.Rows.Count,
-            pairsIncoming        = diff.PairsIncoming,
-            pairsExisting        = diff.PairsExisting,
-            pairsNew             = diff.PairsNew,
-            existingRowsToDelete = diff.ExistingRowsToDelete,
-            rowsToAdd            = diff.RowsToAdd,
-            warnings = parsed.Warnings,
+            file         = filename,
+            type         = "contacts",
+            dryRun       = true,
+            parsed       = parsed.Rows.Count,
+            rowsToAdd    = diff.RowsToAdd,
+            rowsUnchanged = diff.RowsUnchanged,
+            warnings     = parsed.Warnings,
         }, parsed.Skipped);
     }
 
