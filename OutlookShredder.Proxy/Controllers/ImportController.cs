@@ -164,11 +164,11 @@ public class ImportController(
             return (new { file = filename, type = "partners", parsed = 0,
                           skippedForReview = parsed.Skipped.Count, warnings = parsed.Warnings }, parsed.Skipped);
 
-        var (added, updated, skipped) = await sp.UpsertBusinessPartnersAsync(parsed.Rows, ct);
-        log.LogInformation("[Import] {File} partners: parsed={P} added={A} updated={U} skipped={S}",
-            filename, parsed.Rows.Count, added, updated, skipped);
+        var (added, updated, spSkipped) = await sp.UpsertBusinessPartnersAsync(parsed.Rows, ct);
+        log.LogInformation("[Import] {File} partners: parsed={P} added={A} updated={U} spSkipped={S}",
+            filename, parsed.Rows.Count, added, updated, spSkipped);
         return (new { file = filename, type = "partners", parsed = parsed.Rows.Count,
-                      added, updated, skipped, skippedForReview = parsed.Skipped.Count,
+                      added, updated, spSkipped, skippedForReview = parsed.Skipped.Count,
                       warnings = parsed.Warnings }, parsed.Skipped);
     }
 
