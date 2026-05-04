@@ -11,20 +11,32 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
 {
     public sealed record BpRow(string Name, string PopupMessage);
     public sealed record ContactRow(string CustomerName, string ContactName, string Phone);
-    public sealed record ParseResult<T>(IReadOnlyList<T> Rows, IReadOnlyList<string> Warnings);
+    /// <summary>A row that was filtered out during parsing and needs manual review.</summary>
+    public sealed record SkippedItem(string Name, string Reason);
+    public sealed record ParseResult<T>(
+        IReadOnlyList<T>           Rows,
+        IReadOnlyList<string>      Warnings,
+        IReadOnlyList<SkippedItem> Skipped);
+
+    // Phrases that flag a BP name as an ERP system artefact.
+    // "Dupe" is short and may appear in real company names — all matches are written
+    // to the per-run skipped review file so they can be inspected manually.
+    private static readonly string[] InvalidPhrases =
+        ["duplicate", "do not use", "dupe"];
 
     // ── Business Partners (ExportedData (2).csv style) ───────────────────────
 
     public ParseResult<BpRow> ParsePartners(string csv)
     {
         var warnings = new List<string>();
+        var skipped  = new List<SkippedItem>();
         var rows     = new List<BpRow>();
         var lines    = ReadCsv(csv);
 
         if (lines.Count < 2)
         {
             warnings.Add("Partners CSV: no data rows found");
-            return new(rows, warnings);
+            return new(rows, warnings, skipped);
         }
 
         var hdr      = lines[0];
@@ -34,7 +46,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         if (nameIdx < 0 || popupIdx < 0)
         {
             warnings.Add($"Partners CSV: required columns not found. Header: {string.Join(" | ", hdr)}");
-            return new(rows, warnings);
+            return new(rows, warnings, skipped);
         }
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -47,12 +59,16 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             var name = cols[nameIdx].Trim();
             if (string.IsNullOrWhiteSpace(name)) continue;
 
-            if (name.Contains("duplicate", StringComparison.OrdinalIgnoreCase) ||
-                name.Contains("do not use", StringComparison.OrdinalIgnoreCase))
+            var matchedPhrase = InvalidPhrases.FirstOrDefault(
+                p => name.Contains(p, StringComparison.OrdinalIgnoreCase));
+
+            if (matchedPhrase is not null)
             {
-                var msg = $"Row {i + 1}: BP name '{name}' is marked invalid — skipped";
+                var reason = $"name contains '{matchedPhrase}'";
+                var msg    = $"Row {i + 1}: BP '{name}' skipped — {reason}";
                 log.LogWarning("[CustImport] {Msg}", msg);
                 warnings.Add(msg);
+                skipped.Add(new SkippedItem(name, reason));
                 continue;
             }
 
@@ -61,13 +77,15 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
                 var msg = $"Row {i + 1}: duplicate business partner '{name}' — skipped";
                 log.LogWarning("[CustImport] {Msg}", msg);
                 warnings.Add(msg);
+                // Duplicate-within-file is not added to skipped — it's a data quality issue,
+                // not an ambiguous phrase match that needs human review.
                 continue;
             }
 
             rows.Add(new BpRow(name, cols[popupIdx].Trim()));
         }
 
-        return new(rows, warnings);
+        return new(rows, warnings, skipped);
     }
 
     // ── Contacts (ExportedData (1).csv style) ────────────────────────────────
@@ -81,7 +99,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         if (lines.Count < 2)
         {
             warnings.Add("Contacts CSV: no data rows found");
-            return new([], warnings);
+            return new([], warnings, []);
         }
 
         var hdr        = lines[0];
@@ -92,7 +110,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         if (bpIdx < 0 || contactIdx < 0 || phoneIdx < 0)
         {
             warnings.Add($"Contacts CSV: required columns not found. Header: {string.Join(" | ", hdr)}");
-            return new([], warnings);
+            return new([], warnings, []);
         }
 
         for (int i = 1; i < lines.Count; i++)
@@ -122,7 +140,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             raw.Add((bp, contact, phone));
         }
 
-        return new(Deduplicate(raw), warnings);
+        return new(Deduplicate(raw), warnings, []);
     }
 
     // ── Dedup: per-BP, prefer phones not shared across multiple contacts ─────
