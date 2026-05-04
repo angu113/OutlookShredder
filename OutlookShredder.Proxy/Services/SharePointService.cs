@@ -2178,17 +2178,12 @@ public class SharePointService
             else if (string.IsNullOrWhiteSpace(newComments))
                 update.Remove("SupplierProductComments"); // nothing to write
 
-            // Pricing fields: when the new extraction has ANY pricing, include all price fields in
-            // the PATCH even if null — this clears stale values when a supplier changes their format
-            // (e.g. previously quoted $/lb, now quoting total-only).
-            var pricingKeys = new HashSet<string>
-                { "PricePerPound", "PricePerFoot", "PricePerPiece", "TotalPrice",
-                  "UnitsQuoted", "LengthPerUnit", "LengthUnit", "WeightPerUnit", "WeightUnit" };
-            bool hasNewPricing = pricingKeys.Any(k => update.TryGetValue(k, out var v) && v is not null);
-
-            // Strip null values from non-pricing fields (don't null out other populated fields).
-            // Preserve null pricing fields when hasNewPricing so stale price columns get cleared.
-            foreach (var key in update.Keys.Where(k => update[k] is null && (!hasNewPricing || !pricingKeys.Contains(k))).ToList())
+            // Never PATCH a field to null — only send fields with actual values.
+            // Nulling out pricing on a cross-SR merge would wipe a prior quote's prices when a
+            // follow-up email (e.g. a conversation reply with partial or no pricing) arrives from
+            // the same supplier. Stale-format clearing is handled by SoftDeleteSlisBySrIdAsync on
+            // same-email reprocess, so there is no need to null pricing fields on a cross-SR PATCH.
+            foreach (var key in update.Keys.Where(k => update[k] is null).ToList())
                 update.Remove(key);
 
             await GetGraph().Sites[siteId].Lists[listId].Items[existing.Id!].Fields
