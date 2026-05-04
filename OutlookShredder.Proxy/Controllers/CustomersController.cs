@@ -58,8 +58,8 @@ public class CustomersController(
         if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
             return BadRequest(new { warnings = parsed.Warnings });
 
-        var (added, deleted) = await sp.UpsertContactsAsync(parsed.Rows, ct);
-        return Ok(new { parsed = parsed.Rows.Count, added, deleted, warnings = parsed.Warnings });
+        var (added, unchanged) = await sp.UpsertContactsAsync(parsed.Rows, ct);
+        return Ok(new { parsed = parsed.Rows.Count, added, unchanged, warnings = parsed.Warnings });
     }
 
     /// <summary>
@@ -86,6 +86,25 @@ public class CustomersController(
     {
         var rows = await sp.ReadAllContactsAsync(ct);
         return Ok(rows);
+    }
+
+    /// <summary>
+    /// DELETE /api/customers/contact?bp=...&amp;contact=...&amp;phone=... — removes a specific
+    /// (CustomerName, ContactName, Phone) triple from CustomerContacts.
+    /// Returns 404 if no matching row is found.
+    /// </summary>
+    [HttpDelete("contact")]
+    public async Task<IActionResult> DeleteContact(
+        [FromQuery] string bp,
+        [FromQuery] string contact,
+        [FromQuery] string phone,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact) || string.IsNullOrWhiteSpace(phone))
+            return BadRequest("bp, contact and phone query parameters are all required.");
+
+        var deleted = await sp.DeleteContactAsync(bp, contact, phone, ct);
+        return deleted ? Ok(new { deleted = true }) : NotFound();
     }
 
     private async Task<string?> ReadBodyAsync(CancellationToken ct)

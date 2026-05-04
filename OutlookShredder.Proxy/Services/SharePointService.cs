@@ -7753,6 +7753,46 @@ public class SharePointService
         return result;
     }
 
+    public async Task<bool> DeleteContactAsync(
+        string bp, string contact, string phone, CancellationToken ct = default)
+    {
+        var normalizedPhone = CustomerImportService.NormalizePhone(phone) ?? phone;
+        var key             = ContactTripleKey(bp, contact, normalizedPhone);
+
+        var siteId     = await GetSiteIdAsync();
+        var contactsId = await GetCustomerContactsListIdAsync();
+
+        var page = await GetGraph().Sites[siteId].Lists[contactsId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Filter = $"fields/Phone eq '{normalizedPhone}'";
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
+                r.QueryParameters.Top    = 50;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var itemBp      = GetStr(d, "CustomerName") ?? "";
+                var itemContact = GetStr(d, "ContactName")  ?? "";
+                var itemPhone   = GetStr(d, "Phone")        ?? "";
+                if (ContactTripleKey(itemBp, itemContact, itemPhone) != key) continue;
+
+                await GetGraph().Sites[siteId].Lists[contactsId].Items[item.Id]
+                    .DeleteAsync(cancellationToken: ct);
+                _log.LogInformation("[SP] DeleteContact: removed ({Bp}, {Contact}, {Phone})", bp, contact, normalizedPhone);
+                return true;
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        return false;
+    }
+
     // ── Phone call log ────────────────────────────────────────────────────────
 
     private async Task<string> GetOrCreateCallLogListIdAsync(CancellationToken ct = default)
