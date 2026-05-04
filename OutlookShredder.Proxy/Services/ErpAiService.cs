@@ -193,7 +193,7 @@ public class ErpAiService
 
         var maxTokens  = int.TryParse(_config["Claude:MaxTokens"],  out var mt) ? mt : 2048;
         var maxRetries = int.TryParse(_config["Claude:MaxRetries"], out var mr) ? mr : 3;
-        var model      = _config["Claude:ErpModel"] ?? "claude-sonnet-4-6";
+        var model      = _config["Claude:ErpModel"] ?? "claude-haiku-4-5-20251001";
 
         var userContent = new object[]
         {
