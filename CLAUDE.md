@@ -354,7 +354,7 @@ Drop CSV files into this folder, then POST to the endpoint. Processed files move
 
 **Business Partner processing rules:**
 - Unique key: BP name (case-insensitive)
-- BP names containing the word `duplicate` (any case) are silently skipped — ERP marks these as duplicate entries that interfere with lookups
+- BP names containing `duplicate` or `do not use` (any case) are silently skipped — ERP marks these as invalid entries that interfere with lookups
 - Duplicate names within the same file are also skipped (second occurrence)
 - Only `PopupMessage` is persisted per BP. **TODO:** enrich schema with more fields (address, credit terms, account number, etc.) once ERP export format is confirmed — `CustomerImportService.ParsePartners` and `SharePointService.UpsertBusinessPartnersAsync` are the two places to extend.
 

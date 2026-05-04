@@ -47,9 +47,10 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             var name = cols[nameIdx].Trim();
             if (string.IsNullOrWhiteSpace(name)) continue;
 
-            if (name.Contains("duplicate", StringComparison.OrdinalIgnoreCase))
+            if (name.Contains("duplicate", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("do not use", StringComparison.OrdinalIgnoreCase))
             {
-                var msg = $"Row {i + 1}: BP name contains 'duplicate' — skipped";
+                var msg = $"Row {i + 1}: BP name '{name}' is marked invalid — skipped";
                 log.LogWarning("[CustImport] {Msg}", msg);
                 warnings.Add(msg);
                 continue;
