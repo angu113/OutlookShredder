@@ -7574,6 +7574,123 @@ public class SharePointService
         return (added, deleted);
     }
 
+    // ── Dry-run diff helpers (read-only — no SP writes) ──────────────────────
+
+    public sealed record BpDiffResult(
+        int ToAdd, int ToUpdate, int Unchanged,
+        IReadOnlyList<string> AddSample,
+        IReadOnlyList<BpUpdateSample> UpdateSamples);
+
+    public sealed record BpUpdateSample(string Name, string? OldPopup, string? NewPopup);
+
+    public sealed record ContactDiffResult(
+        int PairsIncoming, int PairsExisting, int PairsNew,
+        int ExistingRowsToDelete, int RowsToAdd);
+
+    public async Task<BpDiffResult> DiffBusinessPartnersAsync(
+        IReadOnlyList<CustomerImportService.BpRow> rows, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+
+        var existing = new Dictionary<string, (string Id, string? Popup)>(StringComparer.OrdinalIgnoreCase);
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                existing[name] = (item.Id, GetStr(d, "PopupMessage"));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        var toAdd     = new List<string>();
+        var toUpdate  = new List<BpUpdateSample>();
+        int unchanged = 0;
+
+        foreach (var row in rows)
+        {
+            if (existing.TryGetValue(row.Name, out var ex))
+            {
+                if (string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal))
+                    unchanged++;
+                else
+                    toUpdate.Add(new BpUpdateSample(row.Name, ex.Popup, row.PopupMessage));
+            }
+            else
+            {
+                toAdd.Add(row.Name);
+            }
+        }
+
+        const int sampleCap = 50;
+        return new BpDiffResult(
+            ToAdd:        toAdd.Count,
+            ToUpdate:     toUpdate.Count,
+            Unchanged:    unchanged,
+            AddSample:    toAdd.Take(sampleCap).ToList(),
+            UpdateSamples: toUpdate.Take(sampleCap).ToList());
+    }
+
+    public async Task<ContactDiffResult> DiffContactsAsync(
+        IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomerContactsListIdAsync();
+
+        var existing = new Dictionary<string, int>();  // ContactKey -> SP row count
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var bp      = GetStr(d, "CustomerName") ?? "";
+                var contact = GetStr(d, "ContactName")  ?? "";
+                if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact)) continue;
+                var key = ContactKey(bp, contact);
+                existing[key] = existing.GetValueOrDefault(key) + 1;
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        var incomingKeys = rows
+            .Select(r => ContactKey(r.CustomerName, r.ContactName))
+            .ToHashSet();
+
+        int pairsExisting       = incomingKeys.Count(k => existing.ContainsKey(k));
+        int pairsNew            = incomingKeys.Count(k => !existing.ContainsKey(k));
+        int existingRowsToDelete = incomingKeys
+            .Where(existing.ContainsKey)
+            .Sum(k => existing[k]);
+
+        return new ContactDiffResult(
+            PairsIncoming:       incomingKeys.Count,
+            PairsExisting:       pairsExisting,
+            PairsNew:            pairsNew,
+            ExistingRowsToDelete: existingRowsToDelete,
+            RowsToAdd:           rows.Count);
+    }
+
     public async Task<CustomerLookupResult?> LookupCustomerByPhoneAsync(
         string rawPhone, CancellationToken ct = default)
     {
