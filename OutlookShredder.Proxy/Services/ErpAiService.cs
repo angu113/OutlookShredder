@@ -35,6 +35,9 @@ public class ErpAiService
 
         CUSTOMER INFORMATION
         customer_name:      The company name the document is addressed to (the buyer or recipient).
+                            On picking slips: look for the "Ship To:" label, then take the company
+                            name from the line BELOW it (not the text to its right on the same line).
+                            Do NOT use the Customer Rep name or store name.
                             For purchase orders this will be our supplier.
         customer_reference: Any PO or reference number assigned BY the customer, e.g. fields labelled
                             "Customer PO", "Your Ref", "Cust. Order", "Customer Reference", "PO #".
@@ -73,7 +76,7 @@ public class ErpAiService
               "is_erp_document":    { "type": "boolean",           "description": "Always true — the file has been confirmed as ERP from its filename." },
               "document_type":      { "type": ["string","null"],   "description": "Leave null — set from filename automatically.", "enum": ["Quotation","SalesOrder","PickingSlip","PurchaseOrder","Invoice","CreditNote","Payment","ShippingNote","Unknown",null] },
               "document_number":    { "type": ["string","null"],   "description": "Our ERP reference (HSK-... or 020803-...). Leave null for most documents — set from filename. Only populate if the filename did not contain a record number (e.g. a bare PurchaseOrder.pdf)." },
-              "customer_name":      { "type": ["string","null"],   "description": "Company the document is addressed to." },
+              "customer_name":      { "type": ["string","null"],   "description": "Company the document is addressed to. On picking slips: the company name on the line BELOW 'Ship To:' (not the text to the right of it on the same line). Not the Customer Rep or store name." },
               "customer_reference": { "type": ["string","null"],   "description": "Customer's own PO or reference number. Never our own ERP reference." },
               "document_date":      { "type": ["string","null"],   "description": "Date as printed on the document." },
               "total_amount":       { "type": ["string","null"],   "description": "Grand total as a plain numeric string, e.g. '1234.56'. Null for documents with no pricing (picking slips, shipping notes)." },
@@ -190,7 +193,7 @@ public class ErpAiService
 
         var maxTokens  = int.TryParse(_config["Claude:MaxTokens"],  out var mt) ? mt : 2048;
         var maxRetries = int.TryParse(_config["Claude:MaxRetries"], out var mr) ? mr : 3;
-        var model      = _config["Claude:ErpModel"] ?? "claude-haiku-4-5-20251001";
+        var model      = _config["Claude:ErpModel"] ?? "claude-sonnet-4-6";
 
         var userContent = new object[]
         {

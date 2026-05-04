@@ -356,17 +356,29 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
-        // Stamp picking slips with the customer name at top-left, then enrich with bold comments + callout page.
-        // Track whether bytes were modified so we can write a temp file for the immediate notification —
-        // the Focus view must render the stamped version, not the raw original.
+        // Stamp picking slips: single combined pass (1 PdfPig read + 1 PdfSharp write) extracts
+        // ship-to name, bolds comments, stamps rep name, and appends callout page in one shot.
         bool bytesModified = false;
-        if (extraction.DocumentType == "PickingSlip" && !string.IsNullOrWhiteSpace(extraction.CustomerName))
+        if (extraction.DocumentType == "PickingSlip")
         {
-            try { bytes = StampCustomerName(bytes, extraction.CustomerName); bytesModified = true; }
-            catch (Exception ex) { _log.LogWarning(ex, "[FW] PDF stamp failed for {File} — uploading original", fileName); }
-
-            try { bytes = PickingSlipEnricher.Enrich(bytes, _log); bytesModified = true; }
-            catch (Exception ex) { _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File} — uploading without callouts", fileName); }
+            try
+            {
+                var (enriched, shipToName) = PickingSlipEnricher.EnrichPickingSlip(bytes, extraction.CustomerName, _log);
+                if (!string.IsNullOrWhiteSpace(shipToName))
+                {
+                    _log.LogInformation("[FW] Ship-to name from PDF: '{Name}'", shipToName);
+                    extraction.CustomerName = shipToName;
+                }
+                if (!ReferenceEquals(enriched, bytes))
+                {
+                    bytes = enriched;
+                    bytesModified = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File}", fileName);
+            }
         }
 
         // If bytes were modified, write the stamped PDF to a temp file so the immediate notification
@@ -491,135 +503,6 @@ public class FileWatcherService : BackgroundService
         }
 
         return true;
-    }
-
-    // ── PDF stamping ──────────────────────────────────────────────────────────
-
-    // PdfSharp 6.x requires an explicit font resolver on Windows — set once.
-    private static readonly object _fontResolverLock = new();
-    private static bool _fontResolverSet;
-
-    private static void EnsureFontResolver()
-    {
-        if (_fontResolverSet) return;
-        lock (_fontResolverLock)
-        {
-            if (_fontResolverSet) return;
-            PdfSharp.Fonts.GlobalFontSettings.FontResolver = new ArialFontResolver();
-            _fontResolverSet = true;
-        }
-    }
-
-    // Reads Arial variants directly from %WINDIR%\Fonts — works in service/task context.
-    private sealed class ArialFontResolver : PdfSharp.Fonts.IFontResolver
-    {
-        private static readonly string FontsDir =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts");
-
-        public PdfSharp.Fonts.FontResolverInfo? ResolveTypeface(string familyName, bool isBold, bool isItalic)
-        {
-            if (!familyName.Equals("Arial", StringComparison.OrdinalIgnoreCase)) return null;
-            var face = (isBold, isItalic) switch
-            {
-                (true,  true)  => "arialbi",
-                (true,  false) => "arialbd",
-                (false, true)  => "ariali",
-                _              => "arial",
-            };
-            return new PdfSharp.Fonts.FontResolverInfo(face);
-        }
-
-        public byte[]? GetFont(string faceName) =>
-            new[] { $"{faceName}.ttf", $"{faceName}.ttc", $"{faceName}.otf" }
-                .Select(f => Path.Combine(FontsDir, f))
-                .Where(File.Exists)
-                .Select(File.ReadAllBytes)
-                .FirstOrDefault();
-    }
-
-    /// <summary>
-    /// Draws a bold customer-name label (2.5" wide × 1" tall) at the top-left of page 1.
-    /// Text wraps across lines and the font size shrinks until everything fits.
-    /// Returns the modified PDF bytes, or throws so the caller can fall back to the original.
-    /// </summary>
-    private static byte[] StampCustomerName(byte[] pdfBytes, string customerName)
-    {
-        EnsureFontResolver();
-
-        using var inputStream = new System.IO.MemoryStream(pdfBytes);
-        var doc  = PdfSharp.Pdf.IO.PdfReader.Open(inputStream, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify);
-        var page = doc.Pages[0];
-
-        // XGraphics.FromPdfPage: top-left origin, Y increases downward.
-        const double boxX      = 18;   // 0.25" from left
-        const double boxY      = 18;   // 0.25" from top
-        const double boxWidth  = 180;  // 2.5"
-        const double boxHeight = 72;   // 1"
-        const double pad       = 6;    // inner padding
-        double textAreaW = boxWidth  - pad * 2;
-        double textAreaH = boxHeight - pad * 2;
-
-        using var gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page);
-
-        // Find the largest font (max 16pt, min 7pt) at which all wrapped lines fit the box.
-        var (lines, font) = FitTextInBox(gfx, customerName, textAreaW, textAreaH);
-
-        var boxRect = new PdfSharp.Drawing.XRect(boxX, boxY, boxWidth, boxHeight);
-        gfx.DrawRectangle(PdfSharp.Drawing.XBrushes.White, boxRect);
-        gfx.DrawRectangle(new PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColors.Black, 0.75), boxRect);
-
-        // Centre the line block vertically, each line centred horizontally.
-        double lineH   = font.GetHeight();
-        double blockH  = lines.Count * lineH;
-        double startY  = boxY + pad + (textAreaH - blockH) / 2.0;
-
-        foreach (var line in lines)
-        {
-            var lineRect = new PdfSharp.Drawing.XRect(boxX + pad, startY, textAreaW, lineH);
-            gfx.DrawString(line, font, PdfSharp.Drawing.XBrushes.Black,
-                lineRect, PdfSharp.Drawing.XStringFormats.TopCenter);
-            startY += lineH;
-        }
-
-        using var outputStream = new System.IO.MemoryStream();
-        doc.Save(outputStream);
-        return outputStream.ToArray();
-    }
-
-    private static (List<string> Lines, PdfSharp.Drawing.XFont Font) FitTextInBox(
-        PdfSharp.Drawing.XGraphics gfx, string text, double maxW, double maxH)
-    {
-        for (double size = 16; size >= 7; size -= 1)
-        {
-            var font  = new PdfSharp.Drawing.XFont("Arial", size, PdfSharp.Drawing.XFontStyleEx.Bold);
-            var lines = WrapWords(gfx, font, text, maxW);
-            if (lines.Count * font.GetHeight() <= maxH)
-                return (lines, font);
-        }
-        var fallback = new PdfSharp.Drawing.XFont("Arial", 7, PdfSharp.Drawing.XFontStyleEx.Bold);
-        return (WrapWords(gfx, fallback, text, maxW), fallback);
-    }
-
-    private static List<string> WrapWords(
-        PdfSharp.Drawing.XGraphics gfx, PdfSharp.Drawing.XFont font, string text, double maxW)
-    {
-        var lines   = new List<string>();
-        var current = "";
-        foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var candidate = string.IsNullOrEmpty(current) ? word : current + " " + word;
-            if (gfx.MeasureString(candidate, font).Width <= maxW)
-            {
-                current = candidate;
-            }
-            else
-            {
-                if (!string.IsNullOrEmpty(current)) lines.Add(current);
-                current = word;
-            }
-        }
-        if (!string.IsNullOrEmpty(current)) lines.Add(current);
-        return lines.Count > 0 ? lines : [text];
     }
 
     // ── Processed-file tracking ───────────────────────────────────────────────
