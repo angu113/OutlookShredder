@@ -34,6 +34,8 @@ Also installs:
 | `HealthController` | `/api/health` | Aggregated service health for Shredder's Home dashboard |
 | `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
 | `SupplierConversationsController` | `/api` | Read supplier conversation threads + send follow-up inquiries (WIP) |
+| `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts, list contacts |
+| `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -335,6 +337,35 @@ Proxy             ──HTTPS──► Microsoft Graph (mail + SharePoint)
 Proxy             ──AMQP───► Azure Service Bus (topic: rfq-updates)
 Shredder desktop  ◄─AMQP───  Azure Service Bus (RfqServiceBusListener)
 ```
+
+## Import Directory — Customer / Contact Bulk Loads
+
+**Endpoint:** `POST /api/import/run`
+
+**Directory:** `Import:Directory` in `appsettings.json` (default: `%LOCALAPPDATA%\Shredder\Import\`).
+Drop CSV files into this folder, then POST to the endpoint. Processed files move to `Import\processed\{yyyyMMdd_HHmmss}_{filename}` so they are never re-processed.
+
+**File type detection (first match wins):**
+- Filename contains `partner`, ` bp`, `_bp`, or starts with `bp` → **Business Partners** (Name + Popup Message)
+- Filename contains `contact` → **Contacts** (Customer Name + Contact Name + Phone)
+- Header row contains `Popup Message` → Business Partners
+- Header row contains both `Contact Name` and `Customer Name` → Contacts
+- Otherwise: file is skipped with a warning in the response
+
+**Business Partner processing rules:**
+- Unique key: BP name (case-insensitive)
+- BP names containing the word `duplicate` (any case) are silently skipped — ERP marks these as duplicate entries that interfere with lookups
+- Duplicate names within the same file are also skipped (second occurrence)
+- Only `PopupMessage` is persisted per BP. **TODO:** enrich schema with more fields (address, credit terms, account number, etc.) once ERP export format is confirmed — `CustomerImportService.ParsePartners` and `SharePointService.UpsertBusinessPartnersAsync` are the two places to extend.
+
+**Contact processing rules:**
+- Unique key: (CustomerName, ContactName, Phone) triple
+- Phones are normalised to 10-digit US format (strips formatting, drops leading country code `1` if 11 digits)
+- Contacts with invalid/missing phones are skipped with a warning
+- Phones shared by 2+ contacts at the same BP are treated as company/general-line numbers and de-prioritised (contact's own unique phone is preferred)
+- On upsert: existing `(CustomerName, ContactName)` rows in SP are deleted then re-inserted with the current phones (full replace per pair)
+
+**Automation:** A `FileSystemWatcherImportService` (auto-trigger on file drop) is in `todos.md` as a future enhancement. Currently requires a manual `POST /api/import/run`.
 
 ## Rules
 

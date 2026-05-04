@@ -47,6 +47,14 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             var name = cols[nameIdx].Trim();
             if (string.IsNullOrWhiteSpace(name)) continue;
 
+            if (name.Contains("duplicate", StringComparison.OrdinalIgnoreCase))
+            {
+                var msg = $"Row {i + 1}: BP name contains 'duplicate' — skipped";
+                log.LogWarning("[CustImport] {Msg}", msg);
+                warnings.Add(msg);
+                continue;
+            }
+
             if (!seen.Add(name))
             {
                 var msg = $"Row {i + 1}: duplicate business partner '{name}' — skipped";
