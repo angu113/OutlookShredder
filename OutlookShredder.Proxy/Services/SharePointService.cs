@@ -2853,6 +2853,22 @@ public class SharePointService
         _log.LogInformation("[SP] Deleted SLI item {Id}", itemId);
     }
 
+    public async Task PatchSliProductKeyAsync(string itemId, string? productSearchKey, string? catalogProductName)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var fields    = new Microsoft.Graph.Models.FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["ProductSearchKey"]   = productSearchKey,
+                ["CatalogProductName"] = catalogProductName,
+            }
+        };
+        await GetGraph().Sites[siteId].Lists[sliListId].Items[itemId].Fields.PatchAsync(fields);
+        _log.LogInformation("[SP] Patched SLI {Id} ProductSearchKey={Key} CatalogProductName={Cat}", itemId, productSearchKey, catalogProductName);
+    }
+
     /// <summary>
     /// Deletes a SupplierResponse row and all SupplierLineItem rows that reference it.
     /// Returns (sliDeleted, srDeleted) counts.

@@ -1008,6 +1008,29 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/sli/{sliItemId}/product-search-key ───────────────────────────
+
+    public record PatchProductKeyRequest(string? ProductSearchKey, string? CatalogProductName);
+
+    /// <summary>
+    /// Overwrites (or clears) ProductSearchKey and CatalogProductName on a single SLI row.
+    /// Pass null for both fields to clear them.
+    /// </summary>
+    [HttpPatch("sli/{sliItemId}/product-search-key")]
+    public async Task<IActionResult> PatchSliProductKey(string sliItemId, [FromBody] PatchProductKeyRequest request)
+    {
+        try
+        {
+            await _sp.PatchSliProductKeyAsync(sliItemId, request?.ProductSearchKey, request?.CatalogProductName);
+            return Ok(new { sliItemId, productSearchKey = request?.ProductSearchKey, catalogProductName = request?.CatalogProductName });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "PatchSliProductKey failed for SLI {Id}", sliItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── DELETE /api/sli/{itemId} ─────────────────────────────────────────────
     /// <summary>
     /// Deletes a single SupplierLineItem by its SharePoint item ID.
