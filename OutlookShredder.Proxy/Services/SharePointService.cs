@@ -2788,17 +2788,40 @@ public class SharePointService
                 var itemId  = item.Id;
                 if (data is null || itemId is null) continue;
 
-                var prodName = data.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null;
+                var prodName        = data.TryGetValue("ProductName",        out var pn) ? pn?.ToString() : null;
+                var existingKey     = data.TryGetValue("ProductSearchKey",   out var sk) ? sk?.ToString() : null;
+                var existingCatName = data.TryGetValue("CatalogProductName", out var cn) ? cn?.ToString() : null;
                 if (string.IsNullOrWhiteSpace(prodName)) continue;
 
-                var match = _catalog.ResolveProduct(prodName);
-                if (match is not null) matched++;
+                string? newKey;
+                string? newCatName;
 
-                // Always patch  -- clears stale values when catalog changes remove a match.
+                if (!string.IsNullOrEmpty(existingKey))
+                {
+                    // Row already has an RLI-anchored or prior-matched MSPC — preserve it.
+                    // Only fill in the catalog name via direct lookup; never overwrite the
+                    // MSPC with a fuzzy-match result that could pick the wrong catalog entry.
+                    var entry = _catalog.FindBySearchKey(existingKey);
+                    newKey     = existingKey;
+                    newCatName = entry?.Name;
+                    if (entry is not null) matched++;
+                }
+                else
+                {
+                    // No MSPC yet — run fuzzy match to find one.
+                    var match = _catalog.ResolveProduct(prodName);
+                    newKey     = match?.SearchKey;
+                    newCatName = match?.Name;
+                    if (match is not null) matched++;
+                }
+
+                // Skip if nothing would change.
+                if (newKey == existingKey && newCatName == existingCatName) continue;
+
                 var patch = new Dictionary<string, object?>
                 {
-                    ["CatalogProductName"] = match?.Name,
-                    ["ProductSearchKey"]   = match?.SearchKey,
+                    ["CatalogProductName"] = newCatName,
+                    ["ProductSearchKey"]   = newKey,
                 };
                 await GetGraph().Sites[siteId].Lists[sliListId].Items[itemId].Fields
                     .PatchAsync(new FieldValueSet { AdditionalData = patch }, cancellationToken: ct);
