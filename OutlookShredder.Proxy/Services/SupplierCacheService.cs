@@ -90,14 +90,23 @@ public class SupplierCacheService : BackgroundService
             return [];
         }
 
-        var items = await graph.Sites[site.Id].Lists[list.Id].Items
+        var page = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=Title,ContactEmail)"];
-                r.QueryParameters.Top    = 1000;
+                r.QueryParameters.Top    = 500;
             });
 
-        return items?.Value?
+        var allItems = new List<Microsoft.Graph.Models.ListItem>();
+        while (page is not null)
+        {
+            allItems.AddRange(page.Value ?? []);
+            if (page.OdataNextLink is null) break;
+            page = await graph.Sites[site.Id].Lists[list.Id].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        return allItems
             .Where(i => i.Fields?.AdditionalData != null)
             .Select(i =>
             {
@@ -110,8 +119,7 @@ public class SupplierCacheService : BackgroundService
             })
             .Where(e => e is not null)
             .Select(e => e!)
-            .ToList()
-            ?? [];
+            .ToList();
     }
 
     private static string? ExtractDomain(string? email)

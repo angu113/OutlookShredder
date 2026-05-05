@@ -367,6 +367,16 @@ Drop CSV files into this folder, then POST to the endpoint. Processed files move
 
 **Automation:** A `FileSystemWatcherImportService` (auto-trigger on file drop) is in `todos.md` as a future enhancement. Currently requires a manual `POST /api/import/run`.
 
+## Debugging & Testing Methodology
+
+**Always prefer testing and direct observation over inference.** When diagnosing a bug or verifying behavior:
+
+1. **Test first**: Use proxy API endpoints (`/api/catalog/resolve`, `/api/catalog/diagnose`, `/api/items/by-rfq/{rfqId}`, `/api/mail/status`, etc.), proxy logs, and SP data to observe actual behavior before reading code.
+2. **Then trace**: After observing the result, use code reading to understand *why* that path was taken — map the observed output back to specific code branches.
+3. **Build test endpoints if needed**: If no API exists to observe a behavior directly, add a lightweight diagnostic endpoint rather than relying on inference from code reading alone.
+
+This approach gives deterministic diagnosis. Inference from code reading alone is error-prone — the same code can produce different results depending on cache state, SP data, config, and timing. Observation anchors the diagnosis in reality.
+
 ## Rules
 
 - `@mithrilmetals.com` is never a valid supplier — never appear in extraction results or email targets

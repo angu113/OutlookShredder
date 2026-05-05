@@ -1841,7 +1841,7 @@ public class SharePointService
         string source, string? sourceFile,
         string? messageId = null)
     {
-        var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier, header.QuoteReference);
+        var existingId = await FindExistingSupplierResponseAsync(siteId, listId, jobRef, supplier, header.QuoteReference, messageId);
         bool isNew = existingId is null;
 
         var emailBodyTrunc = (emailMeta.EmailBody ?? emailMeta.BodyContext) is string body
@@ -2012,7 +2012,7 @@ public class SharePointService
 
     private async Task<string?> FindExistingSupplierResponseAsync(
         string siteId, string listId, string jobRef, string supplierName,
-        string? quoteReference = null)
+        string? quoteReference = null, string? messageId = null)
     {
         if (string.IsNullOrEmpty(jobRef)) return null;
 
@@ -2025,12 +2025,13 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName,QuoteReference)"];
+                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName,QuoteReference,MessageId)"];
                 r.QueryParameters.Top    = 2000;
             });
 
-        string? nameMatch    = null;
+        string? msgIdMatch    = null;
         string? quoteRefMatch = null;
+        string? nameMatch     = null;
 
         while (page is not null)
         {
@@ -2038,6 +2039,20 @@ public class SharePointService
             {
                 var d = i.Fields?.AdditionalData;
                 if (d is null || i.Id is null) continue;
+
+                // Strongest match: same Graph MessageId — unique per email, survives name
+                // variations and eventual-consistency duplicate SR creation (poller race).
+                if (!string.IsNullOrEmpty(messageId))
+                {
+                    var itemMsgId = d.TryGetValue("MessageId", out var mv) ? mv?.ToString() : null;
+                    if (!string.IsNullOrEmpty(itemMsgId)
+                        && string.Equals(itemMsgId, messageId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        msgIdMatch = i.Id;
+                        break;
+                    }
+                }
+
                 var itemJobRef = (d.TryGetValue("RFQ_ID",       out var jv)  ? jv?.ToString()  : null)
                               ?? (d.TryGetValue("RFQ_x005F_ID", out var jv2) ? jv2?.ToString() : null);
                 if (!string.Equals(itemJobRef, jobRef, StringComparison.OrdinalIgnoreCase)) continue;
@@ -2046,13 +2061,9 @@ public class SharePointService
                 var itemQuoteRef  = d.TryGetValue("QuoteReference",  out var qv) ? qv?.ToString() : null;
 
                 // Strong match: same job ref + same quote reference (supplier-assigned number).
-                // Matches regardless of email address or name variation.
                 if (!string.IsNullOrEmpty(quoteReference) && !string.IsNullOrEmpty(itemQuoteRef)
                     && string.Equals(quoteReference, itemQuoteRef, StringComparison.OrdinalIgnoreCase))
-                {
-                    quoteRefMatch = i.Id;
-                    break;
-                }
+                    quoteRefMatch ??= i.Id;
 
                 // Fallback: same job ref + same supplier name.
                 if (nameMatch is null
@@ -2061,14 +2072,14 @@ public class SharePointService
                     nameMatch = i.Id;
             }
 
-            if (quoteRefMatch is not null) break;
+            if (msgIdMatch is not null) break;
             if (page.OdataNextLink is null) break;
             var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter);
             page = await next.GetAsync();
         }
 
-        return quoteRefMatch ?? nameMatch;
+        return msgIdMatch ?? quoteRefMatch ?? nameMatch;
     }
 
     // ??"?????"??? Write SupplierLineItems (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
