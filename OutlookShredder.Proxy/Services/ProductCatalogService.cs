@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.Graph;
 
@@ -117,14 +117,22 @@ public class ProductCatalogService : BackgroundService
                 $"List '{listName}' not found. Available lists: [{names}]");
         }
 
-        var items = await graph.Sites[site.Id].Lists[list.Id].Items
+        var page = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields"];
-                r.QueryParameters.Top    = 2000;
+                r.QueryParameters.Top    = 500;
             });
 
-        var raw = items?.Value ?? [];
+        var raw = new List<Microsoft.Graph.Models.ListItem>();
+        while (page is not null)
+        {
+            raw.AddRange(page.Value ?? []);
+            if (page.OdataNextLink is null) break;
+            page = await graph.Sites[site.Id].Lists[list.Id].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
         var firstFields = raw.Count > 0
             ? string.Join(", ", raw[0].Fields?.AdditionalData?.Keys ?? [])
             : "(no items)";
@@ -259,6 +267,54 @@ public class ProductCatalogService : BackgroundService
     /// <summary>Cached product names, for API use.</summary>
     public IReadOnlyList<string> CachedNames => _cache.Select(e => e.Name).ToList().AsReadOnly();
 
+    /// <summary>Cached entries with name + searchKey, for API use.</summary>
+    public IReadOnlyList<(string Name, string? SearchKey)> CachedEntries =>
+        _cache.Select(e => (e.Name, e.SearchKey)).ToList().AsReadOnly();
+
+    /// <summary>
+    /// Diagnostic: returns the tokenised non-dim tokens for a raw string, and the top-N
+    /// containment/Jaccard scores against the catalog. Useful for debugging mismatches.
+    /// </summary>
+    public object Diagnose(string rawName, int topN = 10)
+    {
+        var vendorTokens = Tokenize(rawName);
+        var vendorNonDim = NonDimTokens(vendorTokens);
+        var vendorDim    = vendorTokens.Where(IsDimToken).ToList();
+
+        var scores = _cache.Select(e =>
+        {
+            var catNonDim = NonDimTokens(e.Tokens);
+            var overlap   = catNonDim.Count(t => vendorNonDim.Contains(t));
+            var fraction  = catNonDim.Count > 0 ? (double)overlap / catNonDim.Count : 0;
+            var dimScore  = DimOverlapFraction(e.Tokens, vendorTokens);
+            var composite = overlap * (1.0 + dimScore);
+            var jac       = Jaccard(catNonDim, vendorNonDim);
+            return new
+            {
+                Name       = e.Name,
+                SearchKey  = e.SearchKey,
+                CatTokens  = catNonDim.OrderBy(t => t).ToList(),
+                Overlap    = overlap,
+                Fraction   = Math.Round(fraction, 3),
+                DimScore   = Math.Round(dimScore, 3),
+                Composite  = Math.Round(composite, 3),
+                Jaccard    = Math.Round(jac, 3),
+                PassesContainment = overlap >= 2 && fraction >= 0.55,
+            };
+        })
+        .OrderByDescending(x => x.Composite).ThenByDescending(x => x.Jaccard)
+        .Take(topN)
+        .ToList();
+
+        return new
+        {
+            Raw          = rawName,
+            VendorNonDim = vendorNonDim.OrderBy(t => t).ToList(),
+            VendorDim    = vendorDim.OrderBy(t => t).ToList(),
+            TopMatches   = scores,
+        };
+    }
+
     /// <summary>
     /// Looks up a catalog entry by its SearchKey (MSPC).
     /// Used when the AI has already resolved the MSPC via RLI anchoring and we
@@ -336,7 +392,7 @@ public class ProductCatalogService : BackgroundService
     // Also matches U+00C3 (Ã) + U+2014 (em dash) which AI extraction sometimes
     // writes instead of ASCII "A-" in beam designations like "W8[U+00C3][U+2014]15".
     private static readonly Regex _beamDesig =
-        new(@"\b(MC|[WSC])(\d+)\s*(?:[xX×]|A-|\u00C3\u2014)\s*(\d+(?:\.\d+)?)\b",
+        new(@"\b(MC|[WSC])\s*(\d+)\s*(?:[xX×]|A-|\u00C3\u2014)\s*(\d+(?:\.\d+)?)\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // HSS (Hollow Structural Section) designations used by suppliers.
@@ -410,6 +466,13 @@ public class ProductCatalogService : BackgroundService
     ];
 
     // Reuse the same dimension-normalisation approach as SharePointService.
+    // Trailing length specification: " x 20'" or " x 144\"" at end of string.
+    // Vendor strings append the cut length after the structural designation; it must be
+    // stripped before dimSeparator runs so it isn't absorbed into the beam token.
+    private static readonly Regex _trailingLengthSpec =
+        new(@"\s+x\s+\d+(?:['""]|(?:\s*(?:ft|foot|feet|in|inch|inches)\b))\s*$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex _dimFraction  = new(@"(\d+)/(\d+)",                                      RegexOptions.Compiled);
     private static readonly Regex _dimDecimal   = new(@"(\d+)\.(\d+)",                                     RegexOptions.Compiled);
     private static readonly Regex _dimSeparator = new(@"(\d[a-z0-9]*)[""']?\s*[xX×]\s*[""']?(\d[a-z0-9]*)", RegexOptions.Compiled);
@@ -496,6 +559,13 @@ public class ProductCatalogService : BackgroundService
         // Convert "A-" cross-section separator (AI extraction artifact) to "x".
         // Only fires when preceded by a digit-form token (never matches "a-36" grade).
         s = _aDimSep.Replace(s, "$1 x ");
+
+        // Strip trailing length specification before dimSeparator runs.
+        // Vendor strings often end with " x 20'" or " x 144\"" for the cut length.
+        // Without this, the dimSeparator absorbs the length into the beam designation
+        // token (e.g. "mc6x16d3 x 20'" → "mc6x16d3x20d0") causing catalog mismatches.
+        // Only strips when a foot/inch mark is present so bare cross-section dims are kept.
+        s = _trailingLengthSpec.Replace(s, "");
 
         // Combine cross-section dimensions; bare integers normalised to "Nd0".
         s = _dimSeparator.Replace(s, m =>

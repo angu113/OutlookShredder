@@ -8,17 +8,27 @@ namespace OutlookShredder.Proxy.Controllers;
 public class CatalogController(ProductCatalogService catalog, SharePointService sp) : ControllerBase
 {
     /// <summary>
-    /// GET /api/catalog — lists the products currently loaded in the in-memory cache,
-    /// plus cache status info.
+    /// GET /api/catalog — lists the products currently loaded in the in-memory cache.
+    /// Add ?detail=true to include searchKeys alongside product names.
+    /// Add ?search=foo to filter by substring (case-insensitive).
     /// </summary>
     [HttpGet]
-    public IActionResult GetAll() => Ok(new
+    public IActionResult GetAll([FromQuery] bool detail = false, [FromQuery] string? search = null)
     {
-        count       = catalog.CachedNames.Count,
-        lastRefresh = catalog.LastRefreshAt,
-        lastError   = catalog.LastError,
-        products    = catalog.CachedNames,
-    });
+        var entries = catalog.CachedEntries;
+        if (!string.IsNullOrWhiteSpace(search))
+            entries = entries.Where(e => e.Name.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        return Ok(new
+        {
+            count       = catalog.CachedNames.Count,
+            lastRefresh = catalog.LastRefreshAt,
+            lastError   = catalog.LastError,
+            products    = detail
+                ? (object)entries.Select(e => new { e.Name, e.SearchKey })
+                : entries.Select(e => e.Name),
+        });
+    }
 
     /// <summary>
     /// POST /api/catalog/refresh — forces an immediate cache refresh.
@@ -86,5 +96,17 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
             return NotFound(new { raw = name, match = (string?)null });
 
         return Ok(new { raw = name, match = match.Value.Name, searchKey = match.Value.SearchKey });
+    }
+
+    /// <summary>
+    /// GET /api/catalog/diagnose?name=foo&amp;top=10 — shows tokenisation and top-N match scores.
+    /// Use to debug why a vendor string matched (or didn't match) the expected catalog entry.
+    /// </summary>
+    [HttpGet("diagnose")]
+    public IActionResult Diagnose([FromQuery] string? name, [FromQuery] int top = 10)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return BadRequest("Provide a ?name= query parameter.");
+        return Ok(catalog.Diagnose(name, top));
     }
 }
