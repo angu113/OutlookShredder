@@ -71,6 +71,13 @@ public class MailPollerService : BackgroundService
     private static readonly Regex ExcessiveNewlineRegex =
         new(@"\n{3,}", RegexOptions.Compiled);
 
+    // Strips the quoted original-message thread from a supplier reply body before sending
+    // to AI. Outlook appends "-----Original Message-----" when replying inline; without
+    // stripping, Claude reads the RFQ product list from the original message and creates
+    // ghost rows for all requested items even when the supplier provided no prices.
+    private static readonly Regex QuotedThreadRegex =
+        new(@"[\r\n][\s]*-{4,}[\s]*[Oo]riginal [Mm]essage[\s]*-{4,}", RegexOptions.Compiled);
+
     // Sliding-window rate limiter — tracks timestamps of recent AI calls.
     private readonly Queue<DateTimeOffset> _aiCallTimestamps = new();
     private readonly SemaphoreSlim         _rateLimitLock    = new(1, 1);
@@ -362,6 +369,12 @@ public class MailPollerService : BackgroundService
     private static bool IsMApiEntryId(string messageId) =>
         messageId.Length >= 64 &&
         messageId.All(c => (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'));
+
+    private static string StripQuotedThread(string body)
+    {
+        var m = QuotedThreadRegex.Match(body);
+        return m.Success ? body[..m.Index].TrimEnd() : body;
+    }
 
     /// <summary>
     /// Triggers an immediate full scan of all unprocessed inbox messages (no lookback limit).
@@ -667,9 +680,10 @@ public class MailPollerService : BackgroundService
         else if (!hasAttachment || msg.Id is null)
         {
             // No attachments — extract pricing from body; always write at least one row.
+            var extractBody = StripQuotedThread(body);
             supplierUnknown = await RunExtractionAsync(new ExtractRequest
             {
-                Content                = body[..Math.Min(body.Length, 12_000)],
+                Content                = extractBody[..Math.Min(extractBody.Length, 12_000)],
                 EmailBody              = body,
                 SourceType             = "body",
                 JobRefs                = jobRefs,
@@ -756,9 +770,10 @@ public class MailPollerService : BackgroundService
             // No recognisable attachment format — fall back to body extraction.
             if (!processedAny && !ct.IsCancellationRequested)
             {
+                var extractBody = StripQuotedThread(body);
                 supplierUnknown = await RunExtractionAsync(new ExtractRequest
                 {
-                    Content              = body[..Math.Min(body.Length, 12_000)],
+                    Content              = extractBody[..Math.Min(extractBody.Length, 12_000)],
                     EmailBody            = body,
                     SourceType           = "body",
                     JobRefs              = jobRefs,
