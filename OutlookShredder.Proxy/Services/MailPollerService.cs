@@ -1037,14 +1037,17 @@ public class MailPollerService : BackgroundService
                         .Select(r => r.Mspc!)
                         .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                    // Null out any productSearchKey that doesn't exist in the catalog at all —
-                    // the AI hallucinated an MSPC that isn't real. A valid catalog entry is
-                    // accepted even if the RLI consistency check stripped it from validMspcs
-                    // (e.g. user edited the RFQ name after catalog selection — the MSPC is still
-                    // correct and the AI's match is better than falling back to null).
+                    // Null out productSearchKey only when the AI hallucinated an MSPC —
+                    // i.e., it's not in the catalog AND it wasn't one of the RLI MSPCs we
+                    // provided as context. If the AI returned an MSPC from our RLI context,
+                    // it's not hallucinating; trust it even if the catalog doesn't have it
+                    // (the catalog may be incomplete — the MSPC came from the user's RFQ).
                     foreach (var p in products.Where(p => !string.IsNullOrEmpty(p.ProductSearchKey)))
                     {
-                        if (_catalog.FindBySearchKey(p.ProductSearchKey) is null)
+                        var inCatalog = _catalog.FindBySearchKey(p.ProductSearchKey) is not null;
+                        var inRli     = validMspcs.Contains(p.ProductSearchKey!);
+
+                        if (!inCatalog && !inRli)
                         {
                             _log.LogWarning(
                                 "[Mail] RLI drift: AI returned productSearchKey '{Key}' for '{Name}' " +
@@ -1052,7 +1055,14 @@ public class MailPollerService : BackgroundService
                                 p.ProductSearchKey, p.ProductName);
                             p.ProductSearchKey = null;
                         }
-                        else if (!validMspcs.Contains(p.ProductSearchKey!))
+                        else if (!inCatalog && inRli)
+                        {
+                            _log.LogWarning(
+                                "[Mail] RLI MSPC not in catalog: AI returned '{Key}' for '{Name}' — " +
+                                "trusting RLI match but CatalogProductName will be blank (catalog gap)",
+                                p.ProductSearchKey, p.ProductName);
+                        }
+                        else if (!inRli)
                         {
                             _log.LogWarning(
                                 "[Mail] RLI off-list: AI returned productSearchKey '{Key}' for '{Name}' " +
