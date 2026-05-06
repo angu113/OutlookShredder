@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services;
 
 namespace OutlookShredder.Proxy.Controllers;
@@ -38,5 +39,41 @@ public class TestController(RfqNotificationService notify, CustomerCacheService 
 
         notify.NotifyIncomingCall(callerName, callerPhone, bpName, popupMessage, contactName);
         return Ok(new { fired = true, callerName, callerPhone, bpName, popupMessage, contactName });
+    }
+
+    /// <summary>
+    /// POST /api/test/erp-doc — fires an ErpDocument bus event as if the file watcher
+    /// processed a new ERP PDF.  Triggers GigaBite to restore and take focus.
+    /// </summary>
+    [HttpPost("erp-doc")]
+    public IActionResult ErpDoc(
+        [FromQuery] string documentNumber = "TEST-001",
+        [FromQuery] string customerName   = "Test Customer",
+        [FromQuery] string documentType   = "PickingSlip")
+    {
+        notify.NotifyRfqProcessed(new RfqProcessedNotification { EventType = "ErpDocument" });
+        return Ok(new { fired = true, documentNumber, customerName, documentType });
+    }
+
+    /// <summary>
+    /// POST /api/test/supplier-response — fires an SR bus event as if a supplier email
+    /// was processed.  Triggers the RFQ tab to refresh and show a toast.
+    /// </summary>
+    [HttpPost("supplier-response")]
+    public IActionResult SupplierResponse(
+        [FromQuery] string rfqId        = "TEST01",
+        [FromQuery] string supplierName = "Test Supplier",
+        [FromQuery] string product      = "Test Product",
+        [FromQuery] double totalPrice   = 999.99)
+    {
+        notify.NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType    = "SR",
+            RfqId        = rfqId,
+            SupplierName = supplierName,
+            MessageId    = $"test-{Guid.NewGuid():N}",
+            Products     = [new RfqNotificationProduct { Name = product, TotalPrice = (double)totalPrice }],
+        });
+        return Ok(new { fired = true, rfqId, supplierName, product, totalPrice });
     }
 }
