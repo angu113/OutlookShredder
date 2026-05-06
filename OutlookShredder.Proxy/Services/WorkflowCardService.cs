@@ -138,9 +138,14 @@ public class WorkflowCardService : IHostedService
             ErpSpItemId    = erpSpItemId,
         }, ct);
 
-        // Delivery: only when delivery method is not pickup
+        // Delivery: only when delivery method is positively not a pickup variant.
+        // Treat null/unknown as pickup (conservative — avoids phantom Delivery cards).
         var dm = extraction.DeliveryMethod?.Trim();
-        if (dm is not null && !dm.Equals("Pickup", StringComparison.OrdinalIgnoreCase))
+        bool isPickup = string.IsNullOrEmpty(dm) ||
+                        dm.Contains("pickup", StringComparison.OrdinalIgnoreCase) ||
+                        dm.Contains("will call", StringComparison.OrdinalIgnoreCase) ||
+                        dm.Contains("walk", StringComparison.OrdinalIgnoreCase);
+        if (!isPickup)
         {
             await CreateAsync(new CreateWorkflowCardRequest
             {
