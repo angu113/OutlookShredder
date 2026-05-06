@@ -6,7 +6,7 @@ namespace OutlookShredder.Proxy.Controllers;
 /// <summary>Dev-only helpers for triggering events without real hardware/mail.</summary>
 [ApiController]
 [Route("api/test")]
-public class TestController(RfqNotificationService notify, SharePointService sp) : ControllerBase
+public class TestController(RfqNotificationService notify, CustomerCacheService crmCache) : ControllerBase
 {
     /// <summary>
     /// POST /api/test/zoom-call — fires an IncomingCall bus event as if Zoom detected an
@@ -27,12 +27,12 @@ public class TestController(RfqNotificationService notify, SharePointService sp)
         if (bpName is null && contactName is null && popupMessage is null
             && !string.IsNullOrWhiteSpace(callerPhone))
         {
-            var crm = await sp.LookupCustomerByPhoneAsync(callerPhone, ct);
+            var crm = crmCache.LookupByPhone(callerPhone);
             if (crm is not null)
             {
-                bpName      = crm.BusinessPartner;
+                bpName       = crm.BusinessPartner;
                 popupMessage = crm.PopupMessage;
-                contactName = crm.ContactName;
+                contactName  = crm.ContactName;
             }
         }
 

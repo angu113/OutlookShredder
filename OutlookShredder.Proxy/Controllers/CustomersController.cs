@@ -74,7 +74,7 @@ public class CustomersController(
         if (string.IsNullOrWhiteSpace(phone))
             return BadRequest("phone query parameter is required");
 
-        var result = await sp.LookupCustomerByPhoneAsync(phone, ct);
+        var result = crmCache.LookupByPhone(phone);
         if (result is null) return NotFound();
         return Ok(result);
     }
