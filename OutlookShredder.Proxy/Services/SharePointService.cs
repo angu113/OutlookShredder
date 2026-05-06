@@ -8043,6 +8043,43 @@ public class SharePointService
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].DeleteAsync(cancellationToken: ct);
     }
 
+    /// <summary>Patches BpName/ContactName/PopupMessage on every PhoneCallLog row matching the given phone number.</summary>
+    public async Task UpdateCallLogCrmByPhoneAsync(
+        string phone, string? bpName, string? contactName, string? popupMessage,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateCallLogListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Filter  = $"fields/CallerPhone eq '{phone.Replace("'", "''")}'";
+                req.QueryParameters.Select  = ["id"];
+                req.QueryParameters.Expand  = ["fields($select=id)"];
+                req.QueryParameters.Top     = 200;
+            }, ct);
+
+        if (items?.Value is null) return;
+
+        var fields = new Microsoft.Graph.Models.FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["BpName"]       = bpName,
+                ["ContactName"]  = contactName,
+                ["PopupMessage"] = popupMessage,
+            }
+        };
+
+        foreach (var item in items.Value)
+        {
+            if (item.Id is null) continue;
+            await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                .PatchAsync(fields, cancellationToken: ct);
+        }
+    }
+
     // ── Messages list ─────────────────────────────────────────────────────────
 
     private async Task<string> GetOrCreateMessagesListIdAsync(CancellationToken ct = default)

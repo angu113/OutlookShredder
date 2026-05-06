@@ -68,6 +68,28 @@ public class PhoneController : ControllerBase
             return StatusCode(500, new { error = ex.Message });
         }
     }
+
+    /// <summary>Patches BpName/ContactName/PopupMessage on all call log entries for a given phone number.</summary>
+    [HttpPatch("call-log/update-crm")]
+    public async Task<IActionResult> UpdateCrm(
+        [FromQuery] string phone,
+        [FromBody] UpdateCrmRequest req,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(phone))
+            return BadRequest(new { error = "phone is required" });
+        try
+        {
+            await _sp.UpdateCallLogCrmByPhoneAsync(phone, req.BpName, req.ContactName, req.PopupMessage, ct);
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Phone] Failed to update CRM for phone {Phone}", phone);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
 }
 
 public record UpdateNotesRequest(string? Notes);
+public record UpdateCrmRequest(string? BpName, string? ContactName, string? PopupMessage);
