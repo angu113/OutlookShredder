@@ -46,7 +46,7 @@ public class WorkflowCardService : IHostedService
     public async Task<List<WorkflowCard>> GetAllAsync()
     {
         await _lock.WaitAsync();
-        try { return [.._cache]; }
+        try { return [.._cache.Where(c => !c.IsCompleted)]; }
         finally { _lock.Release(); }
     }
 
@@ -127,16 +127,28 @@ public class WorkflowCardService : IHostedService
 
         var today = DateOnly.FromDateTime(DateTime.Today).ToString("yyyy-MM-dd");
 
-        // Processing: always for picking slips
-        await CreateAsync(new CreateWorkflowCardRequest
+        var docNum = extraction.DocumentNumber ?? "";
+
+        // Guard: skip if a non-completed card already exists for this doc + tab
+        bool hasProcessing, hasDelivery;
+        await _lock.WaitAsync(ct);
+        try
         {
-            DocumentNumber = extraction.DocumentNumber ?? "",
-            CustomerName   = extraction.CustomerName,
-            DocumentType   = extraction.DocumentType,
-            Tab            = "Processing",
-            AssignedDate   = today,
-            ErpSpItemId    = erpSpItemId,
-        }, ct);
+            hasProcessing = _cache.Any(c => c.DocumentNumber == docNum && c.Tab == "Processing" && !c.IsCompleted);
+            hasDelivery   = _cache.Any(c => c.DocumentNumber == docNum && c.Tab == "Delivery"   && !c.IsCompleted);
+        }
+        finally { _lock.Release(); }
+
+        if (!hasProcessing)
+            await CreateAsync(new CreateWorkflowCardRequest
+            {
+                DocumentNumber = docNum,
+                CustomerName   = extraction.CustomerName,
+                DocumentType   = extraction.DocumentType,
+                Tab            = "Processing",
+                AssignedDate   = today,
+                ErpSpItemId    = erpSpItemId,
+            }, ct);
 
         // Delivery: only when delivery method is positively not a pickup variant.
         // Treat null/unknown as pickup (conservative — avoids phantom Delivery cards).
@@ -145,11 +157,11 @@ public class WorkflowCardService : IHostedService
                         dm.Contains("pickup", StringComparison.OrdinalIgnoreCase) ||
                         dm.Contains("will call", StringComparison.OrdinalIgnoreCase) ||
                         dm.Contains("walk", StringComparison.OrdinalIgnoreCase);
-        if (!isPickup)
+        if (!isPickup && !hasDelivery)
         {
             await CreateAsync(new CreateWorkflowCardRequest
             {
-                DocumentNumber = extraction.DocumentNumber ?? "",
+                DocumentNumber = docNum,
                 CustomerName   = extraction.CustomerName,
                 DocumentType   = extraction.DocumentType,
                 Tab            = "Delivery",

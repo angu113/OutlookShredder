@@ -11,6 +11,7 @@ public class WorkflowCard
     public int     SortOrder      { get; set; }
     public string? Notes          { get; set; }
     public string? ErpSpItemId    { get; set; }
+    public bool    IsCompleted    { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -30,4 +31,5 @@ public class UpdateWorkflowCardRequest
     public string? AssignedDate { get; set; }
     public int?    SortOrder    { get; set; }
     public string? Notes        { get; set; }
+    public bool?   IsCompleted  { get; set; }
 }

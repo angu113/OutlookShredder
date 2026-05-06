@@ -8390,6 +8390,7 @@ public class SharePointService
             ("CustomerName", "text"),
             ("DocumentType", "text"),
             ("ErpSpItemId",  "text"),
+            ("IsCompleted",  "boolean"),
         };
 
         foreach (var (name, type) in schema)
@@ -8397,9 +8398,10 @@ public class SharePointService
             if (byName.ContainsKey(name)) continue;
             var def = type switch
             {
-                "number" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Number = new Microsoft.Graph.Models.NumberColumn() },
-                "note"   => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text   = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
-                _        => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text   = new Microsoft.Graph.Models.TextColumn() },
+                "number"  => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Number  = new Microsoft.Graph.Models.NumberColumn() },
+                "note"    => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text    = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
+                "boolean" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean = new Microsoft.Graph.Models.BooleanColumn() },
+                _         => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text    = new Microsoft.Graph.Models.TextColumn() },
             };
             await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
             _log.LogInformation("[SP] Created WorkflowCards column '{Col}'", name);
@@ -8452,6 +8454,10 @@ public class SharePointService
                 CustomerName   = d.TryGetValue("CustomerName", out var cn) ? cn?.ToString() : null,
                 DocumentType   = d.TryGetValue("DocumentType", out var dt) ? dt?.ToString() : null,
                 ErpSpItemId    = d.TryGetValue("ErpSpItemId",  out var ei) ? ei?.ToString() : null,
+                IsCompleted    = d.TryGetValue("IsCompleted",  out var ic) &&
+                                 (ic is System.Text.Json.JsonElement icEl
+                                     ? icEl.ValueKind == System.Text.Json.JsonValueKind.True
+                                     : ic is bool b && b),
             });
         }
         return cards;
@@ -8484,6 +8490,7 @@ public class SharePointService
                         ["CustomerName"] = card.CustomerName,
                         ["DocumentType"] = card.DocumentType,
                         ["ErpSpItemId"]  = card.ErpSpItemId,
+                        ["IsCompleted"]  = card.IsCompleted,
                     }
                 }
             }, cancellationToken: ct);
@@ -8503,6 +8510,7 @@ public class SharePointService
         if (req.AssignedDate is not null) fields["AssignedDate"] = req.AssignedDate;
         if (req.SortOrder    is not null) fields["SortOrder"]    = (double)req.SortOrder.Value;
         if (req.Notes        is not null) fields["Notes"]        = req.Notes;
+        if (req.IsCompleted  is not null) fields["IsCompleted"]  = req.IsCompleted.Value;
 
         if (fields.Count == 0) return;
 
