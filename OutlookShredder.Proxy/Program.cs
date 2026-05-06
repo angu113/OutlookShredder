@@ -91,6 +91,8 @@ try
     builder.Services.AddSingleton<AiServiceFactory>();
     builder.Services.AddSingleton<SupplierCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());
+    builder.Services.AddSingleton<CustomerCacheService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<CustomerCacheService>());
     builder.Services.AddSingleton<ProductCatalogService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<SharePointService>();

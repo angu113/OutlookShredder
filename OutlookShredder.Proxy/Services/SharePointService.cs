@@ -7513,6 +7513,37 @@ public class SharePointService
         return result;
     }
 
+    /// <summary>Reads all business partners with their popup messages for the CRM cache.</summary>
+    public async Task<List<CustomerBpRow>> ReadAllCustomersAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+        var result = new List<CustomerBpRow>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (!string.IsNullOrWhiteSpace(name))
+                    result.Add(new CustomerBpRow(name, GetStr(d, "PopupMessage")));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        return result;
+    }
+
     public async Task<(int Added, int Updated, int Skipped)> UpsertBusinessPartnersAsync(
         IReadOnlyList<CustomerImportService.BpRow> rows, CancellationToken ct = default)
     {

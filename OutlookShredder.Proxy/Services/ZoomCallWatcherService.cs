@@ -76,6 +76,7 @@ public class ZoomCallWatcherService : BackgroundService
     private readonly IConfiguration                  _config;
     private readonly RfqNotificationService          _notify;
     private readonly SharePointService               _sp;
+    private readonly CustomerCacheService            _crmCache;
     // Held as a field so the GC never collects the delegate while the hook is live
     private WinEventProc? _winEventCallback;
 
@@ -83,12 +84,14 @@ public class ZoomCallWatcherService : BackgroundService
         ILogger<ZoomCallWatcherService> log,
         IConfiguration config,
         RfqNotificationService notify,
-        SharePointService sp)
+        SharePointService sp,
+        CustomerCacheService crmCache)
     {
-        _log    = log;
-        _config = config;
-        _notify = notify;
-        _sp     = sp;
+        _log      = log;
+        _config   = config;
+        _crmCache = crmCache;
+        _notify   = notify;
+        _sp       = sp;
     }
 
     protected override Task ExecuteAsync(CancellationToken ct)
@@ -209,17 +212,10 @@ public class ZoomCallWatcherService : BackgroundService
                         CustomerLookupResult? crm = null;
                         if (!string.IsNullOrWhiteSpace(callerPhone))
                         {
-                            try
-                            {
-                                crm = await _sp.LookupCustomerByPhoneAsync(callerPhone, CancellationToken.None);
-                                if (crm is not null)
-                                    _log.LogInformation("[Zoom] CRM match — bp='{Bp}' contact='{Contact}'",
-                                        crm.BusinessPartner, crm.ContactName);
-                            }
-                            catch (Exception ex)
-                            {
-                                _log.LogWarning(ex, "[Zoom] CRM lookup failed for phone={Phone}", callerPhone);
-                            }
+                            crm = _crmCache.LookupByPhone(callerPhone);
+                            if (crm is not null)
+                                _log.LogInformation("[Zoom] CRM match (cache) — bp='{Bp}' contact='{Contact}'",
+                                    crm.BusinessPartner, crm.ContactName);
                         }
                         // Write call log first to get the SP item ID, then notify
                         string spItemId = "";

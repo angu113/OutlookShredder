@@ -7,7 +7,8 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api/customers")]
 public class CustomersController(
     CustomerImportService importer,
-    SharePointService     sp) : ControllerBase
+    SharePointService     sp,
+    CustomerCacheService  crmCache) : ControllerBase
 {
     /// <summary>
     /// POST /api/customers/setup-lists — provisions Customers + CustomerContacts SP lists.
@@ -82,20 +83,18 @@ public class CustomersController(
     /// GET /api/customers/contacts — returns all CustomerContacts rows (CustomerName, ContactName, Phone).
     /// </summary>
     [HttpGet("contacts")]
-    public async Task<IActionResult> GetContacts(CancellationToken ct)
+    public IActionResult GetContacts()
     {
-        var rows = await sp.ReadAllContactsAsync(ct);
-        return Ok(rows);
+        return Ok(crmCache.GetAllContacts());
     }
 
     /// <summary>
     /// GET /api/customers/business-partners — returns all BP names from the Customers list, sorted.
     /// </summary>
     [HttpGet("business-partners")]
-    public async Task<IActionResult> GetBusinessPartners(CancellationToken ct)
+    public IActionResult GetBusinessPartners()
     {
-        var names = await sp.ReadAllBusinessPartnersAsync(ct);
-        return Ok(names);
+        return Ok(crmCache.GetAllPartnerNames());
     }
 
     /// <summary>
@@ -115,6 +114,7 @@ public class CustomersController(
             return BadRequest(new { error = $"Invalid phone number: {req.Phone}" });
 
         await sp.AddContactDirectAsync(req.CustomerName, req.ContactName, phone, req.IsErpOrphan, ct);
+        crmCache.Invalidate();
         return Ok(new { customerName = req.CustomerName, contactName = req.ContactName, phone, isErpOrphan = req.IsErpOrphan });
     }
 
