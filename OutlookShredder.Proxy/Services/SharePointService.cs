@@ -7429,6 +7429,7 @@ public class SharePointService
                 ("CustomerName", "text"),
                 ("ContactName",  "text"),
                 ("Phone",        "text"),
+                ("IsErpOrphan",  "boolean"),
             ]),
         };
 
@@ -7442,6 +7443,64 @@ public class SharePointService
             siteId, "Customers", "Title");
 
         return results;
+    }
+
+    public async Task AddContactDirectAsync(
+        string customerName, string contactName, string phone, bool isErpOrphan,
+        CancellationToken ct = default)
+    {
+        var siteId     = await GetSiteIdAsync();
+        var contactsId = await GetCustomerContactsListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[contactsId].Items
+            .PostAsync(new ListItem
+            {
+                Fields = new FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["Title"]        = contactName,
+                        ["CustomerName"] = customerName,
+                        ["ContactName"]  = contactName,
+                        ["Phone"]        = phone,
+                        ["IsErpOrphan"]  = isErpOrphan,
+                    }
+                }
+            }, cancellationToken: ct);
+
+        _log.LogInformation("[SP] AddContactDirect: ({Bp}, {Contact}, {Phone}, orphan={Orphan})",
+            customerName, contactName, phone, isErpOrphan);
+    }
+
+    public async Task<List<string>> ReadAllBusinessPartnersAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+        var result = new List<string>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (!string.IsNullOrWhiteSpace(name))
+                    result.Add(name);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+
+        result.Sort(StringComparer.OrdinalIgnoreCase);
+        return result;
     }
 
     public async Task<(int Added, int Updated, int Skipped)> UpsertBusinessPartnersAsync(

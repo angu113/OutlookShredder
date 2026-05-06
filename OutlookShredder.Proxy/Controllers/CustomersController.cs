@@ -89,6 +89,36 @@ public class CustomersController(
     }
 
     /// <summary>
+    /// GET /api/customers/business-partners — returns all BP names from the Customers list, sorted.
+    /// </summary>
+    [HttpGet("business-partners")]
+    public async Task<IActionResult> GetBusinessPartners(CancellationToken ct)
+    {
+        var names = await sp.ReadAllBusinessPartnersAsync(ct);
+        return Ok(names);
+    }
+
+    /// <summary>
+    /// POST /api/customers/contacts/add — adds a single contact row directly (bypassing CSV import).
+    /// isErpOrphan=true marks contacts added manually so they can be reported separately.
+    /// </summary>
+    [HttpPost("contacts/add")]
+    public async Task<IActionResult> AddContact(
+        [FromBody] AddContactRequest req,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.CustomerName) || string.IsNullOrWhiteSpace(req.ContactName))
+            return BadRequest("customerName and contactName are required.");
+
+        var phone = CustomerImportService.NormalizePhone(req.Phone);
+        if (phone is null)
+            return BadRequest(new { error = $"Invalid phone number: {req.Phone}" });
+
+        await sp.AddContactDirectAsync(req.CustomerName, req.ContactName, phone, req.IsErpOrphan, ct);
+        return Ok(new { customerName = req.CustomerName, contactName = req.ContactName, phone, isErpOrphan = req.IsErpOrphan });
+    }
+
+    /// <summary>
     /// DELETE /api/customers/contact?bp=...&amp;contact=...&amp;phone=... — removes a specific
     /// (CustomerName, ContactName, Phone) triple from CustomerContacts.
     /// Returns 404 if no matching row is found.
@@ -115,3 +145,5 @@ public class CustomersController(
         return ms.Length == 0 ? null : System.Text.Encoding.UTF8.GetString(ms.ToArray());
     }
 }
+
+public record AddContactRequest(string CustomerName, string ContactName, string Phone, bool IsErpOrphan = false);
