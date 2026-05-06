@@ -129,7 +129,12 @@ public class FileWatcherService : BackgroundService
             await sem.WaitAsync(ct);
             _ = Task.Run(async () =>
             {
-                try { await ProcessFileAsync(path, ct); }
+                try
+                {
+                    var wasErp = await ProcessFileAsync(path, ct);
+                    if (wasErp)
+                        _notify.NotifyRfqProcessed(new RfqProcessedNotification { EventType = "ErpDocument" });
+                }
                 catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
                 finally { sem.Release(); }
             }, ct);
@@ -211,6 +216,7 @@ public class FileWatcherService : BackgroundService
                 {
                     result.ErpDocuments++;
                     result.ProcessedFiles.Add(Path.GetFileName(file));
+                    _notify.NotifyRfqProcessed(new RfqProcessedNotification { EventType = "ErpDocument" });
                 }
                 else
                 {

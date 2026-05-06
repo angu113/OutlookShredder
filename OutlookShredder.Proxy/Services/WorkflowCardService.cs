@@ -93,6 +93,7 @@ public class WorkflowCardService : IHostedService
             if (req.AssignedDate is not null) card.AssignedDate = req.AssignedDate;
             if (req.SortOrder    is not null) card.SortOrder    = req.SortOrder.Value;
             if (req.Notes        is not null) card.Notes        = req.Notes;
+            if (req.IsCompleted  is not null) card.IsCompleted  = req.IsCompleted.Value;
 
             await _sp.UpdateWorkflowCardAsync(spItemId, req, ct);
             Publish("Updated", card);
