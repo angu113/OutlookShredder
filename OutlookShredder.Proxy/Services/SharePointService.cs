@@ -189,6 +189,15 @@ public class SharePointService
                 _log.LogInformation("[SP] SLI Created index: {Status}", r.GetValueOrDefault("Created", "?"));
             });
 
+            // Provision all SP lists idempotently so they exist before any service uses them.
+            // Each call is a no-op if the list already exists; faults are logged and swallowed.
+            await TrySwallowAsync(async () => { await EnsureSupplierListsAsync(); _log.LogInformation("[SP] Supplier lists ensured"); });
+            await TrySwallowAsync(async () => { await EnsureErpDocumentsListAsync(ct); _log.LogInformation("[SP] ERP documents list ensured"); });
+            await TrySwallowAsync(async () => { await EnsureCustomerListsAsync(ct); _log.LogInformation("[SP] Customer lists ensured"); });
+            await TrySwallowAsync(async () => { await EnsureCallLogListAsync(ct); _log.LogInformation("[SP] Call log list ensured"); });
+            await TrySwallowAsync(async () => { await EnsureMessagesListAsync(ct); _log.LogInformation("[SP] Messages list ensured"); });
+            await TrySwallowAsync(async () => { await EnsureWorkflowCardsListAsync(ct); _log.LogInformation("[SP] WorkflowCards list ensured"); });
+
             _log.LogInformation("[SP] Pre-warm complete");
         }
         catch (Exception ex)
@@ -8331,6 +8340,12 @@ public class SharePointService
 
     private string? _workflowCardsListId;
 
+    public async Task EnsureCallLogListAsync(CancellationToken ct = default)
+        => await GetOrCreateCallLogListIdAsync(ct);
+
+    public async Task EnsureMessagesListAsync(CancellationToken ct = default)
+        => await GetOrCreateMessagesListIdAsync(ct);
+
     public async Task EnsureWorkflowCardsListAsync(CancellationToken ct = default)
         => await GetOrCreateWorkflowCardsListIdAsync(ct);
 
@@ -8430,7 +8445,7 @@ public class SharePointService
                 SpItemId       = spId,
                 DocumentNumber = d.TryGetValue("Title",        out var t)  ? t?.ToString() ?? "" : "",
                 Tab            = d.TryGetValue("Tab",          out var tb) ? tb?.ToString() ?? "Processing" : "Processing",
-                AssignedDate   = d.TryGetValue("AssignedDate", out var ad) ? ad?.ToString() ?? "" : "",
+                AssignedDate   = d.TryGetValue("AssignedDate", out var ad) ? NormalizeDateString(ad?.ToString()) ?? "" : "",
                 SortOrder      = d.TryGetValue("SortOrder",    out var so) && so is System.Text.Json.JsonElement soEl
                                      ? (int)soEl.GetDouble() : 0,
                 Notes          = d.TryGetValue("Notes",        out var n)  ? n?.ToString() : null,
@@ -8440,6 +8455,13 @@ public class SharePointService
             });
         }
         return cards;
+    }
+
+    private static string? NormalizeDateString(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        if (DateTime.TryParse(s, out var dt)) return dt.ToString("yyyy-MM-dd");
+        return s;
     }
 
     public async Task<int> WriteWorkflowCardAsync(Models.WorkflowCard card, CancellationToken ct = default)
