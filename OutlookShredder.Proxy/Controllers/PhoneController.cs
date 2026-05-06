@@ -34,6 +34,22 @@ public class PhoneController : ControllerBase
         }
     }
 
+    /// <summary>Deletes a single call log entry by its SP item ID.</summary>
+    [HttpDelete("call-log/{spItemId}")]
+    public async Task<IActionResult> DeleteCallLogEntry(string spItemId, CancellationToken ct = default)
+    {
+        try
+        {
+            await _sp.DeletePhoneCallLogItemAsync(spItemId, ct);
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Phone] Failed to delete call log entry {Id}", spItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     /// <summary>Updates the free-text notes on a call log entry.</summary>
     [HttpPatch("call-log/{spItemId}/notes")]
     public async Task<IActionResult> UpdateNotes(

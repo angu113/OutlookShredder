@@ -7976,6 +7976,14 @@ public class SharePointService
             }, cancellationToken: ct);
     }
 
+    /// <summary>Hard-deletes a single PhoneCallLog item by its SP item ID.</summary>
+    public async Task DeletePhoneCallLogItemAsync(string spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateCallLogListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].DeleteAsync(cancellationToken: ct);
+    }
+
     // ── Messages list ─────────────────────────────────────────────────────────
 
     private async Task<string> GetOrCreateMessagesListIdAsync(CancellationToken ct = default)
