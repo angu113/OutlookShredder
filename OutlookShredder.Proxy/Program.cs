@@ -101,9 +101,11 @@ try
     builder.Services.AddSingleton<MailPollerService>();
     builder.Services.AddSingleton<ErpAiService>();
     builder.Services.AddSingleton<CustomerImportService>();
+    builder.Services.AddSingleton<WorkflowCardService>();
     builder.Services.AddSingleton<FileWatcherService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<FileWatcherService>());
 
     builder.Services.AddSingleton<OutlookComPollerService>();

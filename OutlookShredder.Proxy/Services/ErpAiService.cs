@@ -59,6 +59,11 @@ public class ErpAiService
         NOTES
         Any payment terms, delivery instructions, or other notable text worth recording.
 
+        DELIVERY METHOD (picking slips only)
+        delivery_method: The delivery method printed on the picking slip, e.g. "Pickup", "UPS Ground",
+                         "Our Truck", "FedEx", etc. Leave null for non-picking-slip documents or if
+                         not present.
+
         Always set is_erp_document = true.
         Leave document_type and document_number as null — they are set from the filename automatically.
         """;
@@ -95,7 +100,8 @@ public class ErpAiService
                   }
                 }
               },
-              "notes": { "type": ["string","null"], "description": "Payment terms, delivery instructions, or other notable text." }
+              "notes":           { "type": ["string","null"], "description": "Payment terms, delivery instructions, or other notable text." },
+              "delivery_method": { "type": ["string","null"], "description": "Delivery method on picking slips, e.g. 'Pickup', 'UPS Ground', 'Our Truck'. Null for other document types." }
             }
           }
         }
@@ -130,7 +136,8 @@ public class ErpAiService
                 }
               }
             },
-            "notes": { "type": "string", "nullable": true }
+            "notes":           { "type": "string", "nullable": true },
+            "delivery_method": { "type": "string", "nullable": true }
           }
         }
         """).RootElement;

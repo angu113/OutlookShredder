@@ -6912,8 +6912,8 @@ public class SharePointService
             _log.LogInformation("[SP] Created ErpDocuments column '{Col}' ({Type})", name, type);
         }
 
-        // Ensure columns used in $filter queries are indexed — never use HonorNonIndexedQueries header.
-        foreach (var colName in new[] { "Title", "IsArchived" })
+        // Ensure columns used in $filter/$orderby queries are indexed — never use HonorNonIndexedQueries header.
+        foreach (var colName in new[] { "Title", "IsArchived", "ReceivedAt" })
         {
             if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
             if (col.Indexed == true) continue;
@@ -7201,12 +7201,13 @@ public class SharePointService
 
         if (daysBack.HasValue)
         {
-            var cutoff = DateTime.UtcNow.AddDays(-daysBack.Value).Date;
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-daysBack.Value);
             results = results.Where(r =>
-                DateTime.TryParse(r.DocumentDate, out var dt) && dt.Date >= cutoff).ToList();
+                DateTimeOffset.TryParse(r.ReceivedAt, out var dt) && dt >= cutoff).ToList();
         }
 
-        return [.. results.OrderByDescending(r => r.ReceivedAt)];
+        return [.. results.OrderByDescending(r =>
+            DateTimeOffset.TryParse(r.ReceivedAt, out var dt) ? dt : DateTimeOffset.MinValue)];
     }
 
     /// <summary>
@@ -8324,6 +8325,175 @@ public class SharePointService
             }
             catch (Exception ex) { _log.LogWarning(ex, "[SP] Failed to mark message {Id} read", item.Id); }
         }
+    }
+
+    // ── WorkflowCards ─────────────────────────────────────────────────────────
+
+    private string? _workflowCardsListId;
+
+    public async Task EnsureWorkflowCardsListAsync(CancellationToken ct = default)
+        => await GetOrCreateWorkflowCardsListIdAsync(ct);
+
+    private async Task<string> GetOrCreateWorkflowCardsListIdAsync(CancellationToken ct = default)
+    {
+        if (_workflowCardsListId is not null) return _workflowCardsListId;
+
+        var siteId    = await GetSiteIdAsync();
+        const string listName = "WorkflowCards";
+
+        var existing = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (existing?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+            _log.LogInformation("[SP] WorkflowCards list found: {Id}", listId);
+        }
+        else
+        {
+            var created = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new Microsoft.Graph.Models.ListInfo { Template = "genericList" }
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("WorkflowCards list creation returned no ID");
+            _log.LogInformation("[SP] Created WorkflowCards list: {Id}", listId);
+        }
+
+        var cols  = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var byName = (cols?.Value ?? [])
+            .Where(c => c.Name is not null)
+            .ToDictionary(c => c.Name!, c => c, StringComparer.OrdinalIgnoreCase);
+
+        var schema = new (string Name, string Type)[]
+        {
+            ("Tab",          "text"),
+            ("AssignedDate", "text"),
+            ("SortOrder",    "number"),
+            ("Notes",        "note"),
+            ("CustomerName", "text"),
+            ("DocumentType", "text"),
+            ("ErpSpItemId",  "text"),
+        };
+
+        foreach (var (name, type) in schema)
+        {
+            if (byName.ContainsKey(name)) continue;
+            var def = type switch
+            {
+                "number" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Number = new Microsoft.Graph.Models.NumberColumn() },
+                "note"   => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text   = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
+                _        => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text   = new Microsoft.Graph.Models.TextColumn() },
+            };
+            await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
+            _log.LogInformation("[SP] Created WorkflowCards column '{Col}'", name);
+        }
+
+        // Index AssignedDate + Tab for fast per-week queries
+        foreach (var colName in new[] { "AssignedDate", "Tab" })
+        {
+            if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
+            if (col.Indexed == true) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Microsoft.Graph.Models.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not index WorkflowCards column '{Col}'", colName); }
+        }
+
+        return _workflowCardsListId = listId;
+    }
+
+    public async Task<List<Models.WorkflowCard>> ReadWorkflowCardsAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        var cards = new List<Models.WorkflowCard>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Id is null) continue;
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            if (!int.TryParse(item.Id, out var spId)) continue;
+
+            cards.Add(new Models.WorkflowCard
+            {
+                SpItemId       = spId,
+                DocumentNumber = d.TryGetValue("Title",        out var t)  ? t?.ToString() ?? "" : "",
+                Tab            = d.TryGetValue("Tab",          out var tb) ? tb?.ToString() ?? "Processing" : "Processing",
+                AssignedDate   = d.TryGetValue("AssignedDate", out var ad) ? ad?.ToString() ?? "" : "",
+                SortOrder      = d.TryGetValue("SortOrder",    out var so) && so is System.Text.Json.JsonElement soEl
+                                     ? (int)soEl.GetDouble() : 0,
+                Notes          = d.TryGetValue("Notes",        out var n)  ? n?.ToString() : null,
+                CustomerName   = d.TryGetValue("CustomerName", out var cn) ? cn?.ToString() : null,
+                DocumentType   = d.TryGetValue("DocumentType", out var dt) ? dt?.ToString() : null,
+                ErpSpItemId    = d.TryGetValue("ErpSpItemId",  out var ei) ? ei?.ToString() : null,
+            });
+        }
+        return cards;
+    }
+
+    public async Task<int> WriteWorkflowCardAsync(Models.WorkflowCard card, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["Title"]        = card.DocumentNumber,
+                        ["Tab"]          = card.Tab,
+                        ["AssignedDate"] = card.AssignedDate,
+                        ["SortOrder"]    = (double)card.SortOrder,
+                        ["Notes"]        = card.Notes,
+                        ["CustomerName"] = card.CustomerName,
+                        ["DocumentType"] = card.DocumentType,
+                        ["ErpSpItemId"]  = card.ErpSpItemId,
+                    }
+                }
+            }, cancellationToken: ct);
+
+        if (item?.Id is null || !int.TryParse(item.Id, out var id))
+            throw new Exception("WorkflowCards write returned no item ID");
+        return id;
+    }
+
+    public async Task UpdateWorkflowCardAsync(int spItemId, Models.UpdateWorkflowCardRequest req, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
+
+        var fields = new Dictionary<string, object?>();
+        if (req.Tab          is not null) fields["Tab"]          = req.Tab;
+        if (req.AssignedDate is not null) fields["AssignedDate"] = req.AssignedDate;
+        if (req.SortOrder    is not null) fields["SortOrder"]    = (double)req.SortOrder.Value;
+        if (req.Notes        is not null) fields["Notes"]        = req.Notes;
+
+        if (fields.Count == 0) return;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+    }
+
+    public async Task DeleteWorkflowCardAsync(int spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()]
+            .DeleteAsync(cancellationToken: ct);
     }
 }
 

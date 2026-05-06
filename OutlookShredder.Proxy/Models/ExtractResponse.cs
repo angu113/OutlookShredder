@@ -46,6 +46,10 @@ public class RfqProcessedNotification
     public string? ContactName       { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". SharePoint item ID of the call log entry.</summary>
     public string? CallLogSpItemId   { get; set; }
+    /// <summary>Populated when EventType = "WorkflowCard".</summary>
+    public WorkflowCard? WorkflowCard     { get; set; }
+    public string?       WorkflowAction   { get; set; }
+    public int?          WorkflowDeletedId { get; set; }
     // Populated only when EventType = "Message"
     public string? MsgFrom           { get; set; }
     public string? MsgTo             { get; set; }
@@ -80,6 +84,7 @@ public class ErpBusRecord
     public string? SourceUser        { get; set; }
     /// <summary>JSON array of ErpAnnotation — carried on bus messages so the Focus view can display stamps without a round-trip.</summary>
     public string? UserAnnotations   { get; set; }
+    public string? DeliveryMethod    { get; set; }
 }
 
 public class RfqNotificationProduct

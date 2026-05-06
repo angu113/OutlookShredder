@@ -31,6 +31,9 @@ public class ErpExtraction
     public List<ErpLineItem> LineItems { get; set; } = [];
 
     public string? Notes { get; set; }
+
+    [JsonPropertyName("delivery_method")]
+    public string? DeliveryMethod { get; set; }
 }
 
 public class ErpLineItem

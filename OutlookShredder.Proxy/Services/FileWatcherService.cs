@@ -27,6 +27,7 @@ public class FileWatcherService : BackgroundService
     private readonly ErpAiService _ai;
     private readonly SharePointService _sp;
     private readonly RfqNotificationService _notify;
+    private readonly WorkflowCardService _workflow;
     private readonly ILogger<FileWatcherService> _log;
 
     // Files waiting to be processed — Channel gives immediate wake-up vs. poll loop
@@ -53,13 +54,15 @@ public class FileWatcherService : BackgroundService
         ErpAiService ai,
         SharePointService sp,
         RfqNotificationService notify,
+        WorkflowCardService workflow,
         ILogger<FileWatcherService> log)
     {
-        _config  = config;
-        _ai      = ai;
-        _sp      = sp;
-        _notify  = notify;
-        _log     = log;
+        _config   = config;
+        _ai       = ai;
+        _sp       = sp;
+        _notify   = notify;
+        _workflow = workflow;
+        _log      = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -437,6 +440,14 @@ public class FileWatcherService : BackgroundService
         }
 
         _log.LogInformation("[FW] Timing {File}: sp-write={Ms}ms → notifying", fileName, sw.ElapsedMilliseconds);
+
+        // Auto-create workflow card for picking slips (fire-and-forget, non-fatal)
+        if (extraction.DocumentType == "PickingSlip")
+            _ = Task.Run(async () =>
+            {
+                try { await _workflow.AutoCreateFromPickingSlipAsync(extraction, spItemId, CancellationToken.None); }
+                catch (Exception ex) { _log.LogWarning(ex, "[FW] Workflow card creation failed for {File}", fileName); }
+            });
 
         // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
         // Other machines that reload later get the SP URL from the follow-up notification below.
