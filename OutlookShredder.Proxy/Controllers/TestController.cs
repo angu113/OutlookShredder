@@ -43,7 +43,7 @@ public class TestController(RfqNotificationService notify, CustomerCacheService 
 
     /// <summary>
     /// POST /api/test/erp-doc — fires an ErpDocument bus event as if the file watcher
-    /// processed a new ERP PDF.  Triggers GigaBite to restore and take focus.
+    /// processed a new ERP PDF.  Triggers the Trigger window to restore and take focus.
     /// </summary>
     [HttpPost("erp-doc")]
     public IActionResult ErpDoc(
