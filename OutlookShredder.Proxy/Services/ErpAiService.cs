@@ -65,10 +65,13 @@ public class ErpAiService
                          not present.
 
         DELIVERY / SHIPPING ADDRESS
-        delivery_address: The full delivery or shipping address shown on the document (e.g. under
-                          "Ship To", "Deliver To", "Delivery Address"). Return as a compact single-line
-                          string, e.g. "123 Main St, Hackensack NJ 07601". On picking slips take the
-                          address block under "Ship To:". Leave null if no delivery address is present.
+        delivery_address: The delivery or shipping address, using this priority order:
+                          1. PREFERRED: If the text "Delivery Services" or "Delivery Service" appears
+                             on the document, use the address block immediately following those words.
+                          2. FALLBACK: Otherwise use the address under "Ship To", "Shipping Address",
+                             or "Deliver To".
+                          Return as a compact single-line string, e.g. "123 Main St, Hackensack NJ 07601".
+                          Leave null if no delivery address is found.
 
         Always set is_erp_document = true.
         Leave document_type and document_number as null — they are set from the filename automatically.
