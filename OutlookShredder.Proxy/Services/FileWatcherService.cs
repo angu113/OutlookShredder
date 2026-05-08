@@ -467,6 +467,7 @@ public class FileWatcherService : BackgroundService
             IsNew             = true,
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
+            DeliveryAddress   = extraction.DeliveryAddress,
         });
 
         _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (upload pending)",
@@ -494,6 +495,7 @@ public class FileWatcherService : BackgroundService
             IsNew             = false,  // update, not new — suppress auto-jump in Focus
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
+            DeliveryAddress   = extraction.DeliveryAddress,
         };
         _ = Task.Run(async () =>
         {

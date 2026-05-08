@@ -85,6 +85,7 @@ public class ErpBusRecord
     /// <summary>JSON array of ErpAnnotation — carried on bus messages so the Focus view can display stamps without a round-trip.</summary>
     public string? UserAnnotations   { get; set; }
     public string? DeliveryMethod    { get; set; }
+    public string? DeliveryAddress   { get; set; }
 }
 
 public class RfqNotificationProduct

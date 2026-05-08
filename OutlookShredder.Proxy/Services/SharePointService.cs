@@ -6905,6 +6905,7 @@ public class SharePointService
             ("LineItemsJson",    "note"),
             ("ExtractionLog",   "note"),
             ("UserAnnotations", "note"),
+            ("DeliveryAddress", "note"),
         };
 
         foreach (var (name, type) in schema)
@@ -6983,8 +6984,9 @@ public class SharePointService
             ["IsArchived"]     = false,
             ["SourceMachine"]  = sourceMachine,
             ["SourceUser"]     = sourceUser,
-            ["LineItemsJson"]  = lineItemsJson,
-            ["ExtractionLog"]  = System.Text.Json.JsonSerializer.Serialize(extraction),
+            ["LineItemsJson"]    = lineItemsJson,
+            ["ExtractionLog"]    = System.Text.Json.JsonSerializer.Serialize(extraction),
+            ["DeliveryAddress"]  = extraction.DeliveryAddress,
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
@@ -7171,7 +7173,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -7205,6 +7207,7 @@ public class SharePointService
                 SourceMachine     = Get("SourceMachine"),
                 SourceUser        = Get("SourceUser"),
                 UserAnnotations   = Get("UserAnnotations"),
+                DeliveryAddress   = Get("DeliveryAddress"),
             });
         }
 
@@ -8414,14 +8417,15 @@ public class SharePointService
 
         var schema = new (string Name, string Type)[]
         {
-            ("Tab",          "text"),
-            ("AssignedDate", "text"),
-            ("SortOrder",    "number"),
-            ("Notes",        "note"),
-            ("CustomerName", "text"),
-            ("DocumentType", "text"),
-            ("ErpSpItemId",  "text"),
-            ("IsCompleted",  "boolean"),
+            ("Tab",             "text"),
+            ("AssignedDate",    "text"),
+            ("SortOrder",       "number"),
+            ("Notes",           "note"),
+            ("CustomerName",    "text"),
+            ("DocumentType",    "text"),
+            ("ErpSpItemId",     "text"),
+            ("IsCompleted",     "boolean"),
+            ("DeliveryAddress", "note"),
         };
 
         foreach (var (name, type) in schema)
@@ -8484,11 +8488,12 @@ public class SharePointService
                 Notes          = d.TryGetValue("Notes",        out var n)  ? n?.ToString() : null,
                 CustomerName   = d.TryGetValue("CustomerName", out var cn) ? cn?.ToString() : null,
                 DocumentType   = d.TryGetValue("DocumentType", out var dt) ? dt?.ToString() : null,
-                ErpSpItemId    = d.TryGetValue("ErpSpItemId",  out var ei) ? ei?.ToString() : null,
-                IsCompleted    = d.TryGetValue("IsCompleted",  out var ic) &&
-                                 (ic is System.Text.Json.JsonElement icEl
-                                     ? icEl.ValueKind == System.Text.Json.JsonValueKind.True
-                                     : ic is bool b && b),
+                ErpSpItemId      = d.TryGetValue("ErpSpItemId",      out var ei) ? ei?.ToString() : null,
+                IsCompleted      = d.TryGetValue("IsCompleted",      out var ic) &&
+                                   (ic is System.Text.Json.JsonElement icEl
+                                       ? icEl.ValueKind == System.Text.Json.JsonValueKind.True
+                                       : ic is bool b && b),
+                DeliveryAddress  = d.TryGetValue("DeliveryAddress",  out var da) ? da?.ToString() : null,
             });
         }
         return cards;
@@ -8520,8 +8525,9 @@ public class SharePointService
                         ["Notes"]        = card.Notes,
                         ["CustomerName"] = card.CustomerName,
                         ["DocumentType"] = card.DocumentType,
-                        ["ErpSpItemId"]  = card.ErpSpItemId,
-                        ["IsCompleted"]  = card.IsCompleted,
+                        ["ErpSpItemId"]     = card.ErpSpItemId,
+                        ["IsCompleted"]     = card.IsCompleted,
+                        ["DeliveryAddress"] = card.DeliveryAddress,
                     }
                 }
             }, cancellationToken: ct);

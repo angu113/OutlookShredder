@@ -34,6 +34,9 @@ public class ErpExtraction
 
     [JsonPropertyName("delivery_method")]
     public string? DeliveryMethod { get; set; }
+
+    [JsonPropertyName("delivery_address")]
+    public string? DeliveryAddress { get; set; }
 }
 
 public class ErpLineItem
@@ -68,6 +71,7 @@ public class ErpDocumentRecord
     public string? SourceUser { get; set; }
     /// <summary>JSON array of ErpAnnotation objects added by the user in the Focus view.</summary>
     public string? UserAnnotations { get; set; }
+    public string? DeliveryAddress { get; set; }
 }
 
 /// <summary>User-applied stamp on an ERP document in the Focus view.</summary>

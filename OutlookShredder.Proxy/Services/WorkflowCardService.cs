@@ -63,14 +63,15 @@ public class WorkflowCardService : IHostedService
 
             var card = new WorkflowCard
             {
-                DocumentNumber = req.DocumentNumber,
-                CustomerName   = req.CustomerName,
-                DocumentType   = req.DocumentType,
-                Tab            = req.Tab,
-                AssignedDate   = req.AssignedDate,
-                SortOrder      = maxOrder + 1,
-                Notes          = req.Notes,
-                ErpSpItemId    = req.ErpSpItemId,
+                DocumentNumber  = req.DocumentNumber,
+                CustomerName    = req.CustomerName,
+                DocumentType    = req.DocumentType,
+                Tab             = req.Tab,
+                AssignedDate    = req.AssignedDate,
+                SortOrder       = maxOrder + 1,
+                Notes           = req.Notes,
+                ErpSpItemId     = req.ErpSpItemId,
+                DeliveryAddress = req.DeliveryAddress,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -143,12 +144,13 @@ public class WorkflowCardService : IHostedService
         if (!hasProcessing)
             await CreateAsync(new CreateWorkflowCardRequest
             {
-                DocumentNumber = docNum,
-                CustomerName   = extraction.CustomerName,
-                DocumentType   = extraction.DocumentType,
-                Tab            = "Processing",
-                AssignedDate   = today,
-                ErpSpItemId    = erpSpItemId,
+                DocumentNumber  = docNum,
+                CustomerName    = extraction.CustomerName,
+                DocumentType    = extraction.DocumentType,
+                Tab             = "Processing",
+                AssignedDate    = today,
+                ErpSpItemId     = erpSpItemId,
+                DeliveryAddress = extraction.DeliveryAddress,
             }, ct);
 
         // Delivery: only when delivery method is positively not a pickup variant.
@@ -162,12 +164,13 @@ public class WorkflowCardService : IHostedService
         {
             await CreateAsync(new CreateWorkflowCardRequest
             {
-                DocumentNumber = docNum,
-                CustomerName   = extraction.CustomerName,
-                DocumentType   = extraction.DocumentType,
-                Tab            = "Delivery",
-                AssignedDate   = today,
-                ErpSpItemId    = erpSpItemId,
+                DocumentNumber  = docNum,
+                CustomerName    = extraction.CustomerName,
+                DocumentType    = extraction.DocumentType,
+                Tab             = "Delivery",
+                AssignedDate    = today,
+                ErpSpItemId     = erpSpItemId,
+                DeliveryAddress = extraction.DeliveryAddress,
             }, ct);
         }
     }

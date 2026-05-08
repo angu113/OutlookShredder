@@ -64,6 +64,12 @@ public class ErpAiService
                          "Our Truck", "FedEx", etc. Leave null for non-picking-slip documents or if
                          not present.
 
+        DELIVERY / SHIPPING ADDRESS
+        delivery_address: The full delivery or shipping address shown on the document (e.g. under
+                          "Ship To", "Deliver To", "Delivery Address"). Return as a compact single-line
+                          string, e.g. "123 Main St, Hackensack NJ 07601". On picking slips take the
+                          address block under "Ship To:". Leave null if no delivery address is present.
+
         Always set is_erp_document = true.
         Leave document_type and document_number as null — they are set from the filename automatically.
         """;
@@ -100,8 +106,9 @@ public class ErpAiService
                   }
                 }
               },
-              "notes":           { "type": ["string","null"], "description": "Payment terms, delivery instructions, or other notable text." },
-              "delivery_method": { "type": ["string","null"], "description": "Delivery method on picking slips, e.g. 'Pickup', 'UPS Ground', 'Our Truck'. Null for other document types." }
+              "notes":            { "type": ["string","null"], "description": "Payment terms, delivery instructions, or other notable text." },
+              "delivery_method":  { "type": ["string","null"], "description": "Delivery method on picking slips, e.g. 'Pickup', 'UPS Ground', 'Our Truck'. Null for other document types." },
+              "delivery_address": { "type": ["string","null"], "description": "Full delivery or shipping address (Ship To / Deliver To). Single-line string, e.g. '123 Main St, Hackensack NJ 07601'. Null if not present." }
             }
           }
         }
@@ -136,8 +143,9 @@ public class ErpAiService
                 }
               }
             },
-            "notes":           { "type": "string", "nullable": true },
-            "delivery_method": { "type": "string", "nullable": true }
+            "notes":            { "type": "string", "nullable": true },
+            "delivery_method":  { "type": "string", "nullable": true },
+            "delivery_address": { "type": "string", "nullable": true }
           }
         }
         """).RootElement;
