@@ -15,6 +15,7 @@ public class WorkflowCardService : IHostedService
 
     private readonly List<WorkflowCard> _cache = [];
     private readonly SemaphoreSlim      _lock  = new(1, 1);
+    private Timer?                      _refreshTimer;
 
     public WorkflowCardService(
         SharePointService sp,
@@ -39,9 +40,38 @@ public class WorkflowCardService : IHostedService
         {
             _log.LogWarning(ex, "[WF] Startup load failed — starting with empty cache");
         }
+
+        // Refresh from SP every 60 s so cards created by other proxy instances are picked up.
+        _refreshTimer = new Timer(_ => _ = RefreshFromSpAsync(), null,
+            TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
     }
 
-    public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken ct)
+    {
+        _refreshTimer?.Dispose();
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshFromSpAsync()
+    {
+        try
+        {
+            using var cts   = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var freshCards  = await _sp.ReadWorkflowCardsAsync(cts.Token);
+
+            await _lock.WaitAsync();
+            try
+            {
+                _cache.Clear();
+                _cache.AddRange(freshCards);
+            }
+            finally { _lock.Release(); }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[WF] Periodic SP refresh failed");
+        }
+    }
 
     public async Task<List<WorkflowCard>> GetAllAsync()
     {
