@@ -447,14 +447,6 @@ public class FileWatcherService : BackgroundService
 
         _log.LogInformation("[FW] Timing {File}: sp-write={Ms}ms → notifying", fileName, sw.ElapsedMilliseconds);
 
-        // Auto-create workflow card for picking slips (fire-and-forget, non-fatal)
-        if (extraction.DocumentType == "PickingSlip")
-            _ = Task.Run(async () =>
-            {
-                try { await _workflow.AutoCreateFromPickingSlipAsync(extraction, spItemId, CancellationToken.None); }
-                catch (Exception ex) { _log.LogWarning(ex, "[FW] Workflow card creation failed for {File}", fileName); }
-            });
-
         // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
         // Other machines that reload later get the SP URL from the follow-up notification below.
         var receivedAt = DateTimeOffset.UtcNow.ToString("o");
