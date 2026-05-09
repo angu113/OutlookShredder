@@ -117,6 +117,7 @@ try
     builder.Services.AddHostedService<ZoomCallWatcherService>();
     builder.Services.AddSingleton<SignalWireService>();
     builder.Services.AddSingleton<MessagingService>();
+    builder.Services.AddSingleton<PricingAnalysisService>();
 
     var app = builder.Build();
 

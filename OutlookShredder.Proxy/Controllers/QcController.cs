@@ -7,9 +7,14 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api/qc")]
 public class QcController : ControllerBase
 {
-    private readonly SharePointService _sp;
+    private readonly SharePointService      _sp;
+    private readonly PricingAnalysisService _pricing;
 
-    public QcController(SharePointService sp) => _sp = sp;
+    public QcController(SharePointService sp, PricingAnalysisService pricing)
+    {
+        _sp      = sp;
+        _pricing = pricing;
+    }
 
     /// <summary>
     /// Returns the QC SharePoint list as { columns: [...], rows: [[...], ...], lastModified: "..." }.
@@ -43,6 +48,24 @@ public class QcController : ControllerBase
     {
         var result = await _sp.UpdateQcLqAsync();
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Returns a pricing analysis for a single day of supplier quote SLI data.
+    /// Raw SLI rows are cached per date so repeat calls are fast.
+    /// Query param: date=2026-05-08 (ISO date; defaults to yesterday).
+    /// Response: PricingReport — grouped by metal/shape/conditions with avg/min/max $/lb.
+    /// Only high-confidence quotes contribute to the average; low/medium are logged and returned separately.
+    /// </summary>
+    [HttpGet("pricing-report")]
+    public async Task<IActionResult> GetPricingReportAsync(
+        [FromQuery] string? date, CancellationToken ct)
+    {
+        if (!DateOnly.TryParse(date, out var parsedDate))
+            parsedDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
+
+        var report = await _pricing.GetReportAsync(parsedDate, ct);
+        return Ok(report);
     }
 
     /// <summary>
