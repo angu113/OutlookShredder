@@ -8426,6 +8426,7 @@ public class SharePointService
             ("ErpSpItemId",     "text"),
             ("IsCompleted",     "boolean"),
             ("DeliveryAddress", "note"),
+            ("RagStatus",       "text"),
         };
 
         foreach (var (name, type) in schema)
@@ -8494,6 +8495,7 @@ public class SharePointService
                                        ? icEl.ValueKind == System.Text.Json.JsonValueKind.True
                                        : ic is bool b && b),
                 DeliveryAddress  = d.TryGetValue("DeliveryAddress",  out var da) ? da?.ToString() : null,
+                RagStatus        = d.TryGetValue("RagStatus",        out var rs) ? (rs?.ToString() is string rv && rv.Length > 0 ? rv : null) : null,
             });
         }
         return cards;
@@ -8518,16 +8520,17 @@ public class SharePointService
                 {
                     AdditionalData = new Dictionary<string, object?>
                     {
-                        ["Title"]        = card.DocumentNumber,
-                        ["Tab"]          = card.Tab,
-                        ["AssignedDate"] = card.AssignedDate,
-                        ["SortOrder"]    = (double)card.SortOrder,
-                        ["Notes"]        = card.Notes,
-                        ["CustomerName"] = card.CustomerName,
-                        ["DocumentType"] = card.DocumentType,
+                        ["Title"]           = card.DocumentNumber,
+                        ["Tab"]             = card.Tab,
+                        ["AssignedDate"]    = card.AssignedDate,
+                        ["SortOrder"]       = (double)card.SortOrder,
+                        ["Notes"]           = card.Notes,
+                        ["CustomerName"]    = card.CustomerName,
+                        ["DocumentType"]    = card.DocumentType,
                         ["ErpSpItemId"]     = card.ErpSpItemId,
                         ["IsCompleted"]     = card.IsCompleted,
                         ["DeliveryAddress"] = card.DeliveryAddress,
+                        ["RagStatus"]       = card.RagStatus,
                     }
                 }
             }, cancellationToken: ct);
@@ -8548,6 +8551,7 @@ public class SharePointService
         if (req.SortOrder    is not null) fields["SortOrder"]    = (double)req.SortOrder.Value;
         if (req.Notes        is not null) fields["Notes"]        = req.Notes;
         if (req.IsCompleted  is not null) fields["IsCompleted"]  = req.IsCompleted.Value;
+        if (req.RagStatus    is not null) fields["RagStatus"]    = req.RagStatus == "" ? null : req.RagStatus;
 
         if (fields.Count == 0) return;
 

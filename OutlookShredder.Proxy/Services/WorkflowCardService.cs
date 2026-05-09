@@ -102,6 +102,7 @@ public class WorkflowCardService : IHostedService
                 Notes           = req.Notes,
                 ErpSpItemId     = req.ErpSpItemId,
                 DeliveryAddress = req.DeliveryAddress,
+                RagStatus       = req.RagStatus,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -125,6 +126,7 @@ public class WorkflowCardService : IHostedService
             if (req.SortOrder    is not null) card.SortOrder    = req.SortOrder.Value;
             if (req.Notes        is not null) card.Notes        = req.Notes;
             if (req.IsCompleted  is not null) card.IsCompleted  = req.IsCompleted.Value;
+            if (req.RagStatus    is not null) card.RagStatus    = req.RagStatus == "" ? null : req.RagStatus;
 
             await _sp.UpdateWorkflowCardAsync(spItemId, req, ct);
             Publish("Updated", card);

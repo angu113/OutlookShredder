@@ -13,6 +13,8 @@ public class WorkflowCard
     public string? ErpSpItemId       { get; set; }
     public bool    IsCompleted       { get; set; }
     public string? DeliveryAddress   { get; set; }
+    /// <summary>"Red" | "Amber" | "Green" | null</summary>
+    public string? RagStatus         { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -25,6 +27,7 @@ public class CreateWorkflowCardRequest
     public string? Notes           { get; set; }
     public string? ErpSpItemId     { get; set; }
     public string? DeliveryAddress { get; set; }
+    public string? RagStatus       { get; set; }
 }
 
 public class UpdateWorkflowCardRequest
@@ -34,4 +37,6 @@ public class UpdateWorkflowCardRequest
     public int?    SortOrder    { get; set; }
     public string? Notes        { get; set; }
     public bool?   IsCompleted  { get; set; }
+    /// <summary>Pass "" to clear. Null means no change.</summary>
+    public string? RagStatus    { get; set; }
 }
