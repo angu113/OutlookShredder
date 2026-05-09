@@ -8033,7 +8033,7 @@ public class SharePointService
 
     /// <summary>Returns the most recent <paramref name="top"/> call log entries, newest first.</summary>
     public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
-        int top = 200, CancellationToken ct = default)
+        int top = 500, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateCallLogListIdAsync(ct);
@@ -8041,9 +8041,9 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
-                r.QueryParameters.Top    = top;
-                r.QueryParameters.Orderby = ["createdDateTime desc"];
+                r.QueryParameters.Expand  = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
+                r.QueryParameters.Top     = top;
+                r.QueryParameters.Orderby = ["id desc"];
             }, ct);
 
         var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();

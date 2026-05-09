@@ -19,7 +19,7 @@ public class PhoneController : ControllerBase
     /// <summary>Returns the most recent call log entries, newest first.</summary>
     [HttpGet("call-log")]
     public async Task<IActionResult> GetCallLog(
-        [FromQuery] int top = 200,
+        [FromQuery] int top = 500,
         CancellationToken ct = default)
     {
         try
