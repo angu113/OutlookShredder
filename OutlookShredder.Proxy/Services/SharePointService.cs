@@ -8031,6 +8031,8 @@ public class SharePointService
         return result?.Id ?? "";
     }
 
+    private const int CallLogFetchCap = 2000;
+
     /// <summary>Returns the most recent <paramref name="top"/> call log entries, newest first.</summary>
     public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
         int top = 500, CancellationToken ct = default)
@@ -8038,12 +8040,12 @@ public class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateCallLogListIdAsync(ct);
 
+        // SP Graph ignores $orderby when $expand is present, so we fetch the full list and sort client-side.
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand  = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
-                r.QueryParameters.Top     = top;
-                r.QueryParameters.Orderby = ["id desc"];
+                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
+                r.QueryParameters.Top    = CallLogFetchCap;
             }, ct);
 
         var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();
@@ -8064,7 +8066,8 @@ public class SharePointService
                 Notes        = Get("Notes"),
             });
         }
-        return results;
+        // SP ignores $orderby when $expand is present — sort client-side by item ID descending (newest first), then apply the requested top.
+        return [.. results.OrderByDescending(r => int.TryParse(r.SpItemId, out var n) ? n : 0).Take(top)];
     }
 
     /// <summary>Patches the Notes field on an existing PhoneCallLog item.</summary>
