@@ -65,7 +65,7 @@ public class QcController : ControllerBase
         [FromQuery] string? date,
         [FromQuery] string? startDate,
         [FromQuery] string? endDate,
-        [FromQuery] int     days = 1,
+        [FromQuery] int     days = 7,
         CancellationToken   ct   = default)
     {
         var yesterday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
