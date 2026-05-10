@@ -60,16 +60,50 @@ public class PricingAnalysisService
         ("galvanized",     "Steel"),
         ("hr ",            "Steel"),   // "HR Standard Beam", "HR Flat Bar" etc.
         (" hr",            "Steel"),   // trailing "... 20' HR"
-        ("a36",            "Steel"),
-        ("a572",           "Steel"),
-        ("a513",           "Steel"),
-        ("a500",           "Steel"),
-        ("a106",           "Steel"),
-        ("a53",            "Steel"),
-        ("1018",           "Steel"),
-        ("1020",           "Steel"),
-        ("1045",           "Steel"),
-        ("12l14",          "Steel"),
+    ];
+
+    // Deterministic condition tags extracted directly from product/catalog name tokens.
+    // Checked in order against the combined lower-cased catalog + product name.
+    // More-specific tokens (e.g. "#4pol") must precede their substrings ("#4").
+    // The AI classification supplements these — it never replaces them.
+    private static readonly (string Token, string Condition)[] KeywordConditions =
+    [
+        // Stainless surface finishes — explicit finish codes come first
+        ("#4pol",          "polished"),
+        ("#4 pol",         "polished"),
+        ("#3/#4",          "polished"),
+        ("#4",             "polished"),    // #4 brushed/polished finish
+        ("#3",             "polished"),    // #3 finish (coarser polish)
+        ("#8",             "mirror_finish"),
+        ("mirror",         "mirror_finish"),
+        ("brushed",        "brushed"),
+        ("polished",       "polished"),
+        // Surface treatments
+        ("galvanized",     "galvanized"),
+        (" galv",          "galvanized"),  // "galv." / "galv " with leading space
+        ("anodized",       "anodized"),
+        ("painted",        "painted"),
+        ("chrome",         "chrome_plated"),
+        ("pvc",            "pvc_coated"),
+        // Processing
+        ("hot rolled",     "hot_rolled"),
+        ("cold rolled",    "cold_rolled"),
+        ("cold drawn",     "cold_drawn"),
+        ("stress proof",   "stress_proof"),
+        ("stress-proof",   "stress_proof"),
+        ("stressproof",    "stress_proof"),
+        // Tube construction (word-safe tokens — "dom " / " dom" avoids "random")
+        ("dom ",           "dom"),
+        (" dom",           "dom"),
+        ("seamless",       "seamless"),
+        (" smls",          "seamless"),
+        ("smls ",          "seamless"),
+        ("welded",         "welded"),
+        // Other
+        ("key stock",      "key_stock"),
+        ("key-stock",      "key_stock"),
+        ("perforated",     "perforated"),
+        ("expanded metal", "expanded"),
     ];
 
     private const string ClassifySystemPrompt = """
@@ -152,6 +186,15 @@ public class PricingAnalysisService
             var productName = GetStr(sli, "ProductName") ?? "";
             var (metal, shape) = ParseMetalShape(catalogName, productName);
 
+            // If catalog and product names imply different metals, don't let the catalog
+            // name contribute conditions (avoids wrong-match leakage, e.g. "Hot Rolled Sheet"
+            // catalog entry matched to a copper product adding hot_rolled to copper's conditions).
+            var metalFromProduct = ExtractMetal(productName);
+            var metalFromCatalog = catalogName is not null ? ExtractMetal(catalogName) : null;
+            var metalConflict    = metalFromProduct is not null && metalFromCatalog is not null
+                                && metalFromProduct != metalFromCatalog;
+            var condCatalogName  = metalConflict ? null : catalogName;
+
             processable.Add(new PricingReportItem
             {
                 SpItemId           = GetStr(sli, "SpItemId") ?? GetStr(sli, "id") ?? "",
@@ -166,7 +209,7 @@ public class PricingAnalysisService
                 Confidence         = confidence,
                 ConfidenceNote     = confNote,
                 ReceivedAt         = GetDate(sli, "ReceivedAt") ?? DateTime.UtcNow,
-                SpecialConditions  = [],
+                SpecialConditions  = ExtractKeywordConditions(condCatalogName, productName),
                 IsService          = false
             });
         }
@@ -329,6 +372,27 @@ public class PricingAnalysisService
         return null;
     }
 
+    // Accepted condition tags — AI output is filtered to this set to prevent hallucinations.
+    private static readonly HashSet<string> ValidConditions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "polished", "anodized", "tread_plate", "dom", "painted", "hot_rolled", "cold_rolled",
+        "cold_drawn", "stress_proof", "chrome_plated", "galvanized", "extruded", "drawn",
+        "seamless", "welded", "hex", "key_stock", "perforated", "expanded", "grating",
+        "mirror_finish", "brushed", "pvc_coated", "tig_welded"
+    };
+
+    // Combines catalog name + product name and checks every keyword token.
+    // Returns a deduplicated sorted array of condition tags.
+    private static string[] ExtractKeywordConditions(string? catalogName, string productName)
+    {
+        var combined = ((catalogName ?? "") + " " + productName).ToLowerInvariant();
+        var found = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var (token, condition) in KeywordConditions)
+            if (combined.Contains(token))
+                found.Add(condition);
+        return [.. found];
+    }
+
     // ── AI batch classification ──────────────────────────────────────────────
 
     private async Task BatchClassifyAsync(List<PricingReportItem> items, CancellationToken ct)
@@ -430,7 +494,7 @@ public class PricingAnalysisService
                     var conditions = new List<string>();
                     if (result.TryGetProperty("special_conditions", out var condsEl))
                         foreach (var c in condsEl.EnumerateArray())
-                            if (c.GetString() is { Length: > 0 } s)
+                            if (c.GetString() is { Length: > 0 } s && ValidConditions.Contains(s))
                                 conditions.Add(s);
 
                     var isService = result.TryGetProperty("is_service", out var svcEl)
@@ -439,9 +503,13 @@ public class PricingAnalysisService
                     var note = result.TryGetProperty("confidence_note", out var noteEl)
                                ? noteEl.GetString() : null;
 
+                    // Merge AI conditions into keyword-extracted set (union, deduped).
+                    var merged = new SortedSet<string>(batch[idx].SpecialConditions, StringComparer.Ordinal);
+                    foreach (var c in conditions) merged.Add(c);
+
                     batch[idx] = batch[idx] with
                     {
-                        SpecialConditions = [.. conditions],
+                        SpecialConditions = [.. merged],
                         IsService         = isService,
                         AiNote            = string.IsNullOrWhiteSpace(note) ? null : note
                     };

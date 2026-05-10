@@ -56,16 +56,26 @@ public class WorkflowCardService : IHostedService
     {
         try
         {
-            using var cts   = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var freshCards  = await _sp.ReadWorkflowCardsAsync(cts.Token);
+            using var cts  = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var freshCards = await _sp.ReadWorkflowCardsAsync(cts.Token);
 
+            List<WorkflowCard> newCards;
             await _lock.WaitAsync();
             try
             {
+                var existingIds = _cache.Select(c => c.SpItemId).ToHashSet();
+                newCards = freshCards.Where(c => !existingIds.Contains(c.SpItemId)).ToList();
                 _cache.Clear();
                 _cache.AddRange(freshCards);
             }
             finally { _lock.Release(); }
+
+            // Publish cards that arrived via another proxy — notifies live Trigger clients.
+            foreach (var card in newCards)
+            {
+                _log.LogInformation("[WF] SP refresh found new card {Id} ({Doc}) — publishing to bus", card.SpItemId, card.DocumentNumber);
+                Publish("Created", card);
+            }
         }
         catch (Exception ex)
         {
