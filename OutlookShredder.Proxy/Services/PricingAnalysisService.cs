@@ -166,61 +166,74 @@ public class PricingAnalysisService
         Directory.CreateDirectory(_cacheDir);
     }
 
-    // ── Public entry point ───────────────────────────────────────────────────
+    // ── Public entry points ──────────────────────────────────────────────────
 
-    public async Task<PricingReport> GetReportAsync(DateOnly date, CancellationToken ct)
+    public Task<PricingReport> GetReportAsync(DateOnly date, CancellationToken ct)
+        => GetRangeReportAsync(date, date, ct);
+
+    public async Task<PricingReport> GetRangeReportAsync(
+        DateOnly startDate, DateOnly endDate, CancellationToken ct)
     {
-        var (rawItems, fromCache) = await LoadOrFetchRawAsync(date, ct);
-
-        var totalRows = rawItems.Count;
+        var totalRows      = 0;
         var regretExcluded = 0;
-        var processable = new List<PricingReportItem>(rawItems.Count);
+        var allFromCache   = true;
+        var processable    = new List<PricingReportItem>();
 
-        foreach (var sli in rawItems)
+        for (var d = startDate; d <= endDate; d = d.AddDays(1))
         {
-            if (GetBool(sli, "IsRegret") || GetBool(sli, "IsDeleted"))
-            { regretExcluded++; continue; }
+            var (dayRaw, dayFromCache) = await LoadOrFetchRawAsync(d, ct);
+            if (!dayFromCache) allFromCache = false;
+            totalRows += dayRaw.Count;
 
-            var (price, source, confidence, confNote) = DerivePrice(sli);
-            var catalogName = GetStr(sli, "CatalogProductName");
-            var productName = GetStr(sli, "ProductName") ?? "";
-            var (metal, shape) = ParseMetalShape(catalogName, productName);
-
-            // If catalog and product names imply different metals, don't let the catalog
-            // name contribute conditions (avoids wrong-match leakage, e.g. "Hot Rolled Sheet"
-            // catalog entry matched to a copper product adding hot_rolled to copper's conditions).
-            var metalFromProduct = ExtractMetal(productName);
-            var metalFromCatalog = catalogName is not null ? ExtractMetal(catalogName) : null;
-            var metalConflict    = metalFromProduct is not null && metalFromCatalog is not null
-                                && metalFromProduct != metalFromCatalog;
-            var condCatalogName  = metalConflict ? null : catalogName;
-
-            processable.Add(new PricingReportItem
+            foreach (var sli in dayRaw)
             {
-                SpItemId           = GetStr(sli, "SpItemId") ?? GetStr(sli, "id") ?? "",
-                RfqId              = GetStr(sli, "JobReference") ?? GetStr(sli, "RFQ_ID") ?? "",
-                SupplierName       = GetStr(sli, "SupplierName") ?? "",
-                ProductName        = productName,
-                CatalogProductName = catalogName,
-                Metal              = metal,
-                Shape              = shape,
-                PricePerPound      = price,
-                PriceSource        = source,
-                Confidence         = confidence,
-                ConfidenceNote     = confNote,
-                ReceivedAt         = GetDate(sli, "ReceivedAt") ?? DateTime.UtcNow,
-                SpecialConditions  = ExtractKeywordConditions(condCatalogName, productName),
-                IsService          = false
-            });
+                if (GetBool(sli, "IsRegret") || GetBool(sli, "IsDeleted"))
+                { regretExcluded++; continue; }
+
+                var (price, source, confidence, confNote) = DerivePrice(sli);
+                var catalogName = GetStr(sli, "CatalogProductName");
+                var productName = GetStr(sli, "ProductName") ?? "";
+                var (metal, shape) = ParseMetalShape(catalogName, productName);
+
+                // If catalog and product names imply different metals, don't let the catalog
+                // name contribute conditions (avoids wrong-match leakage, e.g. "Hot Rolled Sheet"
+                // catalog entry matched to a copper product adding hot_rolled to copper's conditions).
+                var metalFromProduct = ExtractMetal(productName);
+                var metalFromCatalog = catalogName is not null ? ExtractMetal(catalogName) : null;
+                var metalConflict    = metalFromProduct is not null && metalFromCatalog is not null
+                                    && metalFromProduct != metalFromCatalog;
+                var condCatalogName  = metalConflict ? null : catalogName;
+
+                processable.Add(new PricingReportItem
+                {
+                    SpItemId           = GetStr(sli, "SpItemId") ?? GetStr(sli, "id") ?? "",
+                    RfqId              = GetStr(sli, "JobReference") ?? GetStr(sli, "RFQ_ID") ?? "",
+                    SupplierName       = GetStr(sli, "SupplierName") ?? "",
+                    ProductName        = productName,
+                    CatalogProductName = catalogName,
+                    Metal              = metal,
+                    Shape              = shape,
+                    PricePerPound      = price,
+                    PriceSource        = source,
+                    Confidence         = confidence,
+                    ConfidenceNote     = confNote,
+                    ReceivedAt         = GetDate(sli, "ReceivedAt") ?? DateTime.UtcNow,
+                    SpecialConditions  = ExtractKeywordConditions(condCatalogName, productName),
+                    IsService          = false
+                });
+            }
         }
 
-        _log.LogInformation("[Pricing] {Date}: {Total} rows, {Regret} regrets → {Proc} to classify",
-            date, totalRows, regretExcluded, processable.Count);
+        var rangeLabel = startDate == endDate
+            ? startDate.ToString("yyyy-MM-dd")
+            : $"{startDate:yyyy-MM-dd}..{endDate:yyyy-MM-dd}";
+        _log.LogInformation("[Pricing] {Range}: {Total} rows, {Regret} regrets → {Proc} to classify",
+            rangeLabel, totalRows, regretExcluded, processable.Count);
 
         await BatchClassifyAsync(processable, ct);
 
-        var report = BuildReport(date, fromCache, totalRows, regretExcluded, processable);
-        LogLowConfidence(date, report.LowMediumConfidenceItems);
+        var report = BuildReport(startDate, endDate, allFromCache, totalRows, regretExcluded, processable);
+        LogLowConfidence(startDate, report.LowMediumConfidenceItems);
         return report;
     }
 
@@ -526,7 +539,8 @@ public class PricingAnalysisService
     // ── Report assembly ──────────────────────────────────────────────────────
 
     private static PricingReport BuildReport(
-        DateOnly                 date,
+        DateOnly                 startDate,
+        DateOnly                 endDate,
         bool                     fromCache,
         int                      totalRows,
         int                      regretExcluded,
@@ -580,7 +594,8 @@ public class PricingAnalysisService
 
         return new PricingReport
         {
-            Date                  = date.ToString("yyyy-MM-dd"),
+            StartDate             = startDate.ToString("yyyy-MM-dd"),
+            EndDate               = endDate.ToString("yyyy-MM-dd"),
             FromCache             = fromCache,
             GeneratedAt           = DateTime.UtcNow,
             TotalSliRows          = totalRows,

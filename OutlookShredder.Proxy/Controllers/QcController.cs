@@ -51,20 +51,42 @@ public class QcController : ControllerBase
     }
 
     /// <summary>
-    /// Returns a pricing analysis for a single day of supplier quote SLI data.
+    /// Returns a pricing analysis over a date range of supplier quote SLI data.
     /// Raw SLI rows are cached per date so repeat calls are fast.
-    /// Query param: date=2026-05-08 (ISO date; defaults to yesterday).
+    /// Query params (pick one):
+    ///   date=2026-05-08          — single day (defaults to yesterday)
+    ///   startDate=&amp;endDate=  — explicit range
+    ///   days=N                   — last N calendar days ending yesterday (default 1)
     /// Response: PricingReport — grouped by metal/shape/conditions with avg/min/max $/lb.
-    /// Only high-confidence quotes contribute to the average; low/medium are logged and returned separately.
+    /// Only high-confidence quotes contribute to the average; low/medium are logged separately.
     /// </summary>
     [HttpGet("pricing-report")]
     public async Task<IActionResult> GetPricingReportAsync(
-        [FromQuery] string? date, CancellationToken ct)
+        [FromQuery] string? date,
+        [FromQuery] string? startDate,
+        [FromQuery] string? endDate,
+        [FromQuery] int     days = 1,
+        CancellationToken   ct   = default)
     {
-        if (!DateOnly.TryParse(date, out var parsedDate))
-            parsedDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
+        var yesterday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1));
+        DateOnly start, end;
 
-        var report = await _pricing.GetReportAsync(parsedDate, ct);
+        if (DateOnly.TryParse(startDate, out var s) && DateOnly.TryParse(endDate, out var e))
+        {
+            start = s;
+            end   = e;
+        }
+        else if (DateOnly.TryParse(date, out var d))
+        {
+            start = end = d;
+        }
+        else
+        {
+            end   = yesterday;
+            start = end.AddDays(-(days - 1));
+        }
+
+        var report = await _pricing.GetRangeReportAsync(start, end, ct);
         return Ok(report);
     }
 

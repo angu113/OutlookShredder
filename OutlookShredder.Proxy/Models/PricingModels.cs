@@ -34,7 +34,8 @@ public record PricingCategory
 
 public record PricingReport
 {
-    public string   Date                  { get; init; } = "";
+    public string   StartDate             { get; init; } = "";
+    public string   EndDate               { get; init; } = "";
     public bool     FromCache             { get; init; }
     public DateTime GeneratedAt           { get; init; }
     public int      TotalSliRows          { get; init; }
