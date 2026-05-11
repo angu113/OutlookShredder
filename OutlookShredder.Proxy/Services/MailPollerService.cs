@@ -27,6 +27,7 @@ public class MailPollerService : BackgroundService
     private readonly SharePointService         _sp;
     private readonly ProductCatalogService     _catalog;
     private readonly RfqNotificationService    _notifications;
+    private readonly SliCacheService           _sliCache;
     private readonly ShrConvInRouter           _shrRouter;
     private readonly ILogger<MailPollerService> _log;
 
@@ -394,6 +395,7 @@ public class MailPollerService : BackgroundService
         SharePointService          sp,
         ProductCatalogService      catalog,
         RfqNotificationService     notifications,
+        SliCacheService            sliCache,
         ShrConvInRouter            shrRouter,
         ILogger<MailPollerService> log)
     {
@@ -403,6 +405,7 @@ public class MailPollerService : BackgroundService
         _sp            = sp;
         _catalog       = catalog;
         _notifications = notifications;
+        _sliCache      = sliCache;
         _shrRouter     = shrRouter;
         _log           = log;
     }
@@ -1138,6 +1141,7 @@ public class MailPollerService : BackgroundService
                                        TotalPrice = x.Second.TotalPrice,
                                    }).ToList(),
                 };
+                _sliCache.Invalidate();
                 _notifications.NotifyRfqProcessed(notification);
             }
 
