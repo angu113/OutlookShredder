@@ -801,11 +801,9 @@ public class ExtractController : ControllerBase
         try
         {
             await _sp.CreateRfqReferenceAsync(req);
-            _notifications.NotifyRfqProcessed(new RfqProcessedNotification
-            {
-                EventType = "RFQ",
-                RfqId     = req.RfqId,
-            });
+            // Do NOT publish a bus event here — line items don't exist yet.
+            // CreateRfqLineItems fires the "RFQ" event once the full RFQ is ready,
+            // preventing other clients from refreshing before line items are written.
             return Ok(new { created = true });
         }
         catch (Exception ex)
