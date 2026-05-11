@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>11</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>OutlookShredder.MailAddin</AssemblyName>
+    <RootNamespace>OutlookShredder.MailAddin</RootNamespace>
+    <UseWindowsForms>true</UseWindowsForms>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <!-- System.Web.Extensions is in the GAC on all .NET 4.x machines — no NuGet needed -->
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- PIA — Outlook COM interop -->
+    <PackageReference Include="Microsoft.Office.Interop.Outlook" Version="15.0.4693.1000" />
+
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="addin-config.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

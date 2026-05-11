@@ -112,6 +112,10 @@ try
 
     builder.Services.AddSingleton<OutlookComPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
+
+    builder.Services.AddSingleton<DelegatedTokenProvider>();
+    builder.Services.AddSingleton<HackensackPollerService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<HackensackPollerService>());
     builder.Services.AddHostedService<LqUpdateService>();
     builder.Services.AddHostedService<RfqAutoCompleteService>();
     builder.Services.AddHostedService<ZoomCallWatcherService>();
