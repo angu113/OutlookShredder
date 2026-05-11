@@ -184,8 +184,11 @@ try
 
                 // Pre-populate the SLI cache so the first /api/items request
                 // is served from memory rather than paginating SP live.
+                // force=true ensures a fresh SP read even when a disk cache exists from
+                // a previous session — disk data can be hours old and would otherwise be
+                // served as "fresh" for 5 minutes before expiring.
                 var sliCache = app.Services.GetRequiredService<SliCacheService>();
-                await sliCache.PopulateAsync();
+                await sliCache.PopulateAsync(force: true);
             }
             catch (Exception ex)
             {
