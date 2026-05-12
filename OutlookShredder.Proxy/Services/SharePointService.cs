@@ -3998,6 +3998,13 @@ public class SharePointService
                 ("Category", "text"),
                 ("Variants",  "note"),
             ]),
+            ["SupplierProductMappings"] = await EnsureListColumnsAsync(siteId, "SupplierProductMappings",
+            [
+                ("SupplierName",       "text"),
+                ("SupplierTerm",       "note"),
+                ("ProductSearchKey",   "text"),
+                ("CatalogProductName", "text"),
+            ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
             poMap is Dictionary<string, string> poDict &&
@@ -4018,8 +4025,54 @@ public class SharePointService
             siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId", "Created");
         results["Indexes:PurchaseOrders"] = await EnsureColumnIndexesAsync(
             siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
+        results["Indexes:SupplierProductMappings"] = await EnsureColumnIndexesAsync(
+            siteId, "SupplierProductMappings", "SupplierName", "ProductSearchKey");
 
         return results;
+    }
+
+    // ── SupplierProductMappings ────────────────────────────────────────────────
+
+    private string? _mappingsListId;
+
+    private async Task<string> GetMappingsListIdAsync()
+    {
+        if (_mappingsListId is not null) return _mappingsListId;
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'SupplierProductMappings'");
+        _mappingsListId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "SupplierProductMappings list not found. Run POST /api/setup-supplier-lists once.");
+        return _mappingsListId;
+    }
+
+    /// <summary>
+    /// Appends a confirmed supplier-term → MSPC mapping row.
+    /// Duplicate entries are allowed; callers reading mappings for prompt injection
+    /// should deduplicate by (SupplierName, SupplierTerm) keeping the most recent.
+    /// </summary>
+    public async Task WriteSupplierProductMappingAsync(
+        string supplierName, string supplierTerm,
+        string productSearchKey, string catalogProductName)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetMappingsListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["SupplierName"]       = supplierName,
+                        ["SupplierTerm"]       = supplierTerm,
+                        ["ProductSearchKey"]   = productSearchKey,
+                        ["CatalogProductName"] = catalogProductName,
+                    }
+                }
+            });
     }
 
     /// <summary>

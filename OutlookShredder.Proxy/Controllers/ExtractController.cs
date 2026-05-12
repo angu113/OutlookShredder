@@ -1904,5 +1904,36 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/supplier-product-mappings ─────────────────────────────────
+    /// <summary>
+    /// Saves a confirmed supplier-term → MSPC mapping to the SupplierProductMappings list.
+    /// Called by the Shredder MSPC Remap dialog after the user confirms a match.
+    /// </summary>
+    [HttpPost("supplier-product-mappings")]
+    public async Task<IActionResult> SaveSupplierProductMapping([FromBody] SaveMappingRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.SupplierName) || string.IsNullOrWhiteSpace(req.SupplierTerm) ||
+            string.IsNullOrWhiteSpace(req.ProductSearchKey))
+            return BadRequest(new { error = "SupplierName, SupplierTerm, and ProductSearchKey are required" });
+
+        try
+        {
+            await _sp.WriteSupplierProductMappingAsync(
+                req.SupplierName, req.SupplierTerm, req.ProductSearchKey, req.CatalogProductName ?? "");
+            return Ok(new { saved = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "SaveSupplierProductMapping failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    public record SaveMappingRequest(
+        string SupplierName,
+        string SupplierTerm,
+        string ProductSearchKey,
+        string? CatalogProductName);
+
     public record ReparentSrRequest(string RfqId);
 }
