@@ -449,6 +449,8 @@ public class SharePointService
         // Pass 2: fuzzy dedup within each SupplierResponseId group
         static string GetProd(Dictionary<string, object?> r) =>
             r.TryGetValue("ProductName", out var p) ? p?.ToString() ?? "" : "";
+        static string? GetLineNo(Dictionary<string, object?> r) =>
+            r.TryGetValue("LineNumber", out var v) && v is not null ? v.ToString() : null;
 
         var fuzzyResult = new List<Dictionary<string, object?>>();
         foreach (var srGroup in result.GroupBy(r =>
@@ -467,7 +469,10 @@ public class SharePointService
                 for (int i = 0; i < accepted.Count; i++)
                 {
                     var accTok = ProductTokens(GetProd(accepted[i]));
-                    if (NumericTokensCompatible(rowTok, accTok) && ProductJaccard(rowTok, accTok) >= 0.5)
+                    // Rows with distinct non-null LineNumbers are separate stock lots — never merge.
+                    var rowLn = GetLineNo(row); var accLn = GetLineNo(accepted[i]);
+                    bool distinctLots = rowLn is not null && accLn is not null && rowLn != accLn;
+                    if (!distinctLots && NumericTokensCompatible(rowTok, accTok) && ProductJaccard(rowTok, accTok) >= 0.5)
                     {
                         _log.LogWarning("[SP] Fuzzy-dedup: merging '{Row}' into '{Acc}' (SrId={SrId})",
                             GetProd(row), GetProd(accepted[i]), srGroup.Key);
