@@ -537,26 +537,36 @@ public class SharePointService
         var siteId    = await GetSiteIdAsync();
         var srListId  = await GetSupplierResponsesListIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
-        var sliCol    = await ResolveRfqIdColumnAsync(siteId, sliListId);
 
-        // Invalidate SR cache so any SR written by another proxy instance (cross-machine)
-        // is visible here. Without this, the new SR isn't in this machine's cache yet and
-        // JoinSliToSr returns SLI rows with missing parent fields (SupplierName, EmailFrom, etc.).
-        InvalidateSrCache();
-        var srTask = GetCachedSrItemsAsync(siteId, srListId);
+        // Resolve both column names in parallel (results are cached after first call).
+        var srColTask  = ResolveRfqIdColumnAsync(siteId, srListId);
+        var sliColTask = ResolveRfqIdColumnAsync(siteId, sliListId);
+        await Task.WhenAll(srColTask, sliColTask);
 
-        // Fetch only SLI rows for this rfqId via OData $filter.
+        // Fetch SR and SLI rows fresh from SP in parallel, both filtered by rfqId.
+        // SR rows are NOT served from the in-memory cache here: the cache is only
+        // invalidated by the local write path, so other machines would never see a
+        // freshly-written SR. A targeted filter on the indexed RFQ_ID column is cheap
+        // (1-3 rows per RFQ) and avoids a full-table scan.
+        var srTask = GetGraph().Sites[siteId].Lists[srListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields"];
+                req.QueryParameters.Filter = $"fields/{srColTask.Result} eq '{rfqId}'";
+                req.QueryParameters.Top    = 100;
+            });
+
         var sliTask = GetGraph().Sites[siteId].Lists[sliListId].Items
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = ["fields"];
-                req.QueryParameters.Filter = $"fields/{sliCol} eq '{rfqId}'";
+                req.QueryParameters.Filter = $"fields/{sliColTask.Result} eq '{rfqId}'";
                 req.QueryParameters.Top    = 500;
             });
 
         await Task.WhenAll(srTask, sliTask);
 
-        var result = JoinSliToSr(sliTask.Result?.Value ?? [], srTask.Result);
+        var result = JoinSliToSr(sliTask.Result?.Value ?? [], srTask.Result?.Value ?? []);
 
         _log.LogInformation("[SP] ReadSupplierItemsByRfqId({RfqId}): {Count} items", rfqId, result.Count);
         return result;
