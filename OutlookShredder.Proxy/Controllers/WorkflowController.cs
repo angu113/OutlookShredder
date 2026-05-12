@@ -8,8 +8,17 @@ namespace OutlookShredder.Proxy.Controllers;
 public class WorkflowController : ControllerBase
 {
     private readonly WorkflowCardService _wf;
+    private readonly SharePointService   _sp;
 
-    public WorkflowController(WorkflowCardService wf) => _wf = wf;
+    public WorkflowController(WorkflowCardService wf, SharePointService sp)
+    {
+        _wf = wf;
+        _sp = sp;
+    }
+
+    [HttpGet("delivery-services")]
+    public async Task<IActionResult> GetDeliveryServices(CancellationToken ct) =>
+        Ok(await _sp.ReadDeliveryServicesAsync(ct));
 
     [HttpGet("cards")]
     public async Task<IActionResult> GetCards() =>

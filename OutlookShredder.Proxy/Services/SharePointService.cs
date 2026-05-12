@@ -8496,6 +8496,84 @@ public class SharePointService
         }
     }
 
+    // ── DeliveryServices ──────────────────────────────────────────────────────
+
+    private string? _deliveryServicesListId;
+
+    public async Task EnsureDeliveryServicesListAsync(CancellationToken ct = default)
+        => await GetOrCreateDeliveryServicesListIdAsync(ct);
+
+    private async Task<string> GetOrCreateDeliveryServicesListIdAsync(CancellationToken ct = default)
+    {
+        if (_deliveryServicesListId is not null) return _deliveryServicesListId;
+
+        var siteId    = await GetSiteIdAsync();
+        const string listName = "DeliveryServices";
+
+        var existing = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        bool isNew = false;
+        if (existing?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+            _log.LogInformation("[SP] DeliveryServices list found: {Id}", listId);
+        }
+        else
+        {
+            var created = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new Microsoft.Graph.Models.ListInfo { Template = "genericList" }
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("DeliveryServices list creation returned no ID");
+            isNew  = true;
+            _log.LogInformation("[SP] Created DeliveryServices list: {Id}", listId);
+        }
+
+        _deliveryServicesListId = listId;
+
+        if (isNew)
+        {
+            // Seed the initial delivery service entries using the Title column (built-in).
+            foreach (var name in new[] { "Eric", "Dan", "UPS", "Uber" })
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+                    new Microsoft.Graph.Models.ListItem
+                    {
+                        Fields = new Microsoft.Graph.Models.FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?> { ["Title"] = name }
+                        }
+                    }, cancellationToken: ct);
+            }
+            _log.LogInformation("[SP] Seeded DeliveryServices list with initial entries");
+        }
+
+        return listId;
+    }
+
+    public async Task<List<string>> ReadDeliveryServicesAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateDeliveryServicesListIdAsync(ct);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Top    = 200;
+            }, ct);
+
+        return (items?.Value ?? [])
+            .Select(i => i.Fields?.AdditionalData?.TryGetValue("Title", out var t) == true ? t?.ToString() : null)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n!)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     // ── WorkflowCards ─────────────────────────────────────────────────────────
 
     private string? _workflowCardsListId;
@@ -8550,9 +8628,10 @@ public class SharePointService
             ("CustomerName",    "text"),
             ("DocumentType",    "text"),
             ("ErpSpItemId",     "text"),
-            ("IsCompleted",     "boolean"),
-            ("DeliveryAddress", "note"),
-            ("RagStatus",       "text"),
+            ("IsCompleted",       "boolean"),
+            ("DeliveryAddress",   "note"),
+            ("RagStatus",         "text"),
+            ("DeliveryService",   "text"),
         };
 
         foreach (var (name, type) in schema)
@@ -8622,6 +8701,7 @@ public class SharePointService
                                        : ic is bool b && b),
                 DeliveryAddress  = d.TryGetValue("DeliveryAddress",  out var da) ? da?.ToString() : null,
                 RagStatus        = d.TryGetValue("RagStatus",        out var rs) ? (rs?.ToString() is string rv && rv.Length > 0 ? rv : null) : null,
+                DeliveryService  = d.TryGetValue("DeliveryService",  out var ds) ? (ds?.ToString() is string dv && dv.Length > 0 ? dv : null) : null,
             });
         }
         return cards;
@@ -8657,6 +8737,7 @@ public class SharePointService
                         ["IsCompleted"]     = card.IsCompleted,
                         ["DeliveryAddress"] = card.DeliveryAddress,
                         ["RagStatus"]       = card.RagStatus,
+                        ["DeliveryService"] = card.DeliveryService,
                     }
                 }
             }, cancellationToken: ct);
@@ -8676,8 +8757,9 @@ public class SharePointService
         if (req.AssignedDate is not null) fields["AssignedDate"] = req.AssignedDate;
         if (req.SortOrder    is not null) fields["SortOrder"]    = (double)req.SortOrder.Value;
         if (req.Notes        is not null) fields["Notes"]        = req.Notes;
-        if (req.IsCompleted  is not null) fields["IsCompleted"]  = req.IsCompleted.Value;
-        if (req.RagStatus    is not null) fields["RagStatus"]    = req.RagStatus == "" ? null : req.RagStatus;
+        if (req.IsCompleted     is not null) fields["IsCompleted"]     = req.IsCompleted.Value;
+        if (req.RagStatus       is not null) fields["RagStatus"]       = req.RagStatus       == "" ? null : req.RagStatus;
+        if (req.DeliveryService is not null) fields["DeliveryService"] = req.DeliveryService == "" ? null : req.DeliveryService;
 
         if (fields.Count == 0) return;
 

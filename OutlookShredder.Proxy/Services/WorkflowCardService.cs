@@ -32,6 +32,7 @@ public class WorkflowCardService : IHostedService
         try
         {
             await _sp.EnsureWorkflowCardsListAsync(ct);
+            await _sp.EnsureDeliveryServicesListAsync(ct);
             var cards = await _sp.ReadWorkflowCardsAsync(ct);
             _cache.AddRange(cards);
             _log.LogInformation("[WF] Loaded {Count} workflow cards", cards.Count);
@@ -113,6 +114,7 @@ public class WorkflowCardService : IHostedService
                 ErpSpItemId     = req.ErpSpItemId,
                 DeliveryAddress = req.DeliveryAddress,
                 RagStatus       = req.RagStatus,
+                DeliveryService = req.DeliveryService,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -131,12 +133,13 @@ public class WorkflowCardService : IHostedService
             var card = _cache.FirstOrDefault(c => c.SpItemId == spItemId);
             if (card is null) return null;
 
-            if (req.Tab          is not null) card.Tab          = req.Tab;
-            if (req.AssignedDate is not null) card.AssignedDate = req.AssignedDate;
-            if (req.SortOrder    is not null) card.SortOrder    = req.SortOrder.Value;
-            if (req.Notes        is not null) card.Notes        = req.Notes;
-            if (req.IsCompleted  is not null) card.IsCompleted  = req.IsCompleted.Value;
-            if (req.RagStatus    is not null) card.RagStatus    = req.RagStatus == "" ? null : req.RagStatus;
+            if (req.Tab             is not null) card.Tab             = req.Tab;
+            if (req.AssignedDate    is not null) card.AssignedDate    = req.AssignedDate;
+            if (req.SortOrder       is not null) card.SortOrder       = req.SortOrder.Value;
+            if (req.Notes           is not null) card.Notes           = req.Notes;
+            if (req.IsCompleted     is not null) card.IsCompleted     = req.IsCompleted.Value;
+            if (req.RagStatus       is not null) card.RagStatus       = req.RagStatus       == "" ? null : req.RagStatus;
+            if (req.DeliveryService is not null) card.DeliveryService = req.DeliveryService == "" ? null : req.DeliveryService;
 
             await _sp.UpdateWorkflowCardAsync(spItemId, req, ct);
             Publish("Updated", card);
