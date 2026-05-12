@@ -429,13 +429,26 @@ public class SharePointService
             return System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
         }
 
+        static double? GetDouble(Dictionary<string, object?> r, string key)
+        {
+            if (!r.TryGetValue(key, out var v)) return null;
+            return v switch {
+                double d                                            => d,
+                string s when double.TryParse(s, out var p)        => p,
+                _                                                   => null,
+            };
+        }
+
         result = result
             .GroupBy(r => (
-                SrId: r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
-                Prod: NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null),
-                // Include normalised comments so distinct stock lots (same product name,
-                // different bin/heat comments) are NOT collapsed into one row.
-                Comments: NormProd(r.TryGetValue("SupplierProductComments", out var sc) ? sc?.ToString() : null)
+                SrId:    r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
+                Prod:    NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null),
+                // Include TotalPrice + UnitsQuoted so distinct stock lots quoting different
+                // quantities (same product name, different price/qty) are NOT collapsed.
+                // Using price+qty rather than comments because comments may carry identical
+                // shipping footnotes across all lines from the same supplier PDF.
+                Price:   Math.Round(GetDouble(r, "TotalPrice")   ?? -1, 2),
+                Units:   Math.Round(GetDouble(r, "UnitsQuoted")  ?? -1, 4)
             ))
             .Select(g =>
             {
