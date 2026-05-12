@@ -519,6 +519,7 @@ public class GeminiExtractionService : IAiExtractionService
                         ["supplierProductComments"] = Nullable(ParameterType.String),
                         ["isSubstitute"]            = new Schema { Type = ParameterType.Boolean },
                         ["isRegret"]                = new Schema { Type = ParameterType.Boolean },
+                        ["lineNumber"]              = Nullable(ParameterType.Integer),
                     },
                 }
             },

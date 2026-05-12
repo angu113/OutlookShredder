@@ -429,31 +429,19 @@ public class SharePointService
             return System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
         }
 
-        static double? GetDouble(Dictionary<string, object?> r, string key)
-        {
-            if (!r.TryGetValue(key, out var v) || v is null) return null;
-            // Values from SP deserialization may be JsonElement, double, long, string, etc.
-            // ToString() works uniformly for all numeric JsonElement kinds.
-            return double.TryParse(v.ToString(), System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : (double?)null;
-        }
-
         result = result
             .GroupBy(r => (
-                SrId:    r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
-                Prod:    NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null),
-                // Include TotalPrice + UnitsQuoted so distinct stock lots quoting different
-                // quantities (same product name, different price/qty) are NOT collapsed.
-                // Using price+qty rather than comments because comments may carry identical
-                // shipping footnotes across all lines from the same supplier PDF.
-                Price:   Math.Round(GetDouble(r, "TotalPrice")   ?? -1, 2),
-                Units:   Math.Round(GetDouble(r, "UnitsQuoted")  ?? -1, 4)
+                SrId:   r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
+                Prod:   NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null),
+                // LineNumber distinguishes distinct stock lots quoted on separate lines of a PDF.
+                // Null for legacy rows (written before this field existed) — they collapse as before.
+                LineNo: r.TryGetValue("LineNumber", out var ln) ? ln?.ToString() : null
             ))
             .Select(g =>
             {
                 if (g.Count() == 1) return g.First();
-                _log.LogWarning("[SP] Dedup: {Count} SLI rows with SrId={SrId} product='{Prod}'  -- keeping most-populated",
-                    g.Count(), g.Key.SrId, g.Key.Prod);
+                _log.LogWarning("[SP] Dedup: {Count} SLI rows with SrId={SrId} product='{Prod}' LineNo={LineNo} -- keeping most-populated",
+                    g.Count(), g.Key.SrId, g.Key.Prod, g.Key.LineNo ?? "null");
                 return g.OrderByDescending(r => r.Count(kv => kv.Value is not null)).First();
             })
             .ToList();
@@ -2188,6 +2176,7 @@ public class SharePointService
             // Priced rows are never regrets regardless of what comments say.
             ["IsRegret"]                 = !HasPrice(product) && (product.IsRegret || HasRegretPhrase(product.SupplierProductComments)),
             ["IsSubstitute"]             = product.IsSubstitute,
+            ["LineNumber"]               = product.LineNumber,
             ["IsDeleted"]               = false,
         };
 
@@ -3974,6 +3963,7 @@ public class SharePointService
                 ("SupplierProductComments",  "note"),
                 ("IsRegret",                 "boolean"),
                 ("IsSubstitute",             "boolean"),
+                ("LineNumber",               "number"),
                 ("IsPurchased",              "boolean"),
                 ("PurchaseRecordId",         "text"),
                 ("IsDeleted",               "boolean"),

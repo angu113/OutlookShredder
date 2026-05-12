@@ -224,7 +224,8 @@ public class ClaudeExtractionService : IAiExtractionService
                     "leadTimeText":            { "type": ["string","null"], "description": "Verbatim lead time as stated, e.g. '4-6 weeks ARO' or 'In Stock'" },
                     "certifications":          { "type": ["string","null"], "description": "e.g. MTR Included / ASTM / AMS / Certified" },
                     "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, surcharges, etc." },
-                    "isSubstitute":            { "type": "boolean", "description": "True when this is an alternate the supplier offered instead of (or in addition to) the requested product" }
+                    "isSubstitute":            { "type": "boolean", "description": "True when this is an alternate the supplier offered instead of (or in addition to) the requested product" },
+                    "lineNumber":              { "type": ["integer","null"], "description": "1-based line number for this product. Use the supplier's own line/item number if shown in the document; otherwise assign sequential numbers starting from 1." }
                   }
                 }
               }

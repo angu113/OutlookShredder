@@ -37,4 +37,11 @@ public class ProductLine
     /// even when no standard regret phrase appears in supplierProductComments.
     /// </summary>
     public bool    IsRegret                { get; set; }
+
+    /// <summary>
+    /// 1-based position of this product in the supplier's quote.
+    /// Set from the supplier's own line/item number when shown in the document;
+    /// otherwise the AI assigns sequential numbers starting from 1.
+    /// </summary>
+    public int?    LineNumber              { get; set; }
 }
