@@ -2177,7 +2177,8 @@ public class SharePointService
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
-            siteId, listId, supplierResponseId, jobRef, supplier, prodName, prodTokens, quoteReference, productSearchKey);
+            siteId, listId, supplierResponseId, jobRef, supplier, prodName, prodTokens, quoteReference, productSearchKey,
+            product.SupplierProductComments);
 
         if (existing is not null)
         {
@@ -2222,7 +2223,8 @@ public class SharePointService
         string siteId, string listId,
         string supplierResponseId, string jobRef, string supplierName,
         string productName, HashSet<string> productTokens,
-        string? quoteReference = null, string? productSearchKey = null)
+        string? quoteReference = null, string? productSearchKey = null,
+        string? supplierProductComments = null)
     {
         // Fetch all SLI rows and filter in memory, following nextLink so lists > 2000 rows
         // don't silently miss existing items and create duplicates.
@@ -2261,7 +2263,7 @@ public class SharePointService
 
                 if (sameSr)
                 {
-                    if (srMatch is null && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey))
+                    if (srMatch is null && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments))
                         srMatch = item;
                 }
                 else if (canCrossSr && crossSrMatch is null)
@@ -2270,7 +2272,7 @@ public class SharePointService
                     var spSupplier = d.TryGetValue("SupplierName",  out var sn) ? sn?.ToString() : null;
                     if (string.Equals(spRfqId, jobRef, StringComparison.OrdinalIgnoreCase)
                         && string.Equals(spSupplier, supplierName, StringComparison.OrdinalIgnoreCase)
-                        && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey))
+                        && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments))
                     {
                         crossSrMatch = item;
                     }
@@ -2291,7 +2293,8 @@ public class SharePointService
     private bool SliProductMatches(
         IDictionary<string, object?> d,
         string productName, HashSet<string> productTokens,
-        string? quoteReference, string? productSearchKey)
+        string? quoteReference, string? productSearchKey,
+        string? supplierProductComments = null)
     {
         // Strong match: same quote reference + same catalog product key.
         // If the supplier attached the same quote PDF twice (or it was forwarded
@@ -2312,10 +2315,19 @@ public class SharePointService
             {
                 if (!string.Equals(productSearchKey, spSearchKey, StringComparison.OrdinalIgnoreCase))
                     return false; // different catalog products
-                // Same PDF + same MSPC: rely on numeric dimension compatibility alone.
-                // Jaccard is intentionally omitted here — dim-token merging can suppress name token
-                // overlap (e.g. "16GA" merged into a single "2x2x16gax24" token vs "16" kept
-                // separate), pushing Jaccard below threshold for the same product.
+                // Same PDF + same MSPC: if both rows have non-empty comments that differ, they
+                // represent distinct stock items (different bins, heat numbers, etc.) — not
+                // AI double-extractions of the same section.
+                var spComments = d.TryGetValue("SupplierProductComments", out var sc) ? sc?.ToString() : null;
+                if (!string.IsNullOrWhiteSpace(supplierProductComments)
+                    && !string.IsNullOrWhiteSpace(spComments)
+                    && !NormalizeSliText(supplierProductComments).Equals(
+                        NormalizeSliText(spComments), StringComparison.OrdinalIgnoreCase))
+                    return false; // different stock lines
+                // Same PDF + same MSPC + same (or absent) comments: rely on numeric dimension
+                // compatibility alone. Jaccard is intentionally omitted here — dim-token merging
+                // can suppress name token overlap (e.g. "16GA" merged into a single "2x2x16gax24"
+                // token vs "16" kept separate), pushing Jaccard below threshold for the same product.
                 // allowSubset=true handles PDFs where one structural section (description block)
                 // includes a dimension (e.g. wall thickness) that another section omits.
                 var spTok3 = ProductTokens(spProduct2 ?? string.Empty);
@@ -2334,6 +2346,10 @@ public class SharePointService
         return NumericTokensCompatible(productTokens, spTokens)
             && ProductJaccard(spTokens, productTokens) >= 0.5;
     }
+
+    private static string NormalizeSliText(string value) =>
+        string.Join(" ", value.Trim().ToLowerInvariant()
+            .Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
 
     // ??"?????"??? Purge stale no-MessageId SLI rows ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 

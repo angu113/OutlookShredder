@@ -10,11 +10,14 @@ namespace OutlookShredder.Proxy.Services;
 /// section). This class collapses those duplicates before the SP write loop runs.
 ///
 /// Identity (two passes):
-///   Pass 1 — MSPC: rows sharing the same non-null ProductSearchKey are the same
-///             catalog product. Unmatched rows (null MSPC) proceed to pass 2.
-///   Pass 2 — Price+Units: rows with the same TotalPrice (±1 cent) AND UnitsQuoted
-///             are treated as the same product line. Rows where either field is null
-///             are passed through unchanged.
+///   Pass 1 — MSPC + comments: rows sharing the same non-null ProductSearchKey AND
+///             the same normalised SupplierProductComments are the same line.
+///             Rows with the same MSPC but different comments (e.g. different bins
+///             or heat numbers) are treated as distinct stock lines and kept.
+///             Unmatched rows (null MSPC) proceed to pass 2.
+///   Pass 2 — Price+Units+comments: rows with the same TotalPrice (±1 cent),
+///             UnitsQuoted, AND normalised comments are treated as the same product
+///             line. Rows where either numeric field is null are passed through.
 ///
 /// Winner selection: the row with the highest richness score (weighted non-null
 /// field count + text-length bonus) survives. Ties go to the first occurrence.
@@ -49,11 +52,12 @@ internal static class ProductDeduplicator
 
         var prefix = dryRun ? "[Dedup DRY]" : "[Dedup]";
 
-        // ── Pass 1: MSPC grouping ─────────────────────────────────────────────
-        // Rows sharing the same non-null ProductSearchKey are the same catalog
-        // product regardless of whether pricing fields are present. This handles
-        // PDFs where different structural sections (description block, pricing
-        // grid, comparison note) each produce an extraction for the same item.
+        // ── Pass 1: MSPC + comments grouping ────────────────────────────────────
+        // Key: MSPC + normalised SupplierProductComments.
+        // Rows sharing the same MSPC but different comments (e.g. different bins,
+        // heat numbers, or stock locations) are kept as distinct stock lines.
+        // Only rows where both the MSPC and the comments are effectively identical
+        // are collapsed — those are AI double-extractions of the same PDF section.
         var mspcGroups = new Dictionary<string, List<(int Index, ProductLine P)>>(
             StringComparer.OrdinalIgnoreCase);
         var noMspc = new List<(int Index, ProductLine P)>();
@@ -63,8 +67,9 @@ internal static class ProductDeduplicator
             var p = products[i];
             if (!string.IsNullOrWhiteSpace(p.ProductSearchKey))
             {
-                if (!mspcGroups.TryGetValue(p.ProductSearchKey!, out var bucket))
-                    mspcGroups[p.ProductSearchKey!] = bucket = [];
+                var groupKey = p.ProductSearchKey! + "|" + NormalizeText(p.SupplierProductComments);
+                if (!mspcGroups.TryGetValue(groupKey, out var bucket))
+                    mspcGroups[groupKey] = bucket = [];
                 bucket.Add((i, p));
             }
             else
@@ -73,8 +78,9 @@ internal static class ProductDeduplicator
 
         var pass1Winners = new List<(int OriginalIndex, ProductLine P)>();
 
-        foreach (var (mspc, members) in mspcGroups)
+        foreach (var (groupKey, members) in mspcGroups)
         {
+            var mspc = groupKey.Split('|')[0];
             if (members.Count == 1)
             {
                 var solo = members[0];
@@ -108,7 +114,7 @@ internal static class ProductDeduplicator
             }
             else
             {
-                var key = $"{Math.Round(p.TotalPrice.Value, 2):F2}|{p.UnitsQuoted.Value}";
+                var key = $"{Math.Round(p.TotalPrice.Value, 2):F2}|{p.UnitsQuoted.Value}|{NormalizeText(p.SupplierProductComments)}";
                 keyed.Add((i, p, key));
             }
         }
@@ -220,6 +226,15 @@ internal static class ProductDeduplicator
     {
         if (string.IsNullOrWhiteSpace(value)) return 0;
         return basePoints + value.Length / bonusPer;
+    }
+
+    // ── Text helpers ──────────────────────────────────────────────────────────
+
+    private static string NormalizeText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        return string.Join(" ", value.Trim().ToLowerInvariant()
+            .Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
     }
 
     // ── Logging helpers ───────────────────────────────────────────────────────
