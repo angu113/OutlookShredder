@@ -2313,6 +2313,23 @@ public class SharePointService
                 return false;
         }
 
+        // Same MSPC + same assigned line number → same physical PDF line extracted
+        // twice with slightly different AI phrasing (e.g. "T6" vs "T6511", or
+        // one extraction omitting the length dimension).  Merge without relying on
+        // name similarity, but guard on comments so distinct stock lots (same MSPC,
+        // different bins) with explicit line numbers are not collapsed.
+        if (lineNumber.HasValue
+            && !string.IsNullOrEmpty(productSearchKey)
+            && d.TryGetValue("ProductSearchKey", out var mspcsv) && mspcsv?.ToString() is string spMspc
+            && string.Equals(productSearchKey, spMspc, StringComparison.OrdinalIgnoreCase))
+        {
+            var spCommLn = d.TryGetValue("SupplierProductComments", out var scl) ? scl?.ToString() : null;
+            if (string.IsNullOrWhiteSpace(supplierProductComments) || string.IsNullOrWhiteSpace(spCommLn)
+                || NormalizeSliText(supplierProductComments).Equals(
+                       NormalizeSliText(spCommLn), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
         // Strong match: same quote reference + same catalog product key.
         // If the supplier attached the same quote PDF twice (or it was forwarded
         // to multiple mailboxes), this reliably identifies the same line without
