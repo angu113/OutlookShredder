@@ -2187,7 +2187,7 @@ public class SharePointService
 
         var existing = await FindExistingSupplierLineItemAsync(
             siteId, listId, supplierResponseId, jobRef, supplier, prodName, prodTokens, quoteReference, productSearchKey,
-            product.SupplierProductComments);
+            product.SupplierProductComments, product.LineNumber);
 
         if (existing is not null)
         {
@@ -2233,7 +2233,7 @@ public class SharePointService
         string supplierResponseId, string jobRef, string supplierName,
         string productName, HashSet<string> productTokens,
         string? quoteReference = null, string? productSearchKey = null,
-        string? supplierProductComments = null)
+        string? supplierProductComments = null, int? lineNumber = null)
     {
         // Fetch all SLI rows and filter in memory, following nextLink so lists > 2000 rows
         // don't silently miss existing items and create duplicates.
@@ -2244,7 +2244,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,RFQ_ID,SupplierName,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments,IsDeleted)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,RFQ_ID,SupplierName,ProductName,ProductSearchKey,QuoteReference,SupplierProductComments,LineNumber,IsDeleted)"];
                 r.QueryParameters.Top    = 2000;
             });
 
@@ -2272,7 +2272,7 @@ public class SharePointService
 
                 if (sameSr)
                 {
-                    if (srMatch is null && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments))
+                    if (srMatch is null && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments, lineNumber))
                         srMatch = item;
                 }
                 else if (canCrossSr && crossSrMatch is null)
@@ -2281,7 +2281,7 @@ public class SharePointService
                     var spSupplier = d.TryGetValue("SupplierName",  out var sn) ? sn?.ToString() : null;
                     if (string.Equals(spRfqId, jobRef, StringComparison.OrdinalIgnoreCase)
                         && string.Equals(spSupplier, supplierName, StringComparison.OrdinalIgnoreCase)
-                        && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments))
+                        && SliProductMatches(d, productName, productTokens, quoteReference, productSearchKey, supplierProductComments, lineNumber))
                     {
                         crossSrMatch = item;
                     }
@@ -2303,8 +2303,16 @@ public class SharePointService
         IDictionary<string, object?> d,
         string productName, HashSet<string> productTokens,
         string? quoteReference, string? productSearchKey,
-        string? supplierProductComments = null)
+        string? supplierProductComments = null, int? lineNumber = null)
     {
+        // Rows with explicitly assigned, distinct LineNumbers are different stock lots — never merge.
+        if (lineNumber.HasValue)
+        {
+            var spLnRaw = d.TryGetValue("LineNumber", out var lnv) ? lnv?.ToString() : null;
+            if (spLnRaw is not null && int.TryParse(spLnRaw, out var spLn) && spLn != lineNumber.Value)
+                return false;
+        }
+
         // Strong match: same quote reference + same catalog product key.
         // If the supplier attached the same quote PDF twice (or it was forwarded
         // to multiple mailboxes), this reliably identifies the same line without
