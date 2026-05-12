@@ -431,12 +431,11 @@ public class SharePointService
 
         static double? GetDouble(Dictionary<string, object?> r, string key)
         {
-            if (!r.TryGetValue(key, out var v)) return null;
-            return v switch {
-                double d                                            => d,
-                string s when double.TryParse(s, out var p)        => p,
-                _                                                   => null,
-            };
+            if (!r.TryGetValue(key, out var v) || v is null) return null;
+            // Values from SP deserialization may be JsonElement, double, long, string, etc.
+            // ToString() works uniformly for all numeric JsonElement kinds.
+            return double.TryParse(v.ToString(), System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : (double?)null;
         }
 
         result = result
