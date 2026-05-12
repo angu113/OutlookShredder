@@ -539,7 +539,10 @@ public class SharePointService
         var sliListId = await GetSupplierLineItemsListIdAsync();
         var sliCol    = await ResolveRfqIdColumnAsync(siteId, sliListId);
 
-        // SR rows served from cache  --  no full-table fetch for targeted refreshes.
+        // Invalidate SR cache so any SR written by another proxy instance (cross-machine)
+        // is visible here. Without this, the new SR isn't in this machine's cache yet and
+        // JoinSliToSr returns SLI rows with missing parent fields (SupplierName, EmailFrom, etc.).
+        InvalidateSrCache();
         var srTask = GetCachedSrItemsAsync(siteId, srListId);
 
         // Fetch only SLI rows for this rfqId via OData $filter.
