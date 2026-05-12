@@ -82,6 +82,31 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     /// <summary>
+    /// POST /api/catalog/dedup?dryRun=true — removes duplicate SP rows sharing the same
+    /// SearchKey (MSPC). Keeps the row with the lowest SP item ID (first written).
+    /// Pass ?dryRun=false (or omit) to actually delete; ?dryRun=true to preview.
+    /// </summary>
+    [HttpPost("dedup")]
+    public async Task<IActionResult> Dedup([FromQuery] bool dryRun = false, CancellationToken ct = default)
+    {
+        var (groups, deleted, report) = await catalog.DedupAsync(dryRun, ct);
+        return Ok(new
+        {
+            dryRun,
+            duplicateGroups = groups,
+            deleted,
+            groups = report.Select(g => new
+            {
+                searchKey  = g.SearchKey,
+                keepSpId   = g.KeeperSpId,
+                keepName   = g.KeeperName,
+                deleteCount = g.Extras.Count,
+                deleting   = g.Extras.Select(x => new { x.SpId, x.Name }),
+            }),
+        });
+    }
+
+    /// <summary>
     /// GET /api/catalog/resolve?name=foo — resolves a vendor description against the cache.
     /// Returns the matched catalog entry, or 404 with the raw name if no match.
     /// </summary>

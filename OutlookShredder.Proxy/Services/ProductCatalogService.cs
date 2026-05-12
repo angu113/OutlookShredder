@@ -171,6 +171,100 @@ public class ProductCatalogService : BackgroundService
         return _graph;
     }
 
+    // ── Dedup ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Finds duplicate catalog rows (same non-null SearchKey) and deletes the extras,
+    /// keeping the row with the lowest SP item ID (first written).
+    /// When <paramref name="dryRun"/> is true, reports what would be deleted without touching SP.
+    /// Returns (duplicateGroups, totalDeleted, report[]).
+    /// </summary>
+    public async Task<(int Groups, int Deleted, List<DedupCatalogGroup> Report)> DedupAsync(
+        bool dryRun, CancellationToken ct)
+    {
+        var graph = GetGraph();
+
+        var siteUrl  = _config["ProductCatalog:SiteUrl"]
+                       ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+        var uri      = new Uri(siteUrl);
+        var siteKey  = $"{uri.Host}:{uri.AbsolutePath}";
+        var site     = await graph.Sites[siteKey].GetAsync(cancellationToken: ct);
+        if (site?.Id is null) throw new InvalidOperationException($"Site not found: '{siteKey}'");
+
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var lists    = await graph.Sites[site.Id].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'",
+                      cancellationToken: ct);
+        var list = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null) throw new InvalidOperationException($"Catalog list '{listName}' not found");
+
+        // Read all items with their SP item IDs and SearchKey/Product fields.
+        var page = await graph.Sites[site.Id].Lists[list.Id].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,Title,Product,Product_x0020_SearchKey,SearchKey)"];
+                r.QueryParameters.Top    = 500;
+            }, cancellationToken: ct);
+
+        var all = new List<(string SpId, string? Name, string? SearchKey)>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                if (item.Id is null) continue;
+                var d    = item.Fields?.AdditionalData;
+                var name = (d?.TryGetValue("Product",                 out var p)  == true ? p  :
+                            d?.TryGetValue("Title",                   out var tt) == true ? tt : null)
+                           ?.ToString();
+                var key  = (d?.TryGetValue("Product_x0020_SearchKey", out var sk) == true ? sk :
+                            d?.TryGetValue("SearchKey",               out var k2) == true ? k2 : null)
+                           ?.ToString();
+                all.Add((item.Id, name, key));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await graph.Sites[site.Id].Lists[list.Id].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        // Group by non-null SearchKey; keep the row with the lowest numeric SP item ID.
+        var groups = all
+            .Where(x => !string.IsNullOrWhiteSpace(x.SearchKey))
+            .GroupBy(x => x.SearchKey!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .ToList();
+
+        var report  = new List<DedupCatalogGroup>();
+        int deleted = 0;
+
+        foreach (var g in groups)
+        {
+            var ordered = g
+                .OrderBy(x => int.TryParse(x.SpId, out var n) ? n : int.MaxValue)
+                .ToList();
+            var keeper  = ordered[0];
+            var extras  = ordered.Skip(1).ToList();
+
+            report.Add(new DedupCatalogGroup(
+                g.Key, keeper.SpId, keeper.Name,
+                extras.Select(x => new DedupCatalogExtra(x.SpId, x.Name)).ToList()));
+
+            if (!dryRun)
+            {
+                foreach (var extra in extras)
+                {
+                    await graph.Sites[site.Id].Lists[list.Id].Items[extra.SpId]
+                        .DeleteAsync(cancellationToken: ct);
+                    deleted++;
+                    _log.LogInformation(
+                        "[Catalog Dedup] Deleted SP item {Id} ('{Name}', MSPC={Key}) — duplicate of {KeepId}",
+                        extra.SpId, extra.Name, g.Key, keeper.SpId);
+                }
+            }
+        }
+
+        return (groups.Count, deleted, report);
+    }
+
     // ── Public resolver ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -707,3 +801,7 @@ public class ProductCatalogService : BackgroundService
         return catAstm.Overlaps(vendAstm);
     }
 }
+
+public record DedupCatalogExtra(string SpId, string? Name);
+public record DedupCatalogGroup(string SearchKey, string KeeperSpId, string? KeeperName,
+    List<DedupCatalogExtra> Extras);

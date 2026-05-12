@@ -4884,13 +4884,16 @@ public class SharePointService
             return s.Trim();
         }
 
-        // Read existing Line No. values from SP catalog (dedup key).
-        // Expand all fields so we can try multiple internal name variants.
-        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Read existing rows from SP catalog to build two dedup sets.
+        // Primary key: Product_x0020_SearchKey (MSPC) — the true business key.
+        // Secondary key: Line_x0020_No (ERP line number) — legacy dedup, kept as
+        //   a fallback for rows where SearchKey may be blank.
+        var existingSearchKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var existingLineNos    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Expand = ["fields($select=id,Title,Product,Product_x0020_SearchKey,SearchKey,Line_x0020_No)"];
                 r.QueryParameters.Top    = 5000;
             }, ct);
 
@@ -4898,17 +4901,20 @@ public class SharePointService
         {
             foreach (var item in page.Value)
             {
-                var d2   = item.Fields?.AdditionalData;
+                var d2 = item.Fields?.AdditionalData;
                 if (d2 is null) continue;
-                var raw = RfqField(d2, "Line_x0020_No", "MSPC", "mspc", "Mspc");
-                if (!string.IsNullOrWhiteSpace(raw)) existing.Add(NormLineNo(raw));
+                var sk  = RfqField(d2, "Product_x0020_SearchKey", "SearchKey");
+                var ln  = RfqField(d2, "Line_x0020_No", "MSPC", "mspc", "Mspc");
+                if (!string.IsNullOrWhiteSpace(sk)) existingSearchKeys.Add(sk);
+                if (!string.IsNullOrWhiteSpace(ln)) existingLineNos.Add(NormLineNo(ln));
             }
             if (page.OdataNextLink is null) break;
             page = await GetGraph().Sites[siteId].Lists[listId].Items
                 .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
         }
 
-        _log.LogInformation("[SP] LoadCatalogFromCsv: {N} existing MSPCs in SP", existing.Count);
+        _log.LogInformation("[SP] LoadCatalogFromCsv: {NK} existing MSPCs, {NL} existing Line Nos in SP",
+            existingSearchKeys.Count, existingLineNos.Count);
 
         // Parse CSV
         var toAdd = new List<(string LineNo, string Product, string SearchKey, string Category, string Shape)>();
@@ -4937,16 +4943,28 @@ public class SharePointService
             if (string.IsNullOrWhiteSpace(line)) continue;
             var f = CsvSplit(line);
 
-            var lineNo  = iLineNo  < f.Length ? NormLineNo(f[iLineNo])        : "";
-            var product = iProduct < f.Length ? f[iProduct].Trim()           : "";
+            var lineNo    = iLineNo    < f.Length ? NormLineNo(f[iLineNo])        : "";
+            var product   = iProduct   < f.Length ? f[iProduct].Trim()           : "";
+            var searchKey = iSearchKey < f.Length ? f[iSearchKey].Trim()         : "";
             if (string.IsNullOrWhiteSpace(lineNo) || string.IsNullOrWhiteSpace(product)) continue;
 
-            if (existing.Contains(lineNo)) { skipped++; continue; }
+            // Skip if already in SP (by MSPC — primary key) or by Line No. (secondary).
+            // Also skip duplicates within this CSV file itself (same MSPC seen twice).
+            if ((!string.IsNullOrWhiteSpace(searchKey) && existingSearchKeys.Contains(searchKey))
+                || existingLineNos.Contains(lineNo))
+            {
+                skipped++;
+                continue;
+            }
+
+            // Mark this MSPC as seen so intra-batch CSV duplicates are caught.
+            if (!string.IsNullOrWhiteSpace(searchKey)) existingSearchKeys.Add(searchKey);
+            existingLineNos.Add(lineNo);
 
             toAdd.Add((
                 lineNo,
                 product,
-                iSearchKey < f.Length ? f[iSearchKey].Trim() : "",
+                searchKey,
                 iCategory  < f.Length ? f[iCategory].Trim()  : "",
                 iShape     < f.Length ? f[iShape].Trim()     : ""
             ));
