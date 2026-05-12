@@ -432,7 +432,10 @@ public class SharePointService
         result = result
             .GroupBy(r => (
                 SrId: r.TryGetValue("SupplierResponseId", out var sid) ? sid?.ToString() ?? "" : "",
-                Prod: NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null)
+                Prod: NormProd(r.TryGetValue("ProductName", out var pn) ? pn?.ToString() : null),
+                // Include normalised comments so distinct stock lots (same product name,
+                // different bin/heat comments) are NOT collapsed into one row.
+                Comments: NormProd(r.TryGetValue("SupplierProductComments", out var sc) ? sc?.ToString() : null)
             ))
             .Select(g =>
             {
