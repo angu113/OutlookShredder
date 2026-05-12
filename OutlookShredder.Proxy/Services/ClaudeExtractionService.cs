@@ -85,6 +85,12 @@ public class ClaudeExtractionService : IAiExtractionService
         Step 1 - Direct: use $/lb, $/ft, $/piece if stated outright. Also capture totalPrice
                  directly if the document states a line total, extended price, amount,
                  subtotal, or extended amount for the line.
+                 "each", "apiece", "/ea", "per each", "per piece" are all synonyms for $/piece —
+                 e.g. "300 each" or "$300/ea" → pricePerPiece = 300.
+                 CRITICAL: a terse "X each" reply (e.g. "300 each - 1 day") is a PRICE QUOTE,
+                 not a quantity. Do NOT put 300 into unitsQuoted; put it into pricePerPiece.
+                 If the "X each" number is far larger than what was requested (e.g. requested
+                 qty 2, reply "300 each") that is confirmation it is a unit price, not a qty.
         Step 2 - $/cwt: if price is per hundred-weight (cwt), divide by 100 to get $/lb.
         Step 3 - $/kg: divide by 2.20462 to get $/lb.
         Step 4 - Unit price to $/lb: if pricePerPiece is known AND weightPerUnit is known,
