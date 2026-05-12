@@ -10,10 +10,13 @@ namespace OutlookShredder.Proxy.Services;
 /// section). This class collapses those duplicates before the SP write loop runs.
 ///
 /// Identity (two passes):
-///   Pass 1 — MSPC + comments: rows sharing the same non-null ProductSearchKey AND
-///             the same normalised SupplierProductComments are the same line.
-///             Rows with the same MSPC but different comments (e.g. different bins
-///             or heat numbers) are treated as distinct stock lines and kept.
+///   Pass 1 — MSPC + line-number (or comments): when the AI assigns a LineNumber,
+///             rows sharing the same non-null ProductSearchKey AND the same LineNumber
+///             are collapsed — they are the same physical PDF line with different AI
+///             phrasings (e.g. "T6" vs "T6511", or different comment wording for the
+///             same substitute-grade note). When LineNumber is absent, falls back to
+///             MSPC + normalised SupplierProductComments so distinct stock lots with
+///             the same MSPC (different bins, heat numbers) are kept as separate rows.
 ///             Unmatched rows (null MSPC) proceed to pass 2.
 ///   Pass 2 — Price+Units+comments: rows with the same TotalPrice (±1 cent),
 ///             UnitsQuoted, AND normalised comments are treated as the same product
@@ -52,12 +55,14 @@ internal static class ProductDeduplicator
 
         var prefix = dryRun ? "[Dedup DRY]" : "[Dedup]";
 
-        // ── Pass 1: MSPC + comments grouping ────────────────────────────────────
-        // Key: MSPC + normalised SupplierProductComments.
-        // Rows sharing the same MSPC but different comments (e.g. different bins,
-        // heat numbers, or stock locations) are kept as distinct stock lines.
-        // Only rows where both the MSPC and the comments are effectively identical
-        // are collapsed — those are AI double-extractions of the same PDF section.
+        // ── Pass 1: MSPC + line-number (or comments) grouping ───────────────────
+        // When the AI assigns a LineNumber, use MSPC + LineNumber as the group key.
+        // Two rows with the same MSPC and the same LineNumber are always the same
+        // physical PDF line — the AI just phrased the description or comment
+        // differently (e.g. "Supplier quoted T6511" vs "Substitute grade T6511").
+        // When LineNumber is absent, fall back to MSPC + normalised comments so that
+        // distinct stock lots with the same MSPC (different bins, heat numbers) are
+        // kept as separate rows.
         var mspcGroups = new Dictionary<string, List<(int Index, ProductLine P)>>(
             StringComparer.OrdinalIgnoreCase);
         var noMspc = new List<(int Index, ProductLine P)>();
@@ -67,7 +72,9 @@ internal static class ProductDeduplicator
             var p = products[i];
             if (!string.IsNullOrWhiteSpace(p.ProductSearchKey))
             {
-                var groupKey = p.ProductSearchKey! + "|" + NormalizeText(p.SupplierProductComments);
+                var groupKey = p.LineNumber.HasValue
+                    ? p.ProductSearchKey! + "|LN=" + p.LineNumber.Value
+                    : p.ProductSearchKey! + "|" + NormalizeText(p.SupplierProductComments);
                 if (!mspcGroups.TryGetValue(groupKey, out var bucket))
                     mspcGroups[groupKey] = bucket = [];
                 bucket.Add((i, p));

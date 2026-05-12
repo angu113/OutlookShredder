@@ -2305,28 +2305,29 @@ public class SharePointService
         string? quoteReference, string? productSearchKey,
         string? supplierProductComments = null, int? lineNumber = null)
     {
-        // Rows with explicitly assigned, distinct LineNumbers are different stock lots — never merge.
+        // LineNumber + MSPC dual check:
+        //   1) If SP has a different LineNumber → never merge (different physical PDF line).
+        //   2) If SP has the SAME LineNumber and SAME MSPC → always merge; the AI just
+        //      phrased the description or comment differently (e.g. "T6" vs "T6511",
+        //      "Supplier quoted T6511" vs "Substitute grade T6511"). LineNumber is a
+        //      PDF positional anchor — distinct stock lots never share one.
+        // SP number columns return floats (e.g. "2.0") — parse via double then round.
         if (lineNumber.HasValue)
         {
             var spLnRaw = d.TryGetValue("LineNumber", out var lnv) ? lnv?.ToString() : null;
-            if (spLnRaw is not null && int.TryParse(spLnRaw, out var spLn) && spLn != lineNumber.Value)
-                return false;
-        }
+            int? spLineNumber = null;
+            if (spLnRaw is not null && double.TryParse(spLnRaw,
+                    System.Globalization.NumberStyles.Number,
+                    System.Globalization.CultureInfo.InvariantCulture, out var spLnD))
+                spLineNumber = (int)Math.Round(spLnD);
 
-        // Same MSPC + same assigned line number → same physical PDF line extracted
-        // twice with slightly different AI phrasing (e.g. "T6" vs "T6511", or
-        // one extraction omitting the length dimension).  Merge without relying on
-        // name similarity, but guard on comments so distinct stock lots (same MSPC,
-        // different bins) with explicit line numbers are not collapsed.
-        if (lineNumber.HasValue
-            && !string.IsNullOrEmpty(productSearchKey)
-            && d.TryGetValue("ProductSearchKey", out var mspcsv) && mspcsv?.ToString() is string spMspc
-            && string.Equals(productSearchKey, spMspc, StringComparison.OrdinalIgnoreCase))
-        {
-            var spCommLn = d.TryGetValue("SupplierProductComments", out var scl) ? scl?.ToString() : null;
-            if (string.IsNullOrWhiteSpace(supplierProductComments) || string.IsNullOrWhiteSpace(spCommLn)
-                || NormalizeSliText(supplierProductComments).Equals(
-                       NormalizeSliText(spCommLn), StringComparison.OrdinalIgnoreCase))
+            if (spLineNumber.HasValue && spLineNumber.Value != lineNumber.Value)
+                return false;
+
+            if (spLineNumber.HasValue
+                && !string.IsNullOrEmpty(productSearchKey)
+                && d.TryGetValue("ProductSearchKey", out var mspcsv) && mspcsv?.ToString() is string spMspc
+                && string.Equals(productSearchKey, spMspc, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
