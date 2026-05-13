@@ -124,6 +124,7 @@ try
     builder.Services.AddSingleton<SignalWireService>();
     builder.Services.AddSingleton<MessagingService>();
     builder.Services.AddSingleton<PricingAnalysisService>();
+    builder.Services.AddSingleton<CatalogAnalysisService>();
 
     var app = builder.Build();
 
