@@ -19,15 +19,19 @@ public class AnalysisController(CatalogAnalysisService analysis) : ControllerBas
 
     /// <summary>
     /// AI-tokenise the catalog or SLI source file (resumable).
-    /// target = "catalog" (default) | "sli"
+    /// clearShapes: comma-separated shape names to force re-tokenise (e.g. "sheet,plate,pipe")
     /// </summary>
     [HttpPost("catalog/tokenize")]
-    public async Task<IActionResult> TokenizeCatalog(CancellationToken ct)
-        => Ok(await analysis.TokenizeAsync("catalog", ct));
+    public async Task<IActionResult> TokenizeCatalog(
+        [FromQuery] string? clearShapes, CancellationToken ct)
+        => Ok(await analysis.TokenizeAsync("catalog",
+            clearShapes?.Split(',', StringSplitOptions.RemoveEmptyEntries) ?? [], ct));
 
     [HttpPost("sli/tokenize")]
-    public async Task<IActionResult> TokenizeSli(CancellationToken ct)
-        => Ok(await analysis.TokenizeAsync("sli", ct));
+    public async Task<IActionResult> TokenizeSli(
+        [FromQuery] string? clearShapes, CancellationToken ct)
+        => Ok(await analysis.TokenizeAsync("sli",
+            clearShapes?.Split(',', StringSplitOptions.RemoveEmptyEntries) ?? [], ct));
 
     /// <summary>
     /// Score sli-tokens against catalog-tokens in-memory. No network calls.

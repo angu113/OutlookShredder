@@ -140,8 +140,10 @@ public class CatalogAnalysisService
     /// AI-tokenise the catalog or SLI source file.  Resumable — entries already
     /// present in the tokens file are skipped.  Saves progress after every batch
     /// so interrupting mid-run doesn't lose work.
+    /// clearShapes: if non-empty, removes entries with those TkShape values from the
+    /// existing tokens file before starting, forcing them to be re-tokenised.
     /// </summary>
-    public async Task<object> TokenizeAsync(string target, CancellationToken ct)
+    public async Task<object> TokenizeAsync(string target, string[] clearShapes, CancellationToken ct)
     {
         var (sourcePath, tokensPath, label) = target == "sli"
             ? (SliPath, SliTokensPath, "sli")
@@ -179,6 +181,20 @@ public class CatalogAnalysisService
                                ?? [];
             foreach (var t in existingList.Where(t => !t.TokenizationFailed))
                 existing[t.Name] = t;
+
+            // Drop entries whose shape is in the clear-list so they get re-tokenised
+            if (clearShapes.Length > 0)
+            {
+                var toClear = existing.Values
+                    .Where(t => t.TkShape != null &&
+                                clearShapes.Contains(t.TkShape, StringComparer.OrdinalIgnoreCase))
+                    .Select(t => t.Name)
+                    .ToList();
+                foreach (var n in toClear) existing.Remove(n);
+                _log.LogInformation("[Analysis] {Label} clear-shapes: removed {Count} entries for shapes [{Shapes}]",
+                    label, toClear.Count, string.Join(", ", clearShapes));
+            }
+
             _log.LogInformation("[Analysis] {Label} resume: {Done}/{Total} already tokenised",
                 label, existing.Count, source.Count);
         }
@@ -251,28 +267,28 @@ public class CatalogAnalysisService
         var catJson  = await File.ReadAllTextAsync(CatalogTokensPath, ct);
         var sliJson  = await File.ReadAllTextAsync(SliTokensPath, ct);
 
-        var catalog  = JsonSerializer.Deserialize<List<ProductTokens>>(catJson, Json)!
-                           .Where(t => !t.TokenizationFailed).ToList();
+        var catalog   = JsonSerializer.Deserialize<List<ProductTokens>>(catJson, Json)!
+                            .Where(t => !t.TokenizationFailed).ToList();
         var sliTokens = JsonSerializer.Deserialize<List<ProductTokens>>(sliJson, Json)!
-                           .Where(t => !t.TokenizationFailed).ToList();
+                            .Where(t => !t.TokenizationFailed).ToList();
 
-        // Re-attach SearchKey from sli-sample.json so expected values are present
+        // Load sli-sample.json once — keyed by name (first entry wins for duplicates)
+        Dictionary<string, SliEntry> sliLookup = [];
         if (File.Exists(SliPath))
         {
-            var rawSli = await File.ReadAllTextAsync(SliPath, ct);
-            var sliEntries = JsonSerializer.Deserialize<List<SliEntry>>(rawSli, Json)!
-                .ToDictionary(e => e.ProductName, e => e, StringComparer.OrdinalIgnoreCase);
+            var rawSli   = await File.ReadAllTextAsync(SliPath, ct);
+            var allSli   = JsonSerializer.Deserialize<List<SliEntry>>(rawSli, Json)!;
+            foreach (var e in allSli)
+                sliLookup.TryAdd(e.ProductName, e);  // first entry wins on duplicate names
+
             foreach (var t in sliTokens)
             {
-                if (sliEntries.TryGetValue(t.Name, out var entry))
-                {
+                if (sliLookup.TryGetValue(t.Name, out var entry))
                     t.SearchKey = entry.ProductSearchKey;
-                    t.Name      = entry.ProductName; // normalise
-                }
             }
         }
 
-        var run = new MatchTestRun { RunAt = DateTime.UtcNow };
+        var run    = new MatchTestRun { RunAt = DateTime.UtcNow };
         var sample = limit > 0 ? sliTokens.Take(limit).ToList() : sliTokens;
 
         foreach (var supplier in sample)
@@ -287,17 +303,11 @@ public class CatalogAnalysisService
                 FailReason          = failReason
             };
 
-            // Re-attach SLI metadata for readability
-            if (File.Exists(SliPath))
+            // Attach supplier/catalog name from pre-loaded lookup
+            if (sliLookup.TryGetValue(supplier.Name, out var sliEntry))
             {
-                var rawSli = await File.ReadAllTextAsync(SliPath, ct);
-                var sliEntries = JsonSerializer.Deserialize<List<SliEntry>>(rawSli, Json)!
-                    .ToDictionary(e => e.ProductName, e => e, StringComparer.OrdinalIgnoreCase);
-                if (sliEntries.TryGetValue(supplier.Name, out var sliEntry))
-                {
-                    mc.SupplierName        = sliEntry.SupplierName;
-                    mc.ExpectedCatalogName = sliEntry.CatalogProductName;
-                }
+                mc.SupplierName        = sliEntry.SupplierName;
+                mc.ExpectedCatalogName = sliEntry.CatalogProductName;
             }
 
             if (match is null)
@@ -350,42 +360,69 @@ public class CatalogAnalysisService
 
     // ── Matching algorithm ────────────────────────────────────────────────────
 
+    // Conditions that are "exclusive" — if the catalog entry carries one of these,
+    // the supplier description must also mention it.  Prevents a plain sheet matching
+    // a perforated sheet, or a plain tube matching a DOM tube, etc.
+    private static readonly HashSet<string> ExclusiveConditions =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "perforated", "expanded", "dom", "grating", "treadplate" };
+
     private static (ProductTokens? match, double score, string? failReason)
         FindBestMatch(ProductTokens supplier, List<ProductTokens> catalog)
     {
-        ProductTokens? best       = null;
-        double         bestScore  = -1;
-        string?        failReason = "no candidates passed gates";
+        ProductTokens? best            = null;
+        double         bestScore       = -1;
+        string?        noMatchReason   = "no candidates passed gates";
 
         foreach (var cat in catalog)
         {
             // Hard gates: if both sides specify a field and they differ → skip
-            if (!GatePasses(supplier.TkMetal,  cat.TkMetal,  out var r1)) { failReason = r1; continue; }
-            if (!GatePasses(supplier.TkShape,  cat.TkShape,  out var r2)) { failReason = r2; continue; }
-            if (!GatePasses(supplier.TkAlloy,  cat.TkAlloy,  out var r3)) { failReason = r3; continue; }
-            if (!GatePasses(supplier.TkTemper, cat.TkTemper, out var r4)) { failReason = r4; continue; }
+            if (!GatePasses(supplier.TkMetal,  cat.TkMetal,  out var r1)) { noMatchReason = r1; continue; }
+            if (!GatePasses(supplier.TkShape,  cat.TkShape,  out var r2)) { noMatchReason = r2; continue; }
+            if (!GatePasses(supplier.TkAlloy,  cat.TkAlloy,  out var r3)) { noMatchReason = r3; continue; }
+            if (!GatePasses(supplier.TkTemper, cat.TkTemper, out var r4)) { noMatchReason = r4; continue; }
 
-            // Score candidates that passed all gates
+            // Exclusive-condition gate: catalog carries an exclusive tag the supplier
+            // didn't mention → not this product
+            var catExclusive = cat.TkConditions
+                .Where(c => ExclusiveConditions.Contains(c)).ToArray();
+            if (catExclusive.Length > 0)
+            {
+                bool supplierMentionsIt = catExclusive.Any(c =>
+                    supplier.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase));
+                if (!supplierMentionsIt)
+                {
+                    noMatchReason = $"catalog requires condition '{catExclusive[0]}'";
+                    continue;
+                }
+            }
+
+            // Scoring
             double score = 0;
-            if (DimsMatch(supplier.TkDims, cat.TkDims))          score += 3;
-            if (ConditionsOverlap(supplier.TkConditions, cat.TkConditions)) score += 1;
+            if (DimsMatch(supplier.TkDims, cat.TkDims))                        score += 3;
+            if (ConditionsOverlap(supplier.TkConditions, cat.TkConditions))     score += 1;
 
-            // Must have at least one positive signal beyond the gates
-            bool hasSignal = score > 0
-                || (supplier.TkAlloy  != null && cat.TkAlloy  != null)
-                || (supplier.TkTemper != null && cat.TkTemper != null);
+            // Signal check: must score >= 1 (dims match OR conditions overlap),
+            // OR both sides specify alloy AND temper (strong identity even without dims)
+            bool bothHaveAlloyAndTemper =
+                supplier.TkAlloy  != null && cat.TkAlloy  != null &&
+                supplier.TkTemper != null && cat.TkTemper != null;
 
-            if (!hasSignal) continue;
+            if (score < 1 && !bothHaveAlloyAndTemper)
+            {
+                noMatchReason = "insufficient signal (no dims match, no conditions overlap, alloy+temper not both present)";
+                continue;
+            }
 
             if (score > bestScore)
             {
-                bestScore  = score;
-                best       = cat;
-                failReason = null;
+                bestScore    = score;
+                best         = cat;
             }
         }
 
-        return (best, bestScore < 0 ? 0 : bestScore, failReason);
+        // Only return a failReason when we have no match at all
+        return (best, bestScore < 0 ? 0 : bestScore, best is null ? noMatchReason : null);
     }
 
     private static bool GatePasses(string? a, string? b, out string? reason)
@@ -448,8 +485,21 @@ public class CatalogAnalysisService
             - alloy: grade/series as lowercase string ("6061", "304", "a36", "1018") — or null
             - temper: temper code as lowercase string ("t6511", "t651", "h14") — or null
             - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate — or null
-            - dims: cross-section only in decimal inches ("0.250x2.500", "2.000x3.000x0.250") — or null
+            - dims: decimal inches, shape-specific rules below — or null
             - conditions: array from [hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated] — empty [] if none
+
+            Dims rules — always ignore cut/length/panel dimensions:
+            - sheet, plate, coil, strip: thickness ONLY → "0.050"  (ignore 48x120 panel size)
+            - flatbar: thickness×width → "0.250x1.250"
+            - roundbar, rod, wire: diameter → "0.500"
+            - squarebar, hexbar: size → "1.000"
+            - angle: leg1×leg2×thickness → "4.000x4.000x0.375"  (legs first, wall last)
+            - channel: depth×weight-per-foot → "6x13"  (e.g. C6×13#, MC6×12#)
+            - tube_square: width×width×wall → "4.000x4.000x0.188"
+            - tube_rect: width×height×wall → "4.000x3.000x0.120"
+            - tube_round: OD×wall → "2.000x0.120"
+            - pipe: nominal size ONLY → "1.0"  (ignore OD and wall thickness)
+            - wideflange, beam_s: depth×weight-per-foot → "8x15"  (e.g. W8×15#, S12×40#)
 
             Products:
             {numbered}

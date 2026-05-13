@@ -266,6 +266,25 @@ public class SharePointService
             ("MachineName", "text"),
             ("LeaseExpiry", "dateTime"),
         ]);
+
+        // Index Title — it is used in the $filter query on every lease check.
+        var listId = await ResolveListIdAsync("ProxyLease");
+        var allCols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
+        var titleCol = allCols?.Value?.FirstOrDefault(c =>
+            string.Equals(c.Name, "Title", StringComparison.OrdinalIgnoreCase));
+        if (titleCol?.Id is not null && titleCol.Indexed != true)
+        {
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[titleCol.Id]
+                    .PatchAsync(new ColumnDefinition { Indexed = true });
+                _log.LogInformation("[SP] Indexed ProxyLease column 'Title'");
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[SP] Could not index ProxyLease column 'Title'");
+            }
+        }
     }
 
     /// <summary>
