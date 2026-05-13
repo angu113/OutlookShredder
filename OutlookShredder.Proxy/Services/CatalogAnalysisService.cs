@@ -376,6 +376,15 @@ public class CatalogAnalysisService
 
         foreach (var cat in catalog)
         {
+            // Asymmetric metal gate: if supplier names a metal, catalog must name one too.
+            // Prevents non-metal catalog entries (plastic, etc.) from matching metal products
+            // via dims alone (catalog TkMetal=null passes the symmetric gate but is wrong).
+            if (supplier.TkMetal != null && cat.TkMetal == null)
+            {
+                noMatchReason = $"supplier is '{supplier.TkMetal}' but catalog metal unspecified";
+                continue;
+            }
+
             // Hard gates: if both sides specify a field and they differ → skip
             if (!GatePasses(supplier.TkMetal,  cat.TkMetal,  out var r1)) { noMatchReason = r1; continue; }
             if (!GatePasses(supplier.TkShape,  cat.TkShape,  out var r2)) { noMatchReason = r2; continue; }
@@ -481,7 +490,7 @@ public class CatalogAnalysisService
             Return a JSON array — one object per product in the same order as numbered.
 
             Each object must have exactly these fields (null if unspecified):
-            - metal: one of aluminum, steel, stainless, copper, brass, bronze, titanium, nickel — or null
+            - metal: one of aluminum, steel, stainless, copper, brass, bronze, titanium, nickel, plastic — or null
             - alloy: grade/series as lowercase string ("6061", "304", "a36", "1018") — or null
             - temper: temper code as lowercase string ("t6511", "t651", "h14") — or null
             - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate — or null
