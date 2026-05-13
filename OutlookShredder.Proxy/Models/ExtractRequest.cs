@@ -66,4 +66,8 @@ public class RliContextItem
     public string? Mspc        { get; set; }
     /// <summary>Human-readable product name as written on the RFQ.</summary>
     public string? ProductName { get; set; }
+    /// <summary>Quantity requested (pieces / bars / sheets etc.).</summary>
+    public double? Quantity    { get; set; }
+    /// <summary>Size/length string as stored on the RLI (e.g. "288", "24'", "20 ft"). Null when not specified.</summary>
+    public string? SizeOfUnits { get; set; }
 }

@@ -159,6 +159,33 @@ public class FileWatcherService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Removes the N most-recently-modified entries from the processed-file cache so
+    /// those files are picked up again on the next scan.  Keys encode lastWriteTicks as
+    /// the third "|"-delimited segment; we sort descending to find the newest ones.
+    /// Returns the number of keys actually removed.
+    /// </summary>
+    public int RemoveLastProcessedKeys(int count)
+    {
+        lock (_processedLock)
+        {
+            var ordered = _processedKeys
+                .Select(k => {
+                    var parts = k.Split('|');
+                    long ticks = parts.Length >= 3 && long.TryParse(parts[2], out var t) ? t : 0L;
+                    return (Key: k, Ticks: ticks);
+                })
+                .OrderByDescending(x => x.Ticks)
+                .Take(count)
+                .Select(x => x.Key)
+                .ToList();
+
+            foreach (var k in ordered) _processedKeys.Remove(k);
+            if (ordered.Count > 0) SaveProcessedLog();
+            return ordered.Count;
+        }
+    }
+
     // ── Public batch-scan API ────────────────────────────────────────────────
 
     public async Task<ErpScanResult> ScanFolderAsync(

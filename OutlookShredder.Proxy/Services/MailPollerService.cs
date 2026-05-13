@@ -1087,6 +1087,14 @@ public class MailPollerService : BackgroundService
                 }
             }
 
+            // Body-only emails often carry only a unit price ($/ft, $/lb, each) without
+            // repeating the quantity and size from the RFQ — the supplier assumes we know.
+            // Enrich those product lines with RLI qty + size before writing so that
+            // EffectiveTotalPrice and ProductKey are computed correctly on the Shredder side.
+            if (source == "body" && req.RliItems.Count > 0)
+                foreach (var p in products)
+                    EnrichFromRli(p, req.RliItems);
+
             // Write product rows sequentially so they all share one SupplierResponse row.
             // Concurrent writes caused a race: every call independently found no existing SR
             // and created its own, producing duplicate SR records per multi-product email.
@@ -1194,6 +1202,73 @@ public class MailPollerService : BackgroundService
             _log.LogError(ex, "[Mail] Extraction failed for {Source} ({File})", source, fileName ?? "body");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Fills in missing UnitsRequested and LengthPerUnit on a body-extracted product line
+    /// when the supplier gave only a unit price ($/ft, $/lb, each) and the matching RLI
+    /// item carries the quantity and size we originally requested.
+    /// Only fires when these fields are absent — never overwrites values Claude extracted.
+    /// </summary>
+    private static void EnrichFromRli(ProductLine p, List<RliContextItem> rliItems)
+    {
+        // Only enrich rows that have a unit price but no explicit qty
+        bool hasUnitPrice = p.PricePerFoot.HasValue || p.PricePerPound.HasValue || p.PricePerPiece.HasValue;
+        bool missingQty   = !p.UnitsRequested.HasValue && !p.UnitsQuoted.HasValue;
+        if (!hasUnitPrice || !missingQty) return;
+
+        // Match by MSPC first; fall back to the only RLI item when there is exactly one
+        RliContextItem? rli = null;
+        if (!string.IsNullOrEmpty(p.ProductSearchKey))
+            rli = rliItems.FirstOrDefault(r =>
+                string.Equals(r.Mspc, p.ProductSearchKey, StringComparison.OrdinalIgnoreCase));
+        if (rli is null && rliItems.Count == 1)
+            rli = rliItems[0];
+        if (rli is null) return;
+
+        if (rli.Quantity.HasValue)
+            p.UnitsRequested = rli.Quantity;
+
+        // For $/ft pricing, also fill in the length when the RLI specifies a size
+        if (p.PricePerFoot.HasValue && !p.LengthPerUnit.HasValue && rli.SizeOfUnits is { Length: > 0 } sizeStr)
+        {
+            var lenFt = ParseRliSizeFt(sizeStr);
+            if (lenFt.HasValue)
+            {
+                p.LengthPerUnit = lenFt.Value;
+                p.LengthUnit    = "ft";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Parses an RLI SizeOfUnits string to feet. Mirrors Shredder's ParseSizeLength logic.
+    /// Returns null for plate/sheet cross-dimension notation ("48 x 96") or unparseable values.
+    /// </summary>
+    private static double? ParseRliSizeFt(string size)
+    {
+        var s  = size.Trim();
+        var nf = System.Globalization.NumberStyles.Any;
+        var ic = System.Globalization.CultureInfo.InvariantCulture;
+
+        // Plate: "48 x 96" — not a bar length
+        if (System.Text.RegularExpressions.Regex.IsMatch(s, @"\d\s*[xX]\s*\d")) return null;
+
+        // Explicit feet: "24'", "24 ft", "24 feet"
+        var mFt = System.Text.RegularExpressions.Regex.Match(s,
+            @"(\d+(?:\.\d+)?)\s*(?:ft|feet|')", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (mFt.Success && double.TryParse(mFt.Groups[1].Value, nf, ic, out var ft)) return ft;
+
+        // Explicit inches: "288 in", "288\"", "288 inches"
+        var mIn = System.Text.RegularExpressions.Regex.Match(s,
+            @"(\d+(?:\.\d+)?)\s*(?:in|inch(?:es)?|"")", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (mIn.Success && double.TryParse(mIn.Groups[1].Value, nf, ic, out var inches)) return inches / 12.0;
+
+        // Bare number: > 24 treated as inches, ≤ 24 as feet (same threshold as Shredder)
+        if (double.TryParse(s, nf, ic, out var bare))
+            return bare > 24 ? bare / 12.0 : bare;
+
+        return null;
     }
 
 }

@@ -1396,7 +1396,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product)"];
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits)"];
                 req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
                 req.QueryParameters.Top    = 100;
             });
@@ -1411,10 +1411,16 @@ public class SharePointService
                        : d.TryGetValue("RFQ_ID",        out var v2) ? v2?.ToString()
                        : null;
             if (!string.Equals(id, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
-            var mspc    = d.TryGetValue("MSPC",    out var vm) ? vm?.ToString() : null;
-            var product = d.TryGetValue("Product", out var vp) ? vp?.ToString() : null;
+            var mspc    = d.TryGetValue("MSPC",        out var vm) ? vm?.ToString() : null;
+            var product = d.TryGetValue("Product",     out var vp) ? vp?.ToString() : null;
+            var sizeStr = d.TryGetValue("SizeOfUnits", out var vs) ? vs?.ToString() : null;
+            double? qty = null;
+            if (d.TryGetValue("Units", out var vu) && vu is not null &&
+                double.TryParse(vu.ToString(), System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var qv))
+                qty = qv;
             if (!string.IsNullOrEmpty(product) || !string.IsNullOrEmpty(mspc))
-                result.Add(new RliContextItem { Mspc = mspc, ProductName = product });
+                result.Add(new RliContextItem { Mspc = mspc, ProductName = product, Quantity = qty, SizeOfUnits = sizeStr });
         }
         return result;
     }

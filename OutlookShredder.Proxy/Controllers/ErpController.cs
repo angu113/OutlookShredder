@@ -178,4 +178,17 @@ public class ErpController : ControllerBase
         _log.LogInformation("[ERP] Clean: deleted {Count} SP records and cleared processed-file cache", deleted);
         return Ok(new { deleted });
     }
+
+    /// <summary>
+    /// Removes the N most-recently-modified entries from the in-memory processed-file cache
+    /// so those files are picked up again on the next scan without touching any other files.
+    /// Defaults to count=1.  Use before running a targeted smoke-test scan.
+    /// </summary>
+    [HttpDelete("/api/erp/processed-cache")]
+    public IActionResult RemoveLastProcessedKeys([FromQuery] int count = 1)
+    {
+        var removed = _fw.RemoveLastProcessedKeys(count);
+        _log.LogInformation("[ERP] Removed {Count} most-recent key(s) from processed-file cache", removed);
+        return Ok(new { removed });
+    }
 }
