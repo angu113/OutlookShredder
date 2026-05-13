@@ -46,6 +46,18 @@ public class RfqProcessedNotification
     public string? ContactName       { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". SharePoint item ID of the call log entry.</summary>
     public string? CallLogSpItemId   { get; set; }
+    /// <summary>
+    /// Identity of the proxy that published this event: "{MachineName}:{startupGuid}".
+    /// Receiving proxies skip cache updates for their own events; Shredder logs it for diagnostics.
+    /// </summary>
+    public string? ProxyId { get; set; }
+    /// <summary>
+    /// Complete fresh SLI rows for the affected RFQ, read from SP immediately after write.
+    /// When present, bus recipients merge these rows directly into their local copy without
+    /// a proxy round-trip, eliminating the SP-index-lag window and cross-proxy stale-cache gap.
+    /// Null when RfqId is unknown (orphan / WHOIS emails) or when the SP read failed.
+    /// </summary>
+    public List<Dictionary<string, object?>>? SliRows { get; set; }
     /// <summary>Populated when EventType = "WorkflowCard".</summary>
     public WorkflowCard? WorkflowCard     { get; set; }
     public string?       WorkflowAction   { get; set; }

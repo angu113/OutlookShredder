@@ -1141,7 +1141,31 @@ public class MailPollerService : BackgroundService
                                        TotalPrice = x.Second.TotalPrice,
                                    }).ToList(),
                 };
-                _sliCache.Invalidate();
+
+                // Read back the complete current SLI rows for this RFQ and embed them in the
+                // bus message.  Bus recipients (Shredder clients + peer proxies) apply these
+                // rows inline, avoiding a proxy round-trip and the SP-index-lag window.
+                // MergeRfqRows keeps the rest of the SliCache valid — no full invalidation needed.
+                if (!string.IsNullOrEmpty(notification.RfqId))
+                {
+                    try
+                    {
+                        notification.SliRows = await _sp.ReadSupplierItemsByRfqIdAsync(notification.RfqId);
+                        _sliCache.MergeRfqRows(notification.RfqId, notification.SliRows);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex,
+                            "[Mail] Failed to read SLI rows for bus message (rfqId={RfqId}) — falling back to full cache invalidate",
+                            notification.RfqId);
+                        _sliCache.Invalidate();
+                    }
+                }
+                else
+                {
+                    _sliCache.Invalidate();
+                }
+
                 _notifications.NotifyRfqProcessed(notification);
             }
 

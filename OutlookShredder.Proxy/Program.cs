@@ -189,6 +189,12 @@ try
                 // served as "fresh" for 5 minutes before expiring.
                 var sliCache = app.Services.GetRequiredService<SliCacheService>();
                 await sliCache.PopulateAsync(force: true);
+
+                // Subscribe this proxy to the rfq-updates topic so peer-proxy SR events
+                // trigger targeted SliCache updates (MergeRfqRows / InvalidateRfq) rather
+                // than waiting for the 5-minute TTL to expire.
+                var notify = app.Services.GetRequiredService<RfqNotificationService>();
+                await notify.StartBusListenerAsync();
             }
             catch (Exception ex)
             {

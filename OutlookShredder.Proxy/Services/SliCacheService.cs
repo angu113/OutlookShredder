@@ -107,4 +107,41 @@ public sealed class SliCacheService
         _populatedAt = DateTime.MinValue;
         _log.LogInformation("[SliCache] Invalidated");
     }
+
+    /// <summary>
+    /// Replaces cached rows for a single RFQ without invalidating the rest of the cache.
+    /// Called after writing SP rows so the cache immediately reflects the change;
+    /// subsequent full-load requests serve correct data without a round-trip to SP.
+    /// </summary>
+    public void MergeRfqRows(string rfqId, IReadOnlyList<Dictionary<string, object?>> freshRows)
+    {
+        var current = _items;
+        if (current is null) return; // cache is cold — PopulateAsync will handle it
+
+        _items = current
+            .Where(r => !MatchesRfq(r, rfqId))
+            .Concat(freshRows)
+            .ToList();
+
+        _log.LogInformation("[SliCache] MergeRfqRows({RfqId}): {Count} fresh rows merged", rfqId, freshRows.Count);
+    }
+
+    /// <summary>
+    /// Removes all cached rows for a single RFQ without touching the rest.
+    /// Used when SliRows are unavailable in the bus message (fallback path).
+    /// </summary>
+    public void InvalidateRfq(string rfqId)
+    {
+        var current = _items;
+        if (current is null) return;
+
+        _items = current.Where(r => !MatchesRfq(r, rfqId)).ToList();
+        _log.LogInformation("[SliCache] InvalidateRfq({RfqId}): rows removed", rfqId);
+    }
+
+    private static bool MatchesRfq(Dictionary<string, object?> row, string rfqId) =>
+        (row.TryGetValue("JobReference", out var j) &&
+         string.Equals(j?.ToString(), rfqId, StringComparison.OrdinalIgnoreCase)) ||
+        (row.TryGetValue("RFQ_ID", out var r) &&
+         string.Equals(r?.ToString(), rfqId, StringComparison.OrdinalIgnoreCase));
 }
