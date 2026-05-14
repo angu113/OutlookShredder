@@ -556,7 +556,8 @@ public class CatalogAnalysisService
                 ProductSearchKey:   GetStr(d, "CatalogProductSearchKey", "ProductSearchKey"),
                 CatalogProductName: GetStr(d, "CatalogProductName"),
                 SupplierName:       GetStr(d, "SupplierName"),
-                RfqId:              GetStr(d, "JobReference")))
+                RfqId:              GetStr(d, "JobReference"),
+                SpItemId:           GetStr(d, "SpItemId")))
             .Where(e => !string.IsNullOrWhiteSpace(e.ProductName)
                      && !string.IsNullOrWhiteSpace(e.ProductSearchKey))
             .ToList();
@@ -721,11 +722,17 @@ public class CatalogAnalysisService
             {
                 if (sliLookup.TryGetValue(t.Name, out var entry))
                     t.SearchKey = entry.ProductSearchKey;
+                else
+                    t.SearchKey = null; // not in current sli-sample (e.g. GT was cleared)
             }
         }
 
+        // Only test entries that have a current GT assignment — entries absent from
+        // sli-sample.json (cleared GT, new rows, or tokenised before this fetch) are excluded.
+        var eligible = sliTokens.Where(t => t.SearchKey != null).ToList();
+
         var run    = new MatchTestRun { RunAt = DateTime.UtcNow };
-        var sample = limit > 0 ? sliTokens.Take(limit).ToList() : sliTokens;
+        var sample = limit > 0 ? eligible.Take(limit).ToList() : eligible;
 
         foreach (var supplier in sample)
         {
@@ -739,11 +746,13 @@ public class CatalogAnalysisService
                 FailReason          = failReason
             };
 
-            // Attach supplier/catalog name from pre-loaded lookup
+            // Attach supplier/catalog name + identity from pre-loaded lookup
             if (sliLookup.TryGetValue(supplier.Name, out var sliEntry))
             {
                 mc.SupplierName        = sliEntry.SupplierName;
                 mc.ExpectedCatalogName = sliEntry.CatalogProductName;
+                mc.RfqId               = sliEntry.RfqId;
+                mc.SpItemId            = sliEntry.SpItemId;
             }
 
             if (match is null)
@@ -1117,6 +1126,181 @@ public class CatalogAnalysisService
             _log.LogWarning(ex, "[Analysis] Failed to parse Claude batch response");
             return Enumerable.Repeat<ProductTokens?>(null, names.Count).ToList();
         }
+    }
+
+    // ── GT Audit ─────────────────────────────────────────────────────────────
+
+    // Prefixes whose GT assignments are confirmed substitutions or wrong product type.
+    // All misses whose expectedSearchKey prefix is in this set will be CLEARED (null out PSK).
+    private static readonly HashSet<string> GtClearPrefixes = new(StringComparer.OrdinalIgnoreCase)
+        { "HA", "HCSC", "HBSB", "AA6063" };
+
+    // Prefixes where the algorithm's match is confirmed correct and GT is wrong.
+    // Misses in this set will be UPDATED to the algorithm's actualSearchKey.
+    private static readonly HashSet<string> GtUpdatePrefixes = new(StringComparer.OrdinalIgnoreCase)
+        { "GPI", "HPI", "HSH", "CSHCQ", "CTR", "HF", "SSH304", "CTSQ", "AR6061T6", "GSHG90" };
+
+    /// <summary>
+    /// Preview or apply GT audit: reads match-test-results.json, classifies each miss,
+    /// and (when dryRun=false) patches SP CatalogProductSearchKey via PatchSliProductKeyAsync.
+    /// SpItemId is resolved from the sli-sample.json SpItemId field when available, then falls
+    /// back to a live SLI cache lookup keyed by (productName, rfqId, supplierName).
+    /// </summary>
+    public async Task<object> ApplyGtAuditAsync(bool dryRun, string actionFilter, CancellationToken ct)
+    {
+        if (!File.Exists(MatchResultsPath))
+            return new { error = "match-test-results.json not found -- run match-test first" };
+
+        var matchJson = await File.ReadAllTextAsync(MatchResultsPath, ct);
+        var run = JsonSerializer.Deserialize<MatchTestRun>(matchJson, Json)!;
+        var misses = run.Cases.Where(c => !c.IsHit && !c.IsNoMatch).ToList();
+
+        // Build SpItemId lookup from sli-sample.json (productName -> spItemId)
+        // Falls back to live SLI cache when sli-sample.json has no SpItemId.
+        var sliSampleById = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // productName -> spItemId
+        var sliSampleByKey = new Dictionary<string, SliEntry>(StringComparer.OrdinalIgnoreCase); // productName -> SliEntry
+        if (File.Exists(SliPath))
+        {
+            var rawSli = await File.ReadAllTextAsync(SliPath, ct);
+            var sliEntries = JsonSerializer.Deserialize<List<SliEntry>>(rawSli, Json)!;
+            foreach (var e in sliEntries)
+            {
+                sliSampleByKey.TryAdd(e.ProductName, e);
+                if (!string.IsNullOrWhiteSpace(e.SpItemId))
+                    sliSampleById.TryAdd(e.ProductName, e.SpItemId);
+            }
+        }
+
+        // Build live cache lookup as fallback: (productName|rfqId|supplierName) -> List<spItemId>
+        var liveLookup = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var cacheRows = _sli.TryGet();
+        if (cacheRows is not null)
+        {
+            foreach (var row in cacheRows)
+            {
+                var pName = GetStr(row, "ProductName");
+                var rfqId = GetStr(row, "JobReference");
+                var sup   = GetStr(row, "SupplierName");
+                var spId  = GetStr(row, "SpItemId");
+                if (string.IsNullOrWhiteSpace(pName) || string.IsNullOrWhiteSpace(spId)) continue;
+                var k = $"{pName.ToLowerInvariant()}|{(rfqId ?? "").ToLowerInvariant()}|{(sup ?? "").ToLowerInvariant()}";
+                if (!liveLookup.TryGetValue(k, out var ids)) liveLookup[k] = ids = [];
+                ids.Add(spId);
+            }
+        }
+
+        var actions = new List<GtAuditAction>();
+
+        foreach (var mc in misses)
+        {
+            var prefix = mc.ExpectedSearchKey?.Split('/')[0] ?? "";
+            string action;
+            if (GtClearPrefixes.Contains(prefix))
+                action = "clear";
+            else if (GtUpdatePrefixes.Contains(prefix) && !string.IsNullOrWhiteSpace(mc.ActualSearchKey))
+                action = "update";
+            else
+                action = "review";
+
+            bool include = actionFilter switch
+            {
+                "both"   => action is "clear" or "update",
+                "clear"  => action == "clear",
+                "update" => action == "update",
+                "review" => action == "review",
+                _        => true // "all"
+            };
+            if (!include) continue;
+
+            // Resolve SpItemId(s) — sli-sample first, then live cache
+            var spIds = new List<string>();
+            if (!string.IsNullOrWhiteSpace(mc.SpItemId))
+            {
+                spIds.Add(mc.SpItemId);
+            }
+            else if (sliSampleById.TryGetValue(mc.ProductName, out var sampleId))
+            {
+                spIds.Add(sampleId);
+            }
+            else
+            {
+                sliSampleByKey.TryGetValue(mc.ProductName, out var sliEntry);
+                var rfq = mc.RfqId ?? sliEntry?.RfqId ?? "";
+                var sup = mc.SupplierName ?? sliEntry?.SupplierName ?? "";
+                var k = $"{mc.ProductName.ToLowerInvariant()}|{rfq.ToLowerInvariant()}|{sup.ToLowerInvariant()}";
+                if (liveLookup.TryGetValue(k, out var ids)) spIds.AddRange(ids);
+            }
+
+            string? newKey = action == "update" ? mc.ActualSearchKey : null;
+            string? newCatName = null;
+            if (action == "update" && newKey != null)
+                newCatName = _catalog.FindBySearchKey(newKey)?.Name;
+
+            // Emit one action per resolved SpItemId (could be multiple rows for same product)
+            if (spIds.Count == 0)
+            {
+                actions.Add(new GtAuditAction
+                {
+                    ProductName    = mc.ProductName,
+                    SupplierName   = mc.SupplierName,
+                    RfqId          = mc.RfqId,
+                    Action         = action,
+                    OldSearchKey   = mc.ExpectedSearchKey,
+                    NewSearchKey   = newKey,
+                    NewCatalogName = newCatName,
+                    Note           = "SpItemId not found in sli-sample.json or live cache"
+                });
+                continue;
+            }
+
+            foreach (var spId in spIds)
+            {
+                var a = new GtAuditAction
+                {
+                    ProductName    = mc.ProductName,
+                    SupplierName   = mc.SupplierName,
+                    RfqId          = mc.RfqId,
+                    SpItemId       = spId,
+                    Action         = action,
+                    OldSearchKey   = mc.ExpectedSearchKey,
+                    NewSearchKey   = newKey,
+                    NewCatalogName = newCatName,
+                };
+
+                if (!dryRun && action != "review")
+                {
+                    try
+                    {
+                        await _sp.PatchSliProductKeyAsync(spId, newKey, newCatName);
+                        a.Applied = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        a.Error = ex.Message;
+                        _log.LogWarning(ex, "[Analysis] GT audit patch failed for SLI {SpId}", spId);
+                    }
+                }
+
+                actions.Add(a);
+            }
+        }
+
+        var cleared  = actions.Count(a => a.Action == "clear");
+        var updated  = actions.Count(a => a.Action == "update");
+        var reviewed = actions.Count(a => a.Action == "review");
+        var noId     = actions.Count(a => a.SpItemId == null && a.Action != "review");
+        var applied  = actions.Count(a => a.Applied);
+        var errored  = actions.Count(a => a.Error != null);
+
+        _log.LogInformation("[Analysis] GT audit {Mode}: clear={C} update={U} review={R} noId={N} applied={A} errors={E}",
+            dryRun ? "dry-run" : "APPLY", cleared, updated, reviewed, noId, applied, errored);
+
+        return new
+        {
+            dryRun,
+            summary = new { cleared, updated, reviewed, noId, applied, errored },
+            actions
+        };
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -11,7 +11,8 @@ public record SliEntry(
     string? ProductSearchKey,
     string? CatalogProductName,
     string? SupplierName,
-    string? RfqId);
+    string? RfqId,
+    string? SpItemId = null);
 
 /// <summary>
 /// AI-extracted token record for one product name.
@@ -43,6 +44,8 @@ public class MatchCase
 {
     public string  ProductName        { get; set; } = "";
     public string? SupplierName       { get; set; }
+    public string? RfqId              { get; set; }
+    public string? SpItemId           { get; set; }
     public string? ExpectedSearchKey  { get; set; }
     public string? ExpectedCatalogName{ get; set; }
     public string? ActualSearchKey    { get; set; }
@@ -68,6 +71,22 @@ public class IndustryDictionaryEntry
     public int     CatalogCount { get; set; }
     public int     SliCount     { get; set; }
     [JsonIgnore] public string? SpItemId { get; set; }
+}
+
+/// <summary>One planned or applied GT audit action</summary>
+public class GtAuditAction
+{
+    public string  ProductName        { get; set; } = "";
+    public string? SupplierName       { get; set; }
+    public string? RfqId              { get; set; }
+    public string? SpItemId           { get; set; }
+    public string  Action             { get; set; } = ""; // "clear", "update", "review", "skip"
+    public string? OldSearchKey       { get; set; }
+    public string? NewSearchKey       { get; set; }
+    public string? NewCatalogName     { get; set; }
+    public string? Note               { get; set; }
+    public bool    Applied            { get; set; }
+    public string? Error              { get; set; }
 }
 
 /// <summary>Results from one match-test run, saved to analysis-cache/match-test-results.json</summary>

@@ -59,4 +59,25 @@ public class AnalysisController(CatalogAnalysisService analysis) : ControllerBas
     [HttpGet("dictionary")]
     public async Task<IActionResult> GetDictionary(CancellationToken ct)
         => Ok(await analysis.ReadDictionaryAsync(ct));
+
+    /// <summary>
+    /// Preview or apply GT audit patches to SharePoint SLI ProductSearchKey values.
+    /// Reads match-test-results.json, classifies each miss (clear/update/review),
+    /// resolves SpItemId from sli-sample.json or live SLI cache, and optionally patches SP.
+    ///
+    /// dryRun=true (default): returns planned actions without touching SP.
+    /// dryRun=false: applies clear+update actions to SP.
+    /// action: "both" (default) | "clear" | "update" | "review" | "all"
+    ///   "both"   = show/apply clear + update (skip review)
+    ///   "clear"  = only clear actions
+    ///   "update" = only update actions
+    ///   "review" = only review bucket (always dry-run)
+    ///   "all"    = all three buckets (review bucket is always dry-run)
+    /// </summary>
+    [HttpPost("gt-audit/apply")]
+    public async Task<IActionResult> ApplyGtAudit(
+        [FromQuery] bool dryRun = true,
+        [FromQuery] string action = "both",
+        CancellationToken ct = default)
+        => Ok(await analysis.ApplyGtAuditAsync(dryRun, action, ct));
 }
