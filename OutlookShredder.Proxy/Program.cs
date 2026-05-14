@@ -22,7 +22,11 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("ShredderProxy starting — logs: {LogPath}", logPath);
+    var version = System.Reflection.Assembly
+        .GetExecutingAssembly()
+        .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+        ?.InformationalVersion ?? "unknown";
+    Log.Information("ShredderProxy {Version} starting — logs: {LogPath}", version, logPath);
 
     // Use the exe directory as the base for config files so that appsettings files are found
     // whether the process runs as a Windows service (working dir = System32) or from a terminal.
