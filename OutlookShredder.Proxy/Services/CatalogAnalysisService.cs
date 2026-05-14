@@ -851,11 +851,15 @@ public class CatalogAnalysisService
                 .Where(c => ExclusiveConditions.Contains(c)).ToArray();
             if (catExclusive.Length > 0)
             {
-                bool supplierMentionsIt = catExclusive.Any(c =>
+                // ALL exclusive conditions must be present in supplier (not just any one).
+                // E.g. catalog [galvanized, perforated] requires supplier to mention both.
+                bool supplierMentionsAll = catExclusive.All(c =>
                     supplier.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase));
-                if (!supplierMentionsIt)
+                if (!supplierMentionsAll)
                 {
-                    noMatchReason = $"catalog requires condition '{catExclusive[0]}'";
+                    var missing = catExclusive.First(c =>
+                        !supplier.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase));
+                    noMatchReason = $"catalog requires condition '{missing}'";
                     continue;
                 }
             }
