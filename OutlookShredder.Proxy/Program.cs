@@ -1,4 +1,5 @@
 // OutlookShredder.Proxy — Program.cs
+using System.Reflection;
 using OutlookShredder.Proxy.Extensions;
 using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Ai;
@@ -22,9 +23,8 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    var version = System.Reflection.Assembly
-        .GetExecutingAssembly()
-        .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+    var version = typeof(Program).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
         ?.InformationalVersion ?? "unknown";
     Log.Information("ShredderProxy {Version} starting — logs: {LogPath}", version, logPath);
 
