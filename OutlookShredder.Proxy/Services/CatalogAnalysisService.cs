@@ -72,6 +72,9 @@ public class CatalogAnalysisService
         - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate -- or null
           HSS (Hollow Structural Section): square cross-section -> tube_square; rectangular -> tube_rect; round -> tube_round.
           "Structural tube" follows the same rule. "SQ" or "square tube" -> tube_square.
+          ASTM A500 = structural HSS (cold-formed welded/seamless, load-bearing) -> alloy=a500.
+          ASTM A513 = mechanical tubing (ERW, precision tolerances, machined parts, not structural) -> alloy=a513.
+          A500 and A513 are mutually exclusive; use whichever appears in the product name as the alloy token.
         - dims: decimal inches, shape-specific rules below -- or null
         - conditions: array of applicable terms from the list below -- empty [] if none
           Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded,
@@ -122,14 +125,23 @@ public class CatalogAnalysisService
             If OD and wall are given but no nominal size, reverse-lookup nominal from the NPS table.
             If wall thickness matches no known schedule, omit the schedule condition rather than guessing.
 
-        Gauge to decimal conversion (for sheet thickness and tube wall):
-          Steel and stainless -- US Standard / Manufacturer's Standard gauge:
+        Gauge to decimal conversion — select the correct table for the metal and shape context:
+          Steel sheet (uncoated) — US Standard / Manufacturer's Standard gauge:
             3ga=0.239  4ga=0.224  5ga=0.209  6ga=0.194  7ga=0.179  8ga=0.164  9ga=0.150
-            10ga=0.135  11ga=0.120  12ga=0.105  13ga=0.090  14ga=0.075  16ga=0.060
-            18ga=0.048  20ga=0.036  22ga=0.030  24ga=0.024  26ga=0.018
-          Aluminum -- B&S (Brown and Sharpe) gauge:
-            8ga=0.128  10ga=0.102  11ga=0.091  12ga=0.081  14ga=0.064  16ga=0.051
-            18ga=0.040  20ga=0.032  22ga=0.025  24ga=0.020
+            10ga=0.135  11ga=0.120  12ga=0.105  13ga=0.090  14ga=0.075  15ga=0.067  16ga=0.060
+            17ga=0.054  18ga=0.048  19ga=0.042  20ga=0.036  22ga=0.030  24ga=0.024  26ga=0.018
+          Galvanized steel sheet — Galvanized Sheet gauge (zinc coating adds ~0.003-0.005" vs bare steel):
+            8ga=0.168  10ga=0.138  11ga=0.123  12ga=0.108  13ga=0.093  14ga=0.079
+            16ga=0.064  18ga=0.052  20ga=0.040  22ga=0.034  24ga=0.028  26ga=0.022
+          Stainless steel sheet — stainless gauge (NOT the same as carbon steel gauge; different thicknesses):
+            7ga=0.188  8ga=0.172  9ga=0.156  10ga=0.141  11ga=0.125  12ga=0.109  13ga=0.094
+            14ga=0.078  16ga=0.063  18ga=0.050  20ga=0.038  22ga=0.031  24ga=0.025  26ga=0.019
+          Aluminum sheet — B&S (Brown and Sharpe) gauge:
+            4ga=0.204  6ga=0.162  8ga=0.129  10ga=0.102  11ga=0.091  12ga=0.081  14ga=0.064
+            16ga=0.051  18ga=0.040  20ga=0.032  22ga=0.025  24ga=0.020  26ga=0.016
+          Steel tube wall — Birmingham Wire Gauge (BWG), used for mechanical tube (A513) wall thickness:
+            7ga=0.180  8ga=0.165  9ga=0.148  10ga=0.134  11ga=0.120  12ga=0.109
+            13ga=0.095  14ga=0.083  15ga=0.072  16ga=0.065  18ga=0.049  20ga=0.035
 
         Weight per foot as a metal check for pipe (when no metal is stated):
           Steel density ~0.283 lb/in3; aluminum ~0.098 lb/in3 (roughly 1/3 of steel); stainless ~0.289 lb/in3.
@@ -146,8 +158,12 @@ public class CatalogAnalysisService
           "4 .120 Domestic A135 ERW Pipe 21ft 5.62lb/ft" -> {metal:steel, alloy:a135, shape:pipe, dims:"4.0", conditions:[welded,sch10]}
           (0.120" wall at 4" nominal = Sch 10 per NPS table; 5.62 lb/ft confirms steel)
           "HSS 4x2x.188 A500" -> {metal:steel, alloy:a500, shape:tube_rect, dims:"4.000x2.000x0.188", conditions:[]}
-          "2 Sq Tube 11ga ERW" -> {metal:steel, shape:tube_square, dims:"2.000x2.000x0.120", conditions:[welded]}
-          (11ga steel = 0.120")
+          "2 Sq Tube 11ga ERW A513" -> {metal:steel, alloy:a513, shape:tube_square, dims:"2.000x2.000x0.120", conditions:[welded]}
+          (11ga BWG tube wall = 0.120"; A513 = mechanical tubing)
+          "304 SS Sheet 11ga x 48 x 96" -> {metal:stainless, alloy:304, shape:sheet, dims:"0.125"}
+          (11ga stainless = 0.125" -- different from 11ga carbon steel 0.120")
+          "16ga Galvanized Sheet 4x8" -> {metal:steel, shape:sheet, dims:"0.064", conditions:[galvanized]}
+          (16ga galvanized = 0.064" -- different from 16ga bare steel 0.060")
           "W8x15 Wide Flange A992" -> {metal:steel, alloy:a992, shape:wideflange, dims:"8x15"}
           "316L SS Seamless Tube 1.5 OD x .109 Wall" -> {metal:stainless, alloy:316, shape:tube_round, dims:"1.500x0.109", conditions:[seamless]}
           "6063-T52 Aluminum Pipe 1.25 Sch 40" -> {metal:aluminum, alloy:6063, temper:t52, shape:pipe, dims:"1.25", conditions:[sch40]}
