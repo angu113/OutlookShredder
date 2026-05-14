@@ -71,6 +71,7 @@ public class CatalogAnalysisService
         - alloy: grade or series as lowercase string ("6061", "304", "a36", "1018", "a500") -- or null
         - temper: temper designation as lowercase ("t6511", "t651", "h32", "h14") -- or null
         - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate -- or null
+          CRITICAL: tread plate / diamond plate / checker plate / lug plate (any plate with a raised surface pattern) MUST use shape=treadplate, NOT shape=plate or shape=sheet. The word "tread", "diamond plate", or "checker" in the product name always means shape=treadplate.
           HSS (Hollow Structural Section): square cross-section -> tube_square; rectangular -> tube_rect; round -> tube_round.
           "Structural tube" follows the same rule. "SQ" or "square tube" -> tube_square.
           ASTM A500 = structural HSS (cold-formed welded/seamless, load-bearing) -> alloy=a500.
@@ -81,7 +82,7 @@ public class CatalogAnalysisService
         - conditions: array of applicable terms from the list below -- empty [] if none
           Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, galvanneal,
           anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
-          bright_annealed, ar_400, ar_500, weathering_steel, painted,
+          bright_annealed, ar_400, ar_500, ar_600, weathering_steel, painted,
           brushed, mirror_finish, ornamental_180,
           round_corner,
           sch5, sch10, sch40, sch80, sch160
@@ -97,6 +98,8 @@ public class CatalogAnalysisService
             "Hardox 400", "Quend 400".
           ar_500: abrasion-resistant plate (Brinell ~500); product names include "AR500", "AR 500",
             "Hardox 500", "Quend 500".
+          ar_600: abrasion-resistant plate (Brinell ~600); product names include "AR600", "AR 600",
+            "Hardox 600", "Quend 600".
           weathering_steel: atmospheric-corrosion-resistant steel; product names include "A606 Type 4",
             "A588", "Corten", "Cor-Ten", "Weathering Steel". ASTM A606 = sheet; A588 = plate and structural.
           painted: factory-applied paint or coating; product names include "Painted", "Coated", "Pre-painted".
@@ -773,7 +776,7 @@ public class CatalogAnalysisService
         new(StringComparer.OrdinalIgnoreCase)
         { "perforated", "expanded", "dom", "grating", "treadplate",
           "galvanized", "galvanneal", "bright_annealed",
-          "ar_400", "ar_500", "weathering_steel", "painted",
+          "ar_400", "ar_500", "ar_600", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
           "round_corner",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
@@ -784,7 +787,8 @@ public class CatalogAnalysisService
     private static readonly HashSet<string> BidirectionalConditions =
         new(StringComparer.OrdinalIgnoreCase)
         { "galvanized", "galvanneal", "bright_annealed", "painted",
-          "brushed", "mirror_finish", "ornamental_180", "polished" };
+          "brushed", "mirror_finish", "ornamental_180", "polished",
+          "ar_400", "ar_500", "ar_600" };
 
     private static (ProductTokens? match, double score, string? failReason)
         FindBestMatch(ProductTokens supplier, List<ProductTokens> catalog)
@@ -846,6 +850,12 @@ public class CatalogAnalysisService
             double score = 0;
             if (DimsMatch(supplier.TkDims, cat.TkDims))                        score += 3;
             if (ConditionsOverlap(supplier.TkConditions, cat.TkConditions))     score += 1;
+
+            // Alloy specificity tie-break: when the supplier doesn't specify an alloy, prefer
+            // generic catalog entries (alloy=null) over specific-alloy entries that happen to
+            // have matching dims.  Avoids "HR Plate 3/8"" landing on "HR Plate A572 0.375"
+            // when "HR Plate 0.375" (alloy=null) is also a candidate.
+            if (supplier.TkAlloy == null && cat.TkAlloy != null) score -= 0.5;
 
             // Signal check: must score >= 1 (dims match OR conditions overlap),
             // OR both sides specify alloy AND temper (strong identity even without dims)
