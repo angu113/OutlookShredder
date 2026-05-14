@@ -204,6 +204,99 @@ public class CatalogAnalysisService
 
     // ── Industry Dictionary ───────────────────────────────────────────────────
 
+    private static readonly string DictionarySystemPrompt = """
+        You are a metals industry expert. For each numbered term, write a concise plain-English definition
+        and 1-2 short product-name examples showing how the term appears in practice.
+
+        Term types for context:
+        - alloy_series: a material composition identifier (e.g. 6061, 304, 1018, a500)
+        - standard: an ASTM or dimensional standard (e.g. A500, A36, sch40)
+        - condition: a processing or surface condition (e.g. hot_rolled, galvanized, welded)
+        - temper: a heat treatment or work-hardening designation (e.g. T6511, H32, O)
+
+        Return a JSON array with one object per input term, in the same order:
+        [{"term":"...","definition":"One sentence max.","examples":"Product Name 1; Product Name 2"},...]
+
+        Respond with only the JSON array — no markdown fences, no extra text.
+        """;
+
+    private record DictDefDto(string Term, string? Definition, string? Examples);
+
+    private async Task<Dictionary<string, DictDefDto>> GenerateDefinitionsAsync(
+        List<IndustryDictionaryEntry> entries, string apiKey, string model, CancellationToken ct)
+    {
+        var result = new Dictionary<string, DictDefDto>(StringComparer.OrdinalIgnoreCase);
+        const int batchSize = 20;
+
+        for (int i = 0; i < entries.Count; i += batchSize)
+        {
+            if (ct.IsCancellationRequested) break;
+            var batch = entries.Skip(i).Take(batchSize).ToList();
+
+            var numbered = string.Join("\n", batch.Select((e, idx) =>
+                $"{idx + 1}. {e.Term} [{e.TermType}" +
+                (e.AppliesTo is { Length: > 0 } a ? $", {a}" : "") + "]"));
+
+            var body = JsonSerializer.Serialize(new
+            {
+                model,
+                max_tokens = 2048,
+                system = new[]
+                {
+                    new { type = "text", text = DictionarySystemPrompt,
+                          cache_control = new { type = "ephemeral" } }
+                },
+                messages = new[] { new { role = "user", content = numbered } }
+            }, Json);
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
+            req.Headers.Add("x-api-key", apiKey);
+            req.Headers.Add("anthropic-version", ApiVersion);
+            req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+            HttpResponseMessage resp;
+            try { resp = await _http.SendAsync(req, ct); }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Analysis] Dict-def batch {I} failed", i / batchSize + 1);
+                continue;
+            }
+
+            var raw = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.LogWarning("[Analysis] Dict-def Claude {Status}: {Snippet}",
+                    resp.StatusCode, raw[..Math.Min(200, raw.Length)]);
+                continue;
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(raw);
+                var text = doc.RootElement.GetProperty("content")[0]
+                              .GetProperty("text").GetString() ?? "[]";
+                text = text.Trim();
+                if (text.StartsWith("```")) text = text[(text.IndexOf('\n') + 1)..];
+                if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
+
+                var dtos = JsonSerializer.Deserialize<List<DictDefDto>>(text,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+
+                foreach (var dto in dtos.Where(d => d.Term is { Length: > 0 }))
+                    result[dto.Term] = dto;
+
+                _log.LogInformation("[Analysis] Dict-def batch {B}: {N}/{Total} terms defined",
+                    i / batchSize + 1, dtos.Count, batch.Count);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Analysis] Dict-def parse failed for batch {B}", i / batchSize + 1);
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// Mine catalog-tokens.json + sli-tokens.json for unique alloy, condition, and temper values.
     /// Upserts results to the SP IndustryDictionary list (new terms inserted; existing ones updated
@@ -211,6 +304,12 @@ public class CatalogAnalysisService
     /// </summary>
     public async Task<object> BuildDictionaryAsync(CancellationToken ct)
     {
+        var apiKey = _config["Anthropic:ApiKey"];
+        if (string.IsNullOrEmpty(apiKey))
+            return new { error = "Anthropic:ApiKey not configured" };
+
+        var model = _config["Claude:AnalysisModel"] ?? "claude-haiku-4-5-20251001";
+
         if (!File.Exists(CatalogTokensPath) || !File.Exists(SliTokensPath))
             return new { error = "Token files missing — run catalog/tokenize and sli/tokenize first" };
 
@@ -303,6 +402,19 @@ public class CatalogAnalysisService
         _log.LogInformation("[Analysis] Dictionary: mined {Count} unique terms ({Cat} catalog, {Sli} SLI tokens)",
             entries.Count, catTokens.Count, sliTokens.Count);
 
+        // AI-generate Definition + Examples for each term before writing to SP.
+        // On re-runs the SP write skips Definition/Examples for existing rows, so
+        // manual edits made in the SP list are never overwritten.
+        var defs = await GenerateDefinitionsAsync(entries.Values.ToList(), apiKey, model, ct);
+        foreach (var e in entries.Values)
+        {
+            if (defs.TryGetValue(e.Term, out var d))
+            {
+                e.Definition = d.Definition;
+                e.Examples   = d.Examples;
+            }
+        }
+
         var (inserted, updated) = await _sp.WriteIndustryDictionaryEntriesAsync(
             entries.Values.ToList(), ct);
 
@@ -316,7 +428,8 @@ public class CatalogAnalysisService
                 .OrderBy(g => g.Key)
                 .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Term).Select(e => new
                 {
-                    e.Term, e.MapsToToken, e.AppliesTo, e.CatalogCount, e.SliCount
+                    e.Term, e.MapsToToken, e.AppliesTo, e.CatalogCount, e.SliCount,
+                    e.Definition, e.Examples
                 })),
         };
     }

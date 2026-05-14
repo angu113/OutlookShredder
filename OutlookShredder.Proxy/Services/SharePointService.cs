@@ -4345,16 +4345,20 @@ public class SharePointService
             ct.ThrowIfCancellationRequested();
             if (byTerm.TryGetValue(entry.Term, out var ex))
             {
+                var patch = new Dictionary<string, object?>
+                {
+                    ["AppliesTo"]    = entry.AppliesTo,
+                    ["CatalogCount"] = (double)entry.CatalogCount,
+                    ["SliCount"]     = (double)entry.SliCount,
+                };
+                // Fill Definition/Examples only when SP row has never had them set — never overwrite manual edits.
+                if (string.IsNullOrEmpty(ex.Definition) && !string.IsNullOrEmpty(entry.Definition))
+                    patch["Definition"] = entry.Definition;
+                if (string.IsNullOrEmpty(ex.Examples) && !string.IsNullOrEmpty(entry.Examples))
+                    patch["Examples"] = entry.Examples;
+
                 await GetGraph().Sites[siteId].Lists[listId].Items[ex.SpItemId!]
-                    .Fields.PatchAsync(new FieldValueSet
-                    {
-                        AdditionalData = new Dictionary<string, object?>
-                        {
-                            ["AppliesTo"]    = entry.AppliesTo,
-                            ["CatalogCount"] = (double)entry.CatalogCount,
-                            ["SliCount"]     = (double)entry.SliCount,
-                        }
-                    }, cancellationToken: ct);
+                    .Fields.PatchAsync(new FieldValueSet { AdditionalData = patch }, cancellationToken: ct);
                 updated++;
             }
             else
@@ -4371,6 +4375,8 @@ public class SharePointService
                                 ["TermType"]     = entry.TermType,
                                 ["AppliesTo"]    = entry.AppliesTo,
                                 ["MapsToToken"]  = entry.MapsToToken,
+                                ["Definition"]   = entry.Definition,
+                                ["Examples"]     = entry.Examples,
                                 ["CatalogCount"] = (double)entry.CatalogCount,
                                 ["SliCount"]     = (double)entry.SliCount,
                             }
