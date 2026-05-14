@@ -856,10 +856,9 @@ public class CatalogAnalysisService
                 }
             }
 
-            // Reverse gate for surface-treatment conditions: if the supplier carries a
-            // bidirectional condition the catalog doesn't have, this isn't a match either.
-            // Prevents a galvanized or brushed-stainless supplier quote from matching a plain
-            // catalog entry when a more specific entry exists.
+            // Bidirectional surface-treatment gate: both directions must agree.
+            // (1) Supplier has treatment → catalog must too (prevents galvanized quote → plain entry).
+            // (2) Catalog has treatment → supplier must too (prevents plain pipe quote → GPI entry).
             var suppBidi = supplier.TkConditions
                 .Where(c => BidirectionalConditions.Contains(c)).ToArray();
             if (suppBidi.Length > 0)
@@ -869,6 +868,18 @@ public class CatalogAnalysisService
                 if (!catalogHasIt)
                 {
                     noMatchReason = $"supplier surface-treatment '{suppBidi[0]}' not in catalog";
+                    continue;
+                }
+            }
+            var catBidi = cat.TkConditions
+                .Where(c => BidirectionalConditions.Contains(c)).ToArray();
+            if (catBidi.Length > 0)
+            {
+                bool supplierHasIt = catBidi.Any(c =>
+                    supplier.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase));
+                if (!supplierHasIt)
+                {
+                    noMatchReason = $"catalog surface-treatment '{catBidi[0]}' not in supplier";
                     continue;
                 }
             }
