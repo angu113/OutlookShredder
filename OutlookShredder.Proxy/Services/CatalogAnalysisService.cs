@@ -142,7 +142,9 @@ public class CatalogAnalysisService
         Dims rules -- use decimal inches; always ignore cut length and panel size dimensions:
           - sheet, plate, coil, strip: thickness only -> "0.050"  (ignore panel/cut size such as 48x120)
           - flatbar: thickness x width -> "0.250x1.500"  (thickness first -- exception to the ordering convention)
-          - roundbar, rod, wire: diameter -> "0.500"
+          - roundbar: diameter -> "0.500"  (smooth round bar / round rod: "round bar", "round rod", "ground shafting")
+          - rod: diameter -> "0.500"  (deformed rebar ONLY: "rebar", "re-bar", "#4 rebar" — do NOT use rod for smooth round bar)
+          - wire: diameter -> "0.500"
           - squarebar, hexbar: size -> "1.000"
           - angle: larger_leg x smaller_leg x wall -> "6.000x4.000x0.375"  (larger leg first, wall last)
           - channel: depth x weight-per-foot -> "6x13"  (e.g. C6x13, MC6x12, MC6x12#)
@@ -225,6 +227,10 @@ public class CatalogAnalysisService
           "Brass Round Bar 360 1.500" -> {metal:brass, alloy:360, shape:roundbar, dims:"1.500"}
           "6x4x3/8 Structural Angle A36" -> {metal:steel, alloy:a36, shape:angle, dims:"6.000x4.000x0.375"}
           "Hot Rolled Pipe 4.000 Schedule 10 (OD 4.500 - Wall 0.120)" -> {metal:steel, shape:pipe, dims:"4.0", conditions:[hot_rolled,sch10]}
+          "Hot Rolled Sheet Pickled & Oiled 11 Ga x 48 x 96" -> {metal:steel, shape:sheet, dims:"0.120", conditions:[hot_rolled,pno]}
+          "HR Plate P&O 0.250 x 48 x 120" -> {metal:steel, shape:plate, dims:"0.250", conditions:[hot_rolled,pno]}
+          "3003-H22 Aluminum Diamond Tread Plate 0.125 x 48 x 96" -> {metal:aluminum, alloy:3003, temper:h22, shape:treadplate, dims:"0.125"}
+          "6061-T6 Aluminum Tread Plate 0.250 x 48 x 96" -> {metal:aluminum, alloy:6061, temper:t6, shape:treadplate, dims:"0.250"}
 
         Respond with only the JSON array, no explanation or markdown fences.
         """;
@@ -788,8 +794,12 @@ public class CatalogAnalysisService
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "ar_600", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
-          "round_corner", "pno",
+          "round_corner",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
+    // pno (Pickled & Oiled) is intentionally NOT exclusive: a supplier quoting the same
+    // product without explicitly mentioning P&O is still considered a valid match.
+    // Instead a soft −0.5 penalty keeps plain catalog entries preferred over P&O catalog
+    // entries when the supplier didn't mention P&O (mirrors the alloy-specificity penalty).
 
     // Surface-treatment conditions are bidirectional: if the SUPPLIER description carries one
     // of these, the catalog entry must also carry it.  Prevents a galvanized supplier quote from
@@ -819,10 +829,12 @@ public class CatalogAnalysisService
             }
 
             // Hard gates: if both sides specify a field and they differ -> skip
-            if (!GatePasses(supplier.TkMetal,  cat.TkMetal,  out var r1)) { noMatchReason = r1; continue; }
-            if (!GatePasses(supplier.TkShape,  cat.TkShape,  out var r2)) { noMatchReason = r2; continue; }
-            if (!GatePasses(supplier.TkAlloy,  cat.TkAlloy,  out var r3)) { noMatchReason = r3; continue; }
-            if (!GatePasses(supplier.TkTemper, cat.TkTemper, out var r4)) { noMatchReason = r4; continue; }
+            // Shape/temper are normalized before comparison to handle equivalent labels
+            // (rod == roundbar; t651/t6511/t652 all collapse to t6).
+            if (!GatePasses(supplier.TkMetal,                 cat.TkMetal,                 out var r1)) { noMatchReason = r1; continue; }
+            if (!GatePasses(NormalizeShape(supplier.TkShape),  NormalizeShape(cat.TkShape),  out var r2)) { noMatchReason = r2; continue; }
+            if (!GatePasses(supplier.TkAlloy,                 cat.TkAlloy,                 out var r3)) { noMatchReason = r3; continue; }
+            if (!GatePasses(NormalizeTemper(supplier.TkTemper),NormalizeTemper(cat.TkTemper),out var r4)) { noMatchReason = r4; continue; }
 
             // Exclusive-condition gate: catalog carries an exclusive tag the supplier
             // didn't mention -> not this product
@@ -868,6 +880,14 @@ public class CatalogAnalysisService
             // when "HR Plate 0.375" (alloy=null) is also a candidate.
             if (supplier.TkAlloy == null && cat.TkAlloy != null) score -= 0.5;
 
+            // P&O soft penalty: catalog specifies P&O but supplier didn't mention it.
+            // Keeps plain catalog entries preferred over P&O entries when the supplier
+            // didn't explicitly quote a P&O product (but doesn't hard-block the match —
+            // P&O is considered acceptable when the base product matches).
+            bool catHasPno  = cat.TkConditions.Contains("pno", StringComparer.OrdinalIgnoreCase);
+            bool suppHasPno = supplier.TkConditions.Contains("pno", StringComparer.OrdinalIgnoreCase);
+            if (catHasPno && !suppHasPno) score -= 0.5;
+
             // Signal check: must score >= 1 (dims match OR conditions overlap),
             // OR both sides specify alloy AND temper (strong identity even without dims)
             bool bothHaveAlloyAndTemper =
@@ -898,6 +918,19 @@ public class CatalogAnalysisService
     }
 
     private static int KeySegments(string? key) => key is null ? 0 : key.Count(c => c == '/');
+
+    private static string? NormalizeShape(string? s) => s;  // reserved for future shape aliases
+
+    // T6511/T651/T652 are all T6-base tempers (stretch-relieved or stress-relieved variants).
+    // Collapse them to "t6" so a catalog entry marked t6511 matches an SLI marked t6, and
+    // vice versa. Other temper families (t4, t5, h-series, etc.) remain distinct.
+    private static string? NormalizeTemper(string? t) =>
+        t?.ToLowerInvariant() switch
+        {
+            "t651" or "t6511" or "t652" => "t6",
+            { } s                        => s,
+            null                         => null
+        };
 
     private static bool GatePasses(string? a, string? b, out string? reason)
     {
