@@ -90,7 +90,7 @@ public class CatalogAnalysisService
           anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
           bright_annealed, ar_400, ar_500, ar_600, weathering_steel, painted,
           brushed, mirror_finish, ornamental_180,
-          round_corner, pno,
+          round_corner, pno, tgp,
           sch5, sch10, sch40, sch80, sch160
           pno: pickled and oiled surface treatment (Pickled & Oiled, P&O, PNO, HPNO). Use ONLY when
             the product explicitly specifies pickling/oiling. Plain hot-rolled plate/sheet with no
@@ -125,6 +125,10 @@ public class CatalogAnalysisService
           round_corner: aluminum tube (square or rectangular) with rounded outer corners, as opposed
             to the standard sharp-corner extrusion; product names include "Round Corner", "RC",
             "Rounded Corner". Do NOT use round_corner for standard/sharp-corner tube.
+          tgp: precision ground and polished round bar — "Turned, Ground and Polished", "Ground
+            Shafting", "TGP", "T.G.P.", "T.G.&P.", "Ground Shaft", "Bearing Quality Ground".
+            Use for round bar that has been precision-ground to a tight tolerance with a smooth finish.
+            Do NOT use tgp for plain cold-drawn or hot-rolled round bar that is not ground/polished.
           IMPORTANT — tread plate is NOT perforated: tread plate (diamond plate, checker plate)
             has a raised diamond or lug pattern embossed on the surface. It has NO holes.
             Never use the perforated condition for tread plate products. Use perforated only for
@@ -229,6 +233,8 @@ public class CatalogAnalysisService
           "Hot Rolled Pipe 4.000 Schedule 10 (OD 4.500 - Wall 0.120)" -> {metal:steel, shape:pipe, dims:"4.0", conditions:[hot_rolled,sch10]}
           "Hot Rolled Sheet Pickled & Oiled 11 Ga x 48 x 96" -> {metal:steel, shape:sheet, dims:"0.120", conditions:[hot_rolled,pno]}
           "HR Plate P&O 0.250 x 48 x 120" -> {metal:steel, shape:plate, dims:"0.250", conditions:[hot_rolled,pno]}
+          "1045 Ground Shafting 1.000" -> {metal:steel, alloy:1045, shape:roundbar, dims:"1.000", conditions:[cold_drawn,tgp]}
+          "303 SS TGP Round Bar 0.500" -> {metal:stainless, alloy:303, shape:roundbar, dims:"0.500", conditions:[cold_drawn,tgp]}
           "3003-H22 Aluminum Diamond Tread Plate 0.125 x 48 x 96" -> {metal:aluminum, alloy:3003, temper:h22, shape:treadplate, dims:"0.125"}
           "6061-T6 Aluminum Tread Plate 0.250 x 48 x 96" -> {metal:aluminum, alloy:6061, temper:t6, shape:treadplate, dims:"0.250"}
 
@@ -794,7 +800,7 @@ public class CatalogAnalysisService
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "ar_600", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
-          "round_corner",
+          "round_corner", "tgp",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
     // pno (Pickled & Oiled) is intentionally NOT exclusive: a supplier quoting the same
     // product without explicitly mentioning P&O is still considered a valid match.
@@ -808,7 +814,7 @@ public class CatalogAnalysisService
         new(StringComparer.OrdinalIgnoreCase)
         { "galvanized", "galvanneal", "bright_annealed", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished",
-          "ar_400", "ar_500", "ar_600" };
+          "ar_400", "ar_500", "ar_600", "tgp" };
 
     private static (ProductTokens? match, double score, string? failReason)
         FindBestMatch(ProductTokens supplier, List<ProductTokens> catalog)
