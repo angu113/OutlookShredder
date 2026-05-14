@@ -69,9 +69,15 @@ public class CatalogAnalysisService
           Copper alloys: brass (Cu+Zn), bronze (Cu+Sn), copper -- check the product name for the metal word.
           If a structural or pipe product carries an ASTM grade (e.g. A500, A513) with no other metal clue, default to steel.
         - alloy: grade or series as lowercase string ("6061", "304", "a36", "1018", "a500") -- or null
+          Dual-certified stainless grades: "304/304L" or "304L/304" -> alloy=304 (not "304l").
+          "316/316L" or "316L/316" -> alloy=316. The L variant is interchangeable; use the base grade.
+          Similarly "317L" -> alloy=317, "321H" -> alloy=321.
         - temper: temper designation as lowercase ("t6511", "t651", "h32", "h14") -- or null
         - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate -- or null
           CRITICAL: tread plate / diamond plate / checker plate / lug plate (any plate with a raised surface pattern) MUST use shape=treadplate, NOT shape=plate or shape=sheet. The word "tread", "diamond plate", or "checker" in the product name always means shape=treadplate.
+          wideflange = W-shape steel beams only (W4x13, W8x31 etc.). Use beam_s for: (a) steel
+          S-shape / American Standard I-beams (S4x7.7, S6x12.5 etc.) AND (b) aluminum I-beams
+          / structural I-beams / wide flange I-beams in 6061 or 6063 (these follow S-shape dims).
           HSS (Hollow Structural Section): square cross-section -> tube_square; rectangular -> tube_rect; round -> tube_round.
           "Structural tube" follows the same rule. "SQ" or "square tube" -> tube_square.
           ASTM A500 = structural HSS (cold-formed welded/seamless, load-bearing) -> alloy=a500.
@@ -84,8 +90,11 @@ public class CatalogAnalysisService
           anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
           bright_annealed, ar_400, ar_500, ar_600, weathering_steel, painted,
           brushed, mirror_finish, ornamental_180,
-          round_corner,
+          round_corner, pno,
           sch5, sch10, sch40, sch80, sch160
+          pno: pickled and oiled surface treatment (Pickled & Oiled, P&O, PNO, HPNO). Use ONLY when
+            the product explicitly specifies pickling/oiling. Plain hot-rolled plate/sheet with no
+            surface treatment specified is NOT pno.
           ERW (Electric Resistance Welded) and HFW (High Frequency Welded) map to the welded condition.
           galvanized: hot-dip zinc coating (G60/G90/HDG/HDGI); spangled silver surface.
           galvanneal: galvannealed — hot-dip zinc then annealed to create iron-zinc alloy coating; matte gray
@@ -141,7 +150,8 @@ public class CatalogAnalysisService
           - tube_rect: larger_dim x smaller_dim x wall -> "4.000x2.000x0.188"  (larger first, wall last)
           - tube_round: OD x wall -> "2.000x0.120"
           - wideflange, beam_s: depth x weight-per-foot -> "8x15"  (e.g. W8x15, W8x15#, S12x40)
-          - pipe: nominal ID only -- do NOT include OD, wall, or length -> "1.0"
+          - pipe: nominal size ONLY — NEVER use OD, wall thickness, or length as dims -> "1.0"
+            CRITICAL: if the product says "2.375" OD" that is the OD of nominal 2" pipe. Use dims="2.0", not "2.375".
             Always include one schedule condition. Resolve schedule abbreviations:
               Sch / SCH / Sched = Schedule
               STD or Standard = sch40 (for most nominal sizes up to 8")
@@ -778,7 +788,7 @@ public class CatalogAnalysisService
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "ar_600", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
-          "round_corner",
+          "round_corner", "pno",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
 
     // Surface-treatment conditions are bidirectional: if the SUPPLIER description carries one
@@ -848,7 +858,8 @@ public class CatalogAnalysisService
 
             // Scoring
             double score = 0;
-            if (DimsMatch(supplier.TkDims, cat.TkDims))                        score += 3;
+            if (DimsMatch(supplier.TkDims, cat.TkDims))             score += 3;  // full match
+            else if (DimsPartialMatch(supplier.TkDims, cat.TkDims)) score += 2;  // partial (fewer supplier dims)
             if (ConditionsOverlap(supplier.TkConditions, cat.TkConditions))     score += 1;
 
             // Alloy specificity tie-break: when the supplier doesn't specify an alloy, prefer
@@ -869,7 +880,13 @@ public class CatalogAnalysisService
                 continue;
             }
 
-            if (score > bestScore)
+            // Tiebreak: when scores are equal prefer fewer MSPC key segments.
+            // Panel-specific catalog entries (SSH304/050/4/48120) have more segments than the
+            // stock entry (SSH304/050/4), so stock entries win when no panel dims were supplied.
+            var newWins = score > bestScore ||
+                          (score == bestScore && best is not null &&
+                           KeySegments(cat.SearchKey) < KeySegments(best.SearchKey));
+            if (newWins)
             {
                 bestScore    = score;
                 best         = cat;
@@ -879,6 +896,8 @@ public class CatalogAnalysisService
         // Only return a failReason when we have no match at all
         return (best, bestScore < 0 ? 0 : bestScore, best is null ? noMatchReason : null);
     }
+
+    private static int KeySegments(string? key) => key is null ? 0 : key.Count(c => c == '/');
 
     private static bool GatePasses(string? a, string? b, out string? reason)
     {
@@ -905,10 +924,38 @@ public class CatalogAnalysisService
         return true;
     }
 
+    /// <summary>
+    /// Partial dims match: one side has fewer dimensions (e.g. supplier gives HxF but catalog has HxFxT).
+    /// Checks that the shorter set of dims matches the leading (largest) dims of the longer set.
+    /// Returns false when lengths are equal — use DimsMatch for that case.
+    /// </summary>
+    private static bool DimsPartialMatch(string? a, string? b, double tolerance = 0.05)
+    {
+        var da = ParseDims(a);
+        var db = ParseDims(b);
+        if (da is null || db is null || da.Length == db.Length) return false;
+        double[] shorter = da.Length < db.Length ? da : db;
+        double[] longer  = da.Length < db.Length ? db : da;
+        // Sort both descending so largest dims align at index 0
+        Array.Sort(shorter, (x, y) => y.CompareTo(x));
+        Array.Sort(longer,  (x, y) => y.CompareTo(x));
+        for (int i = 0; i < shorter.Length; i++)
+        {
+            double avg = (shorter[i] + longer[i]) / 2.0;
+            if (avg < 0.001) continue;
+            if (Math.Abs(shorter[i] - longer[i]) / avg > tolerance) return false;
+        }
+        return true;
+    }
+
     private static double[]? ParseDims(string? dims)
     {
         if (string.IsNullOrWhiteSpace(dims)) return null;
-        var parts = dims.Split('x', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // Strip literal "null" tokens that Claude may emit when a dim is absent.
+        var parts = dims.Split('x', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(p => !string.Equals(p, "null", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (parts.Length == 0) return null;
         var result = new double[parts.Length];
         for (int i = 0; i < parts.Length; i++)
             if (!double.TryParse(parts[i], System.Globalization.NumberStyles.Any,
