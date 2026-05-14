@@ -144,8 +144,9 @@ public class CatalogAnalysisService
           Example: "1/4 x 1-1/2 flat bar" -> "0.250x1.500"
 
         Dims rules -- use decimal inches; always ignore cut length and panel size dimensions:
-          - sheet, plate, coil, strip: thickness only -> "0.050"  (ignore panel/cut size such as 48x120)
-          - flatbar: thickness x width -> "0.250x1.500"  (thickness first -- exception to the ordering convention)
+          - sheet, plate, coil: thickness only -> "0.050"  (ignore panel/cut size such as 48x120)
+          - flatbar, strip: thickness x width -> "0.250x1.500"  (thickness first -- exception to the ordering convention)
+            strip examples: "HR Strip 1/8 x 1-1/2" -> "0.125x1.500"; "Galv Strip 1/8 x 1-1/4" -> "0.125x1.250"
           - roundbar: diameter -> "0.500"  (smooth round bar / round rod: "round bar", "round rod", "ground shafting")
           - rod: diameter -> "0.500"  (deformed rebar ONLY: "rebar", "re-bar", "#4 rebar" — do NOT use rod for smooth round bar)
           - wire: diameter -> "0.500"
@@ -916,7 +917,12 @@ public class CatalogAnalysisService
 
     private static int KeySegments(string? key) => key is null ? 0 : key.Count(c => c == '/');
 
-    private static string? NormalizeShape(string? s) => s;  // reserved for future shape aliases
+    private static string? NormalizeShape(string? s) => s?.ToLowerInvariant() switch
+    {
+        "strip" => "flatbar",   // HR/galv strip is the same product family as flatbar
+        { } v   => v,
+        null    => null
+    };
 
     // T6511/T651/T652 are all T6-base tempers (stretch-relieved or stress-relieved variants).
     // Collapse them to "t6" so a catalog entry marked t6511 matches an SLI marked t6, and
