@@ -74,7 +74,8 @@ public class CatalogAnalysisService
           "Structural tube" follows the same rule. "SQ" or "square tube" -> tube_square.
           ASTM A500 = structural HSS (cold-formed welded/seamless, load-bearing) -> alloy=a500.
           ASTM A513 = mechanical tubing (ERW, precision tolerances, machined parts, not structural) -> alloy=a513.
-          A500 and A513 are mutually exclusive; use whichever appears in the product name as the alloy token.
+          EXCEPTION: if both A500 and A513 appear together (e.g. "A500/A513") -> alloy=null.
+          Dual listing means either standard is acceptable; alloy=null lets the matcher accept either.
         - dims: decimal inches, shape-specific rules below -- or null
         - conditions: array of applicable terms from the list below -- empty [] if none
           Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded,
@@ -158,6 +159,8 @@ public class CatalogAnalysisService
           "4 .120 Domestic A135 ERW Pipe 21ft 5.62lb/ft" -> {metal:steel, alloy:a135, shape:pipe, dims:"4.0", conditions:[welded,sch10]}
           (0.120" wall at 4" nominal = Sch 10 per NPS table; 5.62 lb/ft confirms steel)
           "HSS 4x2x.188 A500" -> {metal:steel, alloy:a500, shape:tube_rect, dims:"4.000x2.000x0.188", conditions:[]}
+          "Steel Rect Tube A500/A513 4x2x.188" -> {metal:steel, alloy:null, shape:tube_rect, dims:"4.000x2.000x0.188", conditions:[welded]}
+          (A500/A513 dual standard -> alloy=null)
           "2 Sq Tube 11ga ERW A513" -> {metal:steel, alloy:a513, shape:tube_square, dims:"2.000x2.000x0.120", conditions:[welded]}
           (11ga BWG tube wall = 0.120"; A513 = mechanical tubing)
           "304 SS Sheet 11ga x 48 x 96" -> {metal:stainless, alloy:304, shape:sheet, dims:"0.125"}
