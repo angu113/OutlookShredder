@@ -800,12 +800,10 @@ public class CatalogAnalysisService
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "ar_600", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
-          "round_corner", "tgp",
+          "round_corner", "tgp", "pno",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
-    // pno (Pickled & Oiled) is intentionally NOT exclusive: a supplier quoting the same
-    // product without explicitly mentioning P&O is still considered a valid match.
-    // Instead a soft −0.5 penalty keeps plain catalog entries preferred over P&O catalog
-    // entries when the supplier didn't mention P&O (mirrors the alloy-specificity penalty).
+    // pno is exclusive (catalog PNO requires supplier to specify P&O) but NOT bidirectional
+    // (supplier quoting P&O is still acceptable when catalog entry is plain — we'll take it).
 
     // Surface-treatment conditions are bidirectional: if the SUPPLIER description carries one
     // of these, the catalog entry must also carry it.  Prevents a galvanized supplier quote from
@@ -878,6 +876,7 @@ public class CatalogAnalysisService
             double score = 0;
             if (DimsMatch(supplier.TkDims, cat.TkDims))             score += 3;  // full match
             else if (DimsPartialMatch(supplier.TkDims, cat.TkDims)) score += 2;  // partial (fewer supplier dims)
+            else if (DimsAnyDimMatch(supplier.TkDims, cat.TkDims))  score += 0.5; // at least one dim close
             if (ConditionsOverlap(supplier.TkConditions, cat.TkConditions))     score += 1;
 
             // Alloy specificity tie-break: when the supplier doesn't specify an alloy, prefer
@@ -885,14 +884,6 @@ public class CatalogAnalysisService
             // have matching dims.  Avoids "HR Plate 3/8"" landing on "HR Plate A572 0.375"
             // when "HR Plate 0.375" (alloy=null) is also a candidate.
             if (supplier.TkAlloy == null && cat.TkAlloy != null) score -= 0.5;
-
-            // P&O soft penalty: catalog specifies P&O but supplier didn't mention it.
-            // Keeps plain catalog entries preferred over P&O entries when the supplier
-            // didn't explicitly quote a P&O product (but doesn't hard-block the match —
-            // P&O is considered acceptable when the base product matches).
-            bool catHasPno  = cat.TkConditions.Contains("pno", StringComparer.OrdinalIgnoreCase);
-            bool suppHasPno = supplier.TkConditions.Contains("pno", StringComparer.OrdinalIgnoreCase);
-            if (catHasPno && !suppHasPno) score -= 0.5;
 
             // Signal check: must score >= 1 (dims match OR conditions overlap),
             // OR both sides specify alloy AND temper (strong identity even without dims)
@@ -985,6 +976,24 @@ public class CatalogAnalysisService
             if (Math.Abs(shorter[i] - longer[i]) / avg > tolerance) return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Returns true when at least one dimension in <paramref name="a"/> is within tolerance of
+    /// any dimension in <paramref name="b"/>.  Used as a soft +0.5 tiebreaker when neither a full
+    /// nor a leading-partial dims match fires (e.g. flat bar 0.375×2.5 vs catalog 0.375×4.0 —
+    /// thickness matches even though width doesn't).
+    /// </summary>
+    private static bool DimsAnyDimMatch(string? a, string? b, double tolerance = 0.05)
+    {
+        var da = ParseDims(a);
+        var db = ParseDims(b);
+        if (da is null || db is null) return false;
+        return da.Any(x => db.Any(y =>
+        {
+            double avg = (x + y) / 2.0;
+            return avg >= 0.001 && Math.Abs(x - y) / avg <= tolerance;
+        }));
     }
 
     private static double[]? ParseDims(string? dims)
