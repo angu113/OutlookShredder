@@ -219,6 +219,10 @@ public class CatalogAnalysisService
           (A500/A513 dual standard -> alloy=null)
           "2 Sq Tube 11ga ERW A513" -> {metal:steel, alloy:a513, shape:tube_square, dims:"2.000x2.000x0.120", conditions:[welded]}
           (11ga BWG tube wall = 0.120"; A513 = mechanical tubing)
+          "A513 Square Tube 2x2 14ga x 24ft" -> {metal:steel, alloy:a513, shape:tube_square, dims:"2.000x2.000x0.083", conditions:[welded]}
+          (14ga BWG tube wall = 0.083" -- NOT 0.120")
+          "A513 Rect Tube 2x1 16ga x 24ft" -> {metal:steel, alloy:a513, shape:tube_rect, dims:"2.000x1.000x0.065", conditions:[welded]}
+          (16ga BWG tube wall = 0.065" -- NOT 0.120")
           "304 SS Sheet 11ga x 48 x 96" -> {metal:stainless, alloy:304, shape:sheet, dims:"0.125"}
           (11ga stainless = 0.125" -- different from 11ga carbon steel 0.120")
           "16ga Galvanized Sheet 4x8" -> {metal:steel, shape:sheet, dims:"0.064", conditions:[galvanized]}
