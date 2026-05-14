@@ -16,8 +16,8 @@ namespace OutlookShredder.Proxy.Services;
 /// Endpoints (via AnalysisController):
 ///   POST /api/analysis/catalog/fetch    — snapshot ProductCatalogService into catalog.json
 ///   POST /api/analysis/sli/fetch        — snapshot SliCacheService rows (PSK != null) into sli-sample.json
-///   POST /api/analysis/catalog/tokenize — AI-tokenise catalog.json → catalog-tokens.json (resumable)
-///   POST /api/analysis/sli/tokenize     — AI-tokenise sli-sample.json → sli-tokens.json (resumable)
+///   POST /api/analysis/catalog/tokenize — AI-tokenise catalog.json -> catalog-tokens.json (resumable)
+///   POST /api/analysis/sli/tokenize     — AI-tokenise sli-sample.json -> sli-tokens.json (resumable)
 ///   GET  /api/analysis/match-test       — score sli-tokens against catalog-tokens in-memory
 ///   GET  /api/analysis/status           — cache file sizes + counts
 /// </summary>
@@ -50,6 +50,117 @@ public class CatalogAnalysisService
     private const string ApiVersion  = "2023-06-01";
     private const int    BatchSize   = 25;
 
+    // Static tokenisation instructions sent as a cached system prompt.
+    // Cached by the Anthropic prompt-caching API (beta header set in constructor).
+    // Minimum cacheable: 1024 tokens for Sonnet, 2048 tokens for Haiku.
+    private static readonly string TokeniseSystemPrompt = """
+        Extract structured product attributes from metal product names.
+        The user will send a numbered list of product names. Return a JSON array with one object per product, in the same order.
+
+        Each object must have exactly these fields (null if unspecified):
+        - metal: one of aluminum, steel, stainless, copper, brass, bronze, titanium, nickel, plastic -- or null
+          Steel indicators: ASTM grades A36, A53, A106, A135, A179, A311, A333, A500, A512, A513, A519, A572, A992;
+          terms "black pipe", "black steel", "carbon steel", "hot rolled", "cold rolled", "structural".
+          Aluminum indicators: alloy series 1xxx/2xxx/3xxx/5xxx/6xxx/7xxx (e.g. 6061, 5052, 3003, 2024, 7075);
+          terms "aluminum" or "aluminium".
+          Stainless indicators: alloy numbers 301, 303, 304, 309, 310, 316, 317, 321, 347;
+          terms "stainless", "SS", "inox".
+          Copper alloys: brass (Cu+Zn), bronze (Cu+Sn), copper -- check the product name for the metal word.
+          If a structural or pipe product carries an ASTM grade (e.g. A500, A513) with no other metal clue, default to steel.
+        - alloy: grade or series as lowercase string ("6061", "304", "a36", "1018", "a500") -- or null
+        - temper: temper designation as lowercase ("t6511", "t651", "h32", "h14") -- or null
+        - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate -- or null
+          HSS (Hollow Structural Section): square cross-section -> tube_square; rectangular -> tube_rect; round -> tube_round.
+          "Structural tube" follows the same rule. "SQ" or "square tube" -> tube_square.
+        - dims: decimal inches, shape-specific rules below -- or null
+        - conditions: array of applicable terms from the list below -- empty [] if none
+          Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded,
+          dom, polished, drawn, extruded, key_stock, perforated, sch5, sch10, sch40, sch80, sch160
+          ERW (Electric Resistance Welded) and HFW (High Frequency Welded) map to the welded condition.
+          For pipe: always include exactly one schedule condition (sch5, sch10, sch40, sch80, or sch160).
+
+        Dimensional ordering convention (industry standard):
+          For angles, square tubes, rectangular tubes, tees, and zees: list dimensions from LARGEST to SMALLEST;
+          the LAST dimension is always the wall thickness or material thickness.
+          Example: "6x4x3/8 angle" = 6" leg x 4" leg x 0.375" wall -> "6.000x4.000x0.375"
+          Example: "4x2x.188 rect tube" = 4" width x 2" height x 0.188" wall -> "4.000x2.000x0.188"
+          EXCEPTION -- flatbar: thickness listed FIRST, then width.
+          Example: "1/4 x 1-1/2 flat bar" -> "0.250x1.500"
+
+        Dims rules -- use decimal inches; always ignore cut length and panel size dimensions:
+          - sheet, plate, coil, strip: thickness only -> "0.050"  (ignore panel/cut size such as 48x120)
+          - flatbar: thickness x width -> "0.250x1.500"  (thickness first -- exception to the ordering convention)
+          - roundbar, rod, wire: diameter -> "0.500"
+          - squarebar, hexbar: size -> "1.000"
+          - angle: larger_leg x smaller_leg x wall -> "6.000x4.000x0.375"  (larger leg first, wall last)
+          - channel: depth x weight-per-foot -> "6x13"  (e.g. C6x13, MC6x12, MC6x12#)
+          - tube_square: size x size x wall -> "4.000x4.000x0.188"
+          - tube_rect: larger_dim x smaller_dim x wall -> "4.000x2.000x0.188"  (larger first, wall last)
+          - tube_round: OD x wall -> "2.000x0.120"
+          - wideflange, beam_s: depth x weight-per-foot -> "8x15"  (e.g. W8x15, W8x15#, S12x40)
+          - pipe: nominal ID only -- do NOT include OD, wall, or length -> "1.0"
+            Always include one schedule condition. Resolve schedule abbreviations:
+              Sch / SCH / Sched = Schedule
+              STD or Standard = sch40 (for most nominal sizes up to 8")
+              XH or Extra Heavy = sch80
+              XXH or Double Extra Heavy = sch160
+            If wall thickness is given instead of explicit schedule, use the NPS lookup table (tolerance +/-0.005"):
+              Nominal | Sch 5  | Sch 10 | Sch 40/STD | Sch 80/XH | Sch 160
+               0.500  |   --   |   --   |   0.109    |   0.147   |  0.187
+               0.750  |   --   |   --   |   0.113    |   0.154   |  0.219
+               1.000  |   --   |   --   |   0.133    |   0.179   |  0.250
+               1.250  |   --   |   --   |   0.140    |   0.191   |  0.250
+               1.500  |   --   |   --   |   0.145    |   0.200   |  0.281
+               2.000  |   --   |   --   |   0.154    |   0.218   |  0.344
+               2.500  |   --   |   --   |   0.203    |   0.276   |  0.375
+               3.000  |   --   |   --   |   0.216    |   0.300   |  0.438
+               4.000  |   --   | 0.120  |   0.237    |   0.337   |  0.531
+               6.000  | 0.109  | 0.134  |   0.280    |   0.432   |  0.719
+               8.000  | 0.109  | 0.148  |   0.322    |   0.500   |  0.906
+              10.000  | 0.134  | 0.165  |   0.365    |   0.594   |  1.125
+              12.000  | 0.156  | 0.180  |   0.406    |   0.688   |  1.312
+            If OD and wall are given but no nominal size, reverse-lookup nominal from the NPS table.
+            If wall thickness matches no known schedule, omit the schedule condition rather than guessing.
+
+        Gauge to decimal conversion (for sheet thickness and tube wall):
+          Steel and stainless -- US Standard / Manufacturer's Standard gauge:
+            3ga=0.239  4ga=0.224  5ga=0.209  6ga=0.194  7ga=0.179  8ga=0.164  9ga=0.150
+            10ga=0.135  11ga=0.120  12ga=0.105  13ga=0.090  14ga=0.075  16ga=0.060
+            18ga=0.048  20ga=0.036  22ga=0.030  24ga=0.024  26ga=0.018
+          Aluminum -- B&S (Brown and Sharpe) gauge:
+            8ga=0.128  10ga=0.102  11ga=0.091  12ga=0.081  14ga=0.064  16ga=0.051
+            18ga=0.040  20ga=0.032  22ga=0.025  24ga=0.020
+
+        Weight per foot as a metal check for pipe (when no metal is stated):
+          Steel density ~0.283 lb/in3; aluminum ~0.098 lb/in3 (roughly 1/3 of steel); stainless ~0.289 lb/in3.
+          If lbs/ft is provided alongside a known nominal pipe size, compare to expected steel weight.
+          If actual lbs/ft is close to steel weight -> metal=steel. If roughly 1/3 of steel weight -> metal=aluminum.
+          Example: 4" Sch 10 steel pipe weighs ~5.6 lb/ft; aluminum of same dims weighs ~1.9 lb/ft.
+
+        Reference examples:
+          "1045 Ground Shafting 1.000" -> {metal:steel, alloy:1045, shape:roundbar, dims:"1.000", conditions:[cold_drawn]}
+          "Aluminum Sheet 5052-H32 0.063 x 48 x 144" -> {metal:aluminum, alloy:5052, temper:h32, shape:sheet, dims:"0.063"}
+          "304 SS Angle 2x2x3/16" -> {metal:stainless, alloy:304, shape:angle, dims:"2.000x2.000x0.188"}
+          "Hot Rolled Flat Bar A36 3/8 x 1-1/2" -> {metal:steel, alloy:a36, shape:flatbar, dims:"0.375x1.500"}
+          "A135 ERW Pipe 4 Sch 10 x 21ft" -> {metal:steel, alloy:a135, shape:pipe, dims:"4.0", conditions:[welded,sch10]}
+          "4 .120 Domestic A135 ERW Pipe 21ft 5.62lb/ft" -> {metal:steel, alloy:a135, shape:pipe, dims:"4.0", conditions:[welded,sch10]}
+          (0.120" wall at 4" nominal = Sch 10 per NPS table; 5.62 lb/ft confirms steel)
+          "HSS 4x2x.188 A500" -> {metal:steel, alloy:a500, shape:tube_rect, dims:"4.000x2.000x0.188", conditions:[]}
+          "2 Sq Tube 11ga ERW" -> {metal:steel, shape:tube_square, dims:"2.000x2.000x0.120", conditions:[welded]}
+          (11ga steel = 0.120")
+          "W8x15 Wide Flange A992" -> {metal:steel, alloy:a992, shape:wideflange, dims:"8x15"}
+          "316L SS Seamless Tube 1.5 OD x .109 Wall" -> {metal:stainless, alloy:316, shape:tube_round, dims:"1.500x0.109", conditions:[seamless]}
+          "6063-T52 Aluminum Pipe 1.25 Sch 40" -> {metal:aluminum, alloy:6063, temper:t52, shape:pipe, dims:"1.25", conditions:[sch40]}
+          "Galvanized Pipe 1 STD" -> {metal:steel, shape:pipe, dims:"1.0", conditions:[galvanized,sch40]}
+          "C6x13 Structural Channel" -> {metal:steel, shape:channel, dims:"6x13"}
+          "Polycarbonate Lexan Clear Sheet 0.500 x 48 x 96" -> {metal:plastic, shape:sheet, dims:"0.500"}
+          "Brass Round Bar 360 1.500" -> {metal:brass, alloy:360, shape:roundbar, dims:"1.500"}
+          "6x4x3/8 Structural Angle A36" -> {metal:steel, alloy:a36, shape:angle, dims:"6.000x4.000x0.375"}
+          "Hot Rolled Pipe 4.000 Schedule 10 (OD 4.500 - Wall 0.120)" -> {metal:steel, shape:pipe, dims:"4.0", conditions:[hot_rolled,sch10]}
+
+        Respond with only the JSON array, no explanation or markdown fences.
+        """;
+
     public CatalogAnalysisService(
         IConfiguration config,
         ILogger<CatalogAnalysisService> log,
@@ -64,6 +175,9 @@ public class CatalogAnalysisService
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         _http.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
+        // Prompt-caching beta: static system prompt is cached across batches.
+        // Activates at 1024 tokens for Sonnet, 2048 for Haiku.
+        _http.DefaultRequestHeaders.Add("anthropic-beta", "prompt-caching-2024-07-31");
     }
 
     // ── Status ────────────────────────────────────────────────────────────────
@@ -88,7 +202,7 @@ public class CatalogAnalysisService
 
     // ── Fetch ─────────────────────────────────────────────────────────────────
 
-    /// <summary>Snapshot ProductCatalogService in-memory cache → catalog.json</summary>
+    /// <summary>Snapshot ProductCatalogService in-memory cache -> catalog.json</summary>
     public object FetchCatalog()
     {
         var entries = _catalog.CachedEntries
@@ -99,20 +213,20 @@ public class CatalogAnalysisService
         File.WriteAllText(CatalogPath,
             JsonSerializer.Serialize(entries, Json), Encoding.UTF8);
 
-        _log.LogInformation("[Analysis] catalog.json written — {Count} entries", entries.Count);
+        _log.LogInformation("[Analysis] catalog.json written -- {Count} entries", entries.Count);
         return new { count = entries.Count, path = CatalogPath };
     }
 
-    /// <summary>Snapshot SliCacheService rows with a known ProductSearchKey → sli-sample.json</summary>
+    /// <summary>Snapshot SliCacheService rows with a known ProductSearchKey -> sli-sample.json</summary>
     public async Task<object> FetchSliAsync(CancellationToken ct)
     {
-        // Ensure cache is warm — will populate from disk or SP
+        // Ensure cache is warm -- will populate from disk or SP
         if (_sli.TryGet() is null)
             await _sli.PopulateAsync(force: false, ct);
 
         var rows = _sli.TryGet();
         if (rows is null)
-            return new { error = "SLI cache is empty — proxy may still be starting up" };
+            return new { error = "SLI cache is empty -- proxy may still be starting up" };
 
         var sample = rows
             .Select(d => new SliEntry(
@@ -129,7 +243,7 @@ public class CatalogAnalysisService
         File.WriteAllText(SliPath,
             JsonSerializer.Serialize(sample, Json), Encoding.UTF8);
 
-        _log.LogInformation("[Analysis] sli-sample.json written — {Count} rows (from {Total} total)",
+        _log.LogInformation("[Analysis] sli-sample.json written -- {Count} rows (from {Total} total)",
             sample.Count, rows.Count);
         return new { count = sample.Count, totalRows = rows.Count, path = SliPath };
     }
@@ -137,7 +251,7 @@ public class CatalogAnalysisService
     // ── Tokenise ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// AI-tokenise the catalog or SLI source file.  Resumable — entries already
+    /// AI-tokenise the catalog or SLI source file.  Resumable -- entries already
     /// present in the tokens file are skipped.  Saves progress after every batch
     /// so interrupting mid-run doesn't lose work.
     /// clearShapes: if non-empty, removes entries with those TkShape values from the
@@ -150,7 +264,7 @@ public class CatalogAnalysisService
             : (CatalogPath, CatalogTokensPath, "catalog");
 
         if (!File.Exists(sourcePath))
-            return new { error = $"{label}.json not found — run fetch first" };
+            return new { error = $"{label}.json not found -- run fetch first" };
 
         var apiKey = _config["Anthropic:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
@@ -260,9 +374,9 @@ public class CatalogAnalysisService
     public async Task<object> RunMatchTestAsync(int limit, CancellationToken ct)
     {
         if (!File.Exists(CatalogTokensPath))
-            return new { error = "catalog-tokens.json not found — run catalog/tokenize first" };
+            return new { error = "catalog-tokens.json not found -- run catalog/tokenize first" };
         if (!File.Exists(SliTokensPath))
-            return new { error = "sli-tokens.json not found — run sli/tokenize first" };
+            return new { error = "sli-tokens.json not found -- run sli/tokenize first" };
 
         var catJson  = await File.ReadAllTextAsync(CatalogTokensPath, ct);
         var sliJson  = await File.ReadAllTextAsync(SliTokensPath, ct);
@@ -272,7 +386,7 @@ public class CatalogAnalysisService
         var sliTokens = JsonSerializer.Deserialize<List<ProductTokens>>(sliJson, Json)!
                             .Where(t => !t.TokenizationFailed).ToList();
 
-        // Load sli-sample.json once — keyed by name (first entry wins for duplicates)
+        // Load sli-sample.json once -- keyed by name (first entry wins for duplicates)
         Dictionary<string, SliEntry> sliLookup = [];
         if (File.Exists(SliPath))
         {
@@ -360,9 +474,9 @@ public class CatalogAnalysisService
 
     // ── Matching algorithm ────────────────────────────────────────────────────
 
-    // Conditions that are "exclusive" — if the catalog entry carries one of these,
+    // Conditions that are "exclusive" -- if the catalog entry carries one of these,
     // the supplier description must also mention it.  Prevents a plain sheet matching
-    // a perforated sheet, or a plain tube matching a DOM tube, etc.
+    // a perforated sheet, a plain tube matching a DOM tube, or Sch 10 matching Sch 80, etc.
     private static readonly HashSet<string> ExclusiveConditions =
         new(StringComparer.OrdinalIgnoreCase)
         { "perforated", "expanded", "dom", "grating", "treadplate",
@@ -386,14 +500,14 @@ public class CatalogAnalysisService
                 continue;
             }
 
-            // Hard gates: if both sides specify a field and they differ → skip
+            // Hard gates: if both sides specify a field and they differ -> skip
             if (!GatePasses(supplier.TkMetal,  cat.TkMetal,  out var r1)) { noMatchReason = r1; continue; }
             if (!GatePasses(supplier.TkShape,  cat.TkShape,  out var r2)) { noMatchReason = r2; continue; }
             if (!GatePasses(supplier.TkAlloy,  cat.TkAlloy,  out var r3)) { noMatchReason = r3; continue; }
             if (!GatePasses(supplier.TkTemper, cat.TkTemper, out var r4)) { noMatchReason = r4; continue; }
 
             // Exclusive-condition gate: catalog carries an exclusive tag the supplier
-            // didn't mention → not this product
+            // didn't mention -> not this product
             var catExclusive = cat.TkConditions
                 .Where(c => ExclusiveConditions.Contains(c)).ToArray();
             if (catExclusive.Length > 0)
@@ -438,13 +552,13 @@ public class CatalogAnalysisService
     private static bool GatePasses(string? a, string? b, out string? reason)
     {
         reason = null;
-        if (a is null || b is null) return true; // one side unspecified → pass
+        if (a is null || b is null) return true; // one side unspecified -> pass
         if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return true;
         reason = $"{a} vs {b}";
         return false;
     }
 
-    private static bool DimsMatch(string? a, string? b, double tolerance = 0.03)
+    private static bool DimsMatch(string? a, string? b, double tolerance = 0.05)
     {
         var da = ParseDims(a);
         var db = ParseDims(b);
@@ -486,62 +600,26 @@ public class CatalogAnalysisService
         var numbered = string.Join("\n",
             names.Select((n, i) => $"{i + 1}. {n}"));
 
-        var prompt = $"""
-            Extract structured product attributes from these metal product names.
-            Return a JSON array — one object per product in the same order as numbered.
-
-            Each object must have exactly these fields (null if unspecified):
-            - metal: one of aluminum, steel, stainless, copper, brass, bronze, titanium, nickel, plastic — or null
-            - alloy: grade/series as lowercase string ("6061", "304", "a36", "1018") — or null
-            - temper: temper code as lowercase string ("t6511", "t651", "h14") — or null
-            - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate — or null
-            - dims: decimal inches, shape-specific rules below — or null
-            - conditions: array from [hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated, sch5, sch10, sch40, sch80, sch160] — empty [] if none
-              For pipe only: always include the pipe schedule as a condition — Schedule 5 → sch5, Schedule 10 → sch10, Schedule 40 or Standard or STD → sch40, Schedule 80 or XH or Extra Heavy → sch80, Schedule 160 → sch160.
-
-            Dims rules — always ignore cut/length/panel dimensions:
-            - sheet, plate, coil, strip: thickness ONLY → "0.050"  (ignore 48x120 panel size)
-            - flatbar: thickness×width → "0.250x1.250"
-            - roundbar, rod, wire: diameter → "0.500"
-            - squarebar, hexbar: size → "1.000"
-            - angle: leg1×leg2×thickness → "4.000x4.000x0.375"  (legs first, wall last)
-            - channel: depth×weight-per-foot → "6x13"  (e.g. C6×13#, MC6×12#)
-            - tube_square: width×width×wall → "4.000x4.000x0.188"
-            - tube_rect: width×height×wall → "4.000x3.000x0.120"
-            - tube_round: OD×wall → "2.000x0.120"
-            - pipe: nominal size ONLY → "1.0"  (ignore OD).
-              Always include the schedule as a condition (sch5/sch10/sch40/sch80/sch160).
-              Schedule abbreviations: Sch / SCH / Sched all mean Schedule. STD or Standard = sch40. XH or Extra Heavy = sch80. XXH or Double Extra Heavy = sch160.
-              If only a wall thickness is given (no explicit schedule), resolve it using the NPS table below (tolerance ±0.005"):
-                Nominal | Sch 5 wall | Sch 10 wall | Sch 40/STD wall | Sch 80/XH wall | Sch 160 wall
-                0.500"  |     —      |     —       |     0.109       |     0.147       |    0.187
-                0.750"  |     —      |     —       |     0.113       |     0.154       |    0.219
-                1.000"  |     —      |     —       |     0.133       |     0.179       |    0.250
-                1.250"  |     —      |     —       |     0.140       |     0.191       |    0.250
-                1.500"  |     —      |     —       |     0.145       |     0.200       |    0.281
-                2.000"  |     —      |     —       |     0.154       |     0.218       |    0.344
-                2.500"  |     —      |     —       |     0.203       |     0.276       |    0.375
-                3.000"  |     —      |     —       |     0.216       |     0.300       |    0.438
-                4.000"  |     —      |     0.120   |     0.237       |     0.337       |    0.531
-                6.000"  |  0.109     |     0.134   |     0.280       |     0.432       |    0.719
-                8.000"  |  0.109     |     0.148   |     0.322       |     0.500       |    0.906
-               10.000"  |  0.134     |     0.165   |     0.365       |     0.594       |    1.125
-               12.000"  |  0.156     |     0.180   |     0.406       |     0.688       |    1.312
-              If wall thickness matches no known schedule, omit the schedule condition rather than guessing.
-            - wideflange, beam_s: depth×weight-per-foot → "8x15"  (e.g. W8×15#, S12×40#)
-
-            Products:
-            {numbered}
-
-            Respond with only the JSON array, no explanation or markdown fences.
-            """;
-
+        // Static instructions are in the system message with cache_control so the Anthropic
+        // API can cache them across batches (avoids re-sending ~1500 tokens every call).
         var body = JsonSerializer.Serialize(new
         {
             model,
             max_tokens = 2048,
-            messages   = new[] { new { role = "user", content = prompt } }
-        });
+            system = new[]
+            {
+                new
+                {
+                    type         = "text",
+                    text         = TokeniseSystemPrompt,
+                    cache_control = new { type = "ephemeral" }
+                }
+            },
+            messages = new[]
+            {
+                new { role = "user", content = $"Products:\n{numbered}" }
+            }
+        }, Json);
 
         using var req = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
         req.Headers.Add("x-api-key", apiKey);
