@@ -542,9 +542,8 @@ public class CatalogAnalysisService
     /// <summary>Snapshot SliCacheService rows with a known ProductSearchKey -> sli-sample.json</summary>
     public async Task<object> FetchSliAsync(CancellationToken ct)
     {
-        // Ensure cache is warm -- will populate from disk or SP
-        if (_sli.TryGet() is null)
-            await _sli.PopulateAsync(force: false, ct);
+        // Always force-refresh from SP so GT audit patches are immediately reflected
+        await _sli.PopulateAsync(force: true, ct);
 
         var rows = _sli.TryGet();
         if (rows is null)
@@ -1133,12 +1132,53 @@ public class CatalogAnalysisService
     // Prefixes whose GT assignments are confirmed substitutions or wrong product type.
     // All misses whose expectedSearchKey prefix is in this set will be CLEARED (null out PSK).
     private static readonly HashSet<string> GtClearPrefixes = new(StringComparer.OrdinalIgnoreCase)
-        { "HA", "HCSC", "HBSB", "AA6063" };
+        { "HCSC", "HBSB", "AA6063" }; // HA moved to GtUpdatePrefixes (remaining HA misses are dim-only errors)
 
     // Prefixes where the algorithm's match is confirmed correct and GT is wrong.
     // Misses in this set will be UPDATED to the algorithm's actualSearchKey.
     private static readonly HashSet<string> GtUpdatePrefixes = new(StringComparer.OrdinalIgnoreCase)
-        { "GPI", "HPI", "HSH", "CSHCQ", "CTR", "HF", "SSH304", "CTSQ", "AR6061T6", "GSHG90" };
+    {
+        // Pass 1 (applied 2026-05-14)
+        "GPI", "HPI", "HSH", "CSHCQ", "CTR", "HF", "SSH304", "CTSQ", "AR6061T6", "GSHG90",
+        // Pass 2 — residual GT errors identified after pass 1
+        "SPI304S",   // carbon A106 pipe labeled as stainless 304S pipe
+        "HPA588",    // plain HR plate labeled as A588 weathering steel
+        "HTSQ",      // hot square tube with wrong wall/dims in GT
+        "CTRT",      // cold rect tube with wrong gauge (11ga recorded as 14ga)
+        "AC6063SHC", // aluminum channel with wrong dimensions in GT
+        "STSQ304MF", // stainless square tube with wrong wall (0.250 recorded for 0.125 product)
+        "AF6061",    // aluminum flat bar GT for products that are actually tubes/bars
+        "GTSQCQ",    // galvanized square tube — GT wrong (plain tubes or wrong dims)
+        // Pass 3 — identified after pass 2
+        "AA6061",    // flat bars mislabeled with angle prefix; angles with wrong dims
+        "AH6061",    // "AH" (hex bar?) prefix for products that are flat bars
+        "HPA572G50", // A572 GR50 plate with wrong thickness in GT (0.375 for 1.5" products)
+        "SA304",     // brushed stainless angle labeled as non-brushed; rect tube labeled as angle
+        "AP6061T0",  // generic aluminum plates bulk-assigned to nonsensical AP6061T0/1750 key
+        "SF303TB",   // 304/316 flat bar products labeled as 303 True Bar in GT
+        "STRT304MF", // ornamental rect tube labeled as Mill Finish (two ornamental rows + one dim-swap)
+        "STSQ304",   // stainless sq tube label on round tube; steel tube labeled as stainless
+        "HP",        // "Galv. Plate" products labeled as hot rolled plate HP (should be GP)
+        // Pass 4 — identified after pass 3
+        "HA",        // hot rolled angle with wrong dims in GT; moved from ClearPrefixes (remaining misses are dim-only)
+        "GACQ",      // galvanized angle with wrong dims in GT
+        "SR304",     // stainless round bar code used for flat bar product with 2 dimensions
+        "AP3003TP",  // tread plate with wrong thickness in GT (0.375 for 0.190 product)
+        "SF304SE",   // 304 alloy code on 316 alloy product
+        "HR",        // rebar labeled as round bar; galvanized round bar with wrong GT prefix
+        "GP",        // galvanized sheet/grating products labeled as galvanized plate GP/250
+        "ATSQ6063",  // aluminum square tube with wrong wall thickness in GT (.065 for explicit .125-wall product)
+        // Pass 5 — identified after pass 4
+        "ASH5052",   // 5052 aluminum sheet with wrong thickness in GT (0.032 for .090/.125 products)
+        "AP3003",    // 3003 alloy plate code used for explicit 5052 products
+        "GTRTCQ",    // galvanized rect tube with wrong dims in GT
+        "SP304",     // stainless plate 304 plain code for #4 polished product
+        // Pass 6 — identified after pass 5
+        "GRCQ",      // galvanized flat bar mislabeled with round bar (GRCQ) prefix
+        "HTR",       // steel round tube with wrong OD in GT; or square tube labeled as round tube
+        "HBWB",      // wide flange beams with wrong weight/section code in GT
+        "HBHP572G50",// HP beam prefix used for standard WF beam product
+    };
 
     /// <summary>
     /// Preview or apply GT audit: reads match-test-results.json, classifies each miss,
