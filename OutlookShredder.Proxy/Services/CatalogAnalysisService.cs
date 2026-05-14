@@ -82,6 +82,7 @@ public class CatalogAnalysisService
           Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, galvanneal,
           anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
           bright_annealed, ar_400, ar_500, weathering_steel, painted,
+          brushed, mirror_finish, ornamental_180,
           sch5, sch10, sch40, sch80, sch160
           ERW (Electric Resistance Welded) and HFW (High Frequency Welded) map to the welded condition.
           galvanized: hot-dip zinc coating (G60/G90/HDG/HDGI); spangled silver surface.
@@ -89,7 +90,8 @@ public class CatalogAnalysisService
             surface; product names often include "Galvanneal", "GA", "HDGA", "A60" coating. Do NOT use
             galvanized for galvanneal — they are different products.
           bright_annealed: BA finish on stainless tube/pipe; smooth reflective interior; product names
-            include "Bright Annealed", "BA", "Bright Anneal".
+            include "Bright Annealed", "BA", "Bright Anneal". For stainless sheet/plate, BA refers to the
+            annealed mill surface — only use bright_annealed for tube/pipe.
           ar_400: abrasion-resistant plate (Brinell ~400); product names include "AR400", "AR 400",
             "Hardox 400", "Quend 400".
           ar_500: abrasion-resistant plate (Brinell ~500); product names include "AR500", "AR 500",
@@ -97,6 +99,16 @@ public class CatalogAnalysisService
           weathering_steel: atmospheric-corrosion-resistant steel; product names include "A606 Type 4",
             "A588", "Corten", "Cor-Ten", "Weathering Steel". ASTM A606 = sheet; A588 = plate and structural.
           painted: factory-applied paint or coating; product names include "Painted", "Coated", "Pre-painted".
+          brushed: #4 brushed/satin stainless surface; product names include "#4", "#4 Finish",
+            "#4 Brushed", "Brushed Finish", "Satin Finish".
+          mirror_finish: #8 bright mirror-polished stainless surface; product names include "#8",
+            "#8 Mirror", "Mirror Finish", "Mirror Polish", "Bright Polish".
+          ornamental_180: 180-grit ornamental-polished stainless tube; product names include
+            "Ornamental", "180 Grit", "Ornamental 180 Grit". Use this for stainless tube/pipe
+            with an ornamental polish. Use polished for other polished stainless products.
+          polished: generic polished/smooth surface on stainless or other metals; use when "polished"
+            or "polished finish" appears and no more specific condition (brushed/mirror_finish/
+            ornamental_180) applies.
           For pipe: always include exactly one schedule condition (sch5, sch10, sch40, sch80, or sch160).
 
         Dimensional ordering convention (industry standard):
@@ -754,6 +766,7 @@ public class CatalogAnalysisService
         { "perforated", "expanded", "dom", "grating", "treadplate",
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "weathering_steel", "painted",
+          "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
 
     private static (ProductTokens? match, double score, string? failReason)
