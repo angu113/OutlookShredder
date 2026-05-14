@@ -79,9 +79,24 @@ public class CatalogAnalysisService
           Dual listing means either standard is acceptable; alloy=null lets the matcher accept either.
         - dims: decimal inches, shape-specific rules below -- or null
         - conditions: array of applicable terms from the list below -- empty [] if none
-          Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded,
-          dom, polished, drawn, extruded, key_stock, perforated, sch5, sch10, sch40, sch80, sch160
+          Valid conditions: hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, galvanneal,
+          anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
+          bright_annealed, ar_400, ar_500, weathering_steel, painted,
+          sch5, sch10, sch40, sch80, sch160
           ERW (Electric Resistance Welded) and HFW (High Frequency Welded) map to the welded condition.
+          galvanized: hot-dip zinc coating (G60/G90/HDG/HDGI); spangled silver surface.
+          galvanneal: galvannealed — hot-dip zinc then annealed to create iron-zinc alloy coating; matte gray
+            surface; product names often include "Galvanneal", "GA", "HDGA", "A60" coating. Do NOT use
+            galvanized for galvanneal — they are different products.
+          bright_annealed: BA finish on stainless tube/pipe; smooth reflective interior; product names
+            include "Bright Annealed", "BA", "Bright Anneal".
+          ar_400: abrasion-resistant plate (Brinell ~400); product names include "AR400", "AR 400",
+            "Hardox 400", "Quend 400".
+          ar_500: abrasion-resistant plate (Brinell ~500); product names include "AR500", "AR 500",
+            "Hardox 500", "Quend 500".
+          weathering_steel: atmospheric-corrosion-resistant steel; product names include "A606 Type 4",
+            "A588", "Corten", "Cor-Ten", "Weathering Steel". ASTM A606 = sheet; A588 = plate and structural.
+          painted: factory-applied paint or coating; product names include "Painted", "Coated", "Pre-painted".
           For pipe: always include exactly one schedule condition (sch5, sch10, sch40, sch80, or sch160).
 
         Dimensional ordering convention (industry standard):
@@ -737,6 +752,8 @@ public class CatalogAnalysisService
     private static readonly HashSet<string> ExclusiveConditions =
         new(StringComparer.OrdinalIgnoreCase)
         { "perforated", "expanded", "dom", "grating", "treadplate",
+          "galvanized", "galvanneal", "bright_annealed",
+          "ar_400", "ar_500", "weathering_steel", "painted",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
 
     private static (ProductTokens? match, double score, string? failReason)
