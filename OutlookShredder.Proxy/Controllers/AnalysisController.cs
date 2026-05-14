@@ -45,4 +45,18 @@ public class AnalysisController(CatalogAnalysisService analysis) : ControllerBas
     [HttpGet("status")]
     public IActionResult Status()
         => Ok(analysis.GetStatus());
+
+    /// <summary>
+    /// Mine catalog-tokens + sli-tokens for unique alloy/condition/temper values and upsert
+    /// them into the SP IndustryDictionary list. Safe to re-run — existing entries are updated
+    /// with fresh occurrence counts; Definition/Examples are never overwritten.
+    /// </summary>
+    [HttpPost("dictionary/build")]
+    public async Task<IActionResult> BuildDictionary(CancellationToken ct)
+        => Ok(await analysis.BuildDictionaryAsync(ct));
+
+    /// <summary>Read all IndustryDictionary entries from SharePoint</summary>
+    [HttpGet("dictionary")]
+    public async Task<IActionResult> GetDictionary(CancellationToken ct)
+        => Ok(await analysis.ReadDictionaryAsync(ct));
 }

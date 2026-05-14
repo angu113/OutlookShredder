@@ -53,6 +53,23 @@ public class MatchCase
     public string? FailReason         { get; set; }
 }
 
+/// <summary>One entry in the IndustryDictionary SharePoint list</summary>
+public class IndustryDictionaryEntry
+{
+    public string  Term         { get; set; } = "";
+    /// <summary>abbreviation | standard | alloy_series | condition | temper | shape_alias</summary>
+    public string  TermType     { get; set; } = "";
+    /// <summary>Comma-separated shapes/metals where this term appears in the catalog+SLI data</summary>
+    public string? AppliesTo    { get; set; }
+    /// <summary>The token field value this term resolves to (e.g. "welded", "sch40", "a500")</summary>
+    public string? MapsToToken  { get; set; }
+    public string? Definition   { get; set; }
+    public string? Examples     { get; set; }
+    public int     CatalogCount { get; set; }
+    public int     SliCount     { get; set; }
+    [JsonIgnore] public string? SpItemId { get; set; }
+}
+
 /// <summary>Results from one match-test run, saved to analysis-cache/match-test-results.json</summary>
 public class MatchTestRun
 {

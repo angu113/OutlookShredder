@@ -4163,6 +4163,7 @@ public class SharePointService
                 ("ProductSearchKey",   "text"),
                 ("CatalogProductName", "text"),
             ]),
+            ["IndustryDictionary"] = await EnsureIndustryDictionaryColumnsAsync(siteId),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
             poMap is Dictionary<string, string> poDict &&
@@ -4185,6 +4186,8 @@ public class SharePointService
             siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
         results["Indexes:SupplierProductMappings"] = await EnsureColumnIndexesAsync(
             siteId, "SupplierProductMappings", "SupplierName", "ProductSearchKey");
+        results["Indexes:IndustryDictionary"] = await EnsureColumnIndexesAsync(
+            siteId, "IndustryDictionary", "Term", "TermType");
 
         return results;
     }
@@ -4203,6 +4206,181 @@ public class SharePointService
             ?? throw new InvalidOperationException(
                 "SupplierProductMappings list not found. Run POST /api/setup-supplier-lists once.");
         return _mappingsListId;
+    }
+
+    // ── IndustryDictionary ────────────────────────────────────────────────────
+
+    private string? _dictListId;
+
+    private async Task<string> GetDictListIdAsync()
+    {
+        if (_dictListId is not null) return _dictListId;
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'IndustryDictionary'");
+        _dictListId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "IndustryDictionary list not found. Run POST /api/setup-supplier-lists once.");
+        return _dictListId;
+    }
+
+    private async Task<Dictionary<string, string>> EnsureIndustryDictionaryColumnsAsync(string siteId)
+    {
+        const string listName = "IndustryDictionary";
+        var lists = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+        string listId;
+        if (lists?.Value?.FirstOrDefault() is null)
+        {
+            var nl = await GetGraph().Sites[siteId].Lists.PostAsync(new List
+            {
+                DisplayName = listName,
+                ListProp    = new ListInfo { Template = "genericList" },
+            });
+            listId = nl?.Id ?? throw new Exception($"Failed to create list '{listName}'");
+            _log.LogInformation("[SP] Created list '{Name}' -> id: {Id}", listName, listId);
+        }
+        else listId = lists.Value.First().Id!;
+
+        _dictListId = listId;
+
+        var existing     = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
+        var existingNames = existing?.Value?
+            .Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        var results = new Dictionary<string, string>();
+
+        async Task AddCol(ColumnDefinition def)
+        {
+            var name = def.Name!;
+            if (existingNames.Contains(name)) { results[name] = "exists"; return; }
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def);
+                results[name] = "created";
+                _log.LogInformation("[SP] Created column '{Name}' on '{List}'", name, listName);
+            }
+            catch (Exception ex)
+            {
+                results[name] = $"error: {ex.Message}";
+                _log.LogWarning("[SP] Column '{Name}' on '{List}': {Err}", name, listName, ex.Message);
+            }
+        }
+
+        await AddCol(new ColumnDefinition { Name = "Term",         Text   = new TextColumn() });
+        await AddCol(new ColumnDefinition { Name = "AppliesTo",    Text   = new TextColumn() });
+        await AddCol(new ColumnDefinition { Name = "MapsToToken",  Text   = new TextColumn() });
+        await AddCol(new ColumnDefinition { Name = "Definition",   Text   = new TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } });
+        await AddCol(new ColumnDefinition { Name = "Examples",     Text   = new TextColumn { AllowMultipleLines = true, LinesForEditing = 3 } });
+        await AddCol(new ColumnDefinition { Name = "CatalogCount", Number = new NumberColumn() });
+        await AddCol(new ColumnDefinition { Name = "SliCount",     Number = new NumberColumn() });
+        await AddCol(new ColumnDefinition
+        {
+            Name   = "TermType",
+            Choice = new ChoiceColumn
+            {
+                Choices = ["abbreviation", "standard", "alloy_series", "condition", "temper", "shape_alias"],
+            }
+        });
+
+        return results;
+    }
+
+    public async Task<List<IndustryDictionaryEntry>> ReadIndustryDictionaryAsync(CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDictListIdAsync();
+        var result = new List<IndustryDictionaryEntry>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,Term,TermType,AppliesTo,MapsToToken,Definition,Examples,CatalogCount,SliCount)"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var f = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+                result.Add(new IndustryDictionaryEntry
+                {
+                    SpItemId     = item.Id,
+                    Term         = GetStr(f, "Term") ?? GetStr(f, "Title") ?? "",
+                    TermType     = GetStr(f, "TermType") ?? "",
+                    AppliesTo    = GetStr(f, "AppliesTo"),
+                    MapsToToken  = GetStr(f, "MapsToToken"),
+                    Definition   = GetStr(f, "Definition"),
+                    Examples     = GetStr(f, "Examples"),
+                    CatalogCount = f.TryGetValue("CatalogCount", out var cc)
+                        ? (cc is JsonElement cje ? (int)cje.GetDouble() : 0) : 0,
+                    SliCount     = f.TryGetValue("SliCount", out var sc)
+                        ? (sc is JsonElement sje ? (int)sje.GetDouble() : 0) : 0,
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(null, ct);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Upsert industry dictionary entries mined from the token files.
+    /// New terms are inserted; existing terms get their AppliesTo/CatalogCount/SliCount updated.
+    /// Definition and Examples are never overwritten (user may have edited them in SP).
+    /// </summary>
+    public async Task<(int Inserted, int Updated)> WriteIndustryDictionaryEntriesAsync(
+        List<IndustryDictionaryEntry> entries, CancellationToken ct)
+    {
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await GetDictListIdAsync();
+        var existing = await ReadIndustryDictionaryAsync(ct);
+        var byTerm   = existing.ToDictionary(e => e.Term, StringComparer.OrdinalIgnoreCase);
+
+        int inserted = 0, updated = 0;
+        foreach (var entry in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (byTerm.TryGetValue(entry.Term, out var ex))
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[ex.SpItemId!]
+                    .Fields.PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["AppliesTo"]    = entry.AppliesTo,
+                            ["CatalogCount"] = (double)entry.CatalogCount,
+                            ["SliCount"]     = (double)entry.SliCount,
+                        }
+                    }, cancellationToken: ct);
+                updated++;
+            }
+            else
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+                    new Microsoft.Graph.Models.ListItem
+                    {
+                        Fields = new FieldValueSet
+                        {
+                            AdditionalData = new Dictionary<string, object?>
+                            {
+                                ["Title"]        = entry.Term,
+                                ["Term"]         = entry.Term,
+                                ["TermType"]     = entry.TermType,
+                                ["AppliesTo"]    = entry.AppliesTo,
+                                ["MapsToToken"]  = entry.MapsToToken,
+                                ["CatalogCount"] = (double)entry.CatalogCount,
+                                ["SliCount"]     = (double)entry.SliCount,
+                            }
+                        }
+                    }, cancellationToken: ct);
+                inserted++;
+            }
+        }
+        _log.LogInformation("[SP] IndustryDictionary: {Ins} inserted, {Upd} updated", inserted, updated);
+        return (inserted, updated);
     }
 
     /// <summary>

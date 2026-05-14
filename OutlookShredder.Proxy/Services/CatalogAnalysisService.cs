@@ -27,6 +27,7 @@ public class CatalogAnalysisService
     private readonly ILogger<CatalogAnalysisService> _log;
     private readonly ProductCatalogService         _catalog;
     private readonly SliCacheService               _sli;
+    private readonly SharePointService             _sp;
     private readonly HttpClient                    _http;
 
     private static readonly JsonSerializerOptions Json = new()
@@ -184,12 +185,14 @@ public class CatalogAnalysisService
         IConfiguration config,
         ILogger<CatalogAnalysisService> log,
         ProductCatalogService catalog,
-        SliCacheService sli)
+        SliCacheService sli,
+        SharePointService sp)
     {
         _config  = config;
         _log     = log;
         _catalog = catalog;
         _sli     = sli;
+        _sp      = sp;
 
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         _http.DefaultRequestHeaders.Accept.Add(
@@ -198,6 +201,128 @@ public class CatalogAnalysisService
         // Activates at 1024 tokens for Sonnet, 2048 for Haiku.
         _http.DefaultRequestHeaders.Add("anthropic-beta", "prompt-caching-2024-07-31");
     }
+
+    // ── Industry Dictionary ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Mine catalog-tokens.json + sli-tokens.json for unique alloy, condition, and temper values.
+    /// Upserts results to the SP IndustryDictionary list (new terms inserted; existing ones updated
+    /// with fresh AppliesTo + occurrence counts; Definition/Examples are never overwritten).
+    /// </summary>
+    public async Task<object> BuildDictionaryAsync(CancellationToken ct)
+    {
+        if (!File.Exists(CatalogTokensPath) || !File.Exists(SliTokensPath))
+            return new { error = "Token files missing — run catalog/tokenize and sli/tokenize first" };
+
+        var catTokens = JsonSerializer.Deserialize<List<ProductTokens>>(
+            File.ReadAllText(CatalogTokensPath, Encoding.UTF8), Json) ?? [];
+        var sliTokens = JsonSerializer.Deserialize<List<ProductTokens>>(
+            File.ReadAllText(SliTokensPath, Encoding.UTF8), Json) ?? [];
+
+        // term -> entry being built
+        var entries = new Dictionary<string, IndustryDictionaryEntry>(StringComparer.OrdinalIgnoreCase);
+        // term -> shapes seen (for AppliesTo)
+        var shapeMap = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+
+        IndustryDictionaryEntry GetEntry(string term, string termType, string mapsToToken)
+        {
+            if (!entries.TryGetValue(term, out var e))
+            {
+                e = new IndustryDictionaryEntry
+                {
+                    Term        = term,
+                    TermType    = termType,
+                    MapsToToken = mapsToToken,
+                };
+                entries[term]   = e;
+                shapeMap[term]  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            }
+            return e;
+        }
+
+        void Track(string term, ProductTokens t, bool isCatalog)
+        {
+            var e = entries[term];
+            if (isCatalog) e.CatalogCount++; else e.SliCount++;
+            if (t.TkShape is not null)
+            {
+                shapeMap[term].TryGetValue(t.TkShape, out var c);
+                shapeMap[term][t.TkShape] = c + 1;
+            }
+        }
+
+        static string ClassifyAlloy(string alloy) =>
+            System.Text.RegularExpressions.Regex.IsMatch(alloy, @"^[a-zA-Z]\d")
+                ? "standard"       // ASTM grade: a36, a500, a513, a135, etc.
+                : "alloy_series";  // numeric or alphanumeric series: 6061, 304, 1018, 360
+
+        static string DisplayAlloy(string alloy) =>
+            System.Text.RegularExpressions.Regex.IsMatch(alloy, @"^[a-zA-Z]\d")
+                ? alloy.ToUpperInvariant()   // A36, A500, etc.
+                : alloy.ToUpperInvariant();  // 6061, 304, etc.
+
+        static string ClassifyCondition(string cond) =>
+            cond.StartsWith("sch", StringComparison.OrdinalIgnoreCase) ? "standard" : "condition";
+
+        void Mine(IEnumerable<ProductTokens> tokens, bool isCatalog)
+        {
+            foreach (var t in tokens.Where(t => !t.TokenizationFailed))
+            {
+                if (t.TkAlloy is { Length: > 0 } alloy)
+                {
+                    var display = DisplayAlloy(alloy);
+                    GetEntry(display, ClassifyAlloy(alloy), alloy);
+                    Track(display, t, isCatalog);
+                }
+                if (t.TkTemper is { Length: > 0 } temper)
+                {
+                    var display = temper.ToUpperInvariant();
+                    GetEntry(display, "temper", temper);
+                    Track(display, t, isCatalog);
+                }
+                foreach (var cond in t.TkConditions)
+                {
+                    GetEntry(cond, ClassifyCondition(cond), cond);
+                    Track(cond, t, isCatalog);
+                }
+            }
+        }
+
+        Mine(catTokens, isCatalog: true);
+        Mine(sliTokens, isCatalog: false);
+
+        // Build AppliesTo: top shapes by occurrence count
+        foreach (var (term, shapes) in shapeMap)
+        {
+            entries[term].AppliesTo = string.Join(", ",
+                shapes.OrderByDescending(kv => kv.Value)
+                      .Take(8)
+                      .Select(kv => kv.Key));
+        }
+
+        _log.LogInformation("[Analysis] Dictionary: mined {Count} unique terms ({Cat} catalog, {Sli} SLI tokens)",
+            entries.Count, catTokens.Count, sliTokens.Count);
+
+        var (inserted, updated) = await _sp.WriteIndustryDictionaryEntriesAsync(
+            entries.Values.ToList(), ct);
+
+        return new
+        {
+            totalTerms = entries.Count,
+            inserted,
+            updated,
+            byType = entries.Values
+                .GroupBy(e => e.TermType)
+                .OrderBy(g => g.Key)
+                .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Term).Select(e => new
+                {
+                    e.Term, e.MapsToToken, e.AppliesTo, e.CatalogCount, e.SliCount
+                })),
+        };
+    }
+
+    public async Task<List<IndustryDictionaryEntry>> ReadDictionaryAsync(CancellationToken ct)
+        => await _sp.ReadIndustryDictionaryAsync(ct);
 
     // ── Status ────────────────────────────────────────────────────────────────
 
