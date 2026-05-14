@@ -83,6 +83,7 @@ public class CatalogAnalysisService
           anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated,
           bright_annealed, ar_400, ar_500, weathering_steel, painted,
           brushed, mirror_finish, ornamental_180,
+          round_corner,
           sch5, sch10, sch40, sch80, sch160
           ERW (Electric Resistance Welded) and HFW (High Frequency Welded) map to the welded condition.
           galvanized: hot-dip zinc coating (G60/G90/HDG/HDGI); spangled silver surface.
@@ -109,6 +110,13 @@ public class CatalogAnalysisService
           polished: generic polished/smooth surface on stainless or other metals; use when "polished"
             or "polished finish" appears and no more specific condition (brushed/mirror_finish/
             ornamental_180) applies.
+          round_corner: aluminum tube (square or rectangular) with rounded outer corners, as opposed
+            to the standard sharp-corner extrusion; product names include "Round Corner", "RC",
+            "Rounded Corner". Do NOT use round_corner for standard/sharp-corner tube.
+          IMPORTANT — tread plate is NOT perforated: tread plate (diamond plate, checker plate)
+            has a raised diamond or lug pattern embossed on the surface. It has NO holes.
+            Never use the perforated condition for tread plate products. Use perforated only for
+            products with actual holes punched through the material.
           For pipe: always include exactly one schedule condition (sch5, sch10, sch40, sch80, or sch160).
 
         Dimensional ordering convention (industry standard):
@@ -767,7 +775,16 @@ public class CatalogAnalysisService
           "galvanized", "galvanneal", "bright_annealed",
           "ar_400", "ar_500", "weathering_steel", "painted",
           "brushed", "mirror_finish", "ornamental_180", "polished", "seamless",
+          "round_corner",
           "sch5", "sch10", "sch40", "sch80", "sch160" };
+
+    // Surface-treatment conditions are bidirectional: if the SUPPLIER description carries one
+    // of these, the catalog entry must also carry it.  Prevents a galvanized supplier quote from
+    // matching a plain HR catalog entry (or a #4-brushed stainless from matching plain 2B).
+    private static readonly HashSet<string> BidirectionalConditions =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "galvanized", "galvanneal", "bright_annealed", "painted",
+          "brushed", "mirror_finish", "ornamental_180", "polished" };
 
     private static (ProductTokens? match, double score, string? failReason)
         FindBestMatch(ProductTokens supplier, List<ProductTokens> catalog)
@@ -804,6 +821,23 @@ public class CatalogAnalysisService
                 if (!supplierMentionsIt)
                 {
                     noMatchReason = $"catalog requires condition '{catExclusive[0]}'";
+                    continue;
+                }
+            }
+
+            // Reverse gate for surface-treatment conditions: if the supplier carries a
+            // bidirectional condition the catalog doesn't have, this isn't a match either.
+            // Prevents a galvanized or brushed-stainless supplier quote from matching a plain
+            // catalog entry when a more specific entry exists.
+            var suppBidi = supplier.TkConditions
+                .Where(c => BidirectionalConditions.Contains(c)).ToArray();
+            if (suppBidi.Length > 0)
+            {
+                bool catalogHasIt = suppBidi.Any(c =>
+                    cat.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase));
+                if (!catalogHasIt)
+                {
+                    noMatchReason = $"supplier surface-treatment '{suppBidi[0]}' not in catalog";
                     continue;
                 }
             }
