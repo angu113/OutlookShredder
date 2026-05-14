@@ -365,7 +365,8 @@ public class CatalogAnalysisService
     // a perforated sheet, or a plain tube matching a DOM tube, etc.
     private static readonly HashSet<string> ExclusiveConditions =
         new(StringComparer.OrdinalIgnoreCase)
-        { "perforated", "expanded", "dom", "grating", "treadplate" };
+        { "perforated", "expanded", "dom", "grating", "treadplate",
+          "sch5", "sch10", "sch40", "sch80", "sch160" };
 
     private static (ProductTokens? match, double score, string? failReason)
         FindBestMatch(ProductTokens supplier, List<ProductTokens> catalog)
@@ -495,7 +496,8 @@ public class CatalogAnalysisService
             - temper: temper code as lowercase string ("t6511", "t651", "h14") — or null
             - shape: one of flatbar, roundbar, squarebar, hexbar, sheet, plate, angle, channel, tube_round, tube_square, tube_rect, pipe, wideflange, beam_s, coil, strip, rod, wire, expanded, grating, treadplate — or null
             - dims: decimal inches, shape-specific rules below — or null
-            - conditions: array from [hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated] — empty [] if none
+            - conditions: array from [hot_rolled, cold_rolled, cold_drawn, stress_proof, galvanized, anodized, seamless, welded, dom, polished, drawn, extruded, key_stock, perforated, sch5, sch10, sch40, sch80, sch160] — empty [] if none
+              For pipe only: always include the pipe schedule as a condition — Schedule 5 → sch5, Schedule 10 → sch10, Schedule 40 or Standard or STD → sch40, Schedule 80 or XH or Extra Heavy → sch80, Schedule 160 → sch160.
 
             Dims rules — always ignore cut/length/panel dimensions:
             - sheet, plate, coil, strip: thickness ONLY → "0.050"  (ignore 48x120 panel size)
@@ -507,7 +509,25 @@ public class CatalogAnalysisService
             - tube_square: width×width×wall → "4.000x4.000x0.188"
             - tube_rect: width×height×wall → "4.000x3.000x0.120"
             - tube_round: OD×wall → "2.000x0.120"
-            - pipe: nominal size ONLY → "1.0"  (ignore OD and wall thickness)
+            - pipe: nominal size ONLY → "1.0"  (ignore OD).
+              Always include the schedule as a condition (sch5/sch10/sch40/sch80/sch160).
+              Schedule abbreviations: Sch / SCH / Sched all mean Schedule. STD or Standard = sch40. XH or Extra Heavy = sch80. XXH or Double Extra Heavy = sch160.
+              If only a wall thickness is given (no explicit schedule), resolve it using the NPS table below (tolerance ±0.005"):
+                Nominal | Sch 5 wall | Sch 10 wall | Sch 40/STD wall | Sch 80/XH wall | Sch 160 wall
+                0.500"  |     —      |     —       |     0.109       |     0.147       |    0.187
+                0.750"  |     —      |     —       |     0.113       |     0.154       |    0.219
+                1.000"  |     —      |     —       |     0.133       |     0.179       |    0.250
+                1.250"  |     —      |     —       |     0.140       |     0.191       |    0.250
+                1.500"  |     —      |     —       |     0.145       |     0.200       |    0.281
+                2.000"  |     —      |     —       |     0.154       |     0.218       |    0.344
+                2.500"  |     —      |     —       |     0.203       |     0.276       |    0.375
+                3.000"  |     —      |     —       |     0.216       |     0.300       |    0.438
+                4.000"  |     —      |     0.120   |     0.237       |     0.337       |    0.531
+                6.000"  |  0.109     |     0.134   |     0.280       |     0.432       |    0.719
+                8.000"  |  0.109     |     0.148   |     0.322       |     0.500       |    0.906
+               10.000"  |  0.134     |     0.165   |     0.365       |     0.594       |    1.125
+               12.000"  |  0.156     |     0.180   |     0.406       |     0.688       |    1.312
+              If wall thickness matches no known schedule, omit the schedule condition rather than guessing.
             - wideflange, beam_s: depth×weight-per-foot → "8x15"  (e.g. W8×15#, S12×40#)
 
             Products:
