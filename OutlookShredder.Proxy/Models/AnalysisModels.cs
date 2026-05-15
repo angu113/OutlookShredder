@@ -100,3 +100,71 @@ public class MatchTestRun
     public double         HitRate    => Total == 0 ? 0 : Math.Round((double)Hits / Total * 100, 1);
     public List<MatchCase>Cases      { get; set; } = [];
 }
+
+/// <summary>In-memory record loaded from the SupplierProductMappings SP list by SupplierProductMappingsCacheService.</summary>
+public class SupplierProductMappingEntry
+{
+    public string  SupplierName       { get; set; } = "";
+    public string  SupplierTerm       { get; set; } = "";
+    public string? ProductSearchKey   { get; set; }
+    public string? CatalogProductName { get; set; }
+}
+
+/// <summary>
+/// Result from CatalogAnalysisService.MatchProductAsync — the best catalog match for one supplier product.
+/// Source values: "user_mapping" (SupplierProductMappings list), "token_scorer" (live tokenisation + scoring),
+/// or null when no match was found.
+/// </summary>
+public class TokenMatchResult
+{
+    public string? SearchKey    { get; set; }
+    public string? CatalogName  { get; set; }
+    public double  Score        { get; set; }
+    public string? Source       { get; set; } // "user_mapping" | "token_scorer" | null
+    public List<TokenMatchCandidate> TopCandidates { get; set; } = [];
+}
+
+/// <summary>One scored candidate returned alongside the best match for diagnostic/review UI.</summary>
+public class TokenMatchCandidate
+{
+    public string? SearchKey   { get; set; }
+    public string? CatalogName { get; set; }
+    public double  Score       { get; set; }
+}
+
+/// <summary>
+/// Row in the TokenMatchDiagnostics SharePoint list.
+/// Records the RLI anchor result vs the token scorer result for every SLI write so agreement
+/// can be reviewed and used to improve matching confidence.
+/// ReviewStatus values: "pending" | "confirmed" | "rejected" | "overridden"
+/// </summary>
+public class TokenMatchDiagnosticEntry
+{
+    [JsonIgnore] public string? SpItemId       { get; set; }
+    public string? RfqId              { get; set; }
+    public string? SliSpItemId        { get; set; }
+    public string? SupplierName       { get; set; }
+    public string  ProductName        { get; set; } = "";
+    /// <summary>Resolution source written to the SLI: "rli_anchor" | "token_scorer" | "user_mapping" | "fuzzy" | "none"</summary>
+    public string? ResolvedSource     { get; set; }
+    public string? RliMspc            { get; set; }
+    public string? TokenMspc          { get; set; }
+    public double  TokenScore         { get; set; }
+    public bool    Agreed             { get; set; }
+    public string  ReviewStatus       { get; set; } = "pending";
+    public string? OverriddenMspc     { get; set; }
+    public DateTime CreatedAt         { get; set; }
+}
+
+/// <summary>Aggregate stats over the TokenMatchDiagnostics list, returned by GET /api/token-match/diagnostics/stats</summary>
+public class TokenMatchStats
+{
+    public int    Total         { get; set; }
+    public int    Agreed        { get; set; }
+    public int    Disagreed     { get; set; }
+    public int    Pending       { get; set; }
+    public int    Confirmed     { get; set; }
+    public int    Rejected      { get; set; }
+    public int    Overridden    { get; set; }
+    public double AgreementRate => Total == 0 ? 0 : Math.Round((double)Agreed / Total * 100, 1);
+}

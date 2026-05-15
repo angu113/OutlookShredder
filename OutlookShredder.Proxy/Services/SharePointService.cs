@@ -1809,7 +1809,7 @@ public class SharePointService
                 var sliListId2 = await GetSupplierLineItemsListIdAsync();
                 if (!srNew2 && rowIndex == 0)
                     await SoftDeleteSlisBySrIdAsync(siteId, sliListId2, srId2);
-                await WriteSupplierLineItemAsync(
+                result.SliSpItemId = await WriteSupplierLineItemAsync(
                     siteId, sliListId2, srId2, jobRef, resolvedSup, product, rowIndex,
                     sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
                     jobRefMismatchWarning);
@@ -1949,7 +1949,7 @@ public class SharePointService
             if (!srNew && rowIndex == 0)
                 await SoftDeleteSlisBySrIdAsync(siteId, sliListId, srId);
 
-            await WriteSupplierLineItemAsync(
+            result.SliSpItemId = await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
                 sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
                 jobRefMismatchWarning);
@@ -2223,7 +2223,7 @@ public class SharePointService
 
     // ??"?????"??? Write SupplierLineItems (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
-    private async Task WriteSupplierLineItemAsync(
+    private async Task<string?> WriteSupplierLineItemAsync(
         string siteId, string listId,
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
@@ -2341,12 +2341,14 @@ public class SharePointService
             await GetGraph().Sites[siteId].Lists[listId].Items[existing.Id!].Fields
                 .PatchAsync(new FieldValueSet { AdditionalData = update });
             _log.LogInformation("[SP] Updated SupplierLineItem {Id} for '{Name}'", existing.Id, prodName);
+            return existing.Id;
         }
         else
         {
             var item = await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = fieldData } });
             _log.LogInformation("[SP] Created SupplierLineItem {Id} for '{Name}'", item!.Id, prodName);
+            return item!.Id;
         }
     }
 
@@ -4163,6 +4165,21 @@ public class SharePointService
                 ("ProductSearchKey",   "text"),
                 ("CatalogProductName", "text"),
             ]),
+            ["TokenMatchDiagnostics"] = await EnsureListColumnsAsync(siteId, "TokenMatchDiagnostics",
+            [
+                ("RfqId",          "text"),
+                ("SliSpItemId",    "text"),
+                ("SupplierName",   "text"),
+                ("ProductName",    "text"),
+                ("ResolvedSource", "text"),
+                ("RliMspc",        "text"),
+                ("TokenMspc",      "text"),
+                ("TokenScore",     "number"),
+                ("Agreed",         "boolean"),
+                ("ReviewStatus",   "text"),
+                ("OverriddenMspc", "text"),
+                ("CreatedAt",      "dateTime"),
+            ]),
             ["IndustryDictionary"] = await EnsureIndustryDictionaryColumnsAsync(siteId),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
@@ -4186,6 +4203,8 @@ public class SharePointService
             siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
         results["Indexes:SupplierProductMappings"] = await EnsureColumnIndexesAsync(
             siteId, "SupplierProductMappings", "SupplierName", "ProductSearchKey");
+        results["Indexes:TokenMatchDiagnostics"] = await EnsureColumnIndexesAsync(
+            siteId, "TokenMatchDiagnostics", "RfqId", "ReviewStatus");
         results["Indexes:IndustryDictionary"] = await EnsureColumnIndexesAsync(
             siteId, "IndustryDictionary", "Term", "TermType");
 
@@ -4415,6 +4434,183 @@ public class SharePointService
                     }
                 }
             });
+    }
+
+    public async Task<List<SupplierProductMappingEntry>> ReadSupplierProductMappingsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetMappingsListIdAsync();
+        var result = new List<SupplierProductMappingEntry>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r => r.QueryParameters.Expand =
+                ["fields($select=SupplierName,SupplierTerm,ProductSearchKey,CatalogProductName)"]);
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+                result.Add(new SupplierProductMappingEntry
+                {
+                    SupplierName       = d.TryGetValue("SupplierName",       out var sn)  ? sn?.ToString() ?? "" : "",
+                    SupplierTerm       = d.TryGetValue("SupplierTerm",       out var st)  ? st?.ToString() ?? "" : "",
+                    ProductSearchKey   = d.TryGetValue("ProductSearchKey",   out var psk) ? psk?.ToString()      : null,
+                    CatalogProductName = d.TryGetValue("CatalogProductName", out var cpn) ? cpn?.ToString()      : null,
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+        return result;
+    }
+
+    // ── TokenMatchDiagnostics ─────────────────────────────────────────────────
+
+    private string? _diagnosticsListId;
+
+    private async Task<string> GetDiagnosticsListIdAsync()
+    {
+        if (_diagnosticsListId is not null) return _diagnosticsListId;
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'TokenMatchDiagnostics'");
+        _diagnosticsListId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "TokenMatchDiagnostics list not found. Run POST /api/setup-supplier-lists once.");
+        return _diagnosticsListId;
+    }
+
+    public async Task WriteTokenMatchDiagnosticAsync(TokenMatchDiagnosticEntry entry)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDiagnosticsListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+            new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["Title"]          = $"[{entry.RfqId}] {entry.SupplierName} - {entry.ProductName}"
+                                              [..Math.Min(255, $"[{entry.RfqId}] {entry.SupplierName} - {entry.ProductName}".Length)],
+                        ["RfqId"]          = entry.RfqId,
+                        ["SliSpItemId"]    = entry.SliSpItemId,
+                        ["SupplierName"]   = entry.SupplierName,
+                        ["ProductName"]    = entry.ProductName,
+                        ["ResolvedSource"] = entry.ResolvedSource,
+                        ["RliMspc"]        = entry.RliMspc,
+                        ["TokenMspc"]      = entry.TokenMspc,
+                        ["TokenScore"]     = entry.TokenScore,
+                        ["Agreed"]         = entry.Agreed,
+                        ["ReviewStatus"]   = "pending",
+                        ["CreatedAt"]      = entry.CreatedAt,
+                    }
+                }
+            });
+    }
+
+    public async Task<List<TokenMatchDiagnosticEntry>> GetTokenMatchDiagnosticsAsync(
+        string? rfqId = null, string? reviewStatus = null, int top = 200)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDiagnosticsListIdAsync();
+        var result = new List<TokenMatchDiagnosticEntry>();
+
+        var filter = new List<string>();
+        if (!string.IsNullOrEmpty(rfqId))       filter.Add($"fields/RfqId eq '{rfqId}'");
+        if (!string.IsNullOrEmpty(reviewStatus)) filter.Add($"fields/ReviewStatus eq '{reviewStatus}'");
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,RfqId,SliSpItemId,SupplierName,ProductName,ResolvedSource,RliMspc,TokenMspc,TokenScore,Agreed,ReviewStatus,OverriddenMspc,CreatedAt)"];
+                if (filter.Count > 0) r.QueryParameters.Filter = string.Join(" and ", filter);
+                r.QueryParameters.Top = top;
+                r.QueryParameters.Orderby = ["fields/CreatedAt desc"];
+            });
+
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+                T? G<T>(string key) where T : class =>
+                    d.TryGetValue(key, out var v) && v is JsonElement je
+                        ? (T?)(object?)je.GetString()
+                        : d.TryGetValue(key, out v) ? v as T : null;
+                bool GB(string key) =>
+                    d.TryGetValue(key, out var v) && v is JsonElement je && je.ValueKind == JsonValueKind.True;
+                double GD(string key) =>
+                    d.TryGetValue(key, out var v) && v is JsonElement je && je.TryGetDouble(out var n) ? n : 0;
+                DateTime GDt(string key) =>
+                    d.TryGetValue(key, out var v) && v is JsonElement je && je.TryGetDateTime(out var dt) ? dt : default;
+
+                result.Add(new TokenMatchDiagnosticEntry
+                {
+                    SpItemId       = item.Id,
+                    RfqId          = G<string>("RfqId"),
+                    SliSpItemId    = G<string>("SliSpItemId"),
+                    SupplierName   = G<string>("SupplierName") ?? "",
+                    ProductName    = G<string>("ProductName")  ?? "",
+                    ResolvedSource = G<string>("ResolvedSource"),
+                    RliMspc        = G<string>("RliMspc"),
+                    TokenMspc      = G<string>("TokenMspc"),
+                    TokenScore     = GD("TokenScore"),
+                    Agreed         = GB("Agreed"),
+                    ReviewStatus   = G<string>("ReviewStatus") ?? "pending",
+                    OverriddenMspc = G<string>("OverriddenMspc"),
+                    CreatedAt      = GDt("CreatedAt"),
+                });
+            }
+            if (page.OdataNextLink is null || result.Count >= top) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+        return result;
+    }
+
+    public async Task ReviewTokenMatchDiagnosticAsync(
+        string spItemId, string reviewStatus, string? overriddenMspc = null)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDiagnosticsListIdAsync();
+        var fields = new Dictionary<string, object?> { ["ReviewStatus"] = reviewStatus };
+        if (overriddenMspc is not null) fields["OverriddenMspc"] = overriddenMspc;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields });
+    }
+
+    public async Task PromoteTokenMatchMappingAsync(string spItemId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDiagnosticsListIdAsync();
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
+            .GetAsync(r => r.QueryParameters.Expand =
+                ["fields($select=SupplierName,ProductName,TokenMspc,OverriddenMspc)"]);
+
+        var d = item?.Fields?.AdditionalData ?? throw new InvalidOperationException("Diagnostic row not found");
+
+        string? Get(string key) => d.TryGetValue(key, out var v) && v is JsonElement je
+            ? je.GetString() : v?.ToString();
+
+        var supplierName = Get("SupplierName") ?? "";
+        var productName  = Get("ProductName")  ?? "";
+        var overridden   = Get("OverriddenMspc");
+        var tokenMspc    = Get("TokenMspc");
+        var mspc         = overridden ?? tokenMspc
+            ?? throw new InvalidOperationException("No MSPC to promote — set TokenMspc or OverriddenMspc first");
+
+        var catalogEntry = _catalog.FindBySearchKey(mspc);
+        var catalogName  = catalogEntry?.Name ?? mspc;
+
+        await WriteSupplierProductMappingAsync(supplierName, productName, mspc, catalogName);
+        await ReviewTokenMatchDiagnosticAsync(spItemId, "confirmed", overridden);
     }
 
     /// <summary>

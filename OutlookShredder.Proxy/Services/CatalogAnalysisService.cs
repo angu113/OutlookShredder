@@ -23,12 +23,23 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public class CatalogAnalysisService
 {
-    private readonly IConfiguration                _config;
-    private readonly ILogger<CatalogAnalysisService> _log;
-    private readonly ProductCatalogService         _catalog;
-    private readonly SliCacheService               _sli;
-    private readonly SharePointService             _sp;
-    private readonly HttpClient                    _http;
+    private readonly IConfiguration                          _config;
+    private readonly ILogger<CatalogAnalysisService>         _log;
+    private readonly ProductCatalogService                   _catalog;
+    private readonly SliCacheService                         _sli;
+    private readonly SharePointService                       _sp;
+    private readonly SupplierProductMappingsCacheService     _mappingsCache;
+    private readonly HttpClient                              _http;
+
+    // Live-tokenisation rate limit: at most 3 concurrent calls at any time.
+    private readonly SemaphoreSlim _liveSemaphore = new(3, 3);
+    // Round-robin counter for Claude Haiku / Gemini Flash alternation.
+    private int _rrCounter;
+
+    // In-memory catalog token cache for MatchProductAsync — loaded once from disk and reused.
+    // Null until first call; refreshed if the on-disk file is newer than the snapshot.
+    private List<ProductTokens>? _catalogTokenCache;
+    private DateTime             _catalogTokenCacheAt;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -251,13 +262,15 @@ public class CatalogAnalysisService
         ILogger<CatalogAnalysisService> log,
         ProductCatalogService catalog,
         SliCacheService sli,
-        SharePointService sp)
+        SharePointService sp,
+        SupplierProductMappingsCacheService mappingsCache)
     {
-        _config  = config;
-        _log     = log;
-        _catalog = catalog;
-        _sli     = sli;
-        _sp      = sp;
+        _config        = config;
+        _log           = log;
+        _catalog       = catalog;
+        _sli           = sli;
+        _sp            = sp;
+        _mappingsCache = mappingsCache;
 
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         _http.DefaultRequestHeaders.Accept.Add(
@@ -1123,6 +1136,244 @@ public class CatalogAnalysisService
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[Analysis] Failed to parse Claude batch response");
+            return Enumerable.Repeat<ProductTokens?>(null, names.Count).ToList();
+        }
+    }
+
+    // ── Live product matching (used during extraction pipeline) ───────────────
+
+    /// <summary>
+    /// Matches one supplier product name against the catalog using the token scorer.
+    /// Priority: (1) user mapping cache, (2) token scorer with round-robin Claude Haiku / Gemini Flash.
+    /// Returns null Source when no confident match is found (score below threshold).
+    /// </summary>
+    public async Task<TokenMatchResult> MatchProductAsync(
+        string productName, string? supplierName = null, CancellationToken ct = default)
+    {
+        // 1. Check user-confirmed mappings first — highest priority.
+        if (supplierName is not null)
+        {
+            var mapping = _mappingsCache.TryGetMapping(supplierName, productName);
+            if (mapping?.ProductSearchKey is not null)
+            {
+                _log.LogInformation(
+                    "[Match] User mapping: '{Name}' -> {Key}", productName, mapping.ProductSearchKey);
+                return new TokenMatchResult
+                {
+                    SearchKey   = mapping.ProductSearchKey,
+                    CatalogName = mapping.CatalogProductName,
+                    Score       = 1.0,
+                    Source      = "user_mapping",
+                };
+            }
+        }
+
+        // 2. Tokenise the supplier product name via round-robin AI.
+        var tokens = await TokeniseSingleLiveAsync(productName, ct);
+        if (tokens is null || tokens.TokenizationFailed)
+        {
+            _log.LogWarning("[Match] Tokenisation failed for '{Name}'", productName);
+            return new TokenMatchResult { Source = null };
+        }
+
+        // 3. Score against catalog tokens.
+        var catalog = await GetCatalogTokensAsync();
+        if (catalog.Count == 0)
+        {
+            _log.LogWarning("[Match] Catalog token cache is empty — run /api/analysis/catalog/tokenize first");
+            return new TokenMatchResult { Source = null };
+        }
+
+        // Collect all scored candidates above the metal/shape gate, sorted by score desc.
+        var scored = new List<(ProductTokens Cat, double Score)>();
+        foreach (var cat in catalog)
+        {
+            var (match, score, _) = FindBestMatchSingle(tokens, cat);
+            if (match is not null) scored.Add((cat, score));
+        }
+        scored.Sort((a, b) => b.Score.CompareTo(a.Score));
+
+        const double MinScore = 1.5; // require at least metal + shape match
+        var top = scored.Take(3).Select(s => new TokenMatchCandidate
+        {
+            SearchKey   = s.Cat.SearchKey,
+            CatalogName = s.Cat.Name,
+            Score       = Math.Round(s.Score, 2),
+        }).ToList();
+
+        if (scored.Count == 0 || scored[0].Score < MinScore)
+        {
+            _log.LogInformation(
+                "[Match] No confident match for '{Name}' (best={Best:F2})",
+                productName, scored.FirstOrDefault().Score);
+            return new TokenMatchResult { TopCandidates = top, Source = null };
+        }
+
+        var best = scored[0];
+        _log.LogInformation(
+            "[Match] Token match: '{Name}' -> {Key} ({Score:F2})",
+            productName, best.Cat.SearchKey, best.Score);
+
+        return new TokenMatchResult
+        {
+            SearchKey      = best.Cat.SearchKey,
+            CatalogName    = best.Cat.Name,
+            Score          = Math.Round(best.Score, 2),
+            Source         = "token_scorer",
+            TopCandidates  = top,
+        };
+    }
+
+    private static (ProductTokens? match, double score, string? failReason)
+        FindBestMatchSingle(ProductTokens supplier, ProductTokens cat)
+    {
+        if (supplier.TkMetal != null && cat.TkMetal == null)
+            return (null, -1, null);
+        if (!GatePasses(supplier.TkMetal,                  cat.TkMetal,                  out _)) return (null, -1, null);
+        if (!GatePasses(NormalizeShape(supplier.TkShape),   NormalizeShape(cat.TkShape),   out _)) return (null, -1, null);
+        if (!GatePasses(supplier.TkAlloy,                  cat.TkAlloy,                  out _)) return (null, -1, null);
+        if (!GatePasses(NormalizeTemper(supplier.TkTemper), NormalizeTemper(cat.TkTemper), out _)) return (null, -1, null);
+        if (cat.TkConditions.Length > 0 && cat.TkConditions.Any(c => ExclusiveConditions.Contains(c))
+            && !supplier.TkConditions.Any(c => cat.TkConditions.Contains(c, StringComparer.OrdinalIgnoreCase)))
+            return (null, -1, null);
+
+        double score = 0;
+        if (supplier.TkMetal  is not null && supplier.TkMetal  == cat.TkMetal)  score += 1.0;
+        if (supplier.TkShape  is not null && NormalizeShape(supplier.TkShape) == NormalizeShape(cat.TkShape))  score += 1.0;
+        if (supplier.TkAlloy  is not null && supplier.TkAlloy  == cat.TkAlloy)  score += 1.0;
+        if (supplier.TkTemper is not null && NormalizeTemper(supplier.TkTemper) == NormalizeTemper(cat.TkTemper)) score += 0.5;
+        if (supplier.TkDims   is not null && cat.TkDims is not null)
+        {
+            if (DimsMatch(supplier.TkDims, cat.TkDims))         score += 1.0;
+            else if (DimsPartialMatch(supplier.TkDims, cat.TkDims)) score += 0.5;
+            else if (DimsAnyDimMatch(supplier.TkDims, cat.TkDims))  score += 0.5;
+        }
+        if (supplier.TkConditions.Length > 0 && ConditionsOverlap(supplier.TkConditions, cat.TkConditions)) score += 0.5;
+
+        return (cat, score, null);
+    }
+
+    private async Task<List<ProductTokens>> GetCatalogTokensAsync()
+    {
+        if (!File.Exists(CatalogTokensPath)) return [];
+        var fileTime = File.GetLastWriteTimeUtc(CatalogTokensPath);
+        if (_catalogTokenCache is not null && fileTime <= _catalogTokenCacheAt)
+            return _catalogTokenCache;
+
+        try
+        {
+            var json = await File.ReadAllTextAsync(CatalogTokensPath);
+            _catalogTokenCache  = JsonSerializer.Deserialize<List<ProductTokens>>(json, Json) ?? [];
+            _catalogTokenCacheAt = fileTime;
+            return _catalogTokenCache;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Match] Failed to load catalog token cache");
+            return [];
+        }
+    }
+
+    private async Task<ProductTokens?> TokeniseSingleLiveAsync(string productName, CancellationToken ct)
+    {
+        await _liveSemaphore.WaitAsync(ct);
+        try
+        {
+            var claudeKey  = _config["Anthropic:ApiKey"]    ?? "";
+            var geminiKey  = _config["Google:ApiKey"]       ?? "";
+            var claudeModel = _config["Claude:AnalysisModel"]  ?? "claude-haiku-4-5-20251001";
+            var geminiModel = _config["Gemini:AnalysisModel"]  ?? "gemini-2.5-flash";
+
+            // Alternate between Claude and Gemini per call; fall back immediately on failure.
+            var counter = Interlocked.Increment(ref _rrCounter);
+            bool claudeFirst = (counter % 2 == 1);
+
+            List<ProductTokens?> result;
+            if (claudeFirst && !string.IsNullOrEmpty(claudeKey))
+            {
+                result = await TokeniseBatchAsync([productName], claudeKey, claudeModel, ct);
+                if (result[0] is null && !string.IsNullOrEmpty(geminiKey))
+                    result = await TokeniseBatchGeminiAsync([productName], geminiKey, geminiModel, ct);
+            }
+            else if (!string.IsNullOrEmpty(geminiKey))
+            {
+                result = await TokeniseBatchGeminiAsync([productName], geminiKey, geminiModel, ct);
+                if (result[0] is null && !string.IsNullOrEmpty(claudeKey))
+                    result = await TokeniseBatchAsync([productName], claudeKey, claudeModel, ct);
+            }
+            else if (!string.IsNullOrEmpty(claudeKey))
+            {
+                result = await TokeniseBatchAsync([productName], claudeKey, claudeModel, ct);
+            }
+            else
+            {
+                _log.LogWarning("[Match] No AI key configured for live tokenisation");
+                return null;
+            }
+
+            var tok = result[0];
+            if (tok is not null) tok.Name = productName;
+            return tok;
+        }
+        finally
+        {
+            _liveSemaphore.Release();
+        }
+    }
+
+    private async Task<List<ProductTokens?>> TokeniseBatchGeminiAsync(
+        List<string> names, string apiKey, string model, CancellationToken ct)
+    {
+        var numbered = string.Join("\n", names.Select((n, i) => $"{i + 1}. {n}"));
+        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}";
+
+        var body = JsonSerializer.Serialize(new
+        {
+            system_instruction = new { parts = new[] { new { text = TokeniseSystemPrompt } } },
+            contents = new[] { new { role = "user", parts = new[] { new { text = $"Products:\n{numbered}" } } } },
+            generationConfig = new { responseMimeType = "application/json" },
+        }, Json);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, url);
+        req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        HttpResponseMessage resp;
+        try { resp = await _http.SendAsync(req, ct); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Analysis] Gemini call failed for batch");
+            return Enumerable.Repeat<ProductTokens?>(null, names.Count).ToList();
+        }
+
+        var raw = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogWarning("[Analysis] Gemini returned {Status}: {Body}",
+                resp.StatusCode, raw[..Math.Min(200, raw.Length)]);
+            return Enumerable.Repeat<ProductTokens?>(null, names.Count).ToList();
+        }
+
+        try
+        {
+            using var doc  = JsonDocument.Parse(raw);
+            var text = doc.RootElement
+                .GetProperty("candidates")[0]
+                .GetProperty("content")
+                .GetProperty("parts")[0]
+                .GetProperty("text")
+                .GetString() ?? "[]";
+
+            text = text.Trim();
+            if (text.StartsWith("```")) text = text[(text.IndexOf('\n') + 1)..];
+            if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
+
+            var tokenDtos = JsonSerializer.Deserialize<List<ProductTokens>>(text, Json) ?? [];
+            while (tokenDtos.Count < names.Count) tokenDtos.Add(null!);
+            return tokenDtos.Take(names.Count).Select(t => (ProductTokens?)t).ToList();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Analysis] Failed to parse Gemini batch response");
             return Enumerable.Repeat<ProductTokens?>(null, names.Count).ToList();
         }
     }

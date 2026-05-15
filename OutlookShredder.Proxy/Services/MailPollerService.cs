@@ -21,14 +21,15 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public class MailPollerService : BackgroundService
 {
-    private readonly IConfiguration            _config;
-    private readonly MailService               _mail;
-    private readonly AiServiceFactory _aiFactory;
-    private readonly SharePointService         _sp;
-    private readonly ProductCatalogService     _catalog;
-    private readonly RfqNotificationService    _notifications;
-    private readonly SliCacheService           _sliCache;
-    private readonly ShrConvInRouter           _shrRouter;
+    private readonly IConfiguration             _config;
+    private readonly MailService                _mail;
+    private readonly AiServiceFactory           _aiFactory;
+    private readonly SharePointService          _sp;
+    private readonly ProductCatalogService      _catalog;
+    private readonly RfqNotificationService     _notifications;
+    private readonly SliCacheService            _sliCache;
+    private readonly ShrConvInRouter            _shrRouter;
+    private readonly CatalogAnalysisService     _analysis;
     private readonly ILogger<MailPollerService> _log;
 
     // Accepts two formats:
@@ -397,6 +398,7 @@ public class MailPollerService : BackgroundService
         RfqNotificationService     notifications,
         SliCacheService            sliCache,
         ShrConvInRouter            shrRouter,
+        CatalogAnalysisService     analysis,
         ILogger<MailPollerService> log)
     {
         _config        = config;
@@ -407,6 +409,7 @@ public class MailPollerService : BackgroundService
         _notifications = notifications;
         _sliCache      = sliCache;
         _shrRouter     = shrRouter;
+        _analysis      = analysis;
         _log           = log;
     }
 
@@ -1124,6 +1127,22 @@ public class MailPollerService : BackgroundService
                         products[i].ProductName, row.Error);
             }
 
+            // Fire token-match diagnostics in the background — zero impact on response time.
+            for (int i = 0; i < rows.Length; i++)
+            {
+                var row = rows[i];
+                if (row.Success && !row.SupplierUnknown && row.SliSpItemId is not null)
+                {
+                    var p = products[i];
+                    _ = FireTokenMatchDiagnosticAsync(
+                        p.ProductName ?? $"Product {i + 1}",
+                        row.SupplierName,
+                        row.RfqId,
+                        row.SliSpItemId,
+                        p.ProductSearchKey);
+                }
+            }
+
             // Notify the UI whenever a supplier response was successfully written — either
             // a new insert or an update to an existing row.  Startup rescans that produce
             // no changes (anyInserted=false, no successful updates) remain silent.
@@ -1201,6 +1220,43 @@ public class MailPollerService : BackgroundService
         {
             _log.LogError(ex, "[Mail] Extraction failed for {Source} ({File})", source, fileName ?? "body");
             return false;
+        }
+    }
+
+    private async Task FireTokenMatchDiagnosticAsync(
+        string productName, string? supplierName, string? rfqId, string sliSpItemId, string? rliMspc)
+    {
+        try
+        {
+            var tokenResult = await _analysis.MatchProductAsync(productName, supplierName);
+
+            var resolvedSource = !string.IsNullOrEmpty(rliMspc) ? "rli_anchor"
+                               : tokenResult.Source == "user_mapping" ? "user_mapping"
+                               : tokenResult.Source == "token_scorer" ? "token_scorer"
+                               : "none";
+
+            var agreed = !string.IsNullOrEmpty(rliMspc) && !string.IsNullOrEmpty(tokenResult.SearchKey)
+                ? string.Equals(rliMspc, tokenResult.SearchKey, StringComparison.OrdinalIgnoreCase)
+                : false; // can only agree when both sides resolved something
+
+            await _sp.WriteTokenMatchDiagnosticAsync(new TokenMatchDiagnosticEntry
+            {
+                RfqId          = rfqId,
+                SliSpItemId    = sliSpItemId,
+                SupplierName   = supplierName ?? "",
+                ProductName    = productName,
+                ResolvedSource = resolvedSource,
+                RliMspc        = rliMspc,
+                TokenMspc      = tokenResult.SearchKey,
+                TokenScore     = tokenResult.Score,
+                Agreed         = agreed,
+                ReviewStatus   = "pending",
+                CreatedAt      = DateTime.UtcNow,
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Diagnostic] Token match diagnostic failed for '{Name}'", productName);
         }
     }
 

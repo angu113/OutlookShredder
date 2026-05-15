@@ -209,8 +209,11 @@ public class SpWriteResult
     /// <summary>True if the SharePoint list item was created successfully.</summary>
     public bool    Success     { get; set; }
 
-    /// <summary>SharePoint item ID of the newly created list item.</summary>
+    /// <summary>SharePoint item ID of the newly created list item (SupplierResponse row).</summary>
     public string? SpItemId    { get; set; }
+
+    /// <summary>SharePoint item ID of the SupplierLineItem row written for this product.</summary>
+    public string? SliSpItemId { get; set; }
 
     /// <summary>Web URL to the SharePoint list item (used by the task pane link).</summary>
     public string? SpWebUrl    { get; set; }
