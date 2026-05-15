@@ -4529,7 +4529,6 @@ public class SharePointService
                 r.QueryParameters.Expand = ["fields($select=id,RfqId,SliSpItemId,SupplierName,ProductName,ResolvedSource,RliMspc,TokenMspc,TokenScore,Agreed,ReviewStatus,OverriddenMspc,CreatedAt)"];
                 if (filter.Count > 0) r.QueryParameters.Filter = string.Join(" and ", filter);
                 r.QueryParameters.Top = top;
-                r.QueryParameters.Orderby = ["fields/CreatedAt desc"];
             });
 
         while (page is not null)
