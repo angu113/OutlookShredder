@@ -141,6 +141,22 @@ public class TokenMatchController : ControllerBase
         }
     }
 
+    /// <summary>DELETE /api/token-match/diagnostics — wipe all rows (dev/cleanup use only)</summary>
+    [HttpDelete("diagnostics")]
+    public async Task<IActionResult> ClearDiagnostics()
+    {
+        try
+        {
+            var count = await _sp.ClearTokenMatchDiagnosticsAsync();
+            return Ok(new { deleted = count });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ClearDiagnostics failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     public class ReviewRequest
     {
         public string  ReviewStatus   { get; set; } = "";

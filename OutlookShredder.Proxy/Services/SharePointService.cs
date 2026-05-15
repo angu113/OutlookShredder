@@ -4541,12 +4541,27 @@ public class SharePointService
                     d.TryGetValue(key, out var v) && v is JsonElement je
                         ? (T?)(object?)je.GetString()
                         : d.TryGetValue(key, out v) ? v as T : null;
-                bool GB(string key) =>
-                    d.TryGetValue(key, out var v) && v is JsonElement je && je.ValueKind == JsonValueKind.True;
-                double GD(string key) =>
-                    d.TryGetValue(key, out var v) && v is JsonElement je && je.TryGetDouble(out var n) ? n : 0;
-                DateTime GDt(string key) =>
-                    d.TryGetValue(key, out var v) && v is JsonElement je && je.TryGetDateTime(out var dt) ? dt : default;
+                bool GB(string key) {
+                    if (!d.TryGetValue(key, out var v) || v is null) return false;
+                    if (v is bool b) return b;
+                    if (v is JsonElement je) return je.ValueKind == JsonValueKind.True;
+                    return false;
+                }
+                double GD(string key) {
+                    if (!d.TryGetValue(key, out var v) || v is null) return 0;
+                    if (v is JsonElement je && je.TryGetDouble(out var n)) return n;
+                    if (v is decimal dec) return (double)dec;
+                    if (v is double dbl) return dbl;
+                    if (v is long lng) return (double)lng;
+                    if (v is int i32) return i32;
+                    return 0;
+                }
+                DateTime GDt(string key) {
+                    if (!d.TryGetValue(key, out var v) || v is null) return default;
+                    if (v is DateTime dt) return dt;
+                    if (v is JsonElement je && je.TryGetDateTime(out var jdt)) return jdt;
+                    return default;
+                }
 
                 result.Add(new TokenMatchDiagnosticEntry
                 {
@@ -4570,6 +4585,29 @@ public class SharePointService
                 .WithUrl(page.OdataNextLink).GetAsync();
         }
         return result;
+    }
+
+    public async Task<int> ClearTokenMatchDiagnosticsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetDiagnosticsListIdAsync();
+
+        var ids = new List<string>();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r => { r.QueryParameters.Top = 5000; });
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+                if (item.Id is not null) ids.Add(item.Id);
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        await Parallel.ForEachAsync(ids, new ParallelOptions { MaxDegreeOfParallelism = 8 },
+            async (id, ct) => await GetGraph().Sites[siteId].Lists[listId].Items[id].DeleteAsync(cancellationToken: ct));
+
+        return ids.Count;
     }
 
     public async Task ReviewTokenMatchDiagnosticAsync(
