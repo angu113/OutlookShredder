@@ -76,6 +76,10 @@ try
                   .AllowAnyHeader()
                   .AllowAnyMethod();
         });
+        options.AddPolicy("PhoneSearch", policy =>
+        {
+            policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
+        });
     });
 
     builder.Services.AddControllers();
