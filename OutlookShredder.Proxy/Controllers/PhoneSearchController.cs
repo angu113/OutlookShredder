@@ -30,6 +30,8 @@ public class PhoneSearchController : ControllerBase
     [HttpOptions("customer")]
     [HttpOptions("pending-customer")]
     [HttpOptions("consume-customer")]
+    [HttpOptions("scan")]
+    [HttpOptions("scan-result")]
     public IActionResult Preflight() => NoContent();
 
     // ── Phone / Contact ───────────────────────────────────────────────────────
@@ -81,6 +83,40 @@ public class PhoneSearchController : ControllerBase
         Volatile.Write(ref _pendingCustomer, null);
         return Ok(new { ok = true });
     }
+
+    // ── Page scanner (dev tool) ───────────────────────────────────────────────
+    // Shredder POSTs to /scan to request a scan; the extension GETs /scan,
+    // runs scanPage(), and POSTs the JSON back to /scan-result.
+    // Shredder polls /scan-result until it appears.
+
+    private static volatile bool _pendingScan;
+    private static string? _scanResult;
+
+    [HttpPost("scan")]
+    public IActionResult RequestScan()
+    {
+        Volatile.Write(ref _scanResult, null);
+        _pendingScan = true;
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("scan")]
+    public IActionResult GetScanRequest()
+        => Ok(new { scan = _pendingScan });
+
+    [HttpPost("scan-result")]
+    public async Task<IActionResult> PostScanResult()
+    {
+        using var reader = new System.IO.StreamReader(Request.Body);
+        var json = await reader.ReadToEndAsync();
+        Volatile.Write(ref _scanResult, json);
+        _pendingScan = false;
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("scan-result")]
+    public IActionResult GetScanResult()
+        => Ok(new { result = Volatile.Read(ref _scanResult) });
 
     public record PhoneSearchRequest(string Phone);
     public record CustomerSearchRequest(string CustomerName);
