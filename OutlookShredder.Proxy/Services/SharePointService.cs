@@ -5639,61 +5639,50 @@ public class SharePointService
             var metalLabel = string.Join("; ", metals);
             var shapeLabel = string.Join("; ", shapes);
 
-            var hasPrices = shortPrices.Count > 0 || longPrices.Count > 0;
-            var hasSliIds = shortMinSliId is not null || longMinSliId is not null;
-            if (hasPrices || hasSliIds)
+            // Always patch every QC row so stale values are cleared when data falls out of window.
+            double? lqShort = shortPrices.Count > 0 ? Median(shortPrices) : null;
+            double? lqLong  = longPrices.Count  > 0 ? Median(longPrices)  : null;
+
+            var patch = new Dictionary<string, object?>
             {
-                var patch = new Dictionary<string, object?>();
+                [lqField]          = lqShort,
+                [lqCountField]     = shortPrices.Count > 0 ? (double)shortPrices.Count : (object?)null,
+                [lqMinField]       = shortPrices.Count > 0 ? shortPrices.Min()         : (object?)null,
+                [lqMaxField]       = shortPrices.Count > 0 ? shortPrices.Max()         : (object?)null,
+                [lqLongField]      = lqLong,
+                [lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null,
+                [lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null,
+                [lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null,
+                [lqMinSliField]    = (object?)shortMinSliId,
+                [lqMaxSliField]    = (object?)shortMaxSliId,
+                [lqLongMinSliField]= (object?)longMinSliId,
+                [lqLongMaxSliField]= (object?)longMaxSliId,
+            };
 
-                double? lqShort = shortPrices.Count > 0 ? Median(shortPrices) : null;
-                double? lqLong  = longPrices.Count  > 0 ? Median(longPrices)  : null;
+            await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = patch });
 
-                if (hasPrices)
-                {
-                    patch[lqField]          = lqShort;
-                    patch[lqCountField]     = shortPrices.Count > 0 ? (double)shortPrices.Count : (object?)null;
-                    patch[lqMinField]       = shortPrices.Count > 0 ? shortPrices.Min()         : (object?)null;
-                    patch[lqMaxField]       = shortPrices.Count > 0 ? shortPrices.Max()         : (object?)null;
-                    patch[lqLongField]      = lqLong;
-                    patch[lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null;
-                    patch[lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null;
-                    patch[lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null;
-                }
-                patch[lqMinSliField]     = (object?)shortMinSliId;
-                patch[lqMaxSliField]     = (object?)shortMaxSliId;
-                patch[lqLongMinSliField] = (object?)longMinSliId;
-                patch[lqLongMaxSliField] = (object?)longMaxSliId;
+            if (shortPrices.Count > 0 || longPrices.Count > 0)
+            {
+                updated.Add(new LqMatch(metalLabel, shapeLabel,
+                    lqShort, shortPrices.Count,
+                    shortPrices.Count > 0 ? shortPrices.Min() : null,
+                    shortPrices.Count > 0 ? shortPrices.Max() : null,
+                    lqLong,  longPrices.Count,
+                    longPrices.Count  > 0 ? longPrices.Min()  : null,
+                    longPrices.Count  > 0 ? longPrices.Max()  : null));
 
-                await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
-                    .PatchAsync(new FieldValueSet { AdditionalData = patch });
-
-                if (hasPrices)
-                {
-                    updated.Add(new LqMatch(metalLabel, shapeLabel,
-                        lqShort, shortPrices.Count,
-                        shortPrices.Count > 0 ? shortPrices.Min() : null,
-                        shortPrices.Count > 0 ? shortPrices.Max() : null,
-                        lqLong,  longPrices.Count,
-                        longPrices.Count  > 0 ? longPrices.Min()  : null,
-                        longPrices.Count  > 0 ? longPrices.Max()  : null));
-
-                    _log.LogInformation(
-                        "[LQ] Updated {Metal}/{Shape}  short={Lq5:F4}(n={N5}, {D5}d)  long={Lq10:F4}(n={N10}, {D10}d)",
-                        metalLabel, shapeLabel,
-                        lqShort?.ToString("F4") ?? "-", shortPrices.Count, shortDays,
-                        lqLong?.ToString("F4")  ?? "-", longPrices.Count,  longDays);
-                }
-                else
-                {
-                    _log.LogInformation(
-                        "[LQ] SLI IDs only (all-time fallback) {Metal}/{Shape}  shortMin={ShortMin} longMin={LongMin}",
-                        metalLabel, shapeLabel, shortMinSliId ?? "-", longMinSliId ?? "-");
-                }
+                _log.LogInformation(
+                    "[LQ] Updated {Metal}/{Shape}  short={Lq5:F4}(n={N5}, {D5}d)  long={Lq10:F4}(n={N10}, {D10}d)",
+                    metalLabel, shapeLabel,
+                    lqShort?.ToString("F4") ?? "-", shortPrices.Count, shortDays,
+                    lqLong?.ToString("F4")  ?? "-", longPrices.Count,  longDays);
             }
             else
             {
                 var titleNote = filtered ? $" [{string.Join("|", titles)}]" : "";
                 misses.Add($"[QC ROW - NO QUOTES] {metalLabel} / {shapeLabel}{titleNote}");
+                _log.LogInformation("[LQ] Cleared stale data for {Metal}/{Shape}", metalLabel, shapeLabel);
             }
         }
 
