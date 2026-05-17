@@ -36,6 +36,11 @@ public class CatalogAnalysisService
     // Round-robin counter for Claude Haiku / Gemini Flash alternation.
     private int _rrCounter;
 
+    // Live tokenization progress (updated each batch; reset when a new run starts).
+    private volatile string _tokenizeTarget = "";
+    private int _tokenizeDone;
+    private int _tokenizeTotal;
+
     // In-memory catalog token cache for MatchProductAsync — loaded once from disk and reused.
     // Null until first call; refreshed if the on-disk file is newer than the snapshot.
     private List<ProductTokens>? _catalogTokenCache;
@@ -525,6 +530,9 @@ public class CatalogAnalysisService
             var fi = new FileInfo(path);
             return new { exists = true, bytes = fi.Length, modified = fi.LastWriteTimeUtc };
         }
+        var done  = _tokenizeDone;
+        var total = _tokenizeTotal;
+        var target = _tokenizeTarget;
         return new
         {
             catalogJson       = FileInfo(CatalogPath),
@@ -532,6 +540,14 @@ public class CatalogAnalysisService
             catalogTokensJson = FileInfo(CatalogTokensPath),
             sliTokensJson     = FileInfo(SliTokensPath),
             matchResultsJson  = FileInfo(MatchResultsPath),
+            tokenize = total > 0 ? new
+            {
+                target,
+                done,
+                total,
+                pct     = (int)(done * 100.0 / total),
+                running = done < total && !string.IsNullOrEmpty(target),
+            } : (object?)null,
         };
     }
 
@@ -652,6 +668,10 @@ public class CatalogAnalysisService
         var sw       = Stopwatch.StartNew();
         int processed = 0, failed = 0;
 
+        _tokenizeTarget = label;
+        Interlocked.Exchange(ref _tokenizeDone,  existing.Count);
+        Interlocked.Exchange(ref _tokenizeTotal, source.Count);
+
         for (int i = 0; i < pending.Count && !ct.IsCancellationRequested; i += BatchSize)
         {
             var batch = pending.Skip(i).Take(BatchSize).ToList();
@@ -701,6 +721,7 @@ public class CatalogAnalysisService
                 }
             }
 
+            Interlocked.Exchange(ref _tokenizeDone, existing.Count);
             _log.LogInformation("[Analysis] {Label} tokenise: {Done}/{Total} ({Fail} failed)",
                 label, processed + failed, pending.Count, failed);
         }
