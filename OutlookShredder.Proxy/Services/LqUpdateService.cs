@@ -4,7 +4,7 @@ namespace OutlookShredder.Proxy.Services;
 /// Background service that periodically recomputes LQ (average $/lb per Metal+Shape)
 /// from recent supplier quotes and writes it to the QC SharePoint list.
 ///
-/// Multiple proxy instances can run concurrently — all compute the same 7-day average
+/// Multiple proxy instances can run concurrently — all compute the same averages
 /// over the same data, so concurrent writes are idempotent. Random startup jitter
 /// (up to half the configured interval) staggers the instances to avoid a stampede.
 /// </summary>

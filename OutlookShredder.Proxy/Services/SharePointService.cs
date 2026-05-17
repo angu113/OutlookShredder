@@ -5029,7 +5029,8 @@ public class SharePointService
         string?  TkAlloy,
         string?  TkTemper,
         string[] TkConditions,
-        double   PricePerPound);
+        double   PricePerPound,
+        DateTime QuoteDate);
 
     // Returns (tokenMetal, impliedCondition?) — "Hot Rolled" maps to steel + hot_rolled condition.
     private static (string? Metal, string? Condition) ClassifyQcMetal(string s) =>
@@ -5154,7 +5155,8 @@ public class SharePointService
         }
 
         // ??"?????"??? 1. Fetch QC rows with item IDs ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-        var wantedDisplay = new[] { "Metal", "Shape", "Title", "LQ", "LQ Count", "LQ Min", "LQ Max" };
+        var wantedDisplay = new[] { "Metal", "Shape", "Title", "LQ", "LQ Count", "LQ Min", "LQ Max",
+                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max" };
         var colsResp = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
         var fields = (colsResp?.Value ?? [])
             .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
@@ -5189,9 +5191,13 @@ public class SharePointService
             return name;
         }
 
-        var lqCountField = await EnsureNumberColumn("LQ Count", "LQ_Count");
-        var lqMinField   = await EnsureNumberColumn("LQ Min",   "LQ_Min");
-        var lqMaxField   = await EnsureNumberColumn("LQ Max",   "LQ_Max");
+        var lqCountField     = await EnsureNumberColumn("LQ Count",      "LQ_Count");
+        var lqMinField       = await EnsureNumberColumn("LQ Min",        "LQ_Min");
+        var lqMaxField       = await EnsureNumberColumn("LQ Max",        "LQ_Max");
+        var lqLongField      = await EnsureNumberColumn("LQ Long",       "LQ_Long");
+        var lqLongCountField = await EnsureNumberColumn("LQ Long Count", "LQ_Long_Count");
+        var lqLongMinField   = await EnsureNumberColumn("LQ Long Min",   "LQ_Long_Min");
+        var lqLongMaxField   = await EnsureNumberColumn("LQ Long Max",   "LQ_Long_Max");
 
         var qcItemsResp = await graph.Sites[qcSiteId].Lists[qcListId].Items
             .GetAsync(r =>
@@ -5218,8 +5224,10 @@ public class SharePointService
             .ToArray();
 
         // ── 2. Load catalog token index ─────────────────────────────
-        var lookbackDays  = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 60;
-        var cutoff        = DateTime.UtcNow.AddDays(-lookbackDays);
+        var shortDays   = int.TryParse(_config["QC:LqShortDays"], out var sd) ? sd : 5;
+        var longDays    = int.TryParse(_config["QC:LqLongDays"],  out var ld) ? ld : 10;
+        var shortCutoff = DateTime.UtcNow.AddDays(-shortDays);
+        var longCutoff  = DateTime.UtcNow.AddDays(-longDays);
 
         var catalogByKey  = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
 
@@ -5242,7 +5250,7 @@ public class SharePointService
                 if (DateTime.TryParse(ds, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
                 { quoteDate = dt.ToUniversalTime(); break; }
             }
-            if (quoteDate.HasValue && quoteDate.Value < cutoff) { staleCount++; continue; }
+            if (quoteDate.HasValue && quoteDate.Value < longCutoff) { staleCount++; continue; }
 
             var searchKey = GetStr(sli, "CatalogProductSearchKey") ?? GetStr(sli, "ProductSearchKey");
             if (string.IsNullOrWhiteSpace(searchKey)) { noTokenCount++; continue; }
@@ -5254,13 +5262,15 @@ public class SharePointService
             if (ppl is null or <= 0) { unpricedCount++; continue; }
 
             priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
-                tok.TkConditions ?? [], ppl.Value));
+                tok.TkConditions ?? [], ppl.Value, quoteDate ?? DateTime.UtcNow));
         }
 
         _log.LogInformation(
-            "[LQ] {QcRows} QC rows, {Priced} token-matched priced quotes in last {Days}d, " +
-            "{Unpriced} unpriced, {NoToken} no token, {Stale} stale",
-            qcRows.Length, priced.Count, lookbackDays, unpricedCount, noTokenCount, staleCount);
+            "[LQ] {QcRows} QC rows, {Priced} token-matched priced quotes in last {LongDays}d " +
+            "({Short} within {ShortDays}d), {Unpriced} unpriced, {NoToken} no token, {Stale} stale",
+            qcRows.Length, priced.Count, longDays,
+            priced.Count(p => p.QuoteDate >= shortCutoff), shortDays,
+            unpricedCount, noTokenCount, staleCount);
 
         // ── 4. Match each QC row to priced tokens, patch SP ────────────────────
         var updated = new List<LqMatch>();
@@ -5287,36 +5297,50 @@ public class SharePointService
             foreach (var c in impliedConditions) titleFilters.Add(c);
             bool filtered    = titleFilters.Count > 0;
 
-            var matchPrices = priced
+            var matched = priced
                 .Where(p => qcMetals.Contains(p.TkMetal)
                          && qcShapes.Contains(p.TkShape)
                          && (!filtered || MatchesTitleFilter(p, titleFilters)))
-                .Select(p => p.PricePerPound)
                 .ToList();
+
+            var shortPrices = matched.Where(p => p.QuoteDate >= shortCutoff).Select(p => p.PricePerPound).ToList();
+            var longPrices  = matched.Select(p => p.PricePerPound).ToList();
 
             var metalLabel = string.Join("; ", metals);
             var shapeLabel = string.Join("; ", shapes);
 
-            if (matchPrices.Count > 0)
+            if (shortPrices.Count > 0 || longPrices.Count > 0)
             {
-                var lq    = matchPrices.Average();
-                var lqMin = matchPrices.Min();
-                var lqMax = matchPrices.Max();
+                var patch = new Dictionary<string, object?>();
+
+                double? lqShort = shortPrices.Count > 0 ? shortPrices.Average() : null;
+                double? lqLong  = longPrices.Count  > 0 ? longPrices.Average()  : null;
+
+                patch[lqField]          = lqShort;
+                patch[lqCountField]     = shortPrices.Count > 0 ? (double)shortPrices.Count : (object?)null;
+                patch[lqMinField]       = shortPrices.Count > 0 ? shortPrices.Min()         : (object?)null;
+                patch[lqMaxField]       = shortPrices.Count > 0 ? shortPrices.Max()         : (object?)null;
+                patch[lqLongField]      = lqLong;
+                patch[lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null;
+                patch[lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null;
+                patch[lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null;
+
                 await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
-                    .PatchAsync(new FieldValueSet
-                    {
-                        AdditionalData = new Dictionary<string, object?>
-                        {
-                            [lqField]      = lq,
-                            [lqCountField] = (double)matchPrices.Count,
-                            [lqMinField]   = lqMin,
-                            [lqMaxField]   = lqMax
-                        }
-                    });
-                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchPrices.Count, lqMin, lqMax));
+                    .PatchAsync(new FieldValueSet { AdditionalData = patch });
+
+                updated.Add(new LqMatch(metalLabel, shapeLabel,
+                    lqShort, shortPrices.Count,
+                    shortPrices.Count > 0 ? shortPrices.Min() : null,
+                    shortPrices.Count > 0 ? shortPrices.Max() : null,
+                    lqLong,  longPrices.Count,
+                    longPrices.Count  > 0 ? longPrices.Min()  : null,
+                    longPrices.Count  > 0 ? longPrices.Max()  : null));
+
                 _log.LogInformation(
-                    "[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} min={Min:F4} max={Max:F4} (n={N}, last {Days}d)",
-                    metalLabel, shapeLabel, lq, lqMin, lqMax, matchPrices.Count, lookbackDays);
+                    "[LQ] Updated {Metal}/{Shape}  short={Lq5:F4}(n={N5}, {D5}d)  long={Lq10:F4}(n={N10}, {D10}d)",
+                    metalLabel, shapeLabel,
+                    lqShort?.ToString("F4") ?? "-", shortPrices.Count, shortDays,
+                    lqLong?.ToString("F4")  ?? "-", longPrices.Count,  longDays);
             }
             else
             {
@@ -9366,11 +9390,15 @@ public record LqUpdateResult(
     List<string>  Misses);
 
 public record LqMatch(
-    string Metal,
-    string Shape,
-    double PricePerPound,
-    int    QuoteCount,
-    double MinPricePerPound,
-    double MaxPricePerPound);
+    string  Metal,
+    string  Shape,
+    double? PricePerPound,
+    int     QuoteCount,
+    double? MinPricePerPound,
+    double? MaxPricePerPound,
+    double? LongPricePerPound,
+    int     LongQuoteCount,
+    double? LongMinPricePerPound,
+    double? LongMaxPricePerPound);
 
 public record CustomerLookupResult(string BusinessPartner, string? PopupMessage, string? ContactName);
