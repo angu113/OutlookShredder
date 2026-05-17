@@ -23,8 +23,9 @@ public class SharePointService
 {
     private readonly IConfiguration          _config;
     private readonly ILogger<SharePointService> _log;
-    private readonly SupplierCacheService  _suppliers;
-    private readonly ProductCatalogService _catalog;
+    private readonly SupplierCacheService          _suppliers;
+    private readonly ProductCatalogService         _catalog;
+    private readonly Lazy<CatalogAnalysisService>  _catalogAnalysis;
 
     private GraphServiceClient?     _graph;
     private ClientSecretCredential? _spCredential;
@@ -114,12 +115,14 @@ public class SharePointService
                  or "AppAuthorLookupId" or "AppEditorLookupId");
 
     public SharePointService(IConfiguration config, ILogger<SharePointService> log,
-        SupplierCacheService suppliers, ProductCatalogService catalog)
+        SupplierCacheService suppliers, ProductCatalogService catalog,
+        Lazy<CatalogAnalysisService> catalogAnalysis)
     {
-        _config    = config;
-        _log       = log;
-        _suppliers = suppliers;
-        _catalog   = catalog;
+        _config          = config;
+        _log             = log;
+        _suppliers       = suppliers;
+        _catalog         = catalog;
+        _catalogAnalysis = catalogAnalysis;
     }
 
     // ??"?????"??? Graph client (lazy init) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
@@ -5020,15 +5023,79 @@ public class SharePointService
         _log.LogInformation("[QC] Patched item {ItemId}: QC={Qc} QcCut={QcCut}", itemId, qc, qcCut);
     }
 
+    private readonly record struct PricedSliToken(
+        string   TkMetal,
+        string   TkShape,
+        string?  TkAlloy,
+        string?  TkTemper,
+        string[] TkConditions,
+        double   PricePerPound);
+
+    // Returns (tokenMetal, impliedCondition?) — "Hot Rolled" maps to steel + hot_rolled condition.
+    private static (string? Metal, string? Condition) ClassifyQcMetal(string s) =>
+        s.Trim().ToLowerInvariant() switch
+        {
+            "hot rolled" or "hr"          => ("steel",     "hot_rolled"),
+            "cold rolled" or "cr"         => ("steel",     "cold_rolled"),
+            "galvanized" or "galv"        => ("steel",     "galvanized"),
+            "galvanneal"                  => ("steel",     "galvanneal"),
+            "aluminum"                    => ("aluminum",  null),
+            "steel"                       => ("steel",     null),
+            "stainless" or "stainless steel" => ("stainless", null),
+            "copper"                      => ("copper",    null),
+            "brass"                       => ("brass",     null),
+            "bronze"                      => ("bronze",    null),
+            "titanium"                    => ("titanium",  null),
+            "nickel"                      => ("nickel",    null),
+            _                             => (null,        null),
+        };
+
+    private static string? NormalizeQcMetal(string s) => ClassifyQcMetal(s).Metal;
+
+    private static string? NormalizeQcShape(string s) => s.Trim().ToLowerInvariant() switch
+    {
+        "flat bar" or "flatbar"                                => "flatbar",
+        "strip"                                                => "flatbar",
+        "round bar" or "roundbar"                              => "roundbar",
+        "square bar" or "squarebar"                            => "squarebar",
+        "hex bar" or "hexbar" or "hexagon bar"                 => "hexbar",
+        "sheet"                                                => "sheet",
+        "plate"                                                => "plate",
+        "angle"                                                => "angle",
+        "channel"                                              => "channel",
+        "pipe"                                                 => "pipe",
+        "round tube" or "tube_round"                           => "tube_round",
+        "square tube" or "tube_square"                         => "tube_square",
+        "rect tube" or "rectangular tube" or "tube_rect"       => "tube_rect",
+        "wide flange" or "wideflange"                          => "wideflange",
+        "beam" or "beam [full lengths]"                        => "wideflange",
+        "tread plate" or "treadplate" or "plate [tread plate]" => "treadplate",
+        "expanded"                                             => "expanded",
+        "perforated sheet"                                     => "sheet",
+        "grating"                                              => "grating",
+        "coil"                                                 => "coil",
+        _                                                      => null,
+    };
+
+    private static bool MatchesTitleFilter(PricedSliToken p, HashSet<string> filters)
+    {
+        foreach (var f in filters)
+        {
+            if (p.TkAlloy?.Equals(f, StringComparison.OrdinalIgnoreCase)  == true) return true;
+            if (p.TkTemper?.Equals(f, StringComparison.OrdinalIgnoreCase) == true) return true;
+            if (p.TkConditions.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase))) return true;
+        }
+        return false;
+    }
+
     // ??"?????"??? LQ update ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
     /// <summary>
-    /// Joins supplier quotes ?????' RFQ Line Items (canonical product names) ?????' QC Metal+Shape rows,
-    /// derives $/lb for each quote, patches the QC list 'LQ' column, and returns a match/miss log.
+    /// Matches priced supplier quotes to QC Metal+Shape rows via catalog token lookup.
     ///
     /// Join chain:
-    ///   SupplierLineItem.RFQ_ID ?????' RFQLineItem.RFQ_ID ?????' RFQLineItem.Product
-    ///   RFQLineItem.Product (text-containment) ?????' QC row Metal+Shape
+    ///   SupplierLineItem.ProductSearchKey '92 CatalogToken (TkMetal, TkShape, TkAlloy, TkConditions)
+    ///   CatalogToken fields match QC row Metal + Shape; Title column filters by alloy/condition.
     /// </summary>
     public async Task<LqUpdateResult> UpdateQcLqAsync()
     {
@@ -5150,24 +5217,23 @@ public class SharePointService
             .Where(r => r.Metals.Length > 0 && r.Shapes.Length > 0)
             .ToArray();
 
-        // ??"?????"??? 2. Fetch priced supplier quotes, group by RFQ_ID ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-        var lookbackDays = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 7;
-        var cutoff       = DateTime.UtcNow.AddDays(-lookbackDays);
+        // ── 2. Load catalog token index ─────────────────────────────
+        var lookbackDays  = int.TryParse(_config["QC:LqLookbackDays"], out var ld) ? ld : 60;
+        var cutoff        = DateTime.UtcNow.AddDays(-lookbackDays);
 
-        var (allSli, _) = await ReadSupplierItemsAsync(top: 5000);
+        var catalogByKey  = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
 
-        // rfqId ?????' list of $/lb values from priced non-regret quotes within the lookback window
-        var pricesByRfq = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
+        // ── 3. Collect priced SLI rows; join each to its catalog token ──────────────
+        var (allSli, _)   = await ReadSupplierItemsAsync(top: 5000);
+        var priced        = new List<PricedSliToken>();
         var unpricedCount = 0;
+        var noTokenCount  = 0;
         var staleCount    = 0;
 
         foreach (var sli in allSli)
         {
             if (IsRegret(sli)) continue;
 
-            // Filter by when the data was processed/written to SP (Modified), not when the
-            // email arrived (ReceivedAt)  -- emails can sit in the inbox for days before
-            // being processed, making ReceivedAt an unreliable freshness indicator.
             DateTime? quoteDate = null;
             foreach (var key in new[] { "Modified", "ProcessedAt", "DateOfQuote", "ReceivedAt" })
             {
@@ -5178,110 +5244,86 @@ public class SharePointService
             }
             if (quoteDate.HasValue && quoteDate.Value < cutoff) { staleCount++; continue; }
 
-            var rfqId = sli.TryGetValue("JobReference", out var jr) ? jr?.ToString()
-                      : sli.TryGetValue("RFQ_ID",       out var ri) ? ri?.ToString()
-                      : null;
-            if (string.IsNullOrEmpty(rfqId)) continue;
+            var searchKey = GetStr(sli, "CatalogProductSearchKey") ?? GetStr(sli, "ProductSearchKey");
+            if (string.IsNullOrWhiteSpace(searchKey)) { noTokenCount++; continue; }
+            if (!catalogByKey.TryGetValue(searchKey, out var tok)) { noTokenCount++; continue; }
+            if (string.IsNullOrWhiteSpace(tok.TkMetal) || string.IsNullOrWhiteSpace(tok.TkShape))
+            { noTokenCount++; continue; }
 
-            var ppp = DerivePerPound(sli);
-            if (ppp is null or <= 0) { unpricedCount++; continue; }
+            var ppl = DerivePerPound(sli);
+            if (ppl is null or <= 0) { unpricedCount++; continue; }
 
-            if (!pricesByRfq.TryGetValue(rfqId, out var list))
-                pricesByRfq[rfqId] = list = [];
-            list.Add(ppp.Value);
+            priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
+                tok.TkConditions ?? [], ppl.Value));
         }
 
-        _log.LogInformation("[LQ] {QcRows} QC rows, {RfqCount} RFQs with prices in last {Days}d, {Unpriced} unpriced, {Stale} outside window",
-            qcRows.Length, pricesByRfq.Count, lookbackDays, unpricedCount, staleCount);
+        _log.LogInformation(
+            "[LQ] {QcRows} QC rows, {Priced} token-matched priced quotes in last {Days}d, " +
+            "{Unpriced} unpriced, {NoToken} no token, {Stale} stale",
+            qcRows.Length, priced.Count, lookbackDays, unpricedCount, noTokenCount, staleCount);
 
-        // ??"?????"??? 3. Fetch RFQ Line Items for RFQs that have quotes ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-        // rfqId ?????' canonical product names (lower-cased)
-        var rfqProducts = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var allRfqLines = await ReadAllRfqLineItemsAsync();
-
-        foreach (var (rfqId, _, product, _, _, _, _) in allRfqLines)
-        {
-            if (string.IsNullOrEmpty(rfqId) || string.IsNullOrEmpty(product)) continue;
-            if (!pricesByRfq.ContainsKey(rfqId)) continue;   // no quotes for this RFQ
-            if (!rfqProducts.TryGetValue(rfqId, out var prods))
-                rfqProducts[rfqId] = prods = [];
-            prods.Add(product.ToLowerInvariant());
-        }
-
-        _log.LogInformation("[LQ] {Count} RFQ Line Item products across quoted RFQs", rfqProducts.Values.Sum(v => v.Count));
-
-        // ??"?????"??? 4. Build: QC row ?????' list of prices whose RFQ products match ??"?????"?????"?????"?????"?????"?????"?????"???
-        // For each QC row, find RFQs where any product contains Metal AND Shape,
-        // then collect all prices from those RFQs.
+        // ── 4. Match each QC row to priced tokens, patch SP ────────────────────
         var updated = new List<LqMatch>();
         var misses  = new List<string>();
 
-        foreach (var qcRow in qcRows)
+        foreach (var (id, metals, shapes, titles) in qcRows)
         {
-            var matchedPrices = new List<double>();
-            var matchedRfqs   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var (rfqId, products) in rfqProducts)
+            var qcMetals          = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var impliedConditions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var m in metals)
             {
-                foreach (var product in products)
-                {
-                    bool metalMatch = qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant()));
-                    bool shapeMatch = qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant()));
-                    bool titleMatch = qcRow.Titles.Length == 0 || qcRow.Titles.Any(t => product.Contains(t));
-                    if (metalMatch && shapeMatch && titleMatch)
-                    {
-                        matchedRfqs.Add(rfqId);
-                        matchedPrices.AddRange(pricesByRfq[rfqId]);
-                        break; // one match per RFQ is enough
-                    }
-                }
+                var (metal, cond) = ClassifyQcMetal(m);
+                if (metal  is not null) qcMetals.Add(metal);
+                if (cond   is not null) impliedConditions.Add(cond);
             }
 
-            var metalLabel = string.Join("; ", qcRow.Metals);
-            var shapeLabel = string.Join("; ", qcRow.Shapes);
+            var qcShapes = shapes
+                .Select(NormalizeQcShape)
+                .Where(s => s is not null)
+                .Cast<string>()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (matchedPrices.Count > 0)
+            var titleFilters = titles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in impliedConditions) titleFilters.Add(c);
+            bool filtered    = titleFilters.Count > 0;
+
+            var matchPrices = priced
+                .Where(p => qcMetals.Contains(p.TkMetal)
+                         && qcShapes.Contains(p.TkShape)
+                         && (!filtered || MatchesTitleFilter(p, titleFilters)))
+                .Select(p => p.PricePerPound)
+                .ToList();
+
+            var metalLabel = string.Join("; ", metals);
+            var shapeLabel = string.Join("; ", shapes);
+
+            if (matchPrices.Count > 0)
             {
-                var lq    = matchedPrices.Average();
-                var lqMin = matchedPrices.Min();
-                var lqMax = matchedPrices.Max();
-                await graph.Sites[qcSiteId].Lists[qcListId].Items[qcRow.Id].Fields
+                var lq    = matchPrices.Average();
+                var lqMin = matchPrices.Min();
+                var lqMax = matchPrices.Max();
+                await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
                     .PatchAsync(new FieldValueSet
                     {
                         AdditionalData = new Dictionary<string, object?>
                         {
                             [lqField]      = lq,
-                            [lqCountField] = (double)matchedPrices.Count,
+                            [lqCountField] = (double)matchPrices.Count,
                             [lqMinField]   = lqMin,
                             [lqMaxField]   = lqMax
                         }
                     });
-                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchedPrices.Count, lqMin, lqMax));
-                _log.LogInformation("[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} min={Min:F4} max={Max:F4} (n={N}, last {Days}d) RFQs: {Rfqs}",
-                    metalLabel, shapeLabel, lq, lqMin, lqMax, matchedPrices.Count, lookbackDays, string.Join(", ", matchedRfqs));
+                updated.Add(new LqMatch(metalLabel, shapeLabel, lq, matchPrices.Count, lqMin, lqMax));
+                _log.LogInformation(
+                    "[LQ] Updated {Metal}/{Shape} LQ={Lq:F4} min={Min:F4} max={Max:F4} (n={N}, last {Days}d)",
+                    metalLabel, shapeLabel, lq, lqMin, lqMax, matchPrices.Count, lookbackDays);
             }
             else
             {
-                misses.Add($"[QC ROW - NO QUOTES] {metalLabel} / {shapeLabel}");
+                var titleNote = filtered ? $" [{string.Join("|", titles)}]" : "";
+                misses.Add($"[QC ROW - NO QUOTES] {metalLabel} / {shapeLabel}{titleNote}");
             }
         }
-
-        // ??"?????"??? 5. Log RFQ Line Item products that matched no QC row ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-        var matchedProducts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var qcRow in qcRows)
-        foreach (var (_, products) in rfqProducts)
-        foreach (var product in products)
-        {
-            if (qcRow.Metals.Any(m => product.Contains(m.ToLowerInvariant())) &&
-                qcRow.Shapes.Any(s => product.Contains(s.ToLowerInvariant())) &&
-                (qcRow.Titles.Length == 0 || qcRow.Titles.Any(t => product.Contains(t))))
-                matchedProducts.Add(product);
-        }
-
-        foreach (var (rfqId, products) in rfqProducts)
-        foreach (var product in products)
-            if (!matchedProducts.Contains(product))
-                misses.Add($"[RFQ PRODUCT - NO QC ROW] {rfqId}: {product}");
 
         return new LqUpdateResult(updated, misses);
     }

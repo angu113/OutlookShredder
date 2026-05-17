@@ -133,6 +133,7 @@ try
     builder.Services.AddSingleton<MessagingService>();
     builder.Services.AddSingleton<PricingAnalysisService>();
     builder.Services.AddSingleton<CatalogAnalysisService>();
+    builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierProductMappingsCacheService>());
 

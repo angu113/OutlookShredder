@@ -1274,6 +1274,15 @@ public class CatalogAnalysisService
         }
     }
 
+    public async Task<Dictionary<string, ProductTokens>> GetCatalogTokensByKeyAsync(
+        CancellationToken ct = default)
+    {
+        var tokens = await GetCatalogTokensAsync();
+        return tokens
+            .Where(t => !string.IsNullOrWhiteSpace(t.SearchKey) && !t.TokenizationFailed)
+            .ToDictionary(t => t.SearchKey!, StringComparer.OrdinalIgnoreCase);
+    }
+
     private async Task<ProductTokens?> TokeniseSingleLiveAsync(string productName, CancellationToken ct)
     {
         await _liveSemaphore.WaitAsync(ct);

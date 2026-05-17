@@ -33,23 +33,27 @@ public class LqUpdateService : BackgroundService
         _log.LogInformation("[LQ] Background updater starting — interval {Interval}min, startup jitter {Jitter:F0}s",
             intervalMinutes, jitter.TotalSeconds);
 
-        await Task.Delay(jitter, ct);
-
-        while (!ct.IsCancellationRequested)
+        try
         {
-            try
-            {
-                _log.LogInformation("[LQ] Running scheduled LQ update");
-                var result = await _sp.UpdateQcLqAsync();
-                _log.LogInformation("[LQ] Scheduled update complete — {Updated} rows updated, {Misses} misses",
-                    result.Updated.Count, result.Misses.Count);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _log.LogError(ex, "[LQ] Scheduled update failed");
-            }
+            await Task.Delay(jitter, ct);
 
-            await Task.Delay(interval, ct);
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    _log.LogInformation("[LQ] Running scheduled LQ update");
+                    var result = await _sp.UpdateQcLqAsync();
+                    _log.LogInformation("[LQ] Scheduled update complete — {Updated} rows updated, {Misses} misses",
+                        result.Updated.Count, result.Misses.Count);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log.LogError(ex, "[LQ] Scheduled update failed");
+                }
+
+                await Task.Delay(interval, ct);
+            }
         }
+        catch (OperationCanceledException) { }
     }
 }
