@@ -45,8 +45,13 @@ public class ProductCatalogService : BackgroundService
     private GraphServiceClient? _graph;
 
     private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens,
-        double? WeightPerFoot = null, string? WeightUnit = null);
+        double? WeightPerFoot = null, string? WeightUnit = null,
+        string? SpItemId = null,
+        string? TkMetal = null, string? TkShape = null,
+        string? TkAlloy = null, string? TkTemper = null, string[]? TkConditions = null);
     private volatile IReadOnlyList<Entry> _cache = [];
+    private string? _cachedSiteId;
+    private string? _cachedListId;
     public string? LastError    { get; private set; }
     public string? LastDiag     { get; private set; }
     public DateTime? LastRefreshAt { get; private set; }
@@ -140,6 +145,13 @@ public class ProductCatalogService : BackgroundService
 
         var diag = $"site={site.Id} list={list.Id} rawItems={raw.Count} firstFields=[{firstFields}]";
 
+        // Cache for PatchCatalogTokensAsync (called after tokenization)
+        _cachedSiteId = site.Id;
+        _cachedListId = list.Id;
+
+        static string? Str(IDictionary<string, object> d, string key)
+            => (d.TryGetValue(key, out var v) ? v : null)?.ToString();
+
         var entries = raw
             .Select(i =>
             {
@@ -161,8 +173,13 @@ public class ProductCatalogService : BackgroundService
                     not null  => double.TryParse(rawWt.ToString(), out var dp) ? dp : null,
                     _         => null
                 };
-                var wtUnit = (data.TryGetValue("WeightUnit", out var wuv) ? wuv : null)?.ToString();
-                return new Entry(name!, key, Tokenize(name!), wt, wtUnit);
+                var wtUnit     = Str(data, "WeightUnit");
+                var tkConds    = Str(data, "TkConditions");
+                var tkCondArr  = string.IsNullOrEmpty(tkConds) ? null
+                    : tkConds.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                return new Entry(name!, key, Tokenize(name!), wt, wtUnit, i.Id,
+                    Str(data, "TkMetal"), Str(data, "TkShape"),
+                    Str(data, "TkAlloy"), Str(data, "TkTemper"), tkCondArr);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -202,6 +219,34 @@ public class ProductCatalogService : BackgroundService
         return c.FirstOrDefault(e => e.SearchKey != null &&
             e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase))?.Name;
     }
+
+    /// <summary>
+    /// Returns catalog tokens keyed by SearchKey, built directly from the in-memory SP cache.
+    /// Returns an empty dict if no entries have been tokenized yet (SP token columns not yet populated).
+    /// </summary>
+    public Dictionary<string, OutlookShredder.Proxy.Models.ProductTokens> GetTokensByKey()
+    {
+        return _cache
+            .Where(e => e.SearchKey != null && e.TkMetal != null && e.TkShape != null)
+            .ToDictionary(
+                e => e.SearchKey!,
+                e => new OutlookShredder.Proxy.Models.ProductTokens
+                {
+                    Name         = e.Name,
+                    SearchKey    = e.SearchKey,
+                    TkMetal      = e.TkMetal,
+                    TkShape      = e.TkShape,
+                    TkAlloy      = e.TkAlloy,
+                    TkTemper     = e.TkTemper,
+                    TkConditions = e.TkConditions ?? [],
+                },
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Returns the SP item ID for a catalog entry by exact product name (case-insensitive).</summary>
+    public string? GetSpItemId(string productName)
+        => _cache.FirstOrDefault(e =>
+            e.Name.Equals(productName, StringComparison.OrdinalIgnoreCase))?.SpItemId;
 
     // ── Weight computation ────────────────────────────────────────────────────
 
@@ -341,7 +386,9 @@ public class ProductCatalogService : BackgroundService
 
     // ── SP column setup ───────────────────────────────────────────────────────
 
-    /// <summary>Idempotently creates the 'WeightPerFoot' number column on the Product Catalog list.</summary>
+    /// <summary>Idempotently creates all optional computed columns on the Product Catalog list:
+    /// WeightPerFoot, WeightUnit, and the five token fields (TkMetal/Shape/Alloy/Temper/Conditions).
+    /// Safe to call repeatedly — skips columns that already exist.</summary>
     public async Task EnsureCatalogWeightColumnAsync()
     {
         var graph = GetGraph();
@@ -390,6 +437,80 @@ public class ProductCatalogService : BackgroundService
                 });
             _log.LogInformation("[Catalog] Created 'WeightUnit' column");
         }
+
+        // Token columns — populated by catalog tokenization; read back on each SP cache refresh
+        // so LQ calculations survive reinstall without needing a file cache.
+        var tokenCols = new[]
+        {
+            ("TkMetal",      20),
+            ("TkShape",      40),
+            ("TkAlloy",      40),
+            ("TkTemper",     20),
+            ("TkConditions", 200),   // semicolon-delimited list, e.g. "hot_rolled;sch10"
+        };
+        foreach (var (colName, maxLen) in tokenCols)
+        {
+            var exists2 = (cols?.Value ?? []).Any(c =>
+                c.DisplayName?.Equals(colName, StringComparison.OrdinalIgnoreCase) == true);
+            if (!exists2)
+            {
+                await graph.Sites[site.Id].Lists[list.Id].Columns
+                    .PostAsync(new Microsoft.Graph.Models.ColumnDefinition
+                    {
+                        DisplayName = colName,
+                        Name        = colName,
+                        Text        = new Microsoft.Graph.Models.TextColumn { MaxLength = maxLen }
+                    });
+                _log.LogInformation("[Catalog] Created '{Col}' column", colName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// PATCHes TkMetal/TkShape/TkAlloy/TkTemper/TkConditions onto SP catalog items.
+    /// Called by CatalogAnalysisService after each tokenization batch.
+    /// Requires _cachedSiteId/_cachedListId populated by a prior FetchEntriesAsync call.
+    /// </summary>
+    public async Task PatchCatalogTokensAsync(
+        IReadOnlyList<(string SpItemId, OutlookShredder.Proxy.Models.ProductTokens Tokens)> patches,
+        CancellationToken ct = default)
+    {
+        if (patches.Count == 0) return;
+        var siteId = _cachedSiteId;
+        var listId = _cachedListId;
+        if (siteId is null || listId is null)
+        {
+            _log.LogWarning("[Catalog] PatchCatalogTokensAsync: site/list IDs not cached — skipping SP write");
+            return;
+        }
+
+        var graph = GetGraph();
+        var tasks = patches.Select(async p =>
+        {
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Items[p.SpItemId].Fields
+                    .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["TkMetal"]      = p.Tokens.TkMetal,
+                            ["TkShape"]      = p.Tokens.TkShape,
+                            ["TkAlloy"]      = p.Tokens.TkAlloy,
+                            ["TkTemper"]     = p.Tokens.TkTemper,
+                            ["TkConditions"] = p.Tokens.TkConditions?.Length > 0
+                                ? string.Join(";", p.Tokens.TkConditions) : null,
+                        }
+                    }, cancellationToken: ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Catalog] Token PATCH failed for SP item {Id}", p.SpItemId);
+            }
+        });
+
+        await System.Threading.Tasks.Task.WhenAll(tasks);
+        _log.LogInformation("[Catalog] Patched tokens on {Count} catalog SP items", patches.Count);
     }
 
     // ── Dedup ─────────────────────────────────────────────────────────────────

@@ -685,6 +685,22 @@ public class CatalogAnalysisService
             await File.WriteAllTextAsync(tokensPath,
                 JsonSerializer.Serialize(snapshot, Json), Encoding.UTF8, ct);
 
+            // For catalog target: also patch SP so tokens survive reinstall.
+            if (target == "catalog")
+            {
+                var patches = existing.Values
+                    .Where(t => !t.TokenizationFailed && t.SearchKey != null)
+                    .Select(t => (SpItemId: _catalog.GetSpItemId(t.Name), Tokens: t))
+                    .Where(p => p.SpItemId != null)
+                    .Select(p => (p.SpItemId!, p.Tokens))
+                    .ToList();
+                if (patches.Count > 0)
+                {
+                    try { await _catalog.PatchCatalogTokensAsync(patches, ct); }
+                    catch (Exception ex) { _log.LogWarning(ex, "[Analysis] SP token patch failed for batch"); }
+                }
+            }
+
             _log.LogInformation("[Analysis] {Label} tokenise: {Done}/{Total} ({Fail} failed)",
                 label, processed + failed, pending.Count, failed);
         }
@@ -1277,6 +1293,11 @@ public class CatalogAnalysisService
     public async Task<Dictionary<string, ProductTokens>> GetCatalogTokensByKeyAsync(
         CancellationToken ct = default)
     {
+        // Prefer SP-backed tokens (populated by TokenizeAsync / PatchCatalogTokensAsync).
+        // Falls back to the file cache for migration path and fresh installs before first tokenize.
+        var fromSp = _catalog.GetTokensByKey();
+        if (fromSp.Count > 0) return fromSp;
+
         var tokens = await GetCatalogTokensAsync();
         return tokens
             .Where(t => !string.IsNullOrWhiteSpace(t.SearchKey) && !t.TokenizationFailed)
