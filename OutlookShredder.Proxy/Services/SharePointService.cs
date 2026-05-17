@@ -2268,18 +2268,25 @@ public class SharePointService
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
-        // If AI only extracted $/ft and catalog has a weight, derive $/lb so winner
-        // comparison and pricing analysis work across suppliers quoting different units.
+        // Derive $/lb from catalog weight when PricePerFoot is available — preferred over
+        // AI-provided PricePerPound, which can be wrong if Claude misidentified total vs
+        // per-unit weight. Catalog weight path is more reliable for standard shapes.
         var pricePerPound = product.PricePerPound;
-        if (pricePerPound is null && product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey))
+        if (product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey))
         {
             var catWt = _catalog.FindWeightPerFoot(productSearchKey);
             if (catWt is > 0)
             {
-                pricePerPound = Math.Round(product.PricePerFoot.Value / catWt.Value, 6);
-                _log.LogInformation(
-                    "[SP] Derived PricePerPound={Ppp:F4} from PricePerFoot={Ppf} / CatalogWeight={Wt} for MSPC={Key}",
-                    pricePerPound, product.PricePerFoot, catWt, productSearchKey);
+                var derived = Math.Round(product.PricePerFoot.Value / catWt.Value, 6);
+                if (pricePerPound is not null && Math.Abs(derived - pricePerPound.Value) / pricePerPound.Value > 0.05)
+                    _log.LogWarning(
+                        "[SP] PricePerPound override: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
+                        pricePerPound, derived, product.PricePerFoot, catWt, productSearchKey);
+                else
+                    _log.LogInformation(
+                        "[SP] Derived PricePerPound={Derived:F4} from PricePerFoot={Ppf} / CatalogWeight={Wt} for MSPC={Key}",
+                        derived, product.PricePerFoot, catWt, productSearchKey);
+                pricePerPound = derived;
             }
         }
 
@@ -5131,11 +5138,12 @@ public class SharePointService
         { "kg" => w * 2.20462, "oz" => w / 16.0, "g" => w / 453.592, _ => w };
         static double? Derive(Dictionary<string, object?> row, double? catWt)
         {
+            var total = GetN(row, "TotalPrice"); var qty = GetN(row, "UnitsQuoted") ?? GetN(row, "UnitsRequested");
+            if (catWt is > 0) { var ppf = GetN(row, "PricePerFoot"); if (ppf is > 0) return ppf.Value / catWt.Value; if (total is > 0 && qty is > 0) { var len = GetN(row, "LengthPerUnit"); if (len is > 0) { var lu = row.TryGetValue("LengthUnit", out var luv) ? luv?.ToString() : null; var lb2 = qty.Value * ToFt(len.Value, lu) * catWt.Value; if (lb2 > 0) return total.Value / lb2; } } }
             var ppp = GetN(row, "PricePerPound");
             if (ppp is > 0) return ppp;
-            var total = GetN(row, "TotalPrice"); var qty = GetN(row, "UnitsQuoted") ?? GetN(row, "UnitsRequested"); var wt = GetN(row, "WeightPerUnit");
+            var wt = GetN(row, "WeightPerUnit");
             if (total is > 0 && qty is > 0 && wt is > 0) { var u = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null; var lb = qty.Value * ToPounds2(wt.Value, u); if (lb > 0) return total.Value / lb; }
-            if (catWt is > 0) { var ppf = GetN(row, "PricePerFoot"); if (ppf is > 0) return ppf.Value / catWt.Value; if (total is > 0 && qty is > 0) { var len = GetN(row, "LengthPerUnit"); if (len is > 0) { var lu = row.TryGetValue("LengthUnit", out var luv) ? luv?.ToString() : null; var lb2 = qty.Value * ToFt(len.Value, lu) * catWt.Value; if (lb2 > 0) return total.Value / lb2; } } }
             return null;
         }
         static bool HasWeightablePriceData(Dictionary<string, object?> row)
@@ -5399,20 +5407,12 @@ public class SharePointService
 
         // Derive $/lb from a supplier quote row; returns null if not computable.
         // catWeightPerFoot: lb/ft from catalog — enables $/ft and length-based derivation.
+        // Priority: catalog-weight paths first (more reliable than stored PricePerPound,
+        // which can be wrong when Claude misidentifies total vs per-unit weight).
         static double? DerivePerPound(Dictionary<string, object?> row, double? catWeightPerFoot = null)
         {
-            var ppp = GetNum(row, "PricePerPound");
-            if (ppp is > 0) return ppp;
-
             var total  = GetNum(row, "TotalPrice");
             var qty    = GetNum(row, "UnitsQuoted") ?? GetNum(row, "UnitsRequested");
-            var weight = GetNum(row, "WeightPerUnit");
-            if (total is > 0 && qty is > 0 && weight is > 0)
-            {
-                var unit    = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null;
-                var totalLb = qty.Value * ToPounds(weight.Value, unit);
-                if (totalLb > 0) return total.Value / totalLb;
-            }
 
             if (catWeightPerFoot is > 0)
             {
@@ -5429,6 +5429,17 @@ public class SharePointService
                         if (totalLb2 > 0) return total.Value / totalLb2;
                     }
                 }
+            }
+
+            var ppp = GetNum(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+
+            var weight = GetNum(row, "WeightPerUnit");
+            if (total is > 0 && qty is > 0 && weight is > 0)
+            {
+                var unit    = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null;
+                var totalLb = qty.Value * ToPounds(weight.Value, unit);
+                if (totalLb > 0) return total.Value / totalLb;
             }
 
             return null;
