@@ -5105,7 +5105,7 @@ public class SharePointService
     {
         var cutoff      = DateTime.UtcNow.AddDays(-windowDays);
         var catalogByKey = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
-        var (allSli, _)  = await ReadSupplierItemsAsync(top: 5000);
+        var (allSli, _)  = await ReadSupplierItemsAsync(top: 5000, since: cutoff);
 
         static double? GetN(Dictionary<string, object?> row, string key)
         {
@@ -5535,7 +5535,10 @@ public class SharePointService
         var catalogByKey  = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
 
         // ── 3. Collect priced SLI rows; join each to its catalog token ──────────────
-        var (allSli, _)    = await ReadSupplierItemsAsync(top: 5000);
+        // Filter by Created >= longCutoff so SP returns only recent items directly —
+        // the SLI list may have thousands of rows and SP paginates oldest-first, so
+        // reading without a date filter would miss all recent quotes.
+        var (allSli, _)    = await ReadSupplierItemsAsync(top: 5000, since: longCutoff);
         var priced         = new List<PricedSliToken>(); // within longCutoff — used for LQ price calc
         var pricedAllTime  = new List<PricedSliToken>(); // no date filter — used for SLI ID fallback
         var unpricedCount  = 0;
@@ -5550,7 +5553,9 @@ public class SharePointService
             // Prefer the actual quote receipt/processing date over the SP Modified timestamp.
             // Modified updates on any field patch (e.g. ProductSearchKey) and would make
             // old quotes appear fresh if used first.
-            foreach (var key in new[] { "ReceivedAt", "ProcessedAt", "DateOfQuote", "Modified" })
+            // Created = SP item creation date; stable (never changes); good fallback when
+            // ReceivedAt/ProcessedAt are absent (e.g. manually-entered rows).
+            foreach (var key in new[] { "ReceivedAt", "ProcessedAt", "DateOfQuote", "Created", "Modified" })
             {
                 if (!sli.TryGetValue(key, out var dv) || dv is null) continue;
                 var ds = dv is JsonElement je ? je.ToString() : dv.ToString();
