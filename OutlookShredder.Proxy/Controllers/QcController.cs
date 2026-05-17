@@ -9,11 +9,13 @@ public class QcController : ControllerBase
 {
     private readonly SharePointService      _sp;
     private readonly PricingAnalysisService _pricing;
+    private readonly ProductCatalogService  _catalog;
 
-    public QcController(SharePointService sp, PricingAnalysisService pricing)
+    public QcController(SharePointService sp, PricingAnalysisService pricing, ProductCatalogService catalog)
     {
         _sp      = sp;
         _pricing = pricing;
+        _catalog = catalog;
     }
 
     /// <summary>
@@ -99,6 +101,19 @@ public class QcController : ControllerBase
     {
         await _sp.UpdateQcRowAsync(req.ItemId, req.Qc, req.QcCut);
         return Ok();
+    }
+
+    /// <summary>
+    /// Analyses SLI pricing coverage for the given rolling window.
+    /// Reports currently-priced rows, rows unlocked by existing catalog weights, rows that
+    /// would unlock if catalog WeightPerFoot was populated, and rows with no usable price.
+    /// Query param: days (default 14).
+    /// </summary>
+    [HttpGet("lq-analysis")]
+    public async Task<IActionResult> LqAnalysisAsync([FromQuery] int days = 14)
+    {
+        var result = await _sp.AnalyzeLqAsync(days);
+        return Ok(result);
     }
 
     /// <summary>

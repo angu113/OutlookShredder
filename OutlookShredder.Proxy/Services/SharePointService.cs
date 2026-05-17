@@ -5079,6 +5079,136 @@ public class SharePointService
         return cleared;
     }
 
+    /// <summary>
+    /// Analyses SLI pricing coverage for the given window.
+    /// Reports how many rows are currently priceable vs. how many would become priceable
+    /// if Product Catalog 'WeightPerFoot' values were populated.
+    /// </summary>
+    public async Task<LqAnalysisResult> AnalyzeLqAsync(int windowDays)
+    {
+        var cutoff      = DateTime.UtcNow.AddDays(-windowDays);
+        var catalogByKey = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
+        var (allSli, _)  = await ReadSupplierItemsAsync(top: 5000);
+
+        static double? GetN(Dictionary<string, object?> row, string key)
+        {
+            if (!row.TryGetValue(key, out var v) || v is null) return null;
+            return v switch
+            {
+                double d => d,
+                int    i => (double)i,
+                System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.Number => je.GetDouble(),
+                _ => double.TryParse(v.ToString(), out var d) ? d : null
+            };
+        }
+        static bool Regret(Dictionary<string, object?> row)
+        {
+            if (!row.TryGetValue("IsRegret", out var v) || v is null) return false;
+            return v switch { bool b => b, System.Text.Json.JsonElement je => je.ValueKind == System.Text.Json.JsonValueKind.True, _ => false };
+        }
+        static double ToFt(double v, string? u) => (u?.ToLowerInvariant()) switch
+        {
+            "in" or "\"" => v / 12.0, "mm" => v / 304.8, "cm" => v / 30.48, "m" => v * 3.28084, _ => v
+        };
+        static double ToPounds2(double w, string? u) => (u?.ToLowerInvariant()) switch
+        { "kg" => w * 2.20462, "oz" => w / 16.0, "g" => w / 453.592, _ => w };
+        static double? Derive(Dictionary<string, object?> row, double? catWt)
+        {
+            var ppp = GetN(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+            var total = GetN(row, "TotalPrice"); var qty = GetN(row, "UnitsQuoted") ?? GetN(row, "UnitsRequested"); var wt = GetN(row, "WeightPerUnit");
+            if (total is > 0 && qty is > 0 && wt is > 0) { var u = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null; var lb = qty.Value * ToPounds2(wt.Value, u); if (lb > 0) return total.Value / lb; }
+            if (catWt is > 0) { var ppf = GetN(row, "PricePerFoot"); if (ppf is > 0) return ppf.Value / catWt.Value; if (total is > 0 && qty is > 0) { var len = GetN(row, "LengthPerUnit"); if (len is > 0) { var lu = row.TryGetValue("LengthUnit", out var luv) ? luv?.ToString() : null; var lb2 = qty.Value * ToFt(len.Value, lu) * catWt.Value; if (lb2 > 0) return total.Value / lb2; } } }
+            return null;
+        }
+        static bool HasWeightablePriceData(Dictionary<string, object?> row)
+        {
+            if (GetN(row, "PricePerFoot") is > 0) return true;
+            var total = GetN(row, "TotalPrice"); var qty = GetN(row, "UnitsQuoted") ?? GetN(row, "UnitsRequested"); var len = GetN(row, "LengthPerUnit");
+            return total is > 0 && qty is > 0 && len is > 0;
+        }
+
+        int staleOrNoKey = 0, noToken = 0, currentlyPriced = 0, actuallyUnlocked = 0, potentiallyUnlockable = 0, noUsable = 0;
+
+        var byKey = new Dictionary<string, (int Total, int Priced, int Unlocked, int Potential, List<double> Ppf, List<double> Ppl)>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var sli in allSli)
+        {
+            if (Regret(sli)) continue;
+
+            DateTime? quoteDate = null;
+            foreach (var k in new[] { "Modified", "ProcessedAt", "DateOfQuote", "ReceivedAt" })
+            {
+                if (!sli.TryGetValue(k, out var dv) || dv is null) continue;
+                var ds = dv is System.Text.Json.JsonElement je2 ? je2.ToString() : dv.ToString();
+                if (DateTime.TryParse(ds, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                { quoteDate = dt.ToUniversalTime(); break; }
+            }
+            if (quoteDate.HasValue && quoteDate.Value < cutoff) { staleOrNoKey++; continue; }
+
+            var searchKey = GetStr(sli, "CatalogProductSearchKey") ?? GetStr(sli, "ProductSearchKey");
+            if (string.IsNullOrWhiteSpace(searchKey)) { staleOrNoKey++; continue; }
+            if (!catalogByKey.ContainsKey(searchKey)) { noToken++; continue; }
+
+            if (!byKey.TryGetValue(searchKey, out var agg))
+                byKey[searchKey] = agg = (0, 0, 0, 0, new List<double>(), new List<double>());
+
+            var catWt   = _catalog.FindWeightPerFoot(searchKey);
+            var pplBase = Derive(sli, null);
+            var pplFull = Derive(sli, catWt);
+
+            var bucket = byKey[searchKey];
+            bucket = bucket with { Total = bucket.Total + 1 };
+
+            if (pplBase is > 0)
+            {
+                bucket = bucket with { Priced = bucket.Priced + 1 };
+                bucket.Ppl.Add(pplBase.Value);
+                currentlyPriced++;
+            }
+            else if (pplFull is > 0 && catWt is > 0)
+            {
+                bucket = bucket with { Unlocked = bucket.Unlocked + 1 };
+                actuallyUnlocked++;
+                var ppf2 = GetN(sli, "PricePerFoot");
+                if (ppf2 is > 0) bucket.Ppf.Add(ppf2.Value);
+            }
+            else if (HasWeightablePriceData(sli))
+            {
+                bucket = bucket with { Potential = bucket.Potential + 1 };
+                potentiallyUnlockable++;
+                var ppf2 = GetN(sli, "PricePerFoot");
+                if (ppf2 is > 0) bucket.Ppf.Add(ppf2.Value);
+            }
+            else
+            {
+                noUsable++;
+            }
+
+            byKey[searchKey] = bucket;
+        }
+
+        var products = byKey
+            .Where(kv => kv.Value.Total > 0)
+            .OrderByDescending(kv => kv.Value.Potential + kv.Value.Unlocked)
+            .ThenByDescending(kv => kv.Value.Total)
+            .Select(kv =>
+            {
+                var (key, v) = kv;
+                var catWt   = _catalog.FindWeightPerFoot(key);
+                var name    = _catalog.FindProductName(key) ?? key;
+                return new LqAnalysisProduct(
+                    key, name, v.Total, v.Priced, v.Unlocked, v.Potential,
+                    catWt.HasValue, catWt,
+                    v.Ppf.Count  > 0 ? v.Ppf.Average()  : null,
+                    v.Ppl.Count  > 0 ? v.Ppl.Average()  : null);
+            })
+            .ToList();
+
+        return new LqAnalysisResult(windowDays, allSli.Count, staleOrNoKey, noToken,
+            currentlyPriced, actuallyUnlocked, potentiallyUnlockable, noUsable, products);
+    }
+
     private readonly record struct PricedSliToken(
         string   TkMetal,
         string   TkShape,
@@ -5191,8 +5321,18 @@ public class SharePointService
             _    => weight
         };
 
+        static double ToFeet(double v, string? unit) => (unit?.ToLowerInvariant()) switch
+        {
+            "in" or "\"" or "inch" or "inches" => v / 12.0,
+            "mm" => v / 304.8,
+            "cm" => v / 30.48,
+            "m"  => v * 3.28084,
+            _    => v
+        };
+
         // Derive $/lb from a supplier quote row; returns null if not computable.
-        static double? DerivePerPound(Dictionary<string, object?> row)
+        // catWeightPerFoot: lb/ft from catalog — enables $/ft and length-based derivation.
+        static double? DerivePerPound(Dictionary<string, object?> row, double? catWeightPerFoot = null)
         {
             var ppp = GetNum(row, "PricePerPound");
             if (ppp is > 0) return ppp;
@@ -5205,6 +5345,23 @@ public class SharePointService
                 var unit    = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null;
                 var totalLb = qty.Value * ToPounds(weight.Value, unit);
                 if (totalLb > 0) return total.Value / totalLb;
+            }
+
+            if (catWeightPerFoot is > 0)
+            {
+                var ppf = GetNum(row, "PricePerFoot");
+                if (ppf is > 0) return ppf.Value / catWeightPerFoot.Value;
+
+                if (total is > 0 && qty is > 0)
+                {
+                    var len = GetNum(row, "LengthPerUnit");
+                    if (len is > 0)
+                    {
+                        var lenUnit  = row.TryGetValue("LengthUnit", out var lu) ? lu?.ToString() : null;
+                        var totalLb2 = qty.Value * ToFeet(len.Value, lenUnit) * catWeightPerFoot.Value;
+                        if (totalLb2 > 0) return total.Value / totalLb2;
+                    }
+                }
             }
 
             return null;
@@ -5314,7 +5471,8 @@ public class SharePointService
             if (string.IsNullOrWhiteSpace(tok.TkMetal) || string.IsNullOrWhiteSpace(tok.TkShape))
             { noTokenCount++; continue; }
 
-            var ppl = DerivePerPound(sli);
+            var catWt = _catalog.FindWeightPerFoot(searchKey!);
+            var ppl = DerivePerPound(sli, catWt);
             if (ppl is null or <= 0) { unpricedCount++; continue; }
 
             priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
@@ -9459,3 +9617,26 @@ public record LqMatch(
     double? LongMaxPricePerPound);
 
 public record CustomerLookupResult(string BusinessPartner, string? PopupMessage, string? ContactName);
+
+public record LqAnalysisResult(
+    int WindowDays,
+    int TotalSli,
+    int StaleOrNoKey,
+    int NoToken,
+    int CurrentlyPriced,
+    int ActuallyUnlocked,
+    int PotentiallyUnlockable,
+    int NoUsablePrice,
+    IReadOnlyList<LqAnalysisProduct> ByProduct);
+
+public record LqAnalysisProduct(
+    string SearchKey,
+    string ProductName,
+    int TotalRows,
+    int PricedRows,
+    int UnlockedRows,
+    int PotentialRows,
+    bool HasCatalogWeight,
+    double? CatalogWeightPerFoot,
+    double? AvgPricePerFoot,
+    double? AvgDerivedPricePerPound);

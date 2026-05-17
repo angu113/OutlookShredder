@@ -134,4 +134,12 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
             return BadRequest("Provide a ?name= query parameter.");
         return Ok(catalog.Diagnose(name, top));
     }
+
+    /// <summary>Idempotently creates the 'WeightPerFoot' number column on the Product Catalog list.</summary>
+    [HttpPost("ensure-weight-column")]
+    public async Task<IActionResult> EnsureWeightColumnAsync()
+    {
+        await catalog.EnsureCatalogWeightColumnAsync();
+        return Ok(new { ok = true });
+    }
 }

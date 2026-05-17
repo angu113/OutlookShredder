@@ -44,7 +44,7 @@ public class ProductCatalogService : BackgroundService
     private readonly ILogger<ProductCatalogService> _log;
     private GraphServiceClient? _graph;
 
-    private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens);
+    private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens, double? WeightPerFoot = null);
     private volatile IReadOnlyList<Entry> _cache = [];
     public string? LastError    { get; private set; }
     public string? LastDiag     { get; private set; }
@@ -151,7 +151,16 @@ public class ProductCatalogService : BackgroundService
                             data.TryGetValue("SearchKey",                out var k2) ? k2 : null)
                            ?.ToString();
                 if (string.IsNullOrWhiteSpace(name)) return null;
-                return new Entry(name!, key, Tokenize(name!));
+                var rawWt = data.TryGetValue("WeightPerFoot", out var wv) ? wv : null;
+                double? wt = rawWt switch
+                {
+                    double d   => d,
+                    int    iv  => (double)iv,
+                    System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.Number => je.GetDouble(),
+                    not null   => double.TryParse(rawWt.ToString(), out var dp) ? dp : null,
+                    _          => null
+                };
+                return new Entry(name!, key, Tokenize(name!), wt);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -169,6 +178,61 @@ public class ProductCatalogService : BackgroundService
         var credential   = new ClientSecretCredential(tenantId, clientId, clientSecret);
         _graph = new GraphServiceClient(credential, ["https://graph.microsoft.com/.default"]);
         return _graph;
+    }
+
+    // ── Public lookups ────────────────────────────────────────────────────────
+
+    public double? FindWeightPerFoot(string searchKey)
+    {
+        var c = _cache;
+        return c.FirstOrDefault(e => e.SearchKey != null &&
+            e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase))?.WeightPerFoot;
+    }
+
+    public string? FindProductName(string searchKey)
+    {
+        var c = _cache;
+        return c.FirstOrDefault(e => e.SearchKey != null &&
+            e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase))?.Name;
+    }
+
+    // ── SP column setup ───────────────────────────────────────────────────────
+
+    /// <summary>Idempotently creates the 'WeightPerFoot' number column on the Product Catalog list.</summary>
+    public async Task EnsureCatalogWeightColumnAsync()
+    {
+        var graph = GetGraph();
+        var siteUrl = _config["ProductCatalog:SiteUrl"]
+            ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+        var uri     = new Uri(siteUrl);
+        var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
+        var site    = await graph.Sites[siteKey].GetAsync();
+        if (site?.Id is null) throw new InvalidOperationException($"Site not found: {siteKey}");
+
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var lists    = await graph.Sites[site.Id].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+        var list = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null) throw new InvalidOperationException($"Catalog list '{listName}' not found");
+
+        var cols = await graph.Sites[site.Id].Lists[list.Id].Columns.GetAsync();
+        var exists = (cols?.Value ?? []).Any(c =>
+            c.DisplayName?.Equals("WeightPerFoot", StringComparison.OrdinalIgnoreCase) == true);
+        if (!exists)
+        {
+            await graph.Sites[site.Id].Lists[list.Id].Columns
+                .PostAsync(new Microsoft.Graph.Models.ColumnDefinition
+                {
+                    DisplayName = "WeightPerFoot",
+                    Name        = "WeightPerFoot",
+                    Number      = new Microsoft.Graph.Models.NumberColumn()
+                });
+            _log.LogInformation("[Catalog] Created 'WeightPerFoot' column");
+        }
+        else
+        {
+            _log.LogInformation("[Catalog] 'WeightPerFoot' column already exists");
+        }
     }
 
     // ── Dedup ─────────────────────────────────────────────────────────────────
