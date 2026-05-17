@@ -5332,7 +5332,7 @@ public class SharePointService
             PricePerPiece:      N(d, "PricePerPiece"),
             TotalPrice:         N(d, "TotalPrice"),
             ReceivedAt:         GetStr(d, "ReceivedAt") ?? GetStr(d, "ProcessedAt"),
-            JobReference:       GetStr(d, "JobReference"),
+            JobReference:       GetStr(d, "RFQ_ID") ?? GetStr(d, "RFQ_x005F_ID") ?? GetStr(d, "JobReference"),
             QuoteReference:     GetStr(d, "QuoteReference"),
             SupplierComments:   GetStr(d, "SupplierProductComments"));
     }
@@ -5344,6 +5344,13 @@ public class SharePointService
     ///   SupplierLineItem.ProductSearchKey '92 CatalogToken (TkMetal, TkShape, TkAlloy, TkConditions)
     ///   CatalogToken fields match QC row Metal + Shape; Title column filters by alloy/condition.
     /// </summary>
+    private static double Median(List<double> values)
+    {
+        var sorted = values.Order().ToList();
+        int mid = sorted.Count / 2;
+        return sorted.Count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2.0 : sorted[mid];
+    }
+
     public async Task<LqUpdateResult> UpdateQcLqAsync()
     {
         var (qcSiteId, qcListId, _) = await ResolveQcAsync();
@@ -5528,11 +5535,12 @@ public class SharePointService
         var catalogByKey  = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
 
         // ── 3. Collect priced SLI rows; join each to its catalog token ──────────────
-        var (allSli, _)   = await ReadSupplierItemsAsync(top: 5000);
-        var priced        = new List<PricedSliToken>();
-        var unpricedCount = 0;
-        var noTokenCount  = 0;
-        var staleCount    = 0;
+        var (allSli, _)    = await ReadSupplierItemsAsync(top: 5000);
+        var priced         = new List<PricedSliToken>(); // within longCutoff — used for LQ price calc
+        var pricedAllTime  = new List<PricedSliToken>(); // no date filter — used for SLI ID fallback
+        var unpricedCount  = 0;
+        var noTokenCount   = 0;
+        var staleCount     = 0;
 
         foreach (var sli in allSli)
         {
@@ -5546,7 +5554,6 @@ public class SharePointService
                 if (DateTime.TryParse(ds, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
                 { quoteDate = dt.ToUniversalTime(); break; }
             }
-            if (quoteDate.HasValue && quoteDate.Value < longCutoff) { staleCount++; continue; }
 
             var searchKey = GetStr(sli, "CatalogProductSearchKey") ?? GetStr(sli, "ProductSearchKey");
             if (string.IsNullOrWhiteSpace(searchKey)) { noTokenCount++; continue; }
@@ -5558,9 +5565,14 @@ public class SharePointService
             var ppl = DerivePerPound(sli, catWt);
             if (ppl is null or <= 0) { unpricedCount++; continue; }
 
-            priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
+            var token = new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
                 tok.TkConditions ?? [], ppl.Value, quoteDate ?? DateTime.UtcNow,
-                GetStr(sli, "SpItemId")));
+                GetStr(sli, "SpItemId"));
+
+            pricedAllTime.Add(token);
+
+            if (quoteDate.HasValue && quoteDate.Value < longCutoff) { staleCount++; continue; }
+            priced.Add(token);
         }
 
         _log.LogInformation(
@@ -5601,32 +5613,49 @@ public class SharePointService
                          && (!filtered || MatchesTitleFilter(p, titleFilters)))
                 .ToList();
 
+            // All-time matches (no date cutoff) — used as fallback for SLI IDs when
+            // in-window data is absent so clicking a min/max price always has a source row.
+            var matchedAllTime = pricedAllTime
+                .Where(p => qcMetals.Contains(p.TkMetal)
+                         && qcShapes.Contains(p.TkShape)
+                         && (!filtered || MatchesTitleFilter(p, titleFilters)))
+                .ToList();
+
             var shortMatched  = matched.Where(p => p.QuoteDate >= shortCutoff).ToList();
             var shortPrices   = shortMatched.Select(p => p.PricePerPound).ToList();
             var longPrices    = matched.Select(p => p.PricePerPound).ToList();
-            var shortMinSliId = shortMatched.Count > 0 ? shortMatched.MinBy(p => p.PricePerPound).SliItemId : null;
-            var shortMaxSliId = shortMatched.Count > 0 ? shortMatched.MaxBy(p => p.PricePerPound).SliItemId : null;
-            var longMinSliId  = matched.Count      > 0 ? matched.MinBy(p => p.PricePerPound).SliItemId      : null;
-            var longMaxSliId  = matched.Count      > 0 ? matched.MaxBy(p => p.PricePerPound).SliItemId      : null;
+
+            // SLI IDs: prefer in-window source (matches the displayed price); fall back to all-time.
+            var sliSrcShort = shortMatched.Count > 0 ? shortMatched : matchedAllTime;
+            var sliSrcLong  = matched.Count      > 0 ? matched      : matchedAllTime;
+            var shortMinSliId = sliSrcShort.Count > 0 ? sliSrcShort.MinBy(p => p.PricePerPound).SliItemId : null;
+            var shortMaxSliId = sliSrcShort.Count > 0 ? sliSrcShort.MaxBy(p => p.PricePerPound).SliItemId : null;
+            var longMinSliId  = sliSrcLong.Count  > 0 ? sliSrcLong.MinBy(p => p.PricePerPound).SliItemId  : null;
+            var longMaxSliId  = sliSrcLong.Count  > 0 ? sliSrcLong.MaxBy(p => p.PricePerPound).SliItemId  : null;
 
             var metalLabel = string.Join("; ", metals);
             var shapeLabel = string.Join("; ", shapes);
 
-            if (shortPrices.Count > 0 || longPrices.Count > 0)
+            var hasPrices = shortPrices.Count > 0 || longPrices.Count > 0;
+            var hasSliIds = shortMinSliId is not null || longMinSliId is not null;
+            if (hasPrices || hasSliIds)
             {
                 var patch = new Dictionary<string, object?>();
 
-                double? lqShort = shortPrices.Count > 0 ? shortPrices.Average() : null;
-                double? lqLong  = longPrices.Count  > 0 ? longPrices.Average()  : null;
+                double? lqShort = shortPrices.Count > 0 ? Median(shortPrices) : null;
+                double? lqLong  = longPrices.Count  > 0 ? Median(longPrices)  : null;
 
-                patch[lqField]          = lqShort;
-                patch[lqCountField]     = shortPrices.Count > 0 ? (double)shortPrices.Count : (object?)null;
-                patch[lqMinField]       = shortPrices.Count > 0 ? shortPrices.Min()         : (object?)null;
-                patch[lqMaxField]       = shortPrices.Count > 0 ? shortPrices.Max()         : (object?)null;
-                patch[lqLongField]      = lqLong;
-                patch[lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null;
-                patch[lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null;
-                patch[lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null;
+                if (hasPrices)
+                {
+                    patch[lqField]          = lqShort;
+                    patch[lqCountField]     = shortPrices.Count > 0 ? (double)shortPrices.Count : (object?)null;
+                    patch[lqMinField]       = shortPrices.Count > 0 ? shortPrices.Min()         : (object?)null;
+                    patch[lqMaxField]       = shortPrices.Count > 0 ? shortPrices.Max()         : (object?)null;
+                    patch[lqLongField]      = lqLong;
+                    patch[lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null;
+                    patch[lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null;
+                    patch[lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null;
+                }
                 patch[lqMinSliField]     = (object?)shortMinSliId;
                 patch[lqMaxSliField]     = (object?)shortMaxSliId;
                 patch[lqLongMinSliField] = (object?)longMinSliId;
@@ -5635,19 +5664,28 @@ public class SharePointService
                 await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
                     .PatchAsync(new FieldValueSet { AdditionalData = patch });
 
-                updated.Add(new LqMatch(metalLabel, shapeLabel,
-                    lqShort, shortPrices.Count,
-                    shortPrices.Count > 0 ? shortPrices.Min() : null,
-                    shortPrices.Count > 0 ? shortPrices.Max() : null,
-                    lqLong,  longPrices.Count,
-                    longPrices.Count  > 0 ? longPrices.Min()  : null,
-                    longPrices.Count  > 0 ? longPrices.Max()  : null));
+                if (hasPrices)
+                {
+                    updated.Add(new LqMatch(metalLabel, shapeLabel,
+                        lqShort, shortPrices.Count,
+                        shortPrices.Count > 0 ? shortPrices.Min() : null,
+                        shortPrices.Count > 0 ? shortPrices.Max() : null,
+                        lqLong,  longPrices.Count,
+                        longPrices.Count  > 0 ? longPrices.Min()  : null,
+                        longPrices.Count  > 0 ? longPrices.Max()  : null));
 
-                _log.LogInformation(
-                    "[LQ] Updated {Metal}/{Shape}  short={Lq5:F4}(n={N5}, {D5}d)  long={Lq10:F4}(n={N10}, {D10}d)",
-                    metalLabel, shapeLabel,
-                    lqShort?.ToString("F4") ?? "-", shortPrices.Count, shortDays,
-                    lqLong?.ToString("F4")  ?? "-", longPrices.Count,  longDays);
+                    _log.LogInformation(
+                        "[LQ] Updated {Metal}/{Shape}  short={Lq5:F4}(n={N5}, {D5}d)  long={Lq10:F4}(n={N10}, {D10}d)",
+                        metalLabel, shapeLabel,
+                        lqShort?.ToString("F4") ?? "-", shortPrices.Count, shortDays,
+                        lqLong?.ToString("F4")  ?? "-", longPrices.Count,  longDays);
+                }
+                else
+                {
+                    _log.LogInformation(
+                        "[LQ] SLI IDs only (all-time fallback) {Metal}/{Shape}  shortMin={ShortMin} longMin={LongMin}",
+                        metalLabel, shapeLabel, shortMinSliId ?? "-", longMinSliId ?? "-");
+                }
             }
             else
             {
