@@ -2268,6 +2268,21 @@ public class SharePointService
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
+        // If AI only extracted $/ft and catalog has a weight, derive $/lb so winner
+        // comparison and pricing analysis work across suppliers quoting different units.
+        var pricePerPound = product.PricePerPound;
+        if (pricePerPound is null && product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey))
+        {
+            var catWt = _catalog.FindWeightPerFoot(productSearchKey);
+            if (catWt is > 0)
+            {
+                pricePerPound = Math.Round(product.PricePerFoot.Value / catWt.Value, 6);
+                _log.LogInformation(
+                    "[SP] Derived PricePerPound={Ppp:F4} from PricePerFoot={Ppf} / CatalogWeight={Wt} for MSPC={Key}",
+                    pricePerPound, product.PricePerFoot, catWt, productSearchKey);
+            }
+        }
+
         var fieldData = new Dictionary<string, object?>
         {
             ["Title"]                    = title,
@@ -2290,7 +2305,7 @@ public class SharePointService
             ["DimLength"]                = product.DimLength,
             ["WeightPerUnit"]            = product.WeightPerUnit,
             ["WeightUnit"]               = product.WeightUnit,
-            ["PricePerPound"]            = product.PricePerPound,
+            ["PricePerPound"]            = pricePerPound,
             ["PricePerFoot"]             = product.PricePerFoot,
             ["PricePerPiece"]            = product.PricePerPiece,
             ["TotalPrice"]               = product.TotalPrice ?? ComputeTotalPrice(product),
