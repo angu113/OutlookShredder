@@ -4954,7 +4954,8 @@ public class SharePointService
         // Metal and Shape are multi-value lookup fields; QC Cut contains notes.
         var wantedDisplay = new[] { "Metal", "Shape", "Title", "QC", "QC Cut",
                                     "LQ", "LQ Count", "LQ Min", "LQ Max",
-                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max" };
+                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max",
+                                    "LQ Min SLI", "LQ Max SLI", "LQ Long Min SLI", "LQ Long Max SLI" };
 
         var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
 
@@ -5052,7 +5053,8 @@ public class SharePointService
         var graph = GetGraph();
 
         var wantedDisplay = new[] { "LQ", "LQ Count", "LQ Min", "LQ Max",
-                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max" };
+                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max",
+                                    "LQ Min SLI", "LQ Max SLI", "LQ Long Min SLI", "LQ Long Max SLI" };
         var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
         var lqFields = (colsResp?.Value ?? [])
             .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
@@ -5231,7 +5233,8 @@ public class SharePointService
         string?  TkTemper,
         string[] TkConditions,
         double   PricePerPound,
-        DateTime QuoteDate);
+        DateTime QuoteDate,
+        string?  SliItemId);
 
     // Returns (tokenMetal, impliedCondition?) — "Hot Rolled" maps to steel + hot_rolled condition.
     private static (string? Metal, string? Condition) ClassifyQcMetal(string s) =>
@@ -5291,6 +5294,48 @@ public class SharePointService
     }
 
     // ??"?????"??? LQ update ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+
+    /// <summary>
+    /// Reads a single SupplierLineItem from SP by its item ID and returns key pricing fields.
+    /// Returns null if the item is not found.
+    /// </summary>
+    public async Task<SliDetail?> ReadSliDetailAsync(string sliItemId)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        var item = await GetGraph().Sites[siteId].Lists[sliListId].Items[sliItemId]
+            .GetAsync(r => r.QueryParameters.Expand = ["fields"]);
+
+        var d = item?.Fields?.AdditionalData;
+        if (d is null) return null;
+
+        static double? N(IDictionary<string, object?> d, string k)
+        {
+            if (!d.TryGetValue(k, out var v) || v is null) return null;
+            return v switch {
+                double dbl                                               => dbl,
+                decimal dec                                              => (double)dec,
+                int i                                                    => i,
+                JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetDouble(),
+                _                                                        => double.TryParse(v.ToString(), out var p) ? p : null
+            };
+        }
+
+        return new SliDetail(
+            SupplierName:       GetStr(d, "SupplierName"),
+            ProductName:        GetStr(d, "SupplierProductName") ?? GetStr(d, "ProductName"),
+            CatalogProductName: GetStr(d, "CatalogProductName"),
+            Mspc:               GetStr(d, "CatalogProductSearchKey") ?? GetStr(d, "ProductSearchKey"),
+            PricePerPound:      N(d, "PricePerPound"),
+            PricePerFoot:       N(d, "PricePerFoot"),
+            PricePerPiece:      N(d, "PricePerPiece"),
+            TotalPrice:         N(d, "TotalPrice"),
+            ReceivedAt:         GetStr(d, "ReceivedAt") ?? GetStr(d, "ProcessedAt"),
+            JobReference:       GetStr(d, "JobReference"),
+            QuoteReference:     GetStr(d, "QuoteReference"),
+            SupplierComments:   GetStr(d, "SupplierProductComments"));
+    }
 
     /// <summary>
     /// Matches priced supplier quotes to QC Metal+Shape rows via catalog token lookup.
@@ -5384,7 +5429,8 @@ public class SharePointService
 
         // ??"?????"??? 1. Fetch QC rows with item IDs ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
         var wantedDisplay = new[] { "Metal", "Shape", "Title", "LQ", "LQ Count", "LQ Min", "LQ Max",
-                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max" };
+                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max",
+                                    "LQ Min SLI", "LQ Max SLI", "LQ Long Min SLI", "LQ Long Max SLI" };
         var colsResp = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
         var fields = (colsResp?.Value ?? [])
             .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
@@ -5426,6 +5472,28 @@ public class SharePointService
         var lqLongCountField = await EnsureNumberColumn("LQ Long Count", "LQ_Long_Count");
         var lqLongMinField   = await EnsureNumberColumn("LQ Long Min",   "LQ_Long_Min");
         var lqLongMaxField   = await EnsureNumberColumn("LQ Long Max",   "LQ_Long_Max");
+
+        async Task<string> EnsureTextColumn(string display, string fallback)
+        {
+            var existing = ColInternal(display);
+            if (existing is not null) return existing;
+            _log.LogInformation("[LQ] '{Display}' column not found  -- creating it", display);
+            var created = await graph.Sites[qcSiteId].Lists[qcListId].Columns
+                .PostAsync(new ColumnDefinition
+                {
+                    Name        = fallback,
+                    DisplayName = display,
+                    Text        = new TextColumn(),
+                });
+            var name = created?.Name ?? fallback;
+            _log.LogInformation("[LQ] Created '{Display}' column (internal: {Name})", display, name);
+            return name;
+        }
+
+        var lqMinSliField     = await EnsureTextColumn("LQ Min SLI",      "LQ_Min_SLI");
+        var lqMaxSliField     = await EnsureTextColumn("LQ Max SLI",      "LQ_Max_SLI");
+        var lqLongMinSliField = await EnsureTextColumn("LQ Long Min SLI", "LQ_Long_Min_SLI");
+        var lqLongMaxSliField = await EnsureTextColumn("LQ Long Max SLI", "LQ_Long_Max_SLI");
 
         var qcItemsResp = await graph.Sites[qcSiteId].Lists[qcListId].Items
             .GetAsync(r =>
@@ -5491,7 +5559,8 @@ public class SharePointService
             if (ppl is null or <= 0) { unpricedCount++; continue; }
 
             priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
-                tok.TkConditions ?? [], ppl.Value, quoteDate ?? DateTime.UtcNow));
+                tok.TkConditions ?? [], ppl.Value, quoteDate ?? DateTime.UtcNow,
+                GetStr(sli, "SpItemId")));
         }
 
         _log.LogInformation(
@@ -5532,8 +5601,13 @@ public class SharePointService
                          && (!filtered || MatchesTitleFilter(p, titleFilters)))
                 .ToList();
 
-            var shortPrices = matched.Where(p => p.QuoteDate >= shortCutoff).Select(p => p.PricePerPound).ToList();
-            var longPrices  = matched.Select(p => p.PricePerPound).ToList();
+            var shortMatched  = matched.Where(p => p.QuoteDate >= shortCutoff).ToList();
+            var shortPrices   = shortMatched.Select(p => p.PricePerPound).ToList();
+            var longPrices    = matched.Select(p => p.PricePerPound).ToList();
+            var shortMinSliId = shortMatched.Count > 0 ? shortMatched.MinBy(p => p.PricePerPound).SliItemId : null;
+            var shortMaxSliId = shortMatched.Count > 0 ? shortMatched.MaxBy(p => p.PricePerPound).SliItemId : null;
+            var longMinSliId  = matched.Count      > 0 ? matched.MinBy(p => p.PricePerPound).SliItemId      : null;
+            var longMaxSliId  = matched.Count      > 0 ? matched.MaxBy(p => p.PricePerPound).SliItemId      : null;
 
             var metalLabel = string.Join("; ", metals);
             var shapeLabel = string.Join("; ", shapes);
@@ -5553,6 +5627,10 @@ public class SharePointService
                 patch[lqLongCountField] = longPrices.Count  > 0 ? (double)longPrices.Count  : (object?)null;
                 patch[lqLongMinField]   = longPrices.Count  > 0 ? longPrices.Min()          : (object?)null;
                 patch[lqLongMaxField]   = longPrices.Count  > 0 ? longPrices.Max()          : (object?)null;
+                patch[lqMinSliField]     = (object?)shortMinSliId;
+                patch[lqMaxSliField]     = (object?)shortMaxSliId;
+                patch[lqLongMinSliField] = (object?)longMinSliId;
+                patch[lqLongMaxSliField] = (object?)longMaxSliId;
 
                 await graph.Sites[qcSiteId].Lists[qcListId].Items[id].Fields
                     .PatchAsync(new FieldValueSet { AdditionalData = patch });
@@ -9614,6 +9692,20 @@ public record CustomerContactRow(string CustomerName, string ContactName, string
 
 public record QcListResult(string[] Columns, string[][] Rows, string[] ItemIds,
     DateTime? LastModified = null, int ShortDays = 5, int LongDays = 10);
+
+public record SliDetail(
+    string? SupplierName,
+    string? ProductName,
+    string? CatalogProductName,
+    string? Mspc,
+    double? PricePerPound,
+    double? PricePerFoot,
+    double? PricePerPiece,
+    double? TotalPrice,
+    string? ReceivedAt,
+    string? JobReference,
+    string? QuoteReference,
+    string? SupplierComments);
 
 public record LqUpdateResult(
     List<LqMatch> Updated,

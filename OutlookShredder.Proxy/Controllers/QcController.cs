@@ -126,6 +126,19 @@ public class QcController : ControllerBase
         var cleared = await _sp.ClearQcLqAsync();
         return Ok(new { cleared });
     }
+
+    /// <summary>
+    /// Returns the key fields of a single SupplierLineItem by its SharePoint item ID.
+    /// Used by the QC grid to show detail when clicking a min/max quote price.
+    /// Returns 404 if the item is not found.
+    /// </summary>
+    [HttpGet("sli/{itemId}")]
+    public async Task<IActionResult> GetSliDetailAsync(string itemId)
+    {
+        var detail = await _sp.ReadSliDetailAsync(itemId);
+        if (detail is null) return NotFound();
+        return Ok(detail);
+    }
 }
 
 public record QcRowUpdateRequest(string ItemId, string? Qc, string? QcCut);
