@@ -78,7 +78,20 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
 
         await catalog.RefreshAsync();
 
-        return Ok(new { added, skipped, total = added + skipped });
+        // Auto-compute weights for newly added items (non-fatal)
+        int weightsComputed = 0;
+        try
+        {
+            var wr = await catalog.ComputeWeightsAsync(dryRun: false, overwrite: false, ct: ct);
+            weightsComputed = wr.Computed;
+        }
+        catch (Exception ex)
+        {
+            // Weight computation is best-effort — column may not exist yet
+            _ = ex;
+        }
+
+        return Ok(new { added, skipped, total = added + skipped, weightsComputed });
     }
 
     /// <summary>
@@ -141,5 +154,38 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     {
         await catalog.EnsureCatalogWeightColumnAsync();
         return Ok(new { ok = true });
+    }
+
+    /// <summary>
+    /// POST /api/catalog/compute-weights?dryRun=true&amp;overwrite=false
+    /// Computes theoretical weight (lb/ft for linear products, lb/sqft for sheet/plate)
+    /// from each product's name and PATCHes WeightPerFoot + WeightUnit on the SP list.
+    /// Run POST /api/catalog/ensure-weight-column first to create the SP columns.
+    /// </summary>
+    [HttpPost("compute-weights")]
+    public async Task<IActionResult> ComputeWeights(
+        [FromQuery] bool dryRun   = true,
+        [FromQuery] bool overwrite = false,
+        CancellationToken ct = default)
+    {
+        var report = await catalog.ComputeWeightsAsync(dryRun, overwrite, ct);
+        return Ok(new
+        {
+            dryRun,
+            overwrite,
+            report.Total,
+            report.Computed,
+            report.AlreadySet,
+            report.Skipped,
+            items = report.Items.Select(i => new
+            {
+                i.SearchKey,
+                i.ProductName,
+                weight    = i.WeightValue.HasValue ? $"{i.WeightValue:F4} {i.WeightUnit}" : null,
+                i.Formula,
+                i.Note,
+                i.Updated,
+            }),
+        });
     }
 }

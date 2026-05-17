@@ -44,7 +44,8 @@ public class ProductCatalogService : BackgroundService
     private readonly ILogger<ProductCatalogService> _log;
     private GraphServiceClient? _graph;
 
-    private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens, double? WeightPerFoot = null);
+    private sealed record Entry(string Name, string? SearchKey, HashSet<string> Tokens,
+        double? WeightPerFoot = null, string? WeightUnit = null);
     private volatile IReadOnlyList<Entry> _cache = [];
     public string? LastError    { get; private set; }
     public string? LastDiag     { get; private set; }
@@ -154,13 +155,14 @@ public class ProductCatalogService : BackgroundService
                 var rawWt = data.TryGetValue("WeightPerFoot", out var wv) ? wv : null;
                 double? wt = rawWt switch
                 {
-                    double d   => d,
-                    int    iv  => (double)iv,
+                    double d  => d,
+                    int    iv => (double)iv,
                     System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.Number => je.GetDouble(),
-                    not null   => double.TryParse(rawWt.ToString(), out var dp) ? dp : null,
-                    _          => null
+                    not null  => double.TryParse(rawWt.ToString(), out var dp) ? dp : null,
+                    _         => null
                 };
-                return new Entry(name!, key, Tokenize(name!), wt);
+                var wtUnit = (data.TryGetValue("WeightUnit", out var wuv) ? wuv : null)?.ToString();
+                return new Entry(name!, key, Tokenize(name!), wt, wtUnit);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -185,8 +187,13 @@ public class ProductCatalogService : BackgroundService
     public double? FindWeightPerFoot(string searchKey)
     {
         var c = _cache;
-        return c.FirstOrDefault(e => e.SearchKey != null &&
-            e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase))?.WeightPerFoot;
+        var e = c.FirstOrDefault(e => e.SearchKey != null &&
+            e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase));
+        if (e is null) return null;
+        // Only return weight for linear products (lb/ft); lb/sqft is a different unit
+        if (e.WeightUnit is not null && !e.WeightUnit.Equals("lb/ft", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return e.WeightPerFoot;
     }
 
     public string? FindProductName(string searchKey)
@@ -194,6 +201,142 @@ public class ProductCatalogService : BackgroundService
         var c = _cache;
         return c.FirstOrDefault(e => e.SearchKey != null &&
             e.SearchKey.Equals(searchKey, StringComparison.OrdinalIgnoreCase))?.Name;
+    }
+
+    // ── Weight computation ────────────────────────────────────────────────────
+
+    public record CatalogWeightItem(
+        string SpId, string SearchKey, string ProductName,
+        double? WeightValue, string? WeightUnit, string? Formula, string? Note,
+        bool Updated);
+
+    public record CatalogWeightReport(
+        bool DryRun, int Total, int Computed, int AlreadySet, int Skipped,
+        IReadOnlyList<CatalogWeightItem> Items);
+
+    /// <summary>
+    /// Iterates all Product Catalog SP items, computes theoretical weight via WeightCalculator,
+    /// and PATCHes WeightPerFoot + WeightUnit back to SharePoint.
+    /// dryRun=true reports without writing. overwrite=false skips items that already have a value.
+    /// </summary>
+    public async Task<CatalogWeightReport> ComputeWeightsAsync(
+        bool dryRun = true, bool overwrite = false, CancellationToken ct = default)
+    {
+        var graph   = GetGraph();
+        var siteUrl = _config["ProductCatalog:SiteUrl"]
+            ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+        var uri     = new Uri(siteUrl);
+        var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
+        var site    = await graph.Sites[siteKey].GetAsync(cancellationToken: ct);
+        if (site?.Id is null) throw new InvalidOperationException($"Site not found: {siteKey}");
+
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var lists    = await graph.Sites[site.Id].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'",
+                      cancellationToken: ct);
+        var list = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null) throw new InvalidOperationException($"Catalog list '{listName}' not found");
+
+        // Load all items with IDs, product names, and current weight
+        var page = await graph.Sites[site.Id].Lists[list.Id].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,Title,Product,Product_x0020_SearchKey,SearchKey,WeightPerFoot,WeightUnit)"];
+                r.QueryParameters.Top    = 5000;
+            }, cancellationToken: ct);
+
+        var all = new List<(string SpId, string Name, string SearchKey, double? ExistingWeight)>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                if (item.Id is null) continue;
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+                var name = (d.TryGetValue("Product",                 out var p)  ? p  :
+                            d.TryGetValue("Title",                   out var tt) ? tt : null)?.ToString();
+                var key  = (d.TryGetValue("Product_x0020_SearchKey", out var sk) ? sk :
+                            d.TryGetValue("SearchKey",               out var k2) ? k2 : null)?.ToString();
+                double? existWt = null;
+                if (d.TryGetValue("WeightPerFoot", out var wv) && wv is not null)
+                    existWt = wv switch
+                    {
+                        double dv => dv,
+                        int iv    => (double)iv,
+                        System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.Number => je.GetDouble(),
+                        _ => double.TryParse(wv.ToString(), out var dp) ? dp : null
+                    };
+                if (!string.IsNullOrWhiteSpace(name))
+                    all.Add((item.Id, name!, key ?? "", existWt));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await graph.Sites[site.Id].Lists[list.Id].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        var items   = new System.Collections.Concurrent.ConcurrentBag<CatalogWeightItem>();
+        int computed = 0, alreadySet = 0, skipped = 0;
+
+        await System.Threading.Tasks.Parallel.ForEachAsync(all,
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+            async (row, token) =>
+            {
+                var wr = WeightCalculator.Calculate(row.Name);
+                bool hasResult = wr.LbPerFoot.HasValue || wr.LbPerSqFt.HasValue;
+
+                if (!hasResult)
+                {
+                    System.Threading.Interlocked.Increment(ref skipped);
+                    items.Add(new CatalogWeightItem(row.SpId, row.SearchKey, row.Name,
+                        null, null, null, wr.Note, false));
+                    return;
+                }
+
+                if (!overwrite && row.ExistingWeight.HasValue)
+                {
+                    System.Threading.Interlocked.Increment(ref alreadySet);
+                    items.Add(new CatalogWeightItem(row.SpId, row.SearchKey, row.Name,
+                        row.ExistingWeight, null, wr.Formula, null, false));
+                    return;
+                }
+
+                double weightVal  = wr.LbPerFoot ?? wr.LbPerSqFt!.Value;
+                string weightUnit = wr.LbPerFoot.HasValue ? "lb/ft" : "lb/sqft";
+
+                if (!dryRun)
+                {
+                    try
+                    {
+                        await graph.Sites[site.Id].Lists[list.Id].Items[row.SpId].Fields
+                            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+                            {
+                                AdditionalData = new Dictionary<string, object?>
+                                {
+                                    ["WeightPerFoot"] = weightVal,
+                                    ["WeightUnit"]    = weightUnit
+                                }
+                            }, cancellationToken: token);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "[Catalog] Weight PATCH failed for item {Id}", row.SpId);
+                        System.Threading.Interlocked.Increment(ref skipped);
+                        items.Add(new CatalogWeightItem(row.SpId, row.SearchKey, row.Name,
+                            weightVal, weightUnit, wr.Formula, $"PATCH failed: {ex.Message}", false));
+                        return;
+                    }
+                }
+
+                System.Threading.Interlocked.Increment(ref computed);
+                items.Add(new CatalogWeightItem(row.SpId, row.SearchKey, row.Name,
+                    weightVal, weightUnit, wr.Formula, wr.Note, !dryRun));
+            });
+
+        _log.LogInformation("[Catalog] ComputeWeights dryRun={Dry}: computed={C}, alreadySet={A}, skipped={S}, total={T}",
+            dryRun, computed, alreadySet, skipped, all.Count);
+
+        return new CatalogWeightReport(dryRun, all.Count, computed, alreadySet, skipped,
+            items.OrderBy(i => i.SearchKey).ToList());
     }
 
     // ── SP column setup ───────────────────────────────────────────────────────
@@ -232,6 +375,20 @@ public class ProductCatalogService : BackgroundService
         else
         {
             _log.LogInformation("[Catalog] 'WeightPerFoot' column already exists");
+        }
+
+        var hasUnit = (cols?.Value ?? []).Any(c =>
+            c.DisplayName?.Equals("WeightUnit", StringComparison.OrdinalIgnoreCase) == true);
+        if (!hasUnit)
+        {
+            await graph.Sites[site.Id].Lists[list.Id].Columns
+                .PostAsync(new Microsoft.Graph.Models.ColumnDefinition
+                {
+                    DisplayName = "WeightUnit",
+                    Name        = "WeightUnit",
+                    Text        = new Microsoft.Graph.Models.TextColumn { MaxLength = 20 }
+                });
+            _log.LogInformation("[Catalog] Created 'WeightUnit' column");
         }
     }
 
