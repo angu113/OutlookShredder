@@ -5547,7 +5547,10 @@ public class SharePointService
             if (IsRegret(sli)) continue;
 
             DateTime? quoteDate = null;
-            foreach (var key in new[] { "Modified", "ProcessedAt", "DateOfQuote", "ReceivedAt" })
+            // Prefer the actual quote receipt/processing date over the SP Modified timestamp.
+            // Modified updates on any field patch (e.g. ProductSearchKey) and would make
+            // old quotes appear fresh if used first.
+            foreach (var key in new[] { "ReceivedAt", "ProcessedAt", "DateOfQuote", "Modified" })
             {
                 if (!sli.TryGetValue(key, out var dv) || dv is null) continue;
                 var ds = dv is JsonElement je ? je.ToString() : dv.ToString();
