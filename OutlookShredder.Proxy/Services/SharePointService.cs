@@ -5027,6 +5027,58 @@ public class SharePointService
         _log.LogInformation("[QC] Patched item {ItemId}: QC={Qc} QcCut={QcCut}", itemId, qc, qcCut);
     }
 
+    /// <summary>
+    /// Clears LQ, LQ Count, LQ Min, LQ Max, LQ Long, LQ Long Count, LQ Long Min, LQ Long Max
+    /// on every QC list item.  Returns the count of rows cleared.
+    /// </summary>
+    public async Task<int> ClearQcLqAsync()
+    {
+        var (siteId, listId, _) = await ResolveQcAsync();
+        var graph = GetGraph();
+
+        var wantedDisplay = new[] { "LQ", "LQ Count", "LQ Min", "LQ Max",
+                                    "LQ Long", "LQ Long Count", "LQ Long Min", "LQ Long Max" };
+        var colsResp = await graph.Sites[siteId].Lists[listId].Columns.GetAsync();
+        var lqFields = (colsResp?.Value ?? [])
+            .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
+                     && wantedDisplay.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase)
+                     && !c.Name!.StartsWith("LinkTitle", StringComparison.OrdinalIgnoreCase))
+            .Select(c => c.Name!)
+            .ToArray();
+
+        if (lqFields.Length == 0)
+        {
+            _log.LogWarning("[QC] ClearLq: no LQ columns found — nothing to clear");
+            return 0;
+        }
+
+        var itemsResp = await graph.Sites[siteId].Lists[listId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = ["fields($select=id)"]; r.QueryParameters.Top = 5000; });
+
+        var ids = (itemsResp?.Value ?? []).Select(i => i.Id).Where(id => id is not null).ToList();
+
+        var patch = new Dictionary<string, object?>();
+        foreach (var f in lqFields) patch[f] = null;
+        var fieldSet = new FieldValueSet { AdditionalData = patch };
+
+        int cleared = 0;
+        foreach (var id in ids)
+        {
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Items[id!].Fields.PatchAsync(fieldSet);
+                cleared++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[QC] ClearLq: failed to clear item {Id}", id);
+            }
+        }
+
+        _log.LogInformation("[QC] ClearLq: cleared {Count}/{Total} items", cleared, ids.Count);
+        return cleared;
+    }
+
     private readonly record struct PricedSliToken(
         string   TkMetal,
         string   TkShape,

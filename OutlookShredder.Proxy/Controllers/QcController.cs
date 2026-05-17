@@ -100,6 +100,17 @@ public class QcController : ControllerBase
         await _sp.UpdateQcRowAsync(req.ItemId, req.Qc, req.QcCut);
         return Ok();
     }
+
+    /// <summary>
+    /// Clears all LQ columns (LQ, LQ Count, LQ Min, LQ Max, LQ Long, LQ Long Count, LQ Long Min,
+    /// LQ Long Max) on every QC list item.  Returns { cleared: N }.
+    /// </summary>
+    [HttpPost("clear-lq")]
+    public async Task<IActionResult> ClearLqAsync()
+    {
+        var cleared = await _sp.ClearQcLqAsync();
+        return Ok(new { cleared });
+    }
 }
 
 public record QcRowUpdateRequest(string ItemId, string? Qc, string? QcCut);
