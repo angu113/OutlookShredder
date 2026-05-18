@@ -771,39 +771,20 @@ internal static class PickingSlipEnricher
             double pigH = page.Height;
             var lines = GroupIntoLines(page.GetWords().ToList());
 
-            TextLine? descLine    = null;
-            double?   totalPigTop = null; // top edge (pig coords) of the TOTAL row
-
             foreach (var line in lines)
             {
                 var t = line.Text.Trim();
-                if (descLine is null &&
-                    t.Contains("Description", StringComparison.OrdinalIgnoreCase) &&
-                    t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
-                {
-                    descLine = line;
-                }
+                if (!t.Contains("Description", StringComparison.OrdinalIgnoreCase) ||
+                    !t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-                // TOTAL row: "TOTAL : 5 ..." etc.
-                if (t.StartsWith("TOTAL", StringComparison.OrdinalIgnoreCase) &&
-                    t.Length > 5 && (t[5] == ' ' || t[5] == ':'))
-                {
-                    double pigTop = line.Y + line.Height;
-                    if (totalPigTop is null || pigTop > totalPigTop)
-                        totalPigTop = pigTop;
-                }
+                // Box starts at the top edge of the label text and runs to the page bottom,
+                // full width — so the label itself is covered and the entire area below is available.
+                double psBoxTop = pigH - (line.Y + line.Height);
+                double boxH     = pigH - psBoxTop; // = line.Y + line.Height
+
+                return (p - 1, 0.0, psBoxTop / pigH, 1.0, boxH / pigH);
             }
-
-            if (descLine is null) continue;
-
-            // Convert to PdfSharp coords (top-left origin, Y increases downward).
-            double psBoxTop    = pigH - (descLine.Y + descLine.Height);
-            double psBoxBottom = totalPigTop.HasValue ? pigH - totalPigTop.Value : pigH - 12.0;
-            double boxH        = psBoxBottom - psBoxTop;
-
-            if (boxH <= 2) continue;
-
-            return (p - 1, 0.0, psBoxTop / pigH, 1.0, boxH / pigH);
         }
 
         return null;
