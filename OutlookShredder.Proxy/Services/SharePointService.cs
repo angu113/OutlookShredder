@@ -355,6 +355,60 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Force-steals the named lease regardless of which machine currently holds it.
+    /// Returns the previous holder's machine name, or null if no lease existed.
+    /// ProxyLeaseService picks up the stolen lease within its next 30 s renewal tick.
+    /// </summary>
+    public async Task<string?> ForceClaimLeaseAsync(
+        string serviceName, string machineName, int leaseSeconds = 60, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetLeaseListIdAsync(siteId);
+        var expiry = DateTimeOffset.UtcNow.AddSeconds(leaseSeconds).ToString("o");
+
+        var existing = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=MachineName,LeaseExpiry)"];
+                req.QueryParameters.Top    = 1;
+                req.QueryParameters.Filter = $"fields/Title eq '{serviceName.Replace("'", "''")}'";
+            }, ct);
+
+        if (existing?.Value is null || existing.Value.Count == 0)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem
+                {
+                    Fields = new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["Title"]       = serviceName,
+                            ["MachineName"] = machineName,
+                            ["LeaseExpiry"] = expiry,
+                        }
+                    }
+                }, cancellationToken: ct);
+            return null;
+        }
+
+        var item       = existing.Value[0];
+        var prevHolder = GetStr(item.Fields?.AdditionalData ?? new(), "MachineName");
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["MachineName"] = machineName,
+                    ["LeaseExpiry"] = expiry,
+                }
+            }, cancellationToken: ct);
+
+        return prevHolder;
+    }
+
+    /// <summary>
     /// Returns all SupplierResponses rows, serving from an in-memory cache for up to 60 s.
     /// Concurrent callers wait on the semaphore; only the first fetches from Graph.
     /// Call <see cref="InvalidateSrCache"/> after any write to SupplierResponses.
