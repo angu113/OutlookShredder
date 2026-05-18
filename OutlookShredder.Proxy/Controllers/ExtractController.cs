@@ -530,14 +530,24 @@ public class ExtractController : ControllerBase
     /// </summary>
     [HttpGet("sp-attachment")]
     public async Task<IActionResult> GetSpAttachment(
-        [FromQuery] string srId,
+        [FromQuery] string? srId,
+        [FromQuery] string? messageId,
         [FromQuery] string filename)
     {
-        if (string.IsNullOrWhiteSpace(srId) || string.IsNullOrWhiteSpace(filename))
-            return BadRequest(new { error = "srId and filename are required" });
+        if (string.IsNullOrWhiteSpace(filename))
+            return BadRequest(new { error = "filename is required" });
+        if (string.IsNullOrWhiteSpace(srId) && string.IsNullOrWhiteSpace(messageId))
+            return BadRequest(new { error = "srId or messageId is required" });
 
         try
         {
+            if (string.IsNullOrWhiteSpace(srId))
+            {
+                srId = await _sp.GetSrIdByMessageIdAsync(messageId!);
+                if (srId is null)
+                    return NotFound(new { error = $"No SR found for messageId={messageId}" });
+            }
+
             var result = await _sp.GetSpItemAttachmentAsync(srId, filename);
             if (result is null)
                 return NotFound(new { error = $"Attachment '{filename}' not found on SR item {srId}." });
@@ -546,7 +556,7 @@ public class ExtractController : ControllerBase
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "GetSpAttachment failed for srId={SrId} file={File}", srId, filename);
+            _log.LogError(ex, "GetSpAttachment failed for srId={SrId} messageId={MsgId} file={File}", srId, messageId, filename);
             return StatusCode(500, new { error = ex.Message });
         }
     }

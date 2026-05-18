@@ -3928,6 +3928,25 @@ public class SharePointService
     // ??"?????"??? Fetch SP list item attachment (SupplierResponses PDF) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
     /// <summary>
+    /// Returns the SupplierResponses SP item ID for the given Graph message ID,
+    /// or null if not found. MessageId is indexed so the query is fast.
+    /// </summary>
+    public async Task<string?> GetSrIdByMessageIdAsync(string messageId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierResponsesListIdAsync();
+        var escaped = messageId.Replace("'", "''");
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Filter = $"fields/MessageId eq '{escaped}'";
+                r.QueryParameters.Expand = ["fields($select=id)"];
+                r.QueryParameters.Top    = 1;
+            });
+        return page?.Value?.FirstOrDefault()?.Id;
+    }
+
+    /// <summary>
     /// Downloads the named attachment from a SupplierResponses list item via the SP REST API.
     /// Returns null if the item or file is not found.
     /// </summary>
