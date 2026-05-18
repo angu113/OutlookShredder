@@ -167,7 +167,7 @@ internal static class PickingSlipEnricher
         {
             double pageH    = doc.Pages[0].Height.Point;
             double pageW    = doc.Pages[0].Width.Point;
-            const double pad = 6.0;
+            const double pad = 10.0;
             double psTop    = pageH - pigHeaderTop    - pad;
             double psHeight = (pigHeaderTop - pigHeaderBottom) + pad * 2;
             StampLeftCellOnDoc(doc,  header, psTop, psHeight, pageW, log);
@@ -253,8 +253,25 @@ internal static class PickingSlipEnricher
 
             if (line.Y > pigPageH - headerZone)
             {
+                // All header-zone lines drive the bottom bound.
                 pigBottom = Math.Min(pigBottom, line.Y);
-                pigTop    = Math.Max(pigTop, line.Y + line.Height);
+
+                // Only recognized cell-content lines drive the top bound so the
+                // company logo/name text (which shares the header zone) is excluded.
+                bool isHeaderLabel =
+                    text.Contains("Attention:",                StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Contact Phone:",            StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Customer Rep:",             StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Order Date:",               StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Delivery Method:",          StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Carrier:",                  StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Customer Purchase Order #", StringComparison.OrdinalIgnoreCase);
+
+                bool isCustomerNameLine = !string.IsNullOrEmpty(customerName) &&
+                    text.Trim().Equals(customerName.Trim(), StringComparison.OrdinalIgnoreCase);
+
+                if (isHeaderLabel || isCustomerNameLine)
+                    pigTop = Math.Max(pigTop, line.Y + line.Height);
             }
 
             // Extract labeled fields from the full page (labels can appear near-header).
