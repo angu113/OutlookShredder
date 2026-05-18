@@ -53,6 +53,38 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Returns the fractional bounding box (0–1, top-left origin) of the
+    /// "Description (Special Instructions)" cell on page 1 of a picking slip PDF.
+    /// Used by the Shredder UI to position stamp overlays correctly.
+    /// </summary>
+    [HttpGet("/api/erp/stamp-bounds")]
+    public async Task<IActionResult> GetStampBounds([FromQuery] string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return BadRequest(new { error = "url parameter is required" });
+
+        try
+        {
+            var bytes  = await _sp.DownloadSpFileAsync(url, ct);
+            var bounds = PickingSlipEnricher.ExtractDescriptionBoxBounds(bytes);
+            return bounds is null
+                ? NotFound(new { error = "Description (Special Instructions) section not found" })
+                : Ok(new
+                {
+                    leftFrac   = bounds.Value.LeftFrac,
+                    topFrac    = bounds.Value.TopFrac,
+                    widthFrac  = bounds.Value.WidthFrac,
+                    heightFrac = bounds.Value.HeightFrac,
+                });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[ERP] stamp-bounds failed for {Url}", url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Proxies a SharePoint PDF download using app-only credentials.
     /// Clients cannot fetch SharePoint WebUrls directly (no auth); this endpoint adds the Bearer token.
     /// </summary>

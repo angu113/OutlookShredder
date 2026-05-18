@@ -731,6 +731,60 @@ internal static class PickingSlipEnricher
             new XRect((x1 + x2) / 2 - 15, y - 14, 30, 12), XStringFormats.TopCenter);
     }
 
+    // ── Stamp-bounds detection (for WPF UI overlay) ───────────────────────────
+
+    /// <summary>
+    /// Finds the "Description (Special Instructions)" box on page 1 and returns
+    /// its bounds as fractions of the page dimensions (0–1, top-left origin).
+    /// Returns null if the section label is not found.
+    /// </summary>
+    public static (double LeftFrac, double TopFrac, double WidthFrac, double HeightFrac)?
+        ExtractDescriptionBoxBounds(byte[] pdfBytes)
+    {
+        using var pigDoc = PigDoc.Open(pdfBytes);
+        var page1  = pigDoc.GetPage(1);
+        double pigH = page1.Height;
+        double pigW = page1.Width;
+        var lines  = GroupIntoLines(page1.GetWords().ToList());
+
+        TextLine? descLine   = null;
+        double?   totalPigTop = null; // top edge (pig coords) of the TOTAL row
+
+        foreach (var line in lines)
+        {
+            var t = line.Text.Trim();
+            if (descLine is null &&
+                t.Contains("Description", StringComparison.OrdinalIgnoreCase) &&
+                t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
+            {
+                descLine = line;
+            }
+
+            // TOTAL row is at the bottom: "TOTAL : 5 ..." etc.
+            if (t.StartsWith("TOTAL", StringComparison.OrdinalIgnoreCase) &&
+                t.Length > 5 && (t[5] == ' ' || t[5] == ':'))
+            {
+                double pigTop = line.Y + line.Height;
+                if (totalPigTop is null || pigTop > totalPigTop)
+                    totalPigTop = pigTop;
+            }
+        }
+
+        if (descLine is null) return null;
+
+        // Convert to PdfSharp coords (top-left origin, Y increases downward).
+        // Box top = top edge of the "Description (Special Instructions)" header label.
+        double psBoxTop    = pigH - (descLine.Y + descLine.Height);
+        // Box bottom = top edge of the TOTAL row (box ends where totals begin),
+        // or near the page bottom if there is no TOTAL row.
+        double psBoxBottom = totalPigTop.HasValue ? pigH - totalPigTop.Value : pigH - 12.0;
+        double boxH        = psBoxBottom - psBoxTop;
+
+        if (boxH <= 2) return null;
+
+        return (0.0, psBoxTop / pigH, 1.0, boxH / pigH);
+    }
+
     // ── Legacy public methods (kept for isolated call-sites) ──────────────────
 
     /// <summary>
