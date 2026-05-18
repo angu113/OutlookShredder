@@ -48,6 +48,7 @@ public class SharePointService
     private string? _callLogListId;          // PhoneCallLog
     private string? _messagesListId;         // Messages
     private string? _leaseListId;            // ProxyLease
+    private string? _todoListId;             // ShredderTodos
 
     // Per-SR next SliVersion cache — set at rowIndex==0 after soft-deleting stale rows;
     // looked up for all subsequent rows in the same batch so all rows share one version number.
@@ -9871,6 +9872,117 @@ public class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()]
+            .DeleteAsync(cancellationToken: ct);
+    }
+
+    // ── ShredderTodos ─────────────────────────────────────────────────────────
+
+    private async Task<string> GetTodoListIdAsync(CancellationToken ct = default)
+    {
+        if (_todoListId is not null) return _todoListId;
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'ShredderTodos'", ct);
+        _todoListId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "ShredderTodos list not found. Run POST /api/setup-supplier-lists once.");
+        return _todoListId;
+    }
+
+    private static Models.ShredderTodo MapTodo(Microsoft.Graph.Models.ListItem item)
+    {
+        var d  = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+        var at = item.CreatedDateTime;
+        return new Models.ShredderTodo
+        {
+            SpItemId     = item.Id,
+            Title        = GetStr(d, "Title") ?? "",
+            Status       = GetStr(d, "Status") ?? "Open",
+            ClaimedBy    = GetStr(d, "ClaimedBy"),
+            CreatedBy    = GetStr(d, "CreatedBy"),
+            Notes        = GetStr(d, "Notes"),
+            RelatedRfqId = GetStr(d, "RelatedRfqId"),
+            DueDate      = d.TryGetValue("DueDate", out var dd) && dd is JsonElement dde && dde.ValueKind == JsonValueKind.String
+                               ? DateTimeOffset.TryParse(dde.GetString(), out var dto) ? dto : null
+                               : null,
+            CreatedAt    = at,
+        };
+    }
+
+    public async Task<List<Models.ShredderTodo>> ReadTodosAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetTodoListIdAsync(ct);
+        var page   = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields"];
+                r.QueryParameters.Top    = 500;
+            }, ct);
+
+        var todos = new List<Models.ShredderTodo>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+                if (item.Id is not null)
+                    todos.Add(MapTodo(item));
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync(cancellationToken: ct);
+        }
+        return todos;
+    }
+
+    public async Task<Models.ShredderTodo> CreateTodoAsync(Models.CreateTodoRequest req, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetTodoListIdAsync(ct);
+        var item   = await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet
+                {
+                    AdditionalData = new Dictionary<string, object?>
+                    {
+                        ["Title"]        = req.Title,
+                        ["Status"]       = "Open",
+                        ["CreatedBy"]    = req.CreatedBy,
+                        ["Notes"]        = req.Notes,
+                        ["DueDate"]      = req.DueDate?.ToString("o"),
+                        ["RelatedRfqId"] = req.RelatedRfqId,
+                    }
+                }
+            }, cancellationToken: ct);
+
+        return MapTodo(item!);
+    }
+
+    public async Task<Models.ShredderTodo?> UpdateTodoAsync(string spItemId, Models.UpdateTodoRequest req, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetTodoListIdAsync(ct);
+
+        var fields = new Dictionary<string, object?>();
+        if (req.Status    is not null) fields["Status"]    = req.Status;
+        if (req.ClaimedBy is not null) fields["ClaimedBy"] = req.ClaimedBy == "" ? null : req.ClaimedBy;
+        if (req.Notes     is not null) fields["Notes"]     = req.Notes;
+        if (req.DueDate   is not null) fields["DueDate"]   = req.DueDate.Value.ToString("o");
+        if (fields.Count == 0) return null;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
+            .GetAsync(r => r.QueryParameters.Expand = ["fields"], ct);
+        return item is null ? null : MapTodo(item);
+    }
+
+    public async Task DeleteTodoAsync(string spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetTodoListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
             .DeleteAsync(cancellationToken: ct);
     }
 }

@@ -62,6 +62,10 @@ public class RfqProcessedNotification
     public WorkflowCard? WorkflowCard     { get; set; }
     public string?       WorkflowAction   { get; set; }
     public int?          WorkflowDeletedId { get; set; }
+    /// <summary>Populated when EventType = "Todo".</summary>
+    public ShredderTodo? TodoItem         { get; set; }
+    public string?       TodoAction       { get; set; }  // Created | Updated | Deleted
+    public string?       TodoDeletedId    { get; set; }
     // Populated only when EventType = "Message"
     public string? MsgFrom           { get; set; }
     public string? MsgTo             { get; set; }

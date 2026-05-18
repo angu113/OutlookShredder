@@ -113,10 +113,12 @@ try
     builder.Services.AddSingleton<CustomerImportService>();
     builder.Services.AddSingleton<WorkflowCardService>();
     builder.Services.AddSingleton<FileWatcherService>();
+    builder.Services.AddSingleton<TodoService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<FileWatcherService>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<TodoService>());
 
     builder.Services.AddSingleton<OutlookComPollerService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OutlookComPollerService>());
