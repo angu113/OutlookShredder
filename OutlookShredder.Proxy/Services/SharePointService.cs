@@ -393,7 +393,7 @@ public class SharePointService
         }
 
         var item       = existing.Value[0];
-        var prevHolder = GetStr(item.Fields?.AdditionalData ?? new(), "MachineName");
+        var prevHolder = GetStr(item.Fields?.AdditionalData ?? new Dictionary<string, object?>(), "MachineName");
 
         await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
             .PatchAsync(new FieldValueSet
