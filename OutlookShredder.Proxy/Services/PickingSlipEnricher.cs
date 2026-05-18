@@ -123,25 +123,23 @@ internal static class PickingSlipEnricher
         // ── PdfPig pass: extract everything ──────────────────────────────────
         string? shipToName = null;
         SlipHeader header;
-        double pigHeaderTop    = 0;
-        double pigHeaderBottom = 0;
-        double pigPageH        = 0;
-        double pigPageW        = 0;
+        double? hdrPsTop    = null;
+        double? hdrPsHeight = null;
         List<CommentBlock> blocks;
 
         using (var pigDoc = PigDoc.Open(pdfBytes))
         {
-            var page1     = pigDoc.GetPage(1);
-            pigPageH      = page1.Height;
-            pigPageW      = page1.Width;
-            var page1Words = page1.GetWords().ToList();
+            var page1      = pigDoc.GetPage(1);
+            double pigPageH = page1.Height;
+            double pigPageW = page1.Width;
+            var page1Words  = page1.GetWords().ToList();
 
             // 1. Ship-to customer name
             shipToName = ExtractShipToNameFromWords(page1Words, log);
 
             // 2. All labeled header fields + header cell bounds
             var page1Lines = GroupIntoLines(page1Words);
-            (header, pigHeaderTop, pigHeaderBottom) = ExtractHeaderFields(
+            (header, hdrPsTop, hdrPsHeight) = ExtractHeaderFields(
                 page1Lines, pigPageW, pigPageH,
                 shipToName ?? knownCustomerName, log);
 
@@ -149,7 +147,7 @@ internal static class PickingSlipEnricher
             blocks = ParseCommentBlocksFromDoc(pigDoc, log);
         }
 
-        bool hasHeaderBounds = pigHeaderTop > pigHeaderBottom;
+        bool hasHeaderBounds = hdrPsTop.HasValue && hdrPsHeight is > 0;
 
         var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var b in blocks)
@@ -165,13 +163,9 @@ internal static class PickingSlipEnricher
 
         if (hasHeaderBounds)
         {
-            double pageH    = doc.Pages[0].Height.Point;
-            double pageW    = doc.Pages[0].Width.Point;
-            const double pad = 10.0;
-            double psTop    = pageH - pigHeaderTop    - pad;
-            double psHeight = (pigHeaderTop - pigHeaderBottom) + pad * 2;
-            StampLeftCellOnDoc(doc,  header, psTop, psHeight, pageW, log);
-            StampRightCellOnDoc(doc, header, psTop, psHeight, pageW, log);
+            double pageW = doc.Pages[0].Width.Point;
+            StampLeftCellOnDoc(doc,  header, hdrPsTop!.Value, hdrPsHeight!.Value, pageW, log);
+            StampRightCellOnDoc(doc, header, hdrPsTop!.Value, hdrPsHeight!.Value, pageW, log);
         }
 
         if (blocks.Count > 0)
@@ -219,15 +213,15 @@ internal static class PickingSlipEnricher
     }
 
     /// <summary>
-    /// Extracts all labeled header fields and computes the bounding box of the header
-    /// zone (top ~160pt of page) in PdfPig coordinates (y=0 at bottom).
+    /// Extracts all labeled header fields and computes the PdfSharp (top-left origin)
+    /// bounding box for the two-column header cell area.
+    /// Anchors on "PICKING SLIP" (cell top) and the "MSPC" column header (cell bottom).
+    /// Returns (header, psTop, psHeight) where psTop/psHeight are null when anchors not found.
     /// </summary>
-    private static (SlipHeader Header, double PigTop, double PigBottom) ExtractHeaderFields(
+    private static (SlipHeader Header, double? PsTop, double? PsHeight) ExtractHeaderFields(
         List<TextLine> lines, double pigPageW, double pigPageH,
         string? customerName, ILogger? log)
     {
-        const double headerZone = 160.0; // pt from top of page
-
         string? attention      = null;
         string? contactPhone   = null;
         string? repName        = null;
@@ -236,8 +230,8 @@ internal static class PickingSlipEnricher
         string? carrier        = null;
         string? poNumber       = null;
 
-        double pigTop    = 0;              // topmost text-line top in header zone
-        double pigBottom = double.MaxValue; // bottommost text-line bottom in header zone
+        TextLine? pickingSlipLine = null; // anchor: cell top is just below its bottom edge
+        TextLine? mspcLine        = null; // anchor: cell bottom is just above its top edge
 
         static string? After(string text, string label)
         {
@@ -251,30 +245,18 @@ internal static class PickingSlipEnricher
         {
             var text = line.Text;
 
-            if (line.Y > pigPageH - headerZone)
-            {
-                // All header-zone lines drive the bottom bound.
-                pigBottom = Math.Min(pigBottom, line.Y);
+            if (pickingSlipLine is null &&
+                text.Contains("PICKING", StringComparison.OrdinalIgnoreCase) &&
+                text.Contains("SLIP",    StringComparison.OrdinalIgnoreCase))
+                pickingSlipLine = line;
 
-                // Only recognized cell-content lines drive the top bound so the
-                // company logo/name text (which shares the header zone) is excluded.
-                bool isHeaderLabel =
-                    text.Contains("Attention:",                StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Contact Phone:",            StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Customer Rep:",             StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Order Date:",               StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Delivery Method:",          StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Carrier:",                  StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("Customer Purchase Order #", StringComparison.OrdinalIgnoreCase);
+            // "MSPC" is the leftmost column header; guard X < 30 to skip product-code
+            // occurrences that contain "MSPC" as part of an item description.
+            if (mspcLine is null &&
+                text.StartsWith("MSPC", StringComparison.OrdinalIgnoreCase) &&
+                line.X < 30.0)
+                mspcLine = line;
 
-                bool isCustomerNameLine = !string.IsNullOrEmpty(customerName) &&
-                    text.Trim().Equals(customerName.Trim(), StringComparison.OrdinalIgnoreCase);
-
-                if (isHeaderLabel || isCustomerNameLine)
-                    pigTop = Math.Max(pigTop, line.Y + line.Height);
-            }
-
-            // Extract labeled fields from the full page (labels can appear near-header).
             attention      ??= After(text, "Attention:");
             contactPhone   ??= After(text, "Contact Phone:");
             repName        ??= After(text, "Customer Rep:");
@@ -284,21 +266,46 @@ internal static class PickingSlipEnricher
             poNumber       ??= After(text, "Customer Purchase Order #");
         }
 
-        if (pigBottom == double.MaxValue)
-            pigBottom = pigPageH - 120;
-        if (pigTop == 0)
-            pigTop = pigPageH - 10;
+        double? psTop    = null;
+        double? psHeight = null;
+
+        if (pickingSlipLine is not null && mspcLine is not null)
+        {
+            // PdfSharp Y of the bottom edge of "PICKING SLIP" text:
+            //   psPickingSlipBottom = pigPageH - pickingSlipLine.Y
+            // Cell top starts a few pt below that (between the text and the horizontal rule).
+            const double topGap    = 5.0; // pt below "PICKING SLIP" bottom → cell top border
+            const double bottomGap = 5.0; // pt above "MSPC" top → cell bottom border
+
+            double psPickingSlipBottom = pigPageH - pickingSlipLine.Y;
+            double psMspcTop           = pigPageH - (mspcLine.Y + mspcLine.Height);
+
+            double top    = psPickingSlipBottom + topGap;
+            double bottom = psMspcTop           - bottomGap;
+            double height = bottom - top;
+
+            if (height > 20)
+            {
+                psTop    = top;
+                psHeight = height;
+            }
+        }
 
         log?.LogInformation(
             "[PSE] Header fields — cust='{C}' attn='{A}' phone='{P}' rep='{R}' date='{D}' del='{V}' carrier='{Ca}' po='{PO}'",
             customerName, attention, contactPhone, repName, orderDate, deliveryMethod, carrier, poNumber);
-        log?.LogInformation("[PSE] Header bounds (pig) — top={T:F1} bottom={B:F1}", pigTop, pigBottom);
+
+        if (psTop.HasValue)
+            log?.LogInformation("[PSE] Header cell bounds — psTop={T:F1} psHeight={H:F1}", psTop, psHeight);
+        else
+            log?.LogWarning("[PSE] Header cell bounds not detected — PICKING SLIP={PS} MSPC={M}",
+                pickingSlipLine?.Text ?? "(not found)", mspcLine?.Text ?? "(not found)");
 
         var h = new SlipHeader(customerName, attention?.Trim(), contactPhone?.Trim(),
             repName?.Trim(), orderDate?.Trim(), deliveryMethod?.Trim(),
             carrier?.Trim(), poNumber?.Trim());
 
-        return (h, pigTop, pigBottom);
+        return (h, psTop, psHeight);
     }
 
     private static List<CommentBlock> ParseCommentBlocksFromDoc(PigDoc doc, ILogger? log)
