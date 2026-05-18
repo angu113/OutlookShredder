@@ -468,12 +468,12 @@ internal static class PickingSlipEnricher
         gfx.DrawRectangle(XBrushes.White, cellRect);
         gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
 
-        var rows = new List<(string Label, string Value)>();
-        if (!string.IsNullOrEmpty(h.RepName))        rows.Add(("Sales Rep:",   h.RepName));
-        if (!string.IsNullOrEmpty(h.OrderDate))       rows.Add(("Order Date:",  h.OrderDate));
-        if (!string.IsNullOrEmpty(h.DeliveryMethod))  rows.Add(("Delivery:",    h.DeliveryMethod));
-        if (!string.IsNullOrEmpty(h.Carrier))         rows.Add(("Carrier:",     h.Carrier));
-        if (!string.IsNullOrEmpty(h.PoNumber))        rows.Add(("PO#:",         h.PoNumber));
+        var rows = new List<(string Label, string Value, bool ValueOnly)>();
+        if (!string.IsNullOrEmpty(h.RepName))        rows.Add(("Sales Rep:",  h.RepName,        false));
+        if (!string.IsNullOrEmpty(h.OrderDate))       rows.Add(("Order Date:", h.OrderDate,      false));
+        if (!string.IsNullOrEmpty(h.DeliveryMethod))  rows.Add(("",            h.DeliveryMethod, true));
+        if (!string.IsNullOrEmpty(h.Carrier))         rows.Add(("Carrier:",    h.Carrier,        false));
+        if (!string.IsNullOrEmpty(h.PoNumber))        rows.Add(("PO#:",        h.PoNumber,       false));
         if (rows.Count == 0) return;
 
         double innerW   = cellW  - margin * 2;
@@ -488,12 +488,20 @@ internal static class PickingSlipEnricher
         double blockH = rows.Count * rowH;
         double y = psTop + margin + (innerH - blockH) / 2.0;
 
-        foreach (var (label, value) in rows)
+        foreach (var (label, value, valueOnly) in rows)
         {
-            gfx.DrawString(label, labelFont, XBrushes.Black,
-                new XRect(splitX + margin, y, labelColW, rowH), XStringFormats.TopLeft);
-            gfx.DrawString(value, valueFont, XBrushes.Black,
-                new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
+            if (valueOnly)
+            {
+                gfx.DrawString(value, labelFont, XBrushes.Black,
+                    new XRect(splitX + margin, y, innerW, rowH), XStringFormats.TopLeft);
+            }
+            else
+            {
+                gfx.DrawString(label, labelFont, XBrushes.Black,
+                    new XRect(splitX + margin, y, labelColW, rowH), XStringFormats.TopLeft);
+                gfx.DrawString(value, valueFont, XBrushes.Black,
+                    new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
+            }
             y += rowH;
         }
 
@@ -583,7 +591,7 @@ internal static class PickingSlipEnricher
     private static (List<string> Lines, XFont Font) FitTextInBox(
         XGraphics gfx, string text, double maxW, double maxH)
     {
-        for (double size = 16; size >= 7; size -= 1)
+        for (double size = 19; size >= 7; size -= 1)
         {
             var font  = new XFont("Arial", size, XFontStyleEx.Bold);
             var lines = WrapWords(gfx, font, text, maxW);
