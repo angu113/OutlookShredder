@@ -236,7 +236,8 @@ internal static class PickingSlipEnricher
         string? carrier        = null;
         string? poNumber       = null;
 
-        double pigTop    = double.MinValue;
+        // Cell top always starts at the page top edge.
+        double pigTop    = pigPageH;
         double pigBottom = double.MaxValue;
 
         static string? After(string text, string label)
@@ -252,10 +253,7 @@ internal static class PickingSlipEnricher
             var text = line.Text;
 
             if (line.Y > pigPageH - headerZone)
-            {
-                pigTop    = Math.Max(pigTop,    line.Y + line.Height);
                 pigBottom = Math.Min(pigBottom, line.Y);
-            }
 
             // Extract labeled fields from the full page (labels can appear near-header).
             attention      ??= After(text, "Attention:");
@@ -267,10 +265,9 @@ internal static class PickingSlipEnricher
             poNumber       ??= After(text, "Customer Purchase Order #");
         }
 
-        if (pigTop == double.MinValue)
+        if (pigBottom == double.MaxValue)
         {
             // Fallback: assume header occupies top 120pt
-            pigTop    = pigPageH - 10;
             pigBottom = pigPageH - 120;
         }
 
@@ -734,55 +731,57 @@ internal static class PickingSlipEnricher
     // ── Stamp-bounds detection (for WPF UI overlay) ───────────────────────────
 
     /// <summary>
-    /// Finds the "Description (Special Instructions)" box on page 1 and returns
-    /// its bounds as fractions of the page dimensions (0–1, top-left origin).
-    /// Returns null if the section label is not found.
+    /// Finds the "Description (Special Instructions)" box on the first page that contains it
+    /// (typically the last page of a multi-page picking slip).
+    /// Returns (0-based page index, fractional bounds with top-left origin), or null when not found.
     /// </summary>
-    public static (double LeftFrac, double TopFrac, double WidthFrac, double HeightFrac)?
+    public static (int PageIndex, double LeftFrac, double TopFrac, double WidthFrac, double HeightFrac)?
         ExtractDescriptionBoxBounds(byte[] pdfBytes)
     {
         using var pigDoc = PigDoc.Open(pdfBytes);
-        var page1  = pigDoc.GetPage(1);
-        double pigH = page1.Height;
-        double pigW = page1.Width;
-        var lines  = GroupIntoLines(page1.GetWords().ToList());
 
-        TextLine? descLine   = null;
-        double?   totalPigTop = null; // top edge (pig coords) of the TOTAL row
-
-        foreach (var line in lines)
+        for (int p = 1; p <= pigDoc.NumberOfPages; p++)
         {
-            var t = line.Text.Trim();
-            if (descLine is null &&
-                t.Contains("Description", StringComparison.OrdinalIgnoreCase) &&
-                t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
+            var page  = pigDoc.GetPage(p);
+            double pigH = page.Height;
+            var lines = GroupIntoLines(page.GetWords().ToList());
+
+            TextLine? descLine    = null;
+            double?   totalPigTop = null; // top edge (pig coords) of the TOTAL row
+
+            foreach (var line in lines)
             {
-                descLine = line;
+                var t = line.Text.Trim();
+                if (descLine is null &&
+                    t.Contains("Description", StringComparison.OrdinalIgnoreCase) &&
+                    t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
+                {
+                    descLine = line;
+                }
+
+                // TOTAL row: "TOTAL : 5 ..." etc.
+                if (t.StartsWith("TOTAL", StringComparison.OrdinalIgnoreCase) &&
+                    t.Length > 5 && (t[5] == ' ' || t[5] == ':'))
+                {
+                    double pigTop = line.Y + line.Height;
+                    if (totalPigTop is null || pigTop > totalPigTop)
+                        totalPigTop = pigTop;
+                }
             }
 
-            // TOTAL row is at the bottom: "TOTAL : 5 ..." etc.
-            if (t.StartsWith("TOTAL", StringComparison.OrdinalIgnoreCase) &&
-                t.Length > 5 && (t[5] == ' ' || t[5] == ':'))
-            {
-                double pigTop = line.Y + line.Height;
-                if (totalPigTop is null || pigTop > totalPigTop)
-                    totalPigTop = pigTop;
-            }
+            if (descLine is null) continue;
+
+            // Convert to PdfSharp coords (top-left origin, Y increases downward).
+            double psBoxTop    = pigH - (descLine.Y + descLine.Height);
+            double psBoxBottom = totalPigTop.HasValue ? pigH - totalPigTop.Value : pigH - 12.0;
+            double boxH        = psBoxBottom - psBoxTop;
+
+            if (boxH <= 2) continue;
+
+            return (p - 1, 0.0, psBoxTop / pigH, 1.0, boxH / pigH);
         }
 
-        if (descLine is null) return null;
-
-        // Convert to PdfSharp coords (top-left origin, Y increases downward).
-        // Box top = top edge of the "Description (Special Instructions)" header label.
-        double psBoxTop    = pigH - (descLine.Y + descLine.Height);
-        // Box bottom = top edge of the TOTAL row (box ends where totals begin),
-        // or near the page bottom if there is no TOTAL row.
-        double psBoxBottom = totalPigTop.HasValue ? pigH - totalPigTop.Value : pigH - 12.0;
-        double boxH        = psBoxBottom - psBoxTop;
-
-        if (boxH <= 2) return null;
-
-        return (0.0, psBoxTop / pigH, 1.0, boxH / pigH);
+        return null;
     }
 
     // ── Legacy public methods (kept for isolated call-sites) ──────────────────

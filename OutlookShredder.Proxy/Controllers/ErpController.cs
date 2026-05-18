@@ -71,6 +71,7 @@ public class ErpController : ControllerBase
                 ? NotFound(new { error = "Description (Special Instructions) section not found" })
                 : Ok(new
                 {
+                    pageIndex  = bounds.Value.PageIndex,
                     leftFrac   = bounds.Value.LeftFrac,
                     topFrac    = bounds.Value.TopFrac,
                     widthFrac  = bounds.Value.WidthFrac,
