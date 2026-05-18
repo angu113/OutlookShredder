@@ -1217,7 +1217,8 @@ public class MailPollerService : BackgroundService
                     receivedAt:          receivedAt,
                     hasAttachments:      req.HasAttachment,
                     fromAddr:            req.EmailFrom,
-                    graphConversationId: req.GraphConversationId);
+                    graphConversationId: req.GraphConversationId,
+                    attachmentName:      req.SourceType == "attachment" ? req.FileName : null);
             }
 
             return anyUnknown;

@@ -4259,6 +4259,7 @@ public class SharePointService
                 ("EmailSubject",       "text"),
                 ("BodyText",           "note"),
                 ("HasAttachments",       "boolean"),
+                ("AttachmentName",       "text"),
                 ("ExtractedPricing",    "boolean"),
                 ("SliVersionAtSend",    "number"),
                 ("GraphConversationId", "text"),
@@ -6815,7 +6816,7 @@ public class SharePointService
             var existing = await GetGraph().Sites[siteId].Lists[listId].Items
                 .GetAsync(req =>
                 {
-                    req.QueryParameters.Expand = ["fields($select=MessageId,ExtractedPricing)"];
+                    req.QueryParameters.Expand = ["fields($select=MessageId,ExtractedPricing,AttachmentName)"];
                     req.QueryParameters.Top    = 1;
                     req.QueryParameters.Filter = $"fields/MessageId eq '{msg.MessageId.Replace("'", "''")}'";
 
@@ -6823,18 +6824,22 @@ public class SharePointService
             if (existing?.Value?.Count > 0)
             {
                 var existingItem = existing.Value[0];
-                // If this write carries ExtractedPricing=true (post-extraction hook) and the
-                // existing row was written before extraction ran (ExtractedPricing=false), patch it.
-                if (msg.ExtractedPricing &&
-                    existingItem.Fields?.AdditionalData.TryGetValue("ExtractedPricing", out var ep) == true &&
-                    ep is false or null)
+                var existingData = existingItem.Fields?.AdditionalData;
+
+                bool needsExtractedPricing = msg.ExtractedPricing &&
+                    existingData?.TryGetValue("ExtractedPricing", out var ep) == true && ep is false or null;
+                bool needsAttachmentName = !string.IsNullOrEmpty(msg.AttachmentName) &&
+                    (existingData?.TryGetValue("AttachmentName", out var an) != true ||
+                     an is not string ans || string.IsNullOrEmpty(ans));
+
+                if (needsExtractedPricing || needsAttachmentName)
                 {
+                    var patch = new Dictionary<string, object?>();
+                    if (needsExtractedPricing) patch["ExtractedPricing"] = true;
+                    if (needsAttachmentName)   patch["AttachmentName"]   = msg.AttachmentName;
                     await GetGraph().Sites[siteId].Lists[listId].Items[existingItem.Id].Fields
-                        .PatchAsync(new FieldValueSet
-                        {
-                            AdditionalData = new Dictionary<string, object?> { ["ExtractedPricing"] = true }
-                        });
-                    _log.LogDebug("[Conv] Patched ExtractedPricing=true on existing row for MessageId {Id}", msg.MessageId);
+                        .PatchAsync(new FieldValueSet { AdditionalData = patch });
+                    _log.LogDebug("[Conv] Patched existing conv row for MessageId {Id}", msg.MessageId);
                 }
                 else
                 {
@@ -6858,6 +6863,7 @@ public class SharePointService
             ["EmailSubject"]       = msg.Subject,
             ["BodyText"]           = msg.BodyText,
             ["HasAttachments"]       = msg.HasAttachments,
+            ["AttachmentName"]       = msg.AttachmentName,
             ["ExtractedPricing"]     = msg.ExtractedPricing,
             ["GraphConversationId"]  = msg.GraphConversationId,
             ["SliVersionAtSend"]     = msg.SliVersionAtSend,
@@ -6982,7 +6988,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[convListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,ExtractedPricing)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing)"];
                 req.QueryParameters.Top    = 500;
                 req.QueryParameters.Filter = filter;
             });
@@ -7006,6 +7012,7 @@ public class SharePointService
                     Subject            = GetStr(f, "EmailSubject"),
                     BodyText           = GetStr(f, "BodyText"),
                     HasAttachments     = f.TryGetValue("HasAttachments", out var ha) && ha is bool hab && hab,
+                    AttachmentName     = GetStr(f, "AttachmentName"),
                     ExtractedPricing   = f.TryGetValue("ExtractedPricing", out var ep) && ep is bool epb && epb,
                 });
             }

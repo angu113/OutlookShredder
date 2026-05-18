@@ -116,7 +116,8 @@ public sealed class ShrConvInRouter
         DateTimeOffset receivedAt,
         bool           hasAttachments,
         string?        fromAddr,
-        string?        graphConversationId = null)
+        string?        graphConversationId = null,
+        string?        attachmentName      = null)
     {
         if (string.IsNullOrEmpty(rfqId)       ||
             string.IsNullOrEmpty(supplierName) ||
@@ -138,6 +139,7 @@ public sealed class ShrConvInRouter
             Subject             = subject,
             BodyText            = b[..Math.Min(b.Length, 4_000)],
             HasAttachments      = hasAttachments,
+            AttachmentName      = attachmentName,
             ExtractedPricing    = true,
             ContactEmail        = fromAddr,
             GraphConversationId = graphConversationId,
