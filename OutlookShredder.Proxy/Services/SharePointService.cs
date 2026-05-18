@@ -7047,6 +7047,7 @@ public class SharePointService
                     Subject            = GetStr(f, "EmailSubject"),
                     BodyText           = GetStr(f, "EmailBody"),
                     HasAttachments     = !string.IsNullOrEmpty(GetStr(f, "SourceFile")),
+                    AttachmentName     = GetStr(f, "SourceFile"),
                     ExtractedPricing   = true,
                     ContactEmail       = GetStr(f, "ContactEmail"),
                 });

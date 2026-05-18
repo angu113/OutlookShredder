@@ -13,6 +13,8 @@ public class ConversationMessage
     public string? Subject { get; set; }
     public string? BodyText { get; set; }
     public bool HasAttachments { get; set; }
+    /// <summary>Filename of the attachment (e.g. "quote.pdf") for inbound SR messages.</summary>
+    public string? AttachmentName { get; set; }
     public bool ExtractedPricing { get; set; }
     /// <summary>
     /// For inbound messages that arrived as forwards: the original supplier's email address
