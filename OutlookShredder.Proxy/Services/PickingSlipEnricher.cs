@@ -468,38 +468,41 @@ internal static class PickingSlipEnricher
         gfx.DrawRectangle(XBrushes.White, cellRect);
         gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
 
-        var rows = new List<(string Label, string Value, bool ValueOnly)>();
-        if (!string.IsNullOrEmpty(h.RepName))        rows.Add(("Sales Rep:",  h.RepName,        false));
-        if (!string.IsNullOrEmpty(h.OrderDate))       rows.Add(("Order Date:", h.OrderDate,      false));
-        if (!string.IsNullOrEmpty(h.DeliveryMethod))  rows.Add(("",            h.DeliveryMethod, true));
-        if (!string.IsNullOrEmpty(h.Carrier))         rows.Add(("Carrier:",    h.Carrier,        false));
-        if (!string.IsNullOrEmpty(h.PoNumber))        rows.Add(("PO#:",        h.PoNumber,       false));
+        var rows = new List<(string Label, string Value, bool ValueOnly, bool BoldValue)>();
+        if (!string.IsNullOrEmpty(h.RepName))        rows.Add(("Sales Rep:",  h.RepName,        false, true));
+        if (!string.IsNullOrEmpty(h.OrderDate))       rows.Add(("Order Date:", h.OrderDate,      false, false));
+        if (!string.IsNullOrEmpty(h.DeliveryMethod))  rows.Add(("",            h.DeliveryMethod, true,  false));
+        if (!string.IsNullOrEmpty(h.Carrier))         rows.Add(("Carrier:",    h.Carrier,        false, false));
+        if (!string.IsNullOrEmpty(h.PoNumber))        rows.Add(("PO#:",        h.PoNumber,       false, false));
         if (rows.Count == 0) return;
 
-        double innerW   = cellW  - margin * 2;
-        double innerH   = psHeight - margin * 2;
-        double rowH     = Math.Min(innerH / rows.Count, 18.0);
-        double fontSize = Math.Clamp(rowH * 0.65, 7.0, 11.0);
-        var labelFont   = new XFont("Arial", fontSize, XFontStyleEx.Bold);
-        var valueFont   = new XFont("Arial", fontSize, XFontStyleEx.Regular);
+        double innerW       = cellW  - margin * 2;
+        double innerH       = psHeight - margin * 2;
+        double rowH         = Math.Min(innerH / rows.Count, 18.0);
+        double fontSize     = Math.Clamp(rowH * 0.65, 7.0, 11.0);
+        var labelFont       = new XFont("Arial", fontSize,     XFontStyleEx.Bold);
+        var valueFont       = new XFont("Arial", fontSize,     XFontStyleEx.Regular);
+        var boldValueFont   = new XFont("Arial", fontSize + 2, XFontStyleEx.Bold);
         const double labelColW = 65.0;
 
         // Vertically centre the row block
         double blockH = rows.Count * rowH;
         double y = psTop + margin + (innerH - blockH) / 2.0;
 
-        foreach (var (label, value, valueOnly) in rows)
+        foreach (var (label, value, valueOnly, boldValue) in rows)
         {
             if (valueOnly)
             {
+                // No label — align value with the value column start
                 gfx.DrawString(value, labelFont, XBrushes.Black,
-                    new XRect(splitX + margin, y, innerW, rowH), XStringFormats.TopLeft);
+                    new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
             }
             else
             {
+                var vFont = boldValue ? boldValueFont : valueFont;
                 gfx.DrawString(label, labelFont, XBrushes.Black,
                     new XRect(splitX + margin, y, labelColW, rowH), XStringFormats.TopLeft);
-                gfx.DrawString(value, valueFont, XBrushes.Black,
+                gfx.DrawString(value, vFont, XBrushes.Black,
                     new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
             }
             y += rowH;
@@ -782,8 +785,7 @@ internal static class PickingSlipEnricher
             foreach (var line in lines)
             {
                 var t = line.Text.Trim();
-                if (!t.Contains("Description", StringComparison.OrdinalIgnoreCase) ||
-                    !t.Contains("Special",     StringComparison.OrdinalIgnoreCase))
+                if (!t.StartsWith("Description", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 // Box starts at the top edge of the label text and runs to the page bottom,
