@@ -463,7 +463,8 @@ public class MailService
                 {
                     req.QueryParameters.Filter  = filter;
                     req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime",
-                                                   "body", "hasAttachments", "bodyPreview", "categories"];
+                                                   "body", "hasAttachments", "bodyPreview", "categories",
+                                                   "conversationId"];
                     req.QueryParameters.Top     = 50;
                     req.QueryParameters.Orderby = ["receivedDateTime desc"];
                 });

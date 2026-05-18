@@ -59,7 +59,8 @@ public sealed class ShrConvInRouter
         string?        messageId,
         bool           hasAttachments,
         DateTimeOffset receivedAt,
-        string?        contactEmail = null)
+        string?        contactEmail         = null,
+        string?        graphConversationId  = null)
     {
         var m = ShrTokenRegex.Match(searchText ?? string.Empty);
         if (!m.Success) return Result.NotTagged;
@@ -82,16 +83,17 @@ public sealed class ShrConvInRouter
 
         await _sp.WriteConversationMessageAsync(new ConversationMessage
         {
-            RfqId            = rfqId,
-            SupplierName     = supplier,
-            Direction        = "in",
-            MessageId        = messageId,
-            SentAt           = receivedAt,
-            Subject          = subject,
-            BodyText         = (body ?? string.Empty)[..Math.Min((body ?? string.Empty).Length, 4_000)],
-            HasAttachments   = hasAttachments,
-            ExtractedPricing = false,
-            ContactEmail     = contactEmail ?? fromAddr,
+            RfqId               = rfqId,
+            SupplierName        = supplier,
+            Direction           = "in",
+            MessageId           = messageId,
+            SentAt              = receivedAt,
+            Subject             = subject,
+            BodyText            = (body ?? string.Empty)[..Math.Min((body ?? string.Empty).Length, 4_000)],
+            HasAttachments      = hasAttachments,
+            ExtractedPricing    = false,
+            ContactEmail        = contactEmail ?? fromAddr,
+            GraphConversationId = graphConversationId,
         });
 
         return Result.WrittenToConv(rfqId, supplier);
@@ -113,7 +115,8 @@ public sealed class ShrConvInRouter
         string?        body,
         DateTimeOffset receivedAt,
         bool           hasAttachments,
-        string?        fromAddr)
+        string?        fromAddr,
+        string?        graphConversationId = null)
     {
         if (string.IsNullOrEmpty(rfqId)       ||
             string.IsNullOrEmpty(supplierName) ||
@@ -127,16 +130,17 @@ public sealed class ShrConvInRouter
         var b = body ?? string.Empty;
         await _sp.WriteConversationMessageAsync(new ConversationMessage
         {
-            RfqId            = rfqId,
-            SupplierName     = supplierName,
-            Direction        = "in",
-            MessageId        = messageId,
-            SentAt           = receivedAt,
-            Subject          = subject,
-            BodyText         = b[..Math.Min(b.Length, 4_000)],
-            HasAttachments   = hasAttachments,
-            ExtractedPricing = true,
-            ContactEmail     = fromAddr,
+            RfqId               = rfqId,
+            SupplierName        = supplierName,
+            Direction           = "in",
+            MessageId           = messageId,
+            SentAt              = receivedAt,
+            Subject             = subject,
+            BodyText            = b[..Math.Min(b.Length, 4_000)],
+            HasAttachments      = hasAttachments,
+            ExtractedPricing    = true,
+            ContactEmail        = fromAddr,
+            GraphConversationId = graphConversationId,
         });
     }
 

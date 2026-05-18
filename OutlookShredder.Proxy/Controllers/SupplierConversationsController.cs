@@ -80,7 +80,8 @@ public class SupplierConversationsController : ControllerBase
                 req.To, req.Subject, req.Body,
                 req.AttachmentName, attachmentBytes, req.AttachmentContentType);
 
-            var spId = await _sp.WriteConversationMessageAsync(new ConversationMessage
+            var sliVer = await _sp.GetCurrentSliVersionAsync(req.RfqId, req.SupplierName);
+            var spId   = await _sp.WriteConversationMessageAsync(new ConversationMessage
             {
                 RfqId              = req.RfqId,
                 SupplierName       = req.SupplierName,
@@ -92,6 +93,7 @@ public class SupplierConversationsController : ControllerBase
                 BodyText           = req.Body,
                 HasAttachments     = attachmentBytes is { Length: > 0 },
                 ExtractedPricing   = false,
+                SliVersionAtSend   = sliVer,
             });
 
             return Ok(new { success = true, spItemId = spId });

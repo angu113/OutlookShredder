@@ -20,6 +20,10 @@ public class ConversationMessage
     /// Use this instead of EmailFrom when composing a reply.
     /// </summary>
     public string? ContactEmail { get; set; }
+    /// <summary>Graph mail conversationId — groups all emails in the same reply chain.</summary>
+    public string? GraphConversationId { get; set; }
+    /// <summary>The SliVersion active on the SR at the time this message was sent/received.</summary>
+    public int? SliVersionAtSend { get; set; }
 }
 
 public class SupplierInquiryRequest

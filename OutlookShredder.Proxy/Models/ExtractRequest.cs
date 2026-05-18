@@ -43,6 +43,12 @@ public class ExtractRequest
     public string? AttachId  { get; set; }
 
     /// <summary>
+    /// Graph mail conversationId for the source message — threads all emails in the same reply chain.
+    /// Set by MailPollerService from Message.ConversationId; null when the request originates from the add-in.
+    /// </summary>
+    public string? GraphConversationId { get; set; }
+
+    /// <summary>
     /// Supplier name pre-resolved by ShrConvInRouter (domain map or historical SR lookup).
     /// When set, WriteProductRowAsync uses this as the authoritative supplier name instead of
     /// re-resolving from the AI output or email domain, preventing WHOIS misroutes on

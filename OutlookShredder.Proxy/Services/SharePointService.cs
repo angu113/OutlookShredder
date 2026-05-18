@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -47,6 +48,10 @@ public class SharePointService
     private string? _callLogListId;          // PhoneCallLog
     private string? _messagesListId;         // Messages
     private string? _leaseListId;            // ProxyLease
+
+    // Per-SR next SliVersion cache — set at rowIndex==0 after soft-deleting stale rows;
+    // looked up for all subsequent rows in the same batch so all rows share one version number.
+    private readonly ConcurrentDictionary<string, int> _nextSliVersionCache = new();
 
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
@@ -1865,11 +1870,15 @@ public class SharePointService
 
                 var sliListId2 = await GetSupplierLineItemsListIdAsync();
                 if (!srNew2 && rowIndex == 0)
-                    await SoftDeleteSlisBySrIdAsync(siteId, sliListId2, srId2);
+                {
+                    var maxVer2 = await SoftDeleteSlisBySrIdAsync(siteId, sliListId2, srId2);
+                    _nextSliVersionCache[srId2] = maxVer2 + 1;
+                }
+                var sliVersion2 = _nextSliVersionCache.GetOrAdd(srId2, 1);
                 result.SliSpItemId = await WriteSupplierLineItemAsync(
                     siteId, sliListId2, srId2, jobRef, resolvedSup, product, rowIndex,
                     sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
-                    jobRefMismatchWarning);
+                    jobRefMismatchWarning, sliVersion2);
                 result.Success = true;
                 return result;
             }
@@ -2004,12 +2013,16 @@ public class SharePointService
             // be reliably matched by the fuzzy dedup and would otherwise accumulate as duplicates.
             // Soft-delete preserves the rows for audit; read queries filter IsDeleted=true.
             if (!srNew && rowIndex == 0)
-                await SoftDeleteSlisBySrIdAsync(siteId, sliListId, srId);
+            {
+                var maxVer = await SoftDeleteSlisBySrIdAsync(siteId, sliListId, srId);
+                _nextSliVersionCache[srId] = maxVer + 1;
+            }
+            var sliVersion = _nextSliVersionCache.GetOrAdd(srId, 1);
 
             result.SliSpItemId = await WriteSupplierLineItemAsync(
                 siteId, sliListId, srId, jobRef, supplier, product, rowIndex,
                 sourceFile, emailMeta.EmailFrom, messageId, header.QuoteReference,
-                jobRefMismatchWarning);
+                jobRefMismatchWarning, sliVersion);
 
             result.Success = true;
         }
@@ -2285,7 +2298,8 @@ public class SharePointService
         string supplierResponseId, string jobRef, string supplier,
         ProductLine product, int rowIndex,
         string? sourceFile, string? emailFrom, string? messageId = null,
-        string? quoteReference = null, string? jobRefMismatchWarning = null)
+        string? quoteReference = null, string? jobRefMismatchWarning = null,
+        int sliVersion = 1)
     {
         var prodName   = product.ProductName ?? $"Product {rowIndex + 1}";
         var prodTokens = ProductTokens(prodName);
@@ -2383,7 +2397,8 @@ public class SharePointService
             ["IsRegret"]                 = !HasPrice(product) && (product.IsRegret || HasRegretPhrase(product.SupplierProductComments)),
             ["IsSubstitute"]             = product.IsSubstitute,
             ["LineNumber"]               = product.LineNumber,
-            ["IsDeleted"]               = false,
+            ["IsDeleted"]                = false,
+            ["SliVersion"]               = sliVersion,
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
@@ -2638,16 +2653,19 @@ public class SharePointService
     /// so stale rows with divergent product names or MSPCs don't survive as duplicates.
     /// Rows are retained in SharePoint with IsDeleted=true for audit purposes.
     /// </summary>
-    private async Task SoftDeleteSlisBySrIdAsync(string siteId, string listId, string srId)
+    // Returns the highest SliVersion found among the rows it soft-deletes (0 if none).
+    // The caller increments by 1 to get the version number for the incoming batch.
+    private async Task<int> SoftDeleteSlisBySrIdAsync(string siteId, string listId, string srId)
     {
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,IsDeleted)"];
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,IsDeleted,SliVersion)"];
                 r.QueryParameters.Top    = 2000;
             });
 
         var toSoftDelete = new List<string>();
+        int maxVersion   = 0;
         while (page is not null)
         {
             foreach (var item in page.Value ?? [])
@@ -2659,7 +2677,14 @@ public class SharePointService
                 var alreadyDeleted = d.TryGetValue("IsDeleted", out var del) &&
                                      del is true or JsonElement { ValueKind: JsonValueKind.True };
                 if (!alreadyDeleted)
+                {
                     toSoftDelete.Add(item.Id);
+                    if (d.TryGetValue("SliVersion", out var vObj))
+                    {
+                        var v = vObj is JsonElement je ? (je.ValueKind == JsonValueKind.Number ? je.GetInt32() : 0) : 0;
+                        if (v > maxVersion) maxVersion = v;
+                    }
+                }
             }
             if (page.OdataNextLink is null) break;
             var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
@@ -2673,6 +2698,8 @@ public class SharePointService
                 .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["IsDeleted"] = true } });
             _log.LogInformation("[SP] Soft-deleted SLI {Id} for SR {SrId} (SR update)", id, srId);
         }
+
+        return maxVersion;
     }
 
     // ??"?????"??? TotalPrice fallback calculation ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
@@ -4201,6 +4228,7 @@ public class SharePointService
                 ("IsPurchased",              "boolean"),
                 ("PurchaseRecordId",         "text"),
                 ("IsDeleted",               "boolean"),
+                ("SliVersion",             "number"),
             ]),
             ["RFQ Line Items"] = await EnsureListColumnsAsync(siteId,
                 _config["SharePoint:ListName"] ?? "RFQ Line Items",
@@ -4229,8 +4257,10 @@ public class SharePointService
                 ("SentAt",             "dateTime"),
                 ("EmailSubject",       "text"),
                 ("BodyText",           "note"),
-                ("HasAttachments",     "boolean"),
-                ("ExtractedPricing",   "boolean"),
+                ("HasAttachments",       "boolean"),
+                ("ExtractedPricing",    "boolean"),
+                ("SliVersionAtSend",    "number"),
+                ("GraphConversationId", "text"),
             ]),
             ["ProductSynonyms"] = await EnsureListColumnsAsync(siteId, "ProductSynonyms",
             [
@@ -4260,6 +4290,15 @@ public class SharePointService
                 ("CreatedAt",      "dateTime"),
             ]),
             ["IndustryDictionary"] = await EnsureIndustryDictionaryColumnsAsync(siteId),
+            ["ShredderTodos"] = await EnsureListColumnsAsync(siteId, "ShredderTodos",
+            [
+                ("Status",       "text"),
+                ("ClaimedBy",    "text"),
+                ("CreatedBy",    "text"),
+                ("Notes",        "note"),
+                ("DueDate",      "dateTime"),
+                ("RelatedRfqId", "text"),
+            ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
             poMap is Dictionary<string, string> poDict &&
@@ -4273,7 +4312,9 @@ public class SharePointService
         // column index instead of scanning the list (which is what the
         // "HonorNonIndexedQueriesWarningMayFailRandomly" hint falls back to).
         results["Indexes:SupplierConversations"] = await EnsureColumnIndexesAsync(
-            siteId, "SupplierConversations", "RFQ_ID", "SupplierName");
+            siteId, "SupplierConversations", "RFQ_ID", "SupplierName", "GraphConversationId");
+        results["Indexes:ShredderTodos"] = await EnsureColumnIndexesAsync(
+            siteId, "ShredderTodos", "Status", "ClaimedBy");
         results["Indexes:SupplierResponses"] = await EnsureColumnIndexesAsync(
             siteId, "SupplierResponses",     "RFQ_ID", "SupplierName", "MessageId");
         results["Indexes:SupplierLineItems"] = await EnsureColumnIndexesAsync(
@@ -6815,8 +6856,10 @@ public class SharePointService
             ["SentAt"]             = msg.SentAt.ToString("o"),
             ["EmailSubject"]       = msg.Subject,
             ["BodyText"]           = msg.BodyText,
-            ["HasAttachments"]     = msg.HasAttachments,
-            ["ExtractedPricing"]   = msg.ExtractedPricing,
+            ["HasAttachments"]       = msg.HasAttachments,
+            ["ExtractedPricing"]     = msg.ExtractedPricing,
+            ["GraphConversationId"]  = msg.GraphConversationId,
+            ["SliVersionAtSend"]     = msg.SliVersionAtSend,
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -6825,6 +6868,50 @@ public class SharePointService
         _log.LogInformation("[Conv] Wrote {Direction} message for [{RfqId}] {Supplier}",
             msg.Direction, msg.RfqId, msg.SupplierName);
         return item?.Id;
+    }
+
+    /// <summary>
+    /// Returns the highest SliVersion currently stored on SupplierLineItems rows for the
+    /// given RFQ + supplier. Used to stamp SliVersionAtSend on outbound messages so the
+    /// conversation viewer can show which SLI state was active when the message was sent.
+    /// Returns 1 (baseline) when no versioned rows exist yet.
+    /// </summary>
+    public async Task<int> GetCurrentSliVersionAsync(string rfqId, string supplierName, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierLineItemsListIdAsync();
+        var sup    = supplierName.Replace("'", "''");
+        var rfq    = rfqId.Replace("'", "''");
+        var page   = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=SupplierName,RFQ_ID,SliVersion,IsDeleted)"];
+                r.QueryParameters.Filter = $"fields/RFQ_ID eq '{rfq}' and fields/SupplierName eq '{sup}'";
+                r.QueryParameters.Top    = 2000;
+            }, ct);
+
+        int maxVer = 1;
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null) continue;
+                var deleted = d.TryGetValue("IsDeleted", out var del) &&
+                              del is true or JsonElement { ValueKind: JsonValueKind.True };
+                if (deleted) continue;
+                if (d.TryGetValue("SliVersion", out var vObj))
+                {
+                    var v = vObj is JsonElement je ? (je.ValueKind == JsonValueKind.Number ? je.GetInt32() : 0) : 0;
+                    if (v > maxVer) maxVer = v;
+                }
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync(cancellationToken: ct);
+        }
+        return maxVer;
     }
 
     /// <summary>

@@ -625,13 +625,14 @@ public class MailPollerService : BackgroundService
         // We never early-return on Routed: the token appears in quoted reply bodies
         // of initial RFQ emails so short-circuiting would silently drop pricing rows.
         var shrResult = await _shrRouter.TryRouteAsync(
-            searchText:     searchText,
-            fromAddr:       fromAddr,
-            subject:        subject,
-            body:           body,
-            messageId:      msg.Id,
-            hasAttachments: msg.HasAttachments == true,
-            receivedAt:     msg.ReceivedDateTime ?? DateTimeOffset.UtcNow);
+            searchText:          searchText,
+            fromAddr:            fromAddr,
+            subject:             subject,
+            body:                body,
+            messageId:           msg.Id,
+            hasAttachments:      msg.HasAttachments == true,
+            receivedAt:          msg.ReceivedDateTime ?? DateTimeOffset.UtcNow,
+            graphConversationId: msg.ConversationId);
 
         // Seed the rfqId so AI extraction files the row under the correct RFQ.
         if (shrResult.ShrRfqId is not null &&
@@ -671,8 +672,9 @@ public class MailPollerService : BackgroundService
                 SourceType   = "body",
                 JobRefs      = jobRefs,
                 EmailSubject = subject,
-                EmailFrom    = fromAddr,
-                ReceivedAt   = received,
+                EmailFrom            = fromAddr,
+                ReceivedAt           = received,
+                GraphConversationId  = msg.ConversationId,
             };
             var extraction = new RfqExtraction();
             var placeholder = new ProductLine
@@ -698,6 +700,7 @@ public class MailPollerService : BackgroundService
                 ReceivedAt             = received,
                 HasAttachment          = false,
                 ResolvedSupplierName   = shrResult.ResolvedSupplier,
+                GraphConversationId    = msg.ConversationId,
             }, "body", null, maxPerMinute, ct, msg.Id);
         }
         else
@@ -768,6 +771,7 @@ public class MailPollerService : BackgroundService
                     ReceivedAt           = received,
                     HasAttachment        = true,
                     ResolvedSupplierName = shrResult.ResolvedSupplier,
+                    GraphConversationId  = msg.ConversationId,
                 }, "attachment", fa.Name, maxPerMinute, ct, msg.Id);
 
                 processedAny = true;
@@ -788,6 +792,7 @@ public class MailPollerService : BackgroundService
                     ReceivedAt           = received,
                     HasAttachment        = true,
                     ResolvedSupplierName = shrResult.ResolvedSupplier,
+                    GraphConversationId  = msg.ConversationId,
                 }, "body", null, maxPerMinute, ct, msg.Id);
             }
         }
@@ -1204,14 +1209,15 @@ public class MailPollerService : BackgroundService
             {
                 var receivedAt = DateTimeOffset.TryParse(req.ReceivedAt, out var rt) ? rt : DateTimeOffset.UtcNow;
                 await _shrRouter.WriteConvInFromExtractionAsync(
-                    rfqId:          firstGood.RfqId,
-                    supplierName:   firstGood.SupplierName,
-                    messageId:      messageId,
-                    subject:        req.EmailSubject,
-                    body:           req.EmailBody,
-                    receivedAt:     receivedAt,
-                    hasAttachments: req.HasAttachment,
-                    fromAddr:       req.EmailFrom);
+                    rfqId:               firstGood.RfqId,
+                    supplierName:        firstGood.SupplierName,
+                    messageId:           messageId,
+                    subject:             req.EmailSubject,
+                    body:                req.EmailBody,
+                    receivedAt:          receivedAt,
+                    hasAttachments:      req.HasAttachment,
+                    fromAddr:            req.EmailFrom,
+                    graphConversationId: req.GraphConversationId);
             }
 
             return anyUnknown;
