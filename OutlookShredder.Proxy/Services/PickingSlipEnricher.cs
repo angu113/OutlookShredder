@@ -11,12 +11,12 @@ namespace OutlookShredder.Proxy.Services;
 
 /// <summary>
 /// Enriches picking-slip PDFs:
-///   1. Stamps the customer name in a box at the top-left of page 1.
+///   1. Stamps both header cells: left = customer name + attention + contact phone;
+///      right = sales rep + order date + delivery method + carrier + PO# (if present).
 ///   2. Bolds shop-comment lines in-place (white rect + bold redraw).
-///   3. Stamps the rep's first name over the "Customer Rep:" / "Store #:" area.
-///   4. Appends a callout page with geometric drawings for bend/cut keywords.
+///   3. Appends a callout page with geometric drawings for bend/cut keywords.
 ///
-/// EnrichPickingSlip does all four in a single PdfPig read + single PdfSharp write.
+/// EnrichPickingSlip does all three in a single PdfPig read + single PdfSharp write.
 /// </summary>
 internal static class PickingSlipEnricher
 {
@@ -97,6 +97,17 @@ internal static class PickingSlipEnricher
 
     private enum ParseState { Preamble, InProduct, AfterBLine, DoneWithProduct }
 
+    /// <summary>All header fields extracted from page 1 of the picking slip.</summary>
+    private sealed record SlipHeader(
+        string? CustomerName,
+        string? Attention,      // "Attention: "
+        string? ContactPhone,   // "Contact Phone: "
+        string? RepName,        // "Customer Rep: " (full name)
+        string? OrderDate,      // "Order Date: "
+        string? DeliveryMethod, // "Delivery Method: "
+        string? Carrier,        // "Carrier: "
+        string? PoNumber);      // "Customer Purchase Order #"
+
     // ── Combined entry point (1 PdfPig read + 1 PdfSharp write) ──────────────
 
     /// <summary>
@@ -110,75 +121,61 @@ internal static class PickingSlipEnricher
         EnsureFontResolver();
 
         // ── PdfPig pass: extract everything ──────────────────────────────────
-        string? shipToName   = null;
-        string? repFirstName = null;
-        double  coverL = double.MaxValue, coverB = double.MaxValue;
-        double  coverR = double.MinValue, coverT = double.MinValue;
-        double  repLineH = 10;
+        string? shipToName = null;
+        SlipHeader header;
+        double pigHeaderTop    = 0;
+        double pigHeaderBottom = 0;
+        double pigPageH        = 0;
+        double pigPageW        = 0;
         List<CommentBlock> blocks;
 
         using (var pigDoc = PigDoc.Open(pdfBytes))
         {
-            var page1Words = pigDoc.GetPage(1).GetWords().ToList();
+            var page1     = pigDoc.GetPage(1);
+            pigPageH      = page1.Height;
+            pigPageW      = page1.Width;
+            var page1Words = page1.GetWords().ToList();
 
-            // 1. Ship-to customer name (left column, line below "Ship" word)
+            // 1. Ship-to customer name
             shipToName = ExtractShipToNameFromWords(page1Words, log);
 
-            // 2. Rep name + cover rect (for white-out + re-stamp)
+            // 2. All labeled header fields + header cell bounds
             var page1Lines = GroupIntoLines(page1Words);
-            foreach (var line in page1Lines)
-            {
-                bool isRepLine   = line.Text.IndexOf("Customer Rep:", StringComparison.OrdinalIgnoreCase) >= 0;
-                bool isStoreLine = line.Text.IndexOf("Store #",       StringComparison.OrdinalIgnoreCase) >= 0;
-                if (isRepLine)
-                {
-                    int sep  = line.Text.IndexOf("Customer Rep:", StringComparison.OrdinalIgnoreCase) + "Customer Rep:".Length;
-                    var after = line.Text[sep..].Trim();
-                    if (!string.IsNullOrWhiteSpace(after))
-                        repFirstName = after.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
-                    repLineH = line.Height;
-                }
-                if (isRepLine || isStoreLine)
-                {
-                    coverL = Math.Min(coverL, line.X);
-                    coverB = Math.Min(coverB, line.Y);
-                    coverR = Math.Max(coverR, line.X + line.Width);
-                    coverT = Math.Max(coverT, line.Y + line.Height);
-                }
-            }
-            log?.LogInformation("[PSE] rep='{Rep}' cover=({L:F1},{B:F1})–({R:F1},{T:F1})",
-                repFirstName ?? "(null)", coverL, coverB, coverR, coverT);
+            (header, pigHeaderTop, pigHeaderBottom) = ExtractHeaderFields(
+                page1Lines, pigPageW, pigPageH,
+                shipToName ?? knownCustomerName, log);
 
             // 3. Comment blocks from all pages
             blocks = ParseCommentBlocksFromDoc(pigDoc, log);
         }
 
-        // Effective customer name (PDF takes priority over AI extraction)
-        var customerName = !string.IsNullOrWhiteSpace(shipToName) ? shipToName : knownCustomerName;
-        bool hasCustomerName = !string.IsNullOrWhiteSpace(customerName);
-        bool hasRepName      = repFirstName is not null && coverL != double.MaxValue;
+        bool hasHeaderBounds = pigHeaderTop > pigHeaderBottom;
 
         var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var b in blocks)
             foreach (var kw in b.Keywords)
                 keywords.Add(kw);
 
-        // Skip write pass if nothing to do
-        if (!hasCustomerName && !hasRepName && blocks.Count == 0)
+        if (!hasHeaderBounds && blocks.Count == 0)
             return (pdfBytes, shipToName);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
         using var ms  = new MemoryStream(pdfBytes);
         var doc       = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
 
-        if (hasCustomerName)
-            StampCustomerNameOnDoc(doc, customerName!, log);
+        if (hasHeaderBounds)
+        {
+            double pageH    = doc.Pages[0].Height.Point;
+            double pageW    = doc.Pages[0].Width.Point;
+            const double pad = 6.0;
+            double psTop    = pageH - pigHeaderTop    - pad;
+            double psHeight = (pigHeaderTop - pigHeaderBottom) + pad * 2;
+            StampLeftCellOnDoc(doc,  header, psTop, psHeight, pageW, log);
+            StampRightCellOnDoc(doc, header, psTop, psHeight, pageW, log);
+        }
 
         if (blocks.Count > 0)
             BoldCommentsOnDoc(doc, blocks);
-
-        if (hasRepName)
-            StampRepNameOnDoc(doc, repFirstName!, coverL, coverB, coverR, coverT, repLineH, log);
 
         if (keywords.Count > 0)
             AppendCalloutPageToDoc(doc, keywords);
@@ -219,6 +216,74 @@ internal static class PickingSlipEnricher
         var name = string.Join(" ", nameWords.Select(w => w.Text)).Trim();
         log?.LogInformation("[PSE] Ship-to name: '{Name}'", name);
         return string.IsNullOrWhiteSpace(name) ? null : name;
+    }
+
+    /// <summary>
+    /// Extracts all labeled header fields and computes the bounding box of the header
+    /// zone (top ~160pt of page) in PdfPig coordinates (y=0 at bottom).
+    /// </summary>
+    private static (SlipHeader Header, double PigTop, double PigBottom) ExtractHeaderFields(
+        List<TextLine> lines, double pigPageW, double pigPageH,
+        string? customerName, ILogger? log)
+    {
+        const double headerZone = 160.0; // pt from top of page
+
+        string? attention      = null;
+        string? contactPhone   = null;
+        string? repName        = null;
+        string? orderDate      = null;
+        string? deliveryMethod = null;
+        string? carrier        = null;
+        string? poNumber       = null;
+
+        double pigTop    = double.MinValue;
+        double pigBottom = double.MaxValue;
+
+        static string? After(string text, string label)
+        {
+            var idx = text.IndexOf(label, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            var val = text[(idx + label.Length)..].TrimStart(' ', ':', '\t').Trim();
+            return string.IsNullOrWhiteSpace(val) ? null : val;
+        }
+
+        foreach (var line in lines)
+        {
+            var text = line.Text;
+
+            if (line.Y > pigPageH - headerZone)
+            {
+                pigTop    = Math.Max(pigTop,    line.Y + line.Height);
+                pigBottom = Math.Min(pigBottom, line.Y);
+            }
+
+            // Extract labeled fields from the full page (labels can appear near-header).
+            attention      ??= After(text, "Attention:");
+            contactPhone   ??= After(text, "Contact Phone:");
+            repName        ??= After(text, "Customer Rep:");
+            orderDate      ??= After(text, "Order Date:");
+            deliveryMethod ??= After(text, "Delivery Method:");
+            carrier        ??= After(text, "Carrier:");
+            poNumber       ??= After(text, "Customer Purchase Order #");
+        }
+
+        if (pigTop == double.MinValue)
+        {
+            // Fallback: assume header occupies top 120pt
+            pigTop    = pigPageH - 10;
+            pigBottom = pigPageH - 120;
+        }
+
+        log?.LogInformation(
+            "[PSE] Header fields — cust='{C}' attn='{A}' phone='{P}' rep='{R}' date='{D}' del='{V}' carrier='{Ca}' po='{PO}'",
+            customerName, attention, contactPhone, repName, orderDate, deliveryMethod, carrier, poNumber);
+        log?.LogInformation("[PSE] Header bounds (pig) — top={T:F1} bottom={B:F1}", pigTop, pigBottom);
+
+        var h = new SlipHeader(customerName, attention?.Trim(), contactPhone?.Trim(),
+            repName?.Trim(), orderDate?.Trim(), deliveryMethod?.Trim(),
+            carrier?.Trim(), poNumber?.Trim());
+
+        return (h, pigTop, pigBottom);
     }
 
     private static List<CommentBlock> ParseCommentBlocksFromDoc(PigDoc doc, ILogger? log)
@@ -296,33 +361,122 @@ internal static class PickingSlipEnricher
 
     // ── PdfSharp modification helpers (operate on an already-open SharpDoc) ──
 
-    private static void StampCustomerNameOnDoc(SharpDoc doc, string customerName, ILogger? log)
+    /// <summary>
+    /// White-outs the left header cell and redraws:
+    ///   - Customer name (large bold, fitted)
+    ///   - Attention: [name]    (12pt bold)
+    ///   - Contact Phone: [num] (12pt bold)
+    /// </summary>
+    private static void StampLeftCellOnDoc(
+        SharpDoc doc, SlipHeader h,
+        double psTop, double psHeight, double pageW, ILogger? log)
     {
         var page = doc.Pages[0];
-        const double boxX      = 18;
-        const double boxY      = 18;
-        const double boxWidth  = 180;
-        const double boxHeight = 72;
-        const double pad       = 6;
-        double textAreaW = boxWidth  - pad * 2;
-        double textAreaH = boxHeight - pad * 2;
-
         using var gfx = XGraphics.FromPdfPage(page);
-        var (lines, font) = FitTextInBox(gfx, customerName, textAreaW, textAreaH);
+        const double margin = 8.0;
+        double splitX = pageW / 2.0;
 
-        var boxRect = new XRect(boxX, boxY, boxWidth, boxHeight);
-        gfx.DrawRectangle(XBrushes.White, boxRect);
-        gfx.DrawRectangle(new XPen(XColors.Black, 0.75), boxRect);
+        // White-out existing cell content and redraw border
+        var cellRect = new XRect(0, psTop, splitX, psHeight);
+        gfx.DrawRectangle(XBrushes.White, cellRect);
+        gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
 
-        double lineH  = font.GetHeight();
-        double blockH = lines.Count * lineH;
-        double startY = boxY + pad + (textAreaH - blockH) / 2.0;
-        foreach (var line in lines)
+        double innerX = margin;
+        double innerW = splitX - margin * 2;
+        double innerH = psHeight - margin * 2;
+
+        // Reserve 16pt per contact row at the bottom
+        const double rowH = 16.0;
+        int extraRows = (h.Attention    != null ? 1 : 0) +
+                        (h.ContactPhone != null ? 1 : 0);
+        double nameH = Math.Max(innerH - extraRows * rowH, rowH);
+
+        // Customer name — fitted bold, centred in name area
+        if (!string.IsNullOrEmpty(h.CustomerName))
         {
-            gfx.DrawString(line, font, XBrushes.Black,
-                new XRect(boxX + pad, startY, textAreaW, lineH), XStringFormats.TopCenter);
-            startY += lineH;
+            var (nameLines, nameFont) = FitTextInBox(gfx, h.CustomerName, innerW, nameH);
+            double lh     = nameFont.GetHeight();
+            double blockH = nameLines.Count * lh;
+            double startY = psTop + margin + (nameH - blockH) / 2.0;
+            foreach (var nl in nameLines)
+            {
+                gfx.DrawString(nl, nameFont, XBrushes.Black,
+                    new XRect(innerX, startY, innerW, lh), XStringFormats.TopCenter);
+                startY += lh;
+            }
         }
+
+        // Contact rows — 12pt bold, left-aligned below name area
+        var smallFont = new XFont("Arial", 12, XFontStyleEx.Bold);
+        double rowY = psTop + margin + nameH;
+        if (!string.IsNullOrEmpty(h.Attention))
+        {
+            gfx.DrawString($"Attention: {h.Attention}", smallFont, XBrushes.Black,
+                new XRect(innerX, rowY, innerW, rowH), XStringFormats.TopLeft);
+            rowY += rowH;
+        }
+        if (!string.IsNullOrEmpty(h.ContactPhone))
+        {
+            gfx.DrawString($"Contact Phone: {h.ContactPhone}", smallFont, XBrushes.Black,
+                new XRect(innerX, rowY, innerW, rowH), XStringFormats.TopLeft);
+        }
+
+        log?.LogInformation("[PSE] Left cell stamped — '{Cust}' / '{Attn}' / '{Phone}'",
+            h.CustomerName, h.Attention, h.ContactPhone);
+    }
+
+    /// <summary>
+    /// White-outs the right header cell and redraws:
+    ///   Sales Rep / Order Date / Delivery Method / Carrier / PO# (omitted when null)
+    /// Each row: bold label + regular value, vertically centred in the cell.
+    /// Font size auto-shrinks to fit all rows.
+    /// </summary>
+    private static void StampRightCellOnDoc(
+        SharpDoc doc, SlipHeader h,
+        double psTop, double psHeight, double pageW, ILogger? log)
+    {
+        var page = doc.Pages[0];
+        using var gfx = XGraphics.FromPdfPage(page);
+        const double margin = 8.0;
+        double splitX = pageW / 2.0;
+        double cellW  = pageW - splitX;
+
+        // White-out existing cell content and redraw border
+        var cellRect = new XRect(splitX, psTop, cellW, psHeight);
+        gfx.DrawRectangle(XBrushes.White, cellRect);
+        gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
+
+        var rows = new List<(string Label, string Value)>();
+        if (!string.IsNullOrEmpty(h.RepName))        rows.Add(("Sales Rep:",   h.RepName));
+        if (!string.IsNullOrEmpty(h.OrderDate))       rows.Add(("Order Date:",  h.OrderDate));
+        if (!string.IsNullOrEmpty(h.DeliveryMethod))  rows.Add(("Delivery:",    h.DeliveryMethod));
+        if (!string.IsNullOrEmpty(h.Carrier))         rows.Add(("Carrier:",     h.Carrier));
+        if (!string.IsNullOrEmpty(h.PoNumber))        rows.Add(("PO#:",         h.PoNumber));
+        if (rows.Count == 0) return;
+
+        double innerW   = cellW  - margin * 2;
+        double innerH   = psHeight - margin * 2;
+        double rowH     = Math.Min(innerH / rows.Count, 18.0);
+        double fontSize = Math.Clamp(rowH * 0.65, 7.0, 11.0);
+        var labelFont   = new XFont("Arial", fontSize, XFontStyleEx.Bold);
+        var valueFont   = new XFont("Arial", fontSize, XFontStyleEx.Regular);
+        const double labelColW = 65.0;
+
+        // Vertically centre the row block
+        double blockH = rows.Count * rowH;
+        double y = psTop + margin + (innerH - blockH) / 2.0;
+
+        foreach (var (label, value) in rows)
+        {
+            gfx.DrawString(label, labelFont, XBrushes.Black,
+                new XRect(splitX + margin, y, labelColW, rowH), XStringFormats.TopLeft);
+            gfx.DrawString(value, valueFont, XBrushes.Black,
+                new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
+            y += rowH;
+        }
+
+        log?.LogInformation("[PSE] Right cell stamped — rep='{R}' date='{D}' del='{V}' carrier='{C}' po='{P}'",
+            h.RepName, h.OrderDate, h.DeliveryMethod, h.Carrier, h.PoNumber);
     }
 
     private static void BoldCommentsOnDoc(SharpDoc doc, List<CommentBlock> blocks)
@@ -645,7 +799,7 @@ internal static class PickingSlipEnricher
             }
         }
 
-        log?.LogInformation("[PSE] StampRepName: rep='{Rep}' cover=({L:F1},{B:F1})–({R:F1},{T:F1})",
+        log?.LogInformation("[PSE] StampRepName: rep='{Rep}' cover=({L:F1},{B:F1})-({R:F1},{T:F1})",
             repFirstName ?? "(null)", coverL, coverB, coverR, coverT);
         if (repFirstName is null || coverL == double.MaxValue) return pdfBytes;
 
