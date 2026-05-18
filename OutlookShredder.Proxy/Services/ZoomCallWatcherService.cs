@@ -128,10 +128,13 @@ public class ZoomCallWatcherService : BackgroundService
         }
     }
 
-    private Task RunHookAsync(CancellationToken ct)
+    private async Task RunHookAsync(CancellationToken ct)
     {
         // Combine the host ct with a lease-loss cancellation so we can stop the
         // STA thread either when the app shuts down OR when we lose the lease.
+        // NOTE: must be async + await tcs.Task so the using block stays alive
+        // until the STA thread exits. A non-async Task return disposes leaseCts
+        // immediately on return, before the STA thread reaches Token.Register.
         using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         var tcs = new TaskCompletionSource();
@@ -208,7 +211,7 @@ public class ZoomCallWatcherService : BackgroundService
             }
         }, leaseCts.Token);
 
-        return tcs.Task;
+        await tcs.Task;
     }
 
     private void OnWinEvent(uint eventType, IntPtr hwnd, int idObject)
