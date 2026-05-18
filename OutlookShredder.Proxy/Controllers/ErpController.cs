@@ -65,7 +65,9 @@ public class ErpController : ControllerBase
 
         try
         {
-            var bytes  = await _sp.DownloadSpFileAsync(url, ct);
+            var bytes = url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? await _sp.DownloadSpFileAsync(url, ct)
+                : await System.IO.File.ReadAllBytesAsync(url, ct);
             var bounds = PickingSlipEnricher.ExtractDescriptionBoxBounds(bytes);
             return bounds is null
                 ? NotFound(new { error = "Description (Special Instructions) section not found" })

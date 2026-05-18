@@ -236,9 +236,8 @@ internal static class PickingSlipEnricher
         string? carrier        = null;
         string? poNumber       = null;
 
-        // Cell top always starts at the page top edge.
-        double pigTop    = pigPageH;
-        double pigBottom = double.MaxValue;
+        double pigTop    = 0;              // topmost text-line top in header zone
+        double pigBottom = double.MaxValue; // bottommost text-line bottom in header zone
 
         static string? After(string text, string label)
         {
@@ -253,7 +252,10 @@ internal static class PickingSlipEnricher
             var text = line.Text;
 
             if (line.Y > pigPageH - headerZone)
+            {
                 pigBottom = Math.Min(pigBottom, line.Y);
+                pigTop    = Math.Max(pigTop, line.Y + line.Height);
+            }
 
             // Extract labeled fields from the full page (labels can appear near-header).
             attention      ??= After(text, "Attention:");
@@ -266,10 +268,9 @@ internal static class PickingSlipEnricher
         }
 
         if (pigBottom == double.MaxValue)
-        {
-            // Fallback: assume header occupies top 120pt
             pigBottom = pigPageH - 120;
-        }
+        if (pigTop == 0)
+            pigTop = pigPageH - 10;
 
         log?.LogInformation(
             "[PSE] Header fields — cust='{C}' attn='{A}' phone='{P}' rep='{R}' date='{D}' del='{V}' carrier='{Ca}' po='{PO}'",
