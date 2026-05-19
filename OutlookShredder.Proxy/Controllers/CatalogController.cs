@@ -178,6 +178,25 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     /// <summary>
+    /// POST /api/catalog/backfill-all-rli-custom-ids?dryRun=true
+    /// Scans every RFQ Line Item with no MSPC and assigns a deterministic CUSTOM_ID.
+    /// Pass ?dryRun=true to count without writing.
+    /// </summary>
+    [HttpPost("backfill-all-rli-custom-ids")]
+    public async Task<IActionResult> BackfillAllRliCustomIds(
+        [FromQuery] bool dryRun = true, CancellationToken ct = default)
+    {
+        var (scanned, patched, items) = await sp.BackfillAllRliCustomIdsAsync(dryRun, ct);
+        return Ok(new
+        {
+            dryRun,
+            scanned,
+            patched,
+            items = items.Select(i => new { rfqId = i.RfqId, product = i.Product, customId = i.CustomId }),
+        });
+    }
+
+    /// <summary>
     /// POST /api/catalog/compute-weights?dryRun=true&amp;overwrite=false
     /// Computes theoretical weight (lb/ft for linear products, lb/sqft for sheet/plate)
     /// from each product's name and PATCHes WeightPerFoot + WeightUnit on the SP list.

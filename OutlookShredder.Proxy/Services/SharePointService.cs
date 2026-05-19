@@ -1630,7 +1630,63 @@ public class SharePointService
         return patched;
     }
 
-    // ??"?????"??? RLI anchoring dry-run helpers ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+    /// <summary>
+    /// Scans every RFQ Line Item row that has no MSPC and assigns a deterministic CUSTOM_ID.
+    /// Pass <paramref name="dryRun"/>=true to count without writing anything.
+    /// Returns (totalScanned, patched, items[]).
+    /// </summary>
+    public async Task<(int Scanned, int Patched, List<(string RfqId, string Product, string CustomId)> Items)>
+        BackfillAllRliCustomIdsAsync(bool dryRun, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        // Page through all RLI items
+        var allItems = new List<Microsoft.Graph.Models.ListItem>();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product)"];
+                req.QueryParameters.Top    = 500;
+            }, ct);
+        while (page is not null)
+        {
+            allItems.AddRange(page.Value ?? []);
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync(cancellationToken: ct);
+        }
+
+        int scanned = 0, patched = 0;
+        var results = new List<(string, string, string)>();
+        foreach (var item in allItems)
+        {
+            if (item.Id is null || item.Fields?.AdditionalData is null) continue;
+            var d       = item.Fields.AdditionalData;
+            var mspc    = d.TryGetValue("MSPC",    out var vm) ? vm?.ToString() : null;
+            var product = d.TryGetValue("Product", out var vp) ? vp?.ToString() : null;
+            if (!string.IsNullOrWhiteSpace(mspc) || string.IsNullOrWhiteSpace(product)) continue;
+
+            scanned++;
+            var rfqId = d.TryGetValue(col, out var vr) ? vr?.ToString() : null;
+            var (custId, _) = await _catalogAnalysis.Value.GetOrCreateCustomIdAsync(product, "RLI", ct);
+
+            if (!dryRun)
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["MSPC"] = custId } },
+                        cancellationToken: ct);
+                _log.LogInformation("[SP] Backfill-all RLI [{RfqId}] '{Product}' -> {Id}", rfqId, product, custId);
+            }
+            patched++;
+            results.Add((rfqId ?? "?", product, custId));
+        }
+        return (allItems.Count, patched, results);
+    }
+
+    // ── RLI anchoring dry-run helpers ─────────────────────────────────────────
 
     /// <summary>
     /// Returns SLI rows (product name + current matched MSPC) for a given RFQ ID.
