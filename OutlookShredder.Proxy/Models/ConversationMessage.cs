@@ -26,7 +26,15 @@ public class ConversationMessage
     public string? GraphConversationId { get; set; }
     /// <summary>The SliVersion active on the SR at the time this message was sent/received.</summary>
     public int? SliVersionAtSend { get; set; }
+    /// <summary>Comma-separated BCC addresses used on this outbound message.</summary>
+    public string? BccAddresses { get; set; }
 }
+
+/// <summary>
+/// Summary entry for one MSG conversation (RFQ_ID starting with "MSG"),
+/// returned by GET /api/supplier-conversations/msg-list.
+/// </summary>
+public record MsgConversationSummary(string RfqId, string SupplierName, string? Subject, DateTime LastAt);
 
 public class SupplierInquiryRequest
 {

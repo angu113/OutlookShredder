@@ -97,10 +97,11 @@ public class MailService
 
     /// <summary>
     /// Sends a follow-up / clarification email to a single supplier for an ongoing RFQ.
-    /// Returns the sent message's internet MessageId (when Graph surfaces it via saveToSentItems),
-    /// which the caller should store on the conversation row for later threading.
+    /// Returns the sent message's Graph ConversationId so the caller can store it on the
+    /// SupplierConversations row for token-free reply matching.
+    /// Uses create-draft-then-send so Graph returns the full message object including ConversationId.
     /// </summary>
-    public async Task SendSupplierInquiryAsync(
+    public async Task<string?> SendSupplierInquiryAsync(
         string to,
         string subject,
         string body,
@@ -131,8 +132,7 @@ public class MailService
             [
                 new Recipient { EmailAddress = new EmailAddress { Address = to } }
             ],
-            BccRecipients = allBcc.Count == 0 ? null :
-                allBcc.Select(a => new Recipient { EmailAddress = new EmailAddress { Address = a } }).ToList(),
+            BccRecipients = allBcc.Select(a => new Recipient { EmailAddress = new EmailAddress { Address = a } }).ToList(),
         };
 
         if (attachmentBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(attachmentName))
@@ -149,10 +149,18 @@ public class MailService
             ];
         }
 
-        await GetGraph().Users[from].SendMail.PostAsync(new() { Message = message, SaveToSentItems = true });
+        // Create as draft first so Graph returns the message object (including ConversationId),
+        // then send it. SendMail endpoint returns 202 with no body so ConversationId is unavailable.
+        var draft = await GetGraph().Users[from].Messages.PostAsync(message);
+        if (draft?.Id is null)
+            throw new InvalidOperationException("[Inquiry] Graph returned null draft message — cannot send");
 
-        _log.LogInformation("[Inquiry] Sent '{Subject}' to {To} (attachment: {Att})",
-            subject, to, attachmentBytes is { Length: > 0 } ? attachmentName : "none");
+        await GetGraph().Users[from].Messages[draft.Id].Send.PostAsync();
+
+        _log.LogInformation("[Inquiry] Sent '{Subject}' to {To} (attachment: {Att}, convId: {ConvId})",
+            subject, to, attachmentBytes is { Length: > 0 } ? attachmentName : "none", draft.ConversationId ?? "none");
+
+        return draft.ConversationId;
     }
 
     // ── RFQ Import: scan a named folder ──────────────────────────────────────

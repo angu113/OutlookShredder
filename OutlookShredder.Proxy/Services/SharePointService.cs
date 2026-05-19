@@ -4417,6 +4417,8 @@ public class SharePointService
                 ("ExtractedPricing",    "boolean"),
                 ("SliVersionAtSend",    "number"),
                 ("GraphConversationId", "text"),
+                ("ContactEmail",        "text"),
+                ("BccAddresses",        "note"),
             ]),
             ["ProductSynonyms"] = await EnsureListColumnsAsync(siteId, "ProductSynonyms",
             [
@@ -7021,6 +7023,8 @@ public class SharePointService
             ["ExtractedPricing"]     = msg.ExtractedPricing,
             ["GraphConversationId"]  = msg.GraphConversationId,
             ["SliVersionAtSend"]     = msg.SliVersionAtSend,
+            ["ContactEmail"]         = msg.ContactEmail,
+            ["BccAddresses"]         = msg.BccAddresses,
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -7135,6 +7139,105 @@ public class SharePointService
         return rows.OrderBy(r => r.SentAt).ToList();
     }
 
+    /// <summary>
+    /// Returns one summary entry per MSG conversation (RFQ_ID starting with "MSG"),
+    /// ordered most-recently-updated first.
+    /// </summary>
+    public async Task<List<Models.MsgConversationSummary>> ReadMsgConversationSummariesAsync()
+    {
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+
+        var results = new List<(string RfqId, string SupplierName, string? Subject, DateTime LastAt)>();
+
+        var page = await GetGraph().Sites[siteId].Lists[convListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SentAt,EmailSubject)"];
+                req.QueryParameters.Top    = 1000;
+                req.QueryParameters.Filter = "startswith(fields/RFQ_ID,'MSG')";
+            });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                var f = item.Fields?.AdditionalData;
+                if (f is null) continue;
+                var rfqId    = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
+                var supplier = GetStr(f, "SupplierName");
+                var subject  = GetStr(f, "EmailSubject");
+                if (string.IsNullOrEmpty(rfqId)) continue;
+                var sentAt = DateTime.UtcNow;
+                if (f.TryGetValue("SentAt", out var sa) && sa is string saStr && DateTime.TryParse(saStr, out var parsed))
+                    sentAt = parsed;
+                results.Add((rfqId, supplier ?? "", subject, sentAt));
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[convListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        // Group by RfqId+SupplierName, keep latest entry per group
+        return results
+            .GroupBy(r => (r.RfqId, r.SupplierName))
+            .Select(g =>
+            {
+                var latest = g.OrderByDescending(r => r.LastAt).First();
+                return new Models.MsgConversationSummary(latest.RfqId, latest.SupplierName,
+                    g.Select(r => r.Subject).FirstOrDefault(s => !string.IsNullOrEmpty(s)),
+                    latest.LastAt);
+            })
+            .OrderByDescending(s => s.LastAt)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Returns the (rfqId, supplierName) for the first SupplierConversations row whose
+    /// GraphConversationId matches, or (null, null) if not found.
+    /// Used as a token-free fallback when an email client truncates the quoted body.
+    /// </summary>
+    public async Task<(string? RfqId, string? SupplierName)> ResolveConvByGraphConversationIdAsync(string graphConvId)
+    {
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+        var safe       = graphConvId.Replace("'", "''");
+        var page = await GetGraph().Sites[siteId].Lists[convListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName)"];
+                req.QueryParameters.Top    = 1;
+                req.QueryParameters.Filter = $"fields/GraphConversationId eq '{safe}'";
+            });
+        var item = page?.Value?.FirstOrDefault();
+        if (item?.Fields?.AdditionalData is not { } f) return (null, null);
+        var rfqId    = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
+        var supplier = GetStr(f, "SupplierName");
+        return (rfqId, supplier);
+    }
+
+    /// <summary>
+    /// Returns the supplier name recorded in SupplierConversations for the given rfqId,
+    /// or null if no rows exist. Used as a fallback for MSG conversations where the
+    /// sender's email domain is not in the SP Suppliers list.
+    /// </summary>
+    public async Task<string?> ResolveSupplierFromConvAsync(string rfqId)
+    {
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+        var safe       = rfqId.Replace("'", "''");
+        var page = await GetGraph().Sites[siteId].Lists[convListId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=SupplierName)"];
+                req.QueryParameters.Top    = 1;
+                req.QueryParameters.Filter = $"fields/RFQ_ID eq '{safe}'";
+            });
+        var item = page?.Value?.FirstOrDefault();
+        if (item?.Fields?.AdditionalData is not { } f) return null;
+        return GetStr(f, "SupplierName");
+    }
+
     private async Task<List<Models.ConversationMessage>> ReadConversationRowsAsync(
         string siteId, string convListId, string filter, string rfqId, string supplierName)
     {
@@ -7142,7 +7245,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[convListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing,ContactEmail,BccAddresses)"];
                 req.QueryParameters.Top    = 500;
                 req.QueryParameters.Filter = filter;
             });
@@ -7168,6 +7271,8 @@ public class SharePointService
                     HasAttachments     = f.TryGetValue("HasAttachments", out var ha) && ha is bool hab && hab,
                     AttachmentName     = GetStr(f, "AttachmentName"),
                     ExtractedPricing   = f.TryGetValue("ExtractedPricing", out var ep) && ep is bool epb && epb,
+                    ContactEmail       = GetStr(f, "ContactEmail"),
+                    BccAddresses       = GetStr(f, "BccAddresses"),
                 });
             }
             if (page.OdataNextLink is null) break;

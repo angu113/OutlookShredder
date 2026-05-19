@@ -646,9 +646,17 @@ public class MailPollerService : BackgroundService
         // (which may be a quote PDF/DOCX even without a reference in the body).
         // Body-only emails with no job reference bypass AI and get a direct placeholder row
         // unless ExtractBodyWithoutJobRef is explicitly enabled in config.
+        // Exception: MSG conv replies are fully handled by ShrConvInRouter — skip the SLI path.
         bool hasJobRef    = jobRefs.Count > 0;
         bool hasAttachment = msg.HasAttachments == true;
         bool sendToAi = hasJobRef || hasAttachment || extractBodyWithoutJobRef;
+
+        if (shrResult.Routed && shrResult.IsMsgConv)
+        {
+            _log.LogInformation("[SHR] MSG conv reply from {From} written to SupplierConversations — skipping SLI", fromAddr);
+            await _mail.MarkProcessedAsync(mailbox, msg.Id!, "RFQ-Processed");
+            return;
+        }
 
         if (!hasJobRef && !hasAttachment)
             _log.LogInformation("[Mail] No job ref or attachment in \"{Subject}\" from {From} — {Action}",

@@ -75,6 +75,44 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns all suppliers that have at least one contact email configured.
+    /// </summary>
+    [HttpGet("supplier-contacts/all")]
+    public IActionResult GetAllContacts()
+    {
+        var result = _suppliers.CachedNames
+            .Select(name => new
+            {
+                supplierName    = name,
+                contactEmail    = _suppliers.GetContactsForSupplier(name)?.ContactEmail,
+                managerContact  = _suppliers.GetContactsForSupplier(name)?.ManagerContact,
+                oooContact      = _suppliers.GetContactsForSupplier(name)?.OooContact,
+            })
+            .Where(x => x.contactEmail != null || x.managerContact != null || x.oooContact != null)
+            .OrderBy(x => x.supplierName)
+            .ToList();
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Returns a summary list of all MSG conversations, ordered most-recently-updated first.
+    /// </summary>
+    [HttpGet("supplier-conversations/msg-list")]
+    public async Task<IActionResult> GetMsgList()
+    {
+        try
+        {
+            var summaries = await _sp.ReadMsgConversationSummariesAsync();
+            return Ok(summaries);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Conv] Failed to read MSG conversation list");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Sends a follow-up email to a supplier about an existing RFQ and appends an
     /// outbound row to SupplierConversations.
     /// </summary>
@@ -107,7 +145,7 @@ public class SupplierConversationsController : ControllerBase
 
         try
         {
-            await _mail.SendSupplierInquiryAsync(
+            var graphConvId = await _mail.SendSupplierInquiryAsync(
                 req.To, req.Subject, req.Body,
                 req.AttachmentName, attachmentBytes, req.AttachmentContentType,
                 bccAddresses: bccAddresses?.Count > 0 ? bccAddresses : null);
@@ -115,17 +153,20 @@ public class SupplierConversationsController : ControllerBase
             var sliVer = await _sp.GetCurrentSliVersionAsync(req.RfqId, req.SupplierName);
             var spId   = await _sp.WriteConversationMessageAsync(new ConversationMessage
             {
-                RfqId              = req.RfqId,
-                SupplierName       = req.SupplierName,
-                SupplierResponseId = req.SupplierResponseId,
-                Direction          = "out",
-                InReplyTo          = req.InReplyTo,
-                SentAt             = DateTimeOffset.UtcNow,
-                Subject            = req.Subject,
-                BodyText           = req.Body,
-                HasAttachments     = attachmentBytes is { Length: > 0 },
-                ExtractedPricing   = false,
-                SliVersionAtSend   = sliVer,
+                RfqId               = req.RfqId,
+                SupplierName        = req.SupplierName,
+                SupplierResponseId  = req.SupplierResponseId,
+                Direction           = "out",
+                InReplyTo           = req.InReplyTo,
+                SentAt              = DateTimeOffset.UtcNow,
+                Subject             = req.Subject,
+                BodyText            = req.Body,
+                HasAttachments      = attachmentBytes is { Length: > 0 },
+                ExtractedPricing    = false,
+                SliVersionAtSend    = sliVer,
+                GraphConversationId = graphConvId,
+                ContactEmail        = req.To,
+                BccAddresses        = bccAddresses is { Count: > 0 } ? string.Join(",", bccAddresses) : null,
             });
 
             return Ok(new { success = true, spItemId = spId });

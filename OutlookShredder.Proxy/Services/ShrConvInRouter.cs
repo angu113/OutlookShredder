@@ -17,9 +17,9 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public sealed class ShrConvInRouter
 {
-    // Format: [SHR:HQABC123] (new 8-char) or [SHR:ABC123] (legacy 6-char).
+    // Format: [SHR:HQABC123] (new 8-char), [SHR:MSGABC123] (MSG 9-char), or [SHR:ABC123] (legacy 6-char).
     private static readonly Regex ShrTokenRegex =
-        new(@"\[SHR:(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]",
+        new(@"\[SHR:(HQ[A-Z0-9]{6}|MSG[A-Z0-9]{6}|[A-Z0-9]{6})\]",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly SupplierCacheService      _suppliers;
@@ -36,11 +36,17 @@ public sealed class ShrConvInRouter
         _log       = log;
     }
 
-    public sealed record Result(bool Routed, string? ShrRfqId, string? ResolvedSupplier)
+    /// <summary>
+    /// When <see cref="Routed"/> is true and <see cref="IsMsgConv"/> is true the caller
+    /// should skip writing an SLI placeholder row — the reply belongs to a free-form
+    /// MSG conversation, not an RFQ pricing thread.
+    /// </summary>
+    public sealed record Result(bool Routed, string? ShrRfqId, string? ResolvedSupplier, bool IsMsgConv = false)
     {
         public static readonly Result NotTagged = new(false, null, null);
         public static Result Unresolvable(string rfqId)                  => new(false, rfqId, null);
-        public static Result WrittenToConv(string rfqId, string supplier) => new(true,  rfqId, supplier);
+        public static Result WrittenToConv(string rfqId, string supplier) => new(true,  rfqId, supplier,
+            rfqId.StartsWith("MSG", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -50,6 +56,8 @@ public sealed class ShrConvInRouter
     /// If the token is present but the supplier can't be resolved, returns the rfqId
     /// via <see cref="Result.ShrRfqId"/> so the caller can seed it into its own job
     /// references and fall through to extraction.
+    /// Falls back to matching via <paramref name="graphConversationId"/> when no token
+    /// is found — this handles replies where the email client truncated the quoted body.
     /// </summary>
     public async Task<Result> TryRouteAsync(
         string         searchText,
@@ -63,23 +71,52 @@ public sealed class ShrConvInRouter
         string?        graphConversationId  = null)
     {
         var m = ShrTokenRegex.Match(searchText ?? string.Empty);
-        if (!m.Success) return Result.NotTagged;
 
-        var rfqId    = m.Groups[1].Value.ToUpperInvariant();
-        var supplier = ResolveSupplierFromEmail(fromAddr)
+        string? rfqId    = null;
+        string? supplier = null;
+
+        if (m.Success)
+        {
+            rfqId    = m.Groups[1].Value.ToUpperInvariant();
+            supplier = ResolveSupplierFromEmail(fromAddr)
                        ?? await _sp.ResolveSupplierNameFromSrAsync(rfqId, fromAddr);
 
-        if (supplier is null)
+            // MSG conversations are free-form — the recipient may not be in the SP
+            // Suppliers list, so fall back to the supplier on existing outbound rows.
+            if (supplier is null && rfqId.StartsWith("MSG", StringComparison.OrdinalIgnoreCase))
+                supplier = await _sp.ResolveSupplierFromConvAsync(rfqId);
+
+            if (supplier is null)
+            {
+                _log.LogInformation(
+                    "[SHR] Token [{RfqId}] from {From} — supplier unresolvable; caller will extract",
+                    rfqId, fromAddr);
+                return Result.Unresolvable(rfqId);
+            }
+        }
+        else if (!string.IsNullOrEmpty(graphConversationId))
         {
-            _log.LogInformation(
-                "[SHR] Token [{RfqId}] from {From} — supplier unresolvable; caller will extract",
-                rfqId, fromAddr);
-            return Result.Unresolvable(rfqId);
+            // No token found (e.g. email client truncated the quoted body).
+            // Try matching via the Graph conversation thread ID stored on outbound rows.
+            var (convRfqId, convSupplier) = await _sp.ResolveConvByGraphConversationIdAsync(graphConversationId);
+            if (convRfqId is not null && convSupplier is not null &&
+                convRfqId.StartsWith("MSG", StringComparison.OrdinalIgnoreCase))
+            {
+                rfqId    = convRfqId;
+                supplier = convSupplier;
+                _log.LogInformation(
+                    "[SHR] GraphConversationId match [{RfqId}] from {From} — routing to SupplierConversations (supplier={Supplier})",
+                    rfqId, fromAddr, supplier);
+            }
         }
 
-        _log.LogInformation(
-            "[SHR] Token [{RfqId}] from {From} — routing to SupplierConversations (supplier={Supplier})",
-            rfqId, fromAddr, supplier);
+        if (rfqId is null || supplier is null)
+            return Result.NotTagged;
+
+        if (m.Success)
+            _log.LogInformation(
+                "[SHR] Token [{RfqId}] from {From} — routing to SupplierConversations (supplier={Supplier})",
+                rfqId, fromAddr, supplier);
 
         await _sp.WriteConversationMessageAsync(new ConversationMessage
         {
