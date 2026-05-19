@@ -1063,21 +1063,26 @@ public class CatalogAnalysisService
     }
 
     /// <summary>
-    /// Returns true when at least one dimension in <paramref name="a"/> is within tolerance of
-    /// any dimension in <paramref name="b"/>.  Used as a soft +0.5 tiebreaker when neither a full
-    /// nor a leading-partial dims match fires (e.g. flat bar 0.375×2.5 vs catalog 0.375×4.0 —
-    /// thickness matches even though width doesn't).
+    /// Returns true when at least one dimension pair at the same ordinal position (after
+    /// sorting both arrays ascending) is within tolerance.  Positional matching prevents
+    /// cross-position false positives, e.g. flat bar 0.375×1.375 vs catalog 0.125×0.375
+    /// where 0.375 appears at different positions (width vs thickness) and should NOT score.
+    /// Legitimate case: 0.375×2.5 vs 0.375×4.0 — position-0 (thickness) matches in both.
     /// </summary>
     private static bool DimsAnyDimMatch(string? a, string? b, double tolerance = 0.05)
     {
         var da = ParseDims(a);
         var db = ParseDims(b);
         if (da is null || db is null) return false;
-        return da.Any(x => db.Any(y =>
+        var sa  = da.OrderBy(x => x).ToArray();
+        var sb  = db.OrderBy(x => x).ToArray();
+        int len = Math.Min(sa.Length, sb.Length);
+        for (int i = 0; i < len; i++)
         {
-            double avg = (x + y) / 2.0;
-            return avg >= 0.001 && Math.Abs(x - y) / avg <= tolerance;
-        }));
+            double avg = (sa[i] + sb[i]) / 2.0;
+            if (avg >= 0.001 && Math.Abs(sa[i] - sb[i]) / avg <= tolerance) return true;
+        }
+        return false;
     }
 
     private static double[]? ParseDims(string? dims)

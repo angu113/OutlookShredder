@@ -157,6 +157,27 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     /// <summary>
+    /// POST /api/catalog/backfill-rli-custom-ids?rfqId=HQXXXXXX
+    /// For every RFQ Line Item row under the given rfqId that has no MSPC, creates a
+    /// deterministic CUSTOM_ID and patches it back to SharePoint.
+    /// Call this once for existing RFQs created before the CUSTOM_ID system was added.
+    /// </summary>
+    [HttpPost("backfill-rli-custom-ids")]
+    public async Task<IActionResult> BackfillRliCustomIds(
+        [FromQuery] string rfqId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId is required" });
+        var patched = await sp.BackfillRliCustomIdsAsync(rfqId, ct);
+        return Ok(new
+        {
+            rfqId,
+            patched = patched.Count,
+            items   = patched.Select(p => new { product = p.Product, customId = p.CustomId }),
+        });
+    }
+
+    /// <summary>
     /// POST /api/catalog/compute-weights?dryRun=true&amp;overwrite=false
     /// Computes theoretical weight (lb/ft for linear products, lb/sqft for sheet/plate)
     /// from each product's name and PATCHes WeightPerFoot + WeightUnit on the SP list.

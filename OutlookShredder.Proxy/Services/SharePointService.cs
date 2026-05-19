@@ -1591,6 +1591,45 @@ public class SharePointService
         return result;
     }
 
+    /// <summary>
+    /// For every RFQ Line Item row under <paramref name="rfqId"/> that has no MSPC,
+    /// creates a deterministic CUSTOM_ID and patches it back to SharePoint.
+    /// Returns the list of (product, customId) pairs that were updated.
+    /// </summary>
+    public async Task<List<(string Product, string CustomId)>> BackfillRliCustomIdsAsync(
+        string rfqId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col},MSPC,Product)"];
+                req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
+                req.QueryParameters.Top    = 100;
+            }, ct);
+
+        var patched = new List<(string, string)>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Id is null || item.Fields?.AdditionalData is null) continue;
+            var d       = item.Fields.AdditionalData;
+            var mspc    = d.TryGetValue("MSPC",    out var vm) ? vm?.ToString() : null;
+            var product = d.TryGetValue("Product", out var vp) ? vp?.ToString() : null;
+            if (!string.IsNullOrWhiteSpace(mspc) || string.IsNullOrWhiteSpace(product)) continue;
+
+            var (custId, _) = await _catalogAnalysis.Value.GetOrCreateCustomIdAsync(product, "RLI", ct);
+            await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["MSPC"] = custId } },
+                    cancellationToken: ct);
+            _log.LogInformation("[SP] Backfill RLI custom ID [{RfqId}] '{Product}' -> {Id}", rfqId, product, custId);
+            patched.Add((product, custId));
+        }
+        return patched;
+    }
+
     // ??"?????"??? RLI anchoring dry-run helpers ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
     /// <summary>
