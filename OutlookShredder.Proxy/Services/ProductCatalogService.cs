@@ -1,4 +1,5 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using Azure.Identity;
 using Microsoft.Graph;
 
@@ -48,7 +49,8 @@ public class ProductCatalogService : BackgroundService
         double? WeightPerFoot = null, string? WeightUnit = null,
         string? SpItemId = null,
         string? TkMetal = null, string? TkShape = null,
-        string? TkAlloy = null, string? TkTemper = null, string[]? TkConditions = null);
+        string? TkAlloy = null, string? TkTemper = null, string[]? TkConditions = null,
+        bool IsCustom = false);
     private volatile IReadOnlyList<Entry> _cache = [];
     private string? _cachedSiteId;
     private string? _cachedListId;
@@ -177,9 +179,11 @@ public class ProductCatalogService : BackgroundService
                 var tkConds    = Str(data, "TkConditions");
                 var tkCondArr  = string.IsNullOrEmpty(tkConds) ? null
                     : tkConds.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                var isCustom   = data.TryGetValue("IsCustom", out var ic) && ic is bool icb && icb;
                 return new Entry(name!, key, Tokenize(name!), wt, wtUnit, i.Id,
                     Str(data, "TkMetal"), Str(data, "TkShape"),
-                    Str(data, "TkAlloy"), Str(data, "TkTemper"), tkCondArr);
+                    Str(data, "TkAlloy"), Str(data, "TkTemper"), tkCondArr,
+                    IsCustom: isCustom);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -464,6 +468,129 @@ public class ProductCatalogService : BackgroundService
                 _log.LogInformation("[Catalog] Created '{Col}' column", colName);
             }
         }
+
+        // Custom-entry metadata columns (idempotent).
+        var hasIsCustom = (cols?.Value ?? []).Any(c =>
+            c.DisplayName?.Equals("IsCustom", StringComparison.OrdinalIgnoreCase) == true);
+        if (!hasIsCustom)
+        {
+            await graph.Sites[site.Id].Lists[list.Id].Columns
+                .PostAsync(new Microsoft.Graph.Models.ColumnDefinition
+                {
+                    DisplayName = "IsCustom",
+                    Name        = "IsCustom",
+                    Boolean     = new Microsoft.Graph.Models.BooleanColumn()
+                });
+            _log.LogInformation("[Catalog] Created 'IsCustom' column");
+        }
+        foreach (var metaCol in new[] { ("OriginalTerm", 512), ("Source", 20) })
+        {
+            var hasMeta = (cols?.Value ?? []).Any(c =>
+                c.DisplayName?.Equals(metaCol.Item1, StringComparison.OrdinalIgnoreCase) == true);
+            if (!hasMeta)
+            {
+                await graph.Sites[site.Id].Lists[list.Id].Columns
+                    .PostAsync(new Microsoft.Graph.Models.ColumnDefinition
+                    {
+                        DisplayName = metaCol.Item1,
+                        Name        = metaCol.Item1,
+                        Text        = new Microsoft.Graph.Models.TextColumn { MaxLength = metaCol.Item2 }
+                    });
+                _log.LogInformation("[Catalog] Created '{Col}' column", metaCol.Item1);
+            }
+        }
+        _customColumnsEnsured = true;
+    }
+
+    // ── Custom entry creation ─────────────────────────────────────────────────
+
+    private volatile bool _customColumnsEnsured;
+    private readonly SemaphoreSlim _ensureColsLock = new(1, 1);
+
+    private async Task EnsureCustomColumnsOnceAsync()
+    {
+        if (_customColumnsEnsured) return;
+        await _ensureColsLock.WaitAsync();
+        try
+        {
+            if (_customColumnsEnsured) return;
+            // Reuse EnsureCatalogWeightColumnAsync — it now covers custom columns too.
+            await EnsureCatalogWeightColumnAsync();
+        }
+        finally { _ensureColsLock.Release(); }
+    }
+
+    /// <summary>
+    /// Returns an existing custom catalog entry matching <paramref name="customId"/>, or creates a
+    /// new one in SP and adds it to the local cache.  Thread-safe within a single proxy process;
+    /// cross-proxy races produce at most one extra SP row (cleaned by /api/catalog/dedup).
+    /// </summary>
+    public async Task<(string CustomId, string Name)> GetOrCreateCustomEntryAsync(
+        string customId, string term, OutlookShredder.Proxy.Models.ProductTokens tokens, string source)
+    {
+        // Fast path: already in local cache (covers same-session creates + hourly SP refresh).
+        var existing = _cache.FirstOrDefault(e =>
+            string.Equals(e.SearchKey, customId, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            return (customId, existing.Name);
+
+        await EnsureCustomColumnsOnceAsync();
+
+        var graph    = GetGraph();
+        var siteUrl  = _config["ProductCatalog:SiteUrl"]
+                       ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+        var uri      = new Uri(siteUrl);
+        var siteKey  = $"{uri.Host}:{uri.AbsolutePath}";
+        var site     = await graph.Sites[siteKey].GetAsync();
+        if (site?.Id is null) throw new InvalidOperationException($"Site not found: {siteKey}");
+
+        var listName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
+        var lists    = await graph.Sites[site.Id].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+        var list     = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null) throw new InvalidOperationException($"Catalog list '{listName}' not found");
+
+        var condStr  = tokens.TkConditions.Length > 0 ? string.Join(";", tokens.TkConditions) : null;
+        var data     = new Dictionary<string, object?>
+        {
+            ["Title"]                   = term,
+            ["Product"]                 = term,
+            ["Product_x0020_SearchKey"] = customId,
+            ["IsCustom"]                = (object)true,
+            ["OriginalTerm"]            = term,
+            ["Source"]                  = source,
+        };
+        if (tokens.TkMetal  is not null) data["TkMetal"]      = tokens.TkMetal;
+        if (tokens.TkShape  is not null) data["TkShape"]      = tokens.TkShape;
+        if (tokens.TkAlloy  is not null) data["TkAlloy"]      = tokens.TkAlloy;
+        if (tokens.TkTemper is not null) data["TkTemper"]     = tokens.TkTemper;
+        if (condStr          is not null) data["TkConditions"] = condStr;
+
+        Microsoft.Graph.Models.ListItem? created = null;
+        try
+        {
+            created = await graph.Sites[site.Id].Lists[list.Id].Items
+                .PostAsync(new Microsoft.Graph.Models.ListItem
+                {
+                    Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }
+                });
+            _log.LogInformation("[Catalog] Created custom entry {Id} for '{Term}' (source={Src})",
+                customId, term, source);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Catalog] Failed to write custom entry {Id} to SP — using in-memory only",
+                customId);
+        }
+
+        // Add to local cache immediately — subsequent calls in this process find it without SP.
+        var condArr = condStr?.Split(';');
+        var entry   = new Entry(term, customId, Tokenize(term), null, null, created?.Id,
+            tokens.TkMetal, tokens.TkShape, tokens.TkAlloy, tokens.TkTemper, condArr,
+            IsCustom: true);
+        _cache = _cache.Append(entry).ToList().AsReadOnly();
+
+        return (customId, term);
     }
 
     /// <summary>

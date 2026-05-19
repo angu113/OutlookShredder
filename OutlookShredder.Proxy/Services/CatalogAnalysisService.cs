@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -1259,6 +1260,54 @@ public class CatalogAnalysisService
             Source         = "token_scorer",
             TopCandidates  = top,
         };
+    }
+
+    // ── Custom ID creation ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Derives a deterministic CUSTOM_ID from a product's token bag.
+    /// Same tokens on any proxy instance produce the same ID, preventing collisions
+    /// without any distributed counter or coordination.
+    /// Format: "CUST_" + first 8 hex chars of SHA-256(canonical token string).
+    /// </summary>
+    public static string ComputeCustomId(ProductTokens tokens)
+    {
+        var conds    = string.Join(",",
+            (tokens.TkConditions ?? []).OrderBy(c => c, StringComparer.Ordinal));
+        var canonical = $"{tokens.TkMetal ?? ""}|{tokens.TkShape ?? ""}|{tokens.TkAlloy ?? ""}|{tokens.TkTemper ?? ""}|{conds}|{tokens.TkDims ?? ""}";
+        var hash     = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return "CUST_" + Convert.ToHexString(hash)[..8];
+    }
+
+    /// <summary>
+    /// Tokenises <paramref name="term"/>, computes a deterministic CUSTOM_ID, and
+    /// creates (or returns an existing) entry in the Product Catalog SP list.
+    /// Called for SLI rows with no catalog match and for RLI rows with no MSPC.
+    /// </summary>
+    public async Task<(string CustomId, string DisplayName)> GetOrCreateCustomIdAsync(
+        string term, string source, CancellationToken ct = default)
+    {
+        var tokens = await TokeniseSingleLiveAsync(term, ct);
+
+        string customId;
+        if (tokens is null || tokens.TokenizationFailed)
+        {
+            // Fallback: hash the raw term so we still get a stable, unique ID.
+            var rawHash = SHA256.HashData(Encoding.UTF8.GetBytes(term.Trim().ToLowerInvariant()));
+            customId    = "CUST_" + Convert.ToHexString(rawHash)[..8];
+            _log.LogWarning("[Match] Tokenisation failed for '{Term}' — custom ID via raw hash: {Id}", term, customId);
+            tokens      = new ProductTokens { Name = term };
+        }
+        else
+        {
+            tokens.Name = term;
+            customId    = ComputeCustomId(tokens);
+            _log.LogInformation("[Match] Custom ID for '{Term}': {Id} (metal={M} shape={S} alloy={A})",
+                term, customId, tokens.TkMetal, tokens.TkShape, tokens.TkAlloy);
+        }
+
+        var (resultId, resultName) = await _catalog.GetOrCreateCustomEntryAsync(customId, term, tokens, source);
+        return (resultId, resultName);
     }
 
     private static (ProductTokens? match, double score, string? failReason)

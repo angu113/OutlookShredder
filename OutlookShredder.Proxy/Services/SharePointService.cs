@@ -1682,8 +1682,26 @@ public class SharePointService
 
         foreach (var req in items)
         {
+            // Resolve MSPC: when the user left the product field blank (no catalog selection),
+            // create/find a deterministic CUSTOM_ID so the RLI item is trackable.
+            var mspc = req.Mspc;
+            if (string.IsNullOrWhiteSpace(mspc) && !string.IsNullOrWhiteSpace(req.Product))
+            {
+                try
+                {
+                    var (custId, _) = await _catalogAnalysis.Value.GetOrCreateCustomIdAsync(req.Product, "RLI");
+                    mspc = custId;
+                    _log.LogInformation("[SP] RLI custom ID for '{Product}': {Id}", req.Product, custId);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[SP] Failed to assign custom ID for RLI '{Product}' — MSPC will be null",
+                        req.Product);
+                }
+            }
+
             var data = new Dictionary<string, object?> { [col] = req.RfqId };
-            if (req.Mspc            is not null) data["MSPC"]             = req.Mspc;
+            if (mspc                is not null) data["MSPC"]             = mspc;
             if (req.Product         is not null) data["Product"]          = req.Product;
             if (req.Units           is not null) data["Units"]            = req.Units;
             if (req.SizeOfUnits     is not null) data["SizeOfUnits"]      = req.SizeOfUnits;
@@ -2323,18 +2341,27 @@ public class SharePointService
         else
         {
             // No MSPC from RLI — use token-based catalog match on supplier's product name.
-            var match          = await _catalogAnalysis.Value.MatchProductAsync(prodName, supplier);
-            productSearchKey   = match.SearchKey;
-            catalogProductName = match.CatalogName;
-            matchConfidence    = match.SearchKey is not null ? 1.0 : 0.0;
+            var match = await _catalogAnalysis.Value.MatchProductAsync(prodName, supplier);
             if (match.SearchKey is not null)
+            {
+                productSearchKey   = match.SearchKey;
+                catalogProductName = match.CatalogName;
+                matchConfidence    = 1.0;
                 _log.LogInformation(
                     "[SP] Token-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} score={Score:F2} src={Src} catalog='{Catalog}'",
                     jobRef, supplier, prodName, productSearchKey, match.Score, match.Source, catalogProductName);
+            }
             else
-                _log.LogWarning(
-                    "[SP] No token match for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null (score={Score:F2})",
-                    jobRef, supplier, prodName, match.Score);
+            {
+                // No catalog match — assign a CUSTOM_ID for this non-catalog item.
+                var (custId, custName) = await _catalogAnalysis.Value.GetOrCreateCustomIdAsync(prodName, "SLI");
+                productSearchKey   = custId;
+                catalogProductName = custName;
+                matchConfidence    = 0.5;
+                _log.LogInformation(
+                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' — assigned {CustomId} (best score={Score:F2})",
+                    jobRef, supplier, prodName, custId, match.Score);
+            }
         }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";
