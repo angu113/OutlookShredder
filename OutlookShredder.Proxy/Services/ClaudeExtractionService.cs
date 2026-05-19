@@ -161,20 +161,28 @@ public class ClaudeExtractionService : IAiExtractionService
         freight notes, and any dimension detail not already in productName.
 
         ── NO QUOTE / REGRET ──────────────────────────────────────────────────────
-        If the email is an acknowledgement, out-of-office reply, or clearly contains no
-        price quote, return one products entry with all numeric fields null and explain
-        the situation in supplierProductComments (e.g. "Out of office until 2026-05-01"
-        or "Supplier regrets — unable to supply this material").
+        Set isRegret = true on any product entry where the supplier states (explicitly
+        OR implicitly) that they cannot or will not quote that product — including:
+        - Direct: "cannot quote", "unable to quote", "cannot supply", "unable to supply",
+          "don't stock", "do not carry", "not available", "out of stock"
+        - Indirect: "I can only quote the [other product]", "we only have [different item]",
+          "only quoting [other product]", or any statement that prices only OTHER products
+          listed in this same email, making it clear this product is excluded.
+        Also set isRegret = true for the whole email when it is an OOF reply,
+        acknowledgement with no pricing, or blanket regret.
+        Leave all numeric price fields null on regret entries.
+        Explain the reason in supplierProductComments.
         Always return at least one entry in products[].
 
         ATTACHMENT PRIORITY: when you are given a PDF or other attachment as the primary
         content, the attachment is the authoritative source for pricing. Email body context
         (provided under "Email body context:") is background only. If the attachment contains
-        pricing for a product, extract those prices and do NOT mark the product as a regret —
+        pricing for a product, extract those prices and do NOT set isRegret for that product —
         even if the body text mentions "no stock", "regret", or inability to supply other items.
-        Apply regret only to products for which the attachment itself contains no pricing AND
+        Apply isRegret only to products for which the attachment itself contains no pricing AND
         the supplier has clearly stated (in the attachment or body) they cannot supply it.
-        Body-only regret phrases must not override prices that are visible in the attachment.
+        Body-only regret phrases ("no stock on others", "regret", etc.) must not override
+        prices that are visible in the attachment.
 
         ── SUBSTITUTES ────────────────────────────────────────────────────────────
         When a supplier cannot supply the requested product but offers an alternate
@@ -240,6 +248,7 @@ public class ClaudeExtractionService : IAiExtractionService
                     "certifications":          { "type": ["string","null"], "description": "e.g. MTR Included / ASTM / AMS / Certified" },
                     "supplierProductComments": { "type": ["string","null"], "description": "All remaining notes: partial availability, surcharges, etc." },
                     "isSubstitute":            { "type": "boolean", "description": "True when this is an alternate the supplier offered instead of (or in addition to) the requested product" },
+                    "isRegret":                { "type": "boolean", "description": "True when the supplier explicitly or implicitly cannot quote this product (no stock, unable to supply, indirect exclusion). Always false when pricing is present." },
                     "lineNumber":              { "type": ["integer","null"], "description": "1-based line number for this product. Use the supplier's own line/item number if shown in the document; otherwise assign sequential numbers starting from 1." }
                   }
                 }
