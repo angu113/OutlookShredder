@@ -106,7 +106,8 @@ public class MailService
         string body,
         string? attachmentName = null,
         byte[]? attachmentBytes = null,
-        string? attachmentContentType = null)
+        string? attachmentContentType = null,
+        string? bcc = null)
     {
         if (string.IsNullOrWhiteSpace(to))
             throw new ArgumentException("Recipient address required", nameof(to));
@@ -121,6 +122,10 @@ public class MailService
             ToRecipients =
             [
                 new Recipient { EmailAddress = new EmailAddress { Address = to } }
+            ],
+            BccRecipients = string.IsNullOrWhiteSpace(bcc) ? null :
+            [
+                new Recipient { EmailAddress = new EmailAddress { Address = bcc } }
             ],
         };
 

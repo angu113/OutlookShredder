@@ -78,7 +78,8 @@ public class SupplierConversationsController : ControllerBase
         {
             await _mail.SendSupplierInquiryAsync(
                 req.To, req.Subject, req.Body,
-                req.AttachmentName, attachmentBytes, req.AttachmentContentType);
+                req.AttachmentName, attachmentBytes, req.AttachmentContentType,
+                bcc: string.IsNullOrWhiteSpace(req.Bcc) ? null : req.Bcc);
 
             var sliVer = await _sp.GetCurrentSliVersionAsync(req.RfqId, req.SupplierName);
             var spId   = await _sp.WriteConversationMessageAsync(new ConversationMessage
