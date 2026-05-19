@@ -7155,7 +7155,6 @@ public class SharePointService
             {
                 req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SentAt,EmailSubject)"];
                 req.QueryParameters.Top    = 1000;
-                req.QueryParameters.Filter = "startswith(fields/RFQ_ID,'MSG')";
             });
 
         while (page?.Value is not null)
@@ -7168,9 +7167,10 @@ public class SharePointService
                 var supplier = GetStr(f, "SupplierName");
                 var subject  = GetStr(f, "EmailSubject");
                 if (string.IsNullOrEmpty(rfqId)) continue;
-                var sentAt = DateTime.UtcNow;
-                if (f.TryGetValue("SentAt", out var sa) && sa is string saStr && DateTime.TryParse(saStr, out var parsed))
-                    sentAt = parsed;
+                DateTime sentAt = default;
+                if (f.TryGetValue("SentAt", out var sa) && DateTime.TryParse(sa?.ToString(), null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+                    sentAt = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
                 results.Add((rfqId, supplier ?? "", subject, sentAt));
             }
             if (page.OdataNextLink is null) break;
