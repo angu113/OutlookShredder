@@ -133,7 +133,7 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
         if (match is null)
             return NotFound(new { raw = name, match = (string?)null });
 
-        return Ok(new { raw = name, match = match.Value.Name, searchKey = match.Value.SearchKey });
+        return Ok(new { raw = name, match = match.Value.Name, searchKey = match.Value.SearchKey, confidence = match.Value.Confidence });
     }
 
     /// <summary>

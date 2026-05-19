@@ -2309,11 +2309,13 @@ public class SharePointService
         // Otherwise fall back to the fuzzy catalog matcher on the supplier's product name.
         string? productSearchKey;
         string? catalogProductName;
+        double  matchConfidence;
         if (!string.IsNullOrEmpty(product.ProductSearchKey))
         {
             productSearchKey   = product.ProductSearchKey;
             var byKey          = _catalog.FindBySearchKey(product.ProductSearchKey);
             catalogProductName = byKey?.Name;
+            matchConfidence    = 1.0;   // AI resolved directly from RLI context
             _log.LogInformation(
                 "[SP] RLI-anchored: [{RfqId}] {Supplier} '{Name}' ?????' MSPC={Key} catalog='{Catalog}'",
                 jobRef, supplier, prodName, productSearchKey, catalogProductName ?? "(not in catalog)");
@@ -2321,13 +2323,14 @@ public class SharePointService
         else
         {
             // No MSPC from RLI — fall back to fuzzy catalog match on supplier's product name.
-            var match = _catalog.ResolveProduct(prodName);
-            productSearchKey   = match?.SearchKey;
+            var match          = _catalog.ResolveProduct(prodName);
+            productSearchKey   = match?.SearchKey;     // null for amber/red; set for green only
             catalogProductName = match?.Name;
+            matchConfidence    = match?.Confidence ?? 0.0;
             if (match is not null)
                 _log.LogInformation(
-                    "[SP] Fuzzy-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} catalog='{Catalog}'",
-                    jobRef, supplier, prodName, productSearchKey, catalogProductName);
+                    "[SP] Fuzzy-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} conf={Conf:P0} catalog='{Catalog}'",
+                    jobRef, supplier, prodName, productSearchKey, matchConfidence, catalogProductName);
             else
                 _log.LogWarning(
                     "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null",
@@ -2400,6 +2403,7 @@ public class SharePointService
             ["LineNumber"]               = product.LineNumber,
             ["IsDeleted"]                = false,
             ["SliVersion"]               = sliVersion,
+            ["MatchConfidence"]          = matchConfidence > 0 ? matchConfidence : (object?)null,
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
@@ -4249,6 +4253,7 @@ public class SharePointService
                 ("PurchaseRecordId",         "text"),
                 ("IsDeleted",               "boolean"),
                 ("SliVersion",             "number"),
+                ("MatchConfidence",         "number"),
             ]),
             ["RFQ Line Items"] = await EnsureListColumnsAsync(siteId,
                 _config["SharePoint:ListName"] ?? "RFQ Line Items",

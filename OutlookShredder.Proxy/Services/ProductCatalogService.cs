@@ -611,10 +611,16 @@ public class ProductCatalogService : BackgroundService
 
     /// <summary>
     /// Returns the best-matching catalog entry for <paramref name="rawName"/>, or
-    /// <see langword="null"/> when no match is found.
+    /// <see langword="null"/> when no candidates pass the compatibility gates.
     /// Returns null immediately for service/processing items (powder coating, etc.).
+    ///
+    /// Confidence is 0–1:
+    ///   ≥ 0.875 → SearchKey is set (high confidence, use MSPC)
+    ///   0.50–0.874 → SearchKey is null (family match, dims uncertain — amber circle)
+    ///   0–0.499 → SearchKey is null (weak match — red circle; only strategy 2 can reach this range)
+    ///   null return → no match (caller stores confidence = 0)
     /// </summary>
-    public (string Name, string? SearchKey)? ResolveProduct(string? rawName)
+    public (string Name, string? SearchKey, double Confidence)? ResolveProduct(string? rawName)
     {
         if (string.IsNullOrWhiteSpace(rawName)) return null;
 
@@ -628,12 +634,15 @@ public class ProductCatalogService : BackgroundService
         var cache = _cache;   // atomic snapshot
         if (cache.Count == 0) return null;
 
+        const double HighConf = 0.875;
+
         var vendorTokens = Tokenize(rawName);
         var vendorNonDim = NonDimTokens(vendorTokens);
 
         // Strategy 1: containment with dim-overlap composite score.
         Entry? bestContained = null;
         double bestComposite = -1;
+        double bestDimScore  = 0;
         foreach (var entry in cache)
         {
             var catalogNonDim = NonDimTokens(entry.Tokens);
@@ -652,14 +661,18 @@ public class ProductCatalogService : BackgroundService
             {
                 bestContained = entry;
                 bestComposite = composite;
+                bestDimScore  = dimScore;
             }
         }
 
         if (bestContained is not null)
         {
-            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (containment composite {Score:F2})",
-                rawName, bestContained.Name, bestComposite);
-            return (bestContained.Name, bestContained.SearchKey);
+            // confidence = (1 + dimScore) / 2: 1.0 when all dims match, 0.5 when none match.
+            var confidence = (1.0 + bestDimScore) / 2.0;
+            var searchKey  = confidence >= HighConf ? bestContained.SearchKey : null;
+            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (containment conf={Conf:P0}, dim={Dim:P0})",
+                rawName, bestContained.Name, confidence, bestDimScore);
+            return (bestContained.Name, searchKey, confidence);
         }
 
         // Strategy 2: Jaccard ≥ 0.30 on non-dimension tokens with all compatibility gates.
@@ -683,9 +696,11 @@ public class ProductCatalogService : BackgroundService
 
         if (best.Entry is not null)
         {
-            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (jaccard {Jac:F2}, dim {Dim:P0})",
-                rawName, best.Entry.Name, best.Jac, best.Dim);
-            return (best.Entry.Name, best.Entry.SearchKey);
+            var confidence = best.Jac * (1.0 + best.Dim) / 2.0;
+            var searchKey  = confidence >= HighConf ? best.Entry.SearchKey : null;
+            _log.LogDebug("[ProductCatalog] '{Raw}' → '{Catalog}' (jaccard conf={Conf:P0}, jac={Jac:F2}, dim={Dim:P0})",
+                rawName, best.Entry.Name, confidence, best.Jac, best.Dim);
+            return (best.Entry.Name, searchKey, confidence);
         }
 
         // Log best candidate even on miss to aid diagnosis.
