@@ -1027,19 +1027,51 @@ public class ProductCatalogService : BackgroundService
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static HashSet<string> DimComponents(HashSet<string> tokens) =>
-        tokens.Where(IsDimToken)
-              .SelectMany(t => t.Split('x'))
-              .Where(c => c.Length > 0)
-              .ToHashSet();
+    // Parses a normalised dim component like "2d0" → 2.0, "0d125" → 0.125, "2d5" → 2.5.
+    private static double ParseDimNum(string part)
+    {
+        var idx = part.IndexOf('d');
+        if (idx < 0) return double.TryParse(part, out var v) ? v : -1;
+        if (!int.TryParse(part[..idx], out int whole)) return -1;
+        var fracStr = part[(idx + 1)..];
+        if (fracStr.Length == 0 || !int.TryParse(fracStr, out int frac)) return whole;
+        if (frac == 0) return whole;
+        return whole + frac / Math.Pow(10, fracStr.Length);
+    }
 
+    // Returns the numeric values encoded in dim tokens (splits "2d0x3d0" → [2.0, 3.0]).
+    private static List<double> DimNumbers(HashSet<string> tokens) =>
+        tokens.Where(IsDimToken)
+              .SelectMany(t => t.Split('x').Select(ParseDimNum))
+              .Where(n => n > 0)
+              .ToList();
+
+    // Proximity-based dim scoring: for each catalog dimension, find the closest vendor
+    // dimension numerically and score by relative closeness (1.0 = exact, decays with distance).
+    // This ensures "2 x 3" scores higher against "2.000 X 4.000" than against "0.125 X 2.000"
+    // even though both share one exact token under the old set-intersection approach.
     private static double DimOverlapFraction(HashSet<string> catalogTokens, HashSet<string> vendorTokens)
     {
-        var catDims = DimComponents(catalogTokens);
-        if (catDims.Count == 0) return 0;
-        var vendDims = DimComponents(vendorTokens);
-        if (vendDims.Count == 0) return 0;
-        return (double)catDims.Count(c => vendDims.Contains(c)) / catDims.Count;
+        var catNums = DimNumbers(catalogTokens);
+        if (catNums.Count == 0) return 0;
+        var vendNums = DimNumbers(vendorTokens);
+        if (vendNums.Count == 0) return 0;
+
+        double total = 0;
+        foreach (var cat in catNums)
+        {
+            double best = vendNums
+                .Select(v =>
+                {
+                    double m = Math.Max(cat, v);
+                    if (m == 0) return 1.0;
+                    double relDist = Math.Abs(cat - v) / m;
+                    return 1.0 / (1.0 + relDist);
+                })
+                .Max();
+            total += best;
+        }
+        return total / catNums.Count;
     }
 
     /// <summary>
