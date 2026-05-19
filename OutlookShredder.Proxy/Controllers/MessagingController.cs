@@ -51,9 +51,21 @@ public class MessagingController : ControllerBase
 
         try
         {
-            var ok = string.Equals(req.Channel, "sms", StringComparison.OrdinalIgnoreCase)
-                ? await _messaging.SendSmsAsync(req.From, req.To, req.Body, ct)
-                : await _messaging.SendInternalAsync(req.From, req.To, req.Body, ct);
+            bool ok;
+            if (string.Equals(req.Channel, "email", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(req.Subject))
+                    return BadRequest(new { error = "Subject is required for email channel" });
+                ok = await _messaging.SendEmailAsync(req.From, req.To, req.Subject!, req.Body, ct);
+            }
+            else if (string.Equals(req.Channel, "sms", StringComparison.OrdinalIgnoreCase))
+            {
+                ok = await _messaging.SendSmsAsync(req.From, req.To, req.Body, ct);
+            }
+            else
+            {
+                ok = await _messaging.SendInternalAsync(req.From, req.To, req.Body, req.Subject, ct);
+            }
             return Ok(new { ok });
         }
         catch (Exception ex)

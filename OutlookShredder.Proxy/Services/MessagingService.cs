@@ -7,15 +7,18 @@ public class MessagingService
     private readonly SharePointService         _sp;
     private readonly SignalWireService         _sw;
     private readonly RfqNotificationService    _notify;
+    private readonly MailService               _mail;
     private readonly IConfiguration            _config;
     private readonly ILogger<MessagingService> _log;
 
     public MessagingService(SharePointService sp, SignalWireService sw,
-        RfqNotificationService notify, IConfiguration config, ILogger<MessagingService> log)
+        RfqNotificationService notify, MailService mail, IConfiguration config,
+        ILogger<MessagingService> log)
     {
         _sp     = sp;
         _sw     = sw;
         _notify = notify;
+        _mail   = mail;
         _config = config;
         _log    = log;
     }
@@ -23,7 +26,8 @@ public class MessagingService
     public string[] KnownUsers =>
         _config.GetSection("Messaging:KnownUsers").Get<string[]>() ?? [];
 
-    public async Task<bool> SendInternalAsync(string from, string to, string body, CancellationToken ct = default)
+    public async Task<bool> SendInternalAsync(string from, string to, string body,
+        string? subject = null, CancellationToken ct = default)
     {
         var record = new MessageRecord
         {
@@ -31,6 +35,7 @@ public class MessagingService
             To             = to,
             Channel        = "internal",
             Direction      = "out",
+            Subject        = subject,
             Body           = body,
             ConversationId = InternalConvId(from, to),
             TimestampUtc   = DateTimeOffset.UtcNow.ToString("o"),
@@ -39,6 +44,43 @@ public class MessagingService
 
         try { await _sp.WriteMessageAsync(record, ct); }
         catch (Exception ex) { _log.LogWarning(ex, "[Messaging] SP write failed for internal message"); }
+
+        _notify.NotifyMessage(record);
+        return true;
+    }
+
+    public async Task<bool> SendEmailAsync(string from, string to, string subject, string body,
+        CancellationToken ct = default)
+    {
+        if (to.EndsWith("@mithrilmetals.com", StringComparison.OrdinalIgnoreCase))
+        {
+            _log.LogWarning("[Messaging] Email send rejected — internal recipient {To}", to);
+            return false;
+        }
+
+        try { await _mail.SendSupplierInquiryAsync(to, subject, body); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Messaging] Email send via MailService failed to {To}", to);
+            return false;
+        }
+
+        var convId = EmailConvId(to);
+        var record = new MessageRecord
+        {
+            From           = from,
+            To             = to,
+            Channel        = "email",
+            Direction      = "out",
+            Subject        = subject,
+            Body           = body,
+            ConversationId = convId,
+            TimestampUtc   = DateTimeOffset.UtcNow.ToString("o"),
+            IsRead         = true,
+        };
+
+        try { await _sp.WriteMessageAsync(record, ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "[Messaging] SP write failed for outbound email"); }
 
         _notify.NotifyMessage(record);
         return true;
@@ -112,6 +154,9 @@ public class MessagingService
 
     public static string SmsConvId(string phone) =>
         $"sms:{NormalizePhone(phone)}";
+
+    public static string EmailConvId(string email) =>
+        $"email:{email.ToLowerInvariant()}";
 
     private static string NormalizePhone(string phone) =>
         "+" + new string(phone.Where(char.IsDigit).ToArray());

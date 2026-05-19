@@ -9551,6 +9551,7 @@ public class SharePointService
             ("MsgTo",      "text"),
             ("Channel",    "text"),
             ("Direction",  "text"),
+            ("Subject",    "text"),
             ("Body",       "note"),
             ("ConvId",     "text"),
             ("MsgTime",    "text"),
@@ -9606,6 +9607,7 @@ public class SharePointService
             ["MsgTo"]      = msg.To,
             ["Channel"]    = msg.Channel,
             ["Direction"]  = msg.Direction,
+            ["Subject"]    = msg.Subject,
             ["Body"]       = msg.Body,
             ["ConvId"]     = msg.ConversationId,
             ["MsgTime"]    = msg.TimestampUtc,
@@ -9654,15 +9656,19 @@ public class SharePointService
             var from    = Get("MsgFrom");
             var to      = Get("MsgTo");
             var channel = Get("Channel");
+            var subject = d.TryGetValue("Subject", out var sv) ? sv?.ToString() : null;
             var body    = Get("Body");
             var time    = Get("MsgTime");
-            var contact = convId.StartsWith("sms:") ? convId[4..] : DeriveInternalContact(convId, from, to);
+            var contact = convId.StartsWith("sms:")   ? convId[4..]
+                        : convId.StartsWith("email:") ? convId[6..]
+                        : DeriveInternalContact(convId, from, to);
 
             seen[convId] = new Models.ConversationSummary
             {
                 ConversationId  = convId,
                 Contact         = contact,
                 Channel         = channel,
+                Subject         = subject,
                 LastMessageBody = body.Length > 60 ? body[..60] + "…" : body,
                 LastTimestamp   = time,
                 UnreadCount     = 0,
@@ -9714,6 +9720,7 @@ public class SharePointService
                 To             = Get("MsgTo"),
                 Channel        = Get("Channel"),
                 Direction      = Get("Direction"),
+                Subject        = d.TryGetValue("Subject", out var sv) ? sv?.ToString() : null,
                 Body           = Get("Body"),
                 ConversationId = Get("ConvId"),
                 TimestampUtc   = Get("MsgTime"),
