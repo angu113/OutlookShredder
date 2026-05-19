@@ -2322,19 +2322,19 @@ public class SharePointService
         }
         else
         {
-            // No MSPC from RLI — fall back to fuzzy catalog match on supplier's product name.
-            var match          = _catalog.ResolveProduct(prodName);
-            productSearchKey   = match?.SearchKey;     // null for amber/red; set for green only
-            catalogProductName = match?.Name;
-            matchConfidence    = match?.Confidence ?? 0.0;
-            if (match is not null)
+            // No MSPC from RLI — use token-based catalog match on supplier's product name.
+            var match          = await _catalogAnalysis.Value.MatchProductAsync(prodName, supplier);
+            productSearchKey   = match.SearchKey;
+            catalogProductName = match.CatalogName;
+            matchConfidence    = match.SearchKey is not null ? 1.0 : 0.0;
+            if (match.SearchKey is not null)
                 _log.LogInformation(
-                    "[SP] Fuzzy-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} conf={Conf:P0} catalog='{Catalog}'",
-                    jobRef, supplier, prodName, productSearchKey, matchConfidence, catalogProductName);
+                    "[SP] Token-matched: [{RfqId}] {Supplier} '{Name}' → MSPC={Key} score={Score:F2} src={Src} catalog='{Catalog}'",
+                    jobRef, supplier, prodName, productSearchKey, match.Score, match.Source, catalogProductName);
             else
                 _log.LogWarning(
-                    "[SP] No catalog match for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null",
-                    jobRef, supplier, prodName);
+                    "[SP] No token match for [{RfqId}] {Supplier} '{Name}' -- ProductSearchKey will be null (score={Score:F2})",
+                    jobRef, supplier, prodName, match.Score);
         }
 
         var title = $"[{jobRef}] {supplier} - {prodName}";
