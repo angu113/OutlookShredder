@@ -259,14 +259,14 @@ public class ZoomCallWatcherService : BackgroundService
                     // CRM lookup runs on a thread-pool thread; notify once it resolves
                     _ = Task.Run(async () =>
                     {
-                        CustomerLookupResult? crm = null;
-                        if (!string.IsNullOrWhiteSpace(callerPhone))
-                        {
-                            crm = _crmCache.LookupByPhone(callerPhone);
-                            if (crm is not null)
-                                _log.LogInformation("[Zoom] CRM match (cache) — bp='{Bp}' contact='{Contact}'",
-                                    crm.BusinessPartner, crm.ContactName);
-                        }
+                        var allCrm = !string.IsNullOrWhiteSpace(callerPhone)
+                            ? _crmCache.LookupAllByPhone(callerPhone)
+                            : [];
+                        var crm = allCrm.Count > 0 ? allCrm[0] : null;
+                        if (crm is not null)
+                            _log.LogInformation("[Zoom] CRM match(es) — {Count} company(ies), primary bp='{Bp}'",
+                                allCrm.Count, crm.BusinessPartner);
+
                         // Write call log first to get the SP item ID, then notify
                         string spItemId = "";
                         try
@@ -282,7 +282,8 @@ public class ZoomCallWatcherService : BackgroundService
                         }
                         _notify.NotifyIncomingCall(callerName, callerPhone,
                             crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
-                            callLogSpItemId: spItemId);
+                            callLogSpItemId: spItemId,
+                            allMatches: allCrm.Count > 1 ? allCrm : null);
                     });
                 }
 

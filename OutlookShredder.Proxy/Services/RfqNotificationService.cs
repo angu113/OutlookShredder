@@ -203,9 +203,10 @@ public class RfqNotificationService
         });
 
     /// <summary>Publishes an "IncomingCall" event so Shredder shows a toast with caller and CRM data.</summary>
-    public void NotifyIncomingCall(string callerName, string callerPhone,
+    public void NotifyIncomingCall(string callerName, string? callerPhone,
         string? bpName = null, string? popupMessage = null, string? contactName = null,
-        string? callLogSpItemId = null) =>
+        string? callLogSpItemId = null,
+        IList<CustomerLookupResult>? allMatches = null) =>
         NotifyRfqProcessed(new RfqProcessedNotification
         {
             EventType       = "IncomingCall",
@@ -215,6 +216,9 @@ public class RfqNotificationService
             PopupMessage    = popupMessage,
             ContactName     = contactName,
             CallLogSpItemId = callLogSpItemId,
+            CrmMatches      = allMatches?.Count > 1
+                ? allMatches.Select(m => new CrmBusMatchDto(m.BusinessPartner, m.ContactName, m.PopupMessage)).ToList()
+                : null,
         });
 
     /// <summary>Publishes a "Message" event so all Shredder clients update their message thread.</summary>

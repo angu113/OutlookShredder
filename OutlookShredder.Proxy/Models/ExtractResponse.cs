@@ -74,7 +74,15 @@ public class RfqProcessedNotification
     public string? MsgChannel        { get; set; }
     public string? MsgDirection      { get; set; }
     public string? MsgTimestamp      { get; set; }
+    /// <summary>
+    /// All CRM matches when the caller's phone number appears at more than one company.
+    /// Null when there is 0 or 1 match (legacy BpName/ContactName/PopupMessage fields cover those cases).
+    /// </summary>
+    public List<CrmBusMatchDto>? CrmMatches { get; set; }
 }
+
+/// <summary>One CRM company match carried on an IncomingCall bus event.</summary>
+public sealed record CrmBusMatchDto(string BpName, string? ContactName, string? PopupMessage);
 
 /// <summary>
 /// ERP document data carried on EventType="ERP" bus messages.

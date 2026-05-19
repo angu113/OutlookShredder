@@ -42,19 +42,33 @@ public class CustomerCacheService : IHostedService
     public List<CustomerContactRow> GetAllContacts()     => _snap.Contacts;
     public List<string>             GetAllPartnerNames() => _snap.PartnerNames;
 
-    public CustomerLookupResult? LookupByPhone(string rawPhone)
+    public CustomerLookupResult? LookupByPhone(string rawPhone) =>
+        LookupAllByPhone(rawPhone).FirstOrDefault();
+
+    /// <summary>
+    /// Returns all CRM matches for the phone number, one per distinct business partner.
+    /// A phone that appears at multiple companies (e.g. a contact who works at two firms)
+    /// produces multiple entries rather than silently dropping all but the first.
+    /// </summary>
+    public List<CustomerLookupResult> LookupAllByPhone(string rawPhone)
     {
         var phone = CustomerImportService.NormalizePhone(rawPhone);
-        if (phone is null) return null;
+        if (phone is null) return [];
 
         var snap = _snap;
         if (!snap.PhoneIndex.TryGetValue(phone, out var contacts) || contacts.Count == 0)
-            return null;
+            return [];
 
-        var bpName      = contacts[0].CustomerName;
-        var contactName = contacts.Count == 1 ? contacts[0].ContactName : null;
-        snap.BpPopups.TryGetValue(bpName, out var popup);
-        return new CustomerLookupResult(bpName, popup, contactName);
+        return contacts
+            .GroupBy(c => c.CustomerName, StringComparer.OrdinalIgnoreCase)
+            .Select(g =>
+            {
+                snap.BpPopups.TryGetValue(g.Key, out var popup);
+                var distinctContacts = g.DistinctBy(c => c.ContactName, StringComparer.OrdinalIgnoreCase).ToList();
+                var contactName = distinctContacts.Count == 1 ? distinctContacts[0].ContactName : null;
+                return new CustomerLookupResult(g.Key, popup, contactName);
+            })
+            .ToList();
     }
 
     /// <summary>Call after any write to CRM data so the cache stays fresh.</summary>
