@@ -483,7 +483,7 @@ public class ProductCatalogService : BackgroundService
                 });
             _log.LogInformation("[Catalog] Created 'IsCustom' column");
         }
-        foreach (var metaCol in new[] { ("OriginalTerm", 512), ("Source", 20) })
+        foreach (var metaCol in new[] { ("OriginalTerm", 255), ("Source", 20) })
         {
             var hasMeta = (cols?.Value ?? []).Any(c =>
                 c.DisplayName?.Equals(metaCol.Item1, StringComparison.OrdinalIgnoreCase) == true);

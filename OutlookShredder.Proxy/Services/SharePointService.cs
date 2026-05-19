@@ -1606,7 +1606,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select=id,{col},MSPC,Product)"];
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product)"];
                 req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
                 req.QueryParameters.Top    = 100;
             }, ct);
