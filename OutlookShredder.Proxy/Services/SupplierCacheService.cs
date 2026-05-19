@@ -1,5 +1,6 @@
 using Azure.Identity;
 using Microsoft.Graph;
+using Microsoft.Graph.Models;
 
 namespace OutlookShredder.Proxy.Services;
 
@@ -40,12 +41,58 @@ public class SupplierCacheService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Ensure ManagerContact and OooContact columns exist before first read.
+        await EnsureColumnsAsync();
+
         // Refresh immediately on startup, then every hour.
         while (!stoppingToken.IsCancellationRequested)
         {
             await RefreshAsync();
             try { await Task.Delay(TimeSpan.FromHours(1), stoppingToken); }
             catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private async Task EnsureColumnsAsync()
+    {
+        try
+        {
+            var graph    = GetGraph();
+            var siteUrl  = _config["Suppliers:SiteUrl"]
+                ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+            var uri      = new Uri(siteUrl);
+            var siteKey  = $"{uri.Host}:{uri.AbsolutePath}";
+
+            var site = await graph.Sites[siteKey].GetAsync();
+            if (site?.Id is null) { _log.LogWarning("[Suppliers] EnsureColumns: could not resolve site"); return; }
+
+            var listName = _config["Suppliers:ListName"] ?? "Suppliers";
+            var lists = await graph.Sites[site.Id].Lists
+                .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+            var list = lists?.Value?.FirstOrDefault();
+            if (list?.Id is null) { _log.LogWarning("[Suppliers] EnsureColumns: list '{Name}' not found", listName); return; }
+
+            // Fetch existing column names.
+            var existing = await graph.Sites[site.Id].Lists[list.Id].Columns.GetAsync();
+            var names = (existing?.Value ?? [])
+                .Select(c => c.Name)
+                .Where(n => n is not null)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            async Task AddTextCol(string name)
+            {
+                if (names.Contains(name)) return;
+                await graph.Sites[site.Id].Lists[list.Id].Columns
+                    .PostAsync(new ColumnDefinition { Name = name, Text = new TextColumn() });
+                _log.LogInformation("[Suppliers] EnsureColumns: added column '{Name}'", name);
+            }
+
+            await AddTextCol("ManagerContact");
+            await AddTextCol("OooContact");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Suppliers] EnsureColumns failed (non-fatal)");
         }
     }
 
