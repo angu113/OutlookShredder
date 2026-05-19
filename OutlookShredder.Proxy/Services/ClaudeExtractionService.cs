@@ -167,6 +167,15 @@ public class ClaudeExtractionService : IAiExtractionService
         or "Supplier regrets — unable to supply this material").
         Always return at least one entry in products[].
 
+        ATTACHMENT PRIORITY: when you are given a PDF or other attachment as the primary
+        content, the attachment is the authoritative source for pricing. Email body context
+        (provided under "Email body context:") is background only. If the attachment contains
+        pricing for a product, extract those prices and do NOT mark the product as a regret —
+        even if the body text mentions "no stock", "regret", or inability to supply other items.
+        Apply regret only to products for which the attachment itself contains no pricing AND
+        the supplier has clearly stated (in the attachment or body) they cannot supply it.
+        Body-only regret phrases must not override prices that are visible in the attachment.
+
         ── SUBSTITUTES ────────────────────────────────────────────────────────────
         When a supplier cannot supply the requested product but offers an alternate
         (different grade, size, form, or specification), extract the alternate as a

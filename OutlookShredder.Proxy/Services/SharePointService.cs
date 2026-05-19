@@ -826,8 +826,12 @@ public class SharePointService
                     if (!row.ContainsKey(f) && srMatch.TryGetValue(f, out var v))
                         row[f] = v;
 
-                // If SR is blanket-regret and line item has no pricing, inherit regret flag
-                if (srMatch.TryGetValue("IsRegret", out var srRegret) &&
+                // If SR is blanket-regret and line item has no pricing, inherit regret flag.
+                // Attachment-sourced rows (SourceFile is set) are exempt: body-language regret
+                // does not override what the attachment did or did not quote.
+                var sliSourceFile = row.TryGetValue("SourceFile", out var sfVal) ? sfVal?.ToString() : null;
+                if (string.IsNullOrEmpty(sliSourceFile) &&
+                    srMatch.TryGetValue("IsRegret", out var srRegret) &&
                     srRegret is true or JsonElement { ValueKind: JsonValueKind.True })
                 {
                     if (!row.ContainsKey("PricePerPound") || row["PricePerPound"] is null)
@@ -2181,7 +2185,11 @@ public class SharePointService
             ? forwardedSender
             : null;
 
-        bool blanketRegret = HasRegretPhrase(emailMeta.EmailBody) || HasRegretPhrase(emailMeta.BodyContext);
+        // Body-phrase regret does not apply when we are processing an attachment.
+        // The attachment is the authoritative pricing source; the email body is context only.
+        // Per-product isRegret (set by the AI on each ProductLine) still applies.
+        bool blanketRegret = emailMeta.SourceType != "attachment" &&
+            (HasRegretPhrase(emailMeta.EmailBody) || HasRegretPhrase(emailMeta.BodyContext));
 
         var title = $"[{jobRef}] {supplier} {(emailMeta.ReceivedAt is not null ? DateTime.Parse(emailMeta.ReceivedAt).ToString("yyyy-MM-dd") : "unknown")}";
         title = title[..Math.Min(title.Length, 255)];
