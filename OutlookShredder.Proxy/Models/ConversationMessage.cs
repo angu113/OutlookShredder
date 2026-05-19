@@ -30,9 +30,10 @@ public class ConversationMessage
 
 public class SupplierInquiryRequest
 {
-    public string  To                      { get; set; } = "";
-    public string? Bcc                     { get; set; }
-    public string  Subject                 { get; set; } = "";
+    public string        To                      { get; set; } = "";
+    public string?       Bcc                     { get; set; }         // legacy single BCC
+    public List<string>? BccAddresses            { get; set; }         // multi-BCC (preferred)
+    public string        Subject                 { get; set; } = "";
     public string  Body                    { get; set; } = "";
     public string  RfqId                   { get; set; } = "";
     public string  SupplierName            { get; set; } = "";

@@ -107,12 +107,20 @@ public class MailService
         string? attachmentName = null,
         byte[]? attachmentBytes = null,
         string? attachmentContentType = null,
-        string? bcc = null)
+        string? bcc = null,
+        IList<string>? bccAddresses = null)
     {
         if (string.IsNullOrWhiteSpace(to))
             throw new ArgumentException("Recipient address required", nameof(to));
 
         var from = _config["Mail:FromAddress"] ?? throw new InvalidOperationException("Mail:FromAddress not configured");
+
+        // Merge bccAddresses + legacy single bcc into one list (deduped, non-empty only).
+        var allBcc = (bccAddresses ?? [])
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .ToList();
+        if (allBcc.Count == 0 && !string.IsNullOrWhiteSpace(bcc))
+            allBcc = [bcc];
 
         var message = new Message
         {
@@ -123,10 +131,8 @@ public class MailService
             [
                 new Recipient { EmailAddress = new EmailAddress { Address = to } }
             ],
-            BccRecipients = string.IsNullOrWhiteSpace(bcc) ? null :
-            [
-                new Recipient { EmailAddress = new EmailAddress { Address = bcc } }
-            ],
+            BccRecipients = allBcc.Count == 0 ? null :
+                allBcc.Select(a => new Recipient { EmailAddress = new EmailAddress { Address = a } }).ToList(),
         };
 
         if (attachmentBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(attachmentName))

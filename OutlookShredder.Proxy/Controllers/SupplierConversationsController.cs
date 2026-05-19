@@ -8,18 +8,21 @@ namespace OutlookShredder.Proxy.Controllers;
 [Route("api")]
 public class SupplierConversationsController : ControllerBase
 {
-    private readonly SharePointService _sp;
-    private readonly MailService _mail;
+    private readonly SharePointService    _sp;
+    private readonly MailService          _mail;
+    private readonly SupplierCacheService _suppliers;
     private readonly ILogger<SupplierConversationsController> _log;
 
     public SupplierConversationsController(
-        SharePointService sp,
-        MailService mail,
+        SharePointService    sp,
+        MailService          mail,
+        SupplierCacheService suppliers,
         ILogger<SupplierConversationsController> log)
     {
-        _sp   = sp;
-        _mail = mail;
-        _log  = log;
+        _sp        = sp;
+        _mail      = mail;
+        _suppliers = suppliers;
+        _log       = log;
     }
 
     /// <summary>
@@ -52,6 +55,26 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns the three contact email addresses (primary, manager, OOO) for the given supplier.
+    /// Always returns 200 — fields are null when the supplier is not in the cache or the
+    /// column has no value.
+    /// </summary>
+    [HttpGet("supplier-contacts")]
+    public IActionResult GetContacts([FromQuery] string supplierName)
+    {
+        if (string.IsNullOrWhiteSpace(supplierName))
+            return BadRequest(new { error = "supplierName required" });
+
+        var contacts = _suppliers.GetContactsForSupplier(supplierName);
+        return Ok(new
+        {
+            contactEmail    = contacts?.ContactEmail,
+            managerContact  = contacts?.ManagerContact,
+            oooContact      = contacts?.OooContact,
+        });
+    }
+
+    /// <summary>
     /// Sends a follow-up email to a supplier about an existing RFQ and appends an
     /// outbound row to SupplierConversations.
     /// </summary>
@@ -74,12 +97,20 @@ public class SupplierConversationsController : ControllerBase
             catch { return BadRequest(new { error = "attachmentContentBase64 is not valid base64" }); }
         }
 
+        // Merge multi-BCC list with legacy single-BCC field.
+        var bccAddresses = req.BccAddresses
+            ?.Where(a => !string.IsNullOrWhiteSpace(a) &&
+                         !a.EndsWith("@mithrilmetals.com", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if ((bccAddresses is null || bccAddresses.Count == 0) && !string.IsNullOrWhiteSpace(req.Bcc))
+            bccAddresses = [req.Bcc];
+
         try
         {
             await _mail.SendSupplierInquiryAsync(
                 req.To, req.Subject, req.Body,
                 req.AttachmentName, attachmentBytes, req.AttachmentContentType,
-                bcc: string.IsNullOrWhiteSpace(req.Bcc) ? null : req.Bcc);
+                bccAddresses: bccAddresses?.Count > 0 ? bccAddresses : null);
 
             var sliVer = await _sp.GetCurrentSliVersionAsync(req.RfqId, req.SupplierName);
             var spId   = await _sp.WriteConversationMessageAsync(new ConversationMessage

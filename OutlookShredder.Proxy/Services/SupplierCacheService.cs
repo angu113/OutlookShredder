@@ -24,8 +24,11 @@ public class SupplierCacheService : BackgroundService
     private GraphServiceClient? _graph;
 
     // Pre-tokenised entries for lock-free reads — reference swap is atomic.
-    private sealed record Entry(string Name, HashSet<string> Tokens, string? EmailDomain);
+    private sealed record Entry(string Name, HashSet<string> Tokens, string? EmailDomain,
+        string? ContactEmail, string? ManagerContact, string? OooContact);
     private volatile IReadOnlyList<Entry> _cache = [];
+
+    public record SupplierContactsDto(string? ContactEmail, string? ManagerContact, string? OooContact);
 
     public SupplierCacheService(IConfiguration config, ILogger<SupplierCacheService> log)
     {
@@ -93,7 +96,7 @@ public class SupplierCacheService : BackgroundService
         var page = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,ContactEmail)"];
+                r.QueryParameters.Expand = ["fields($select=Title,ContactEmail,ManagerContact,OooContact)"];
                 r.QueryParameters.Top    = 500;
             });
 
@@ -111,11 +114,13 @@ public class SupplierCacheService : BackgroundService
             .Select(i =>
             {
                 var d = i.Fields!.AdditionalData!;
-                var name  = d.TryGetValue("Title",        out var t) ? t?.ToString() : null;
-                var email = d.TryGetValue("ContactEmail", out var e) ? e?.ToString() : null;
+                var name    = d.TryGetValue("Title",          out var t) ? t?.ToString() : null;
+                var email   = d.TryGetValue("ContactEmail",  out var e) ? e?.ToString() : null;
+                var manager = d.TryGetValue("ManagerContact",out var m) ? m?.ToString() : null;
+                var ooo     = d.TryGetValue("OooContact",    out var o) ? o?.ToString() : null;
                 if (string.IsNullOrWhiteSpace(name)) return null;
                 var domain = ExtractDomain(email);
-                return new Entry(name, Tokenize(name), domain);
+                return new Entry(name, Tokenize(name), domain, email, manager, ooo);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -188,6 +193,18 @@ public class SupplierCacheService : BackgroundService
         }
 
         return null;   // no match in reference list
+    }
+
+    /// <summary>
+    /// Returns the contact email addresses stored on the Suppliers list entry for the given name,
+    /// or <see langword="null"/> when the supplier is not in the cache.
+    /// </summary>
+    public SupplierContactsDto? GetContactsForSupplier(string supplierName)
+    {
+        var cache = _cache;
+        var entry = cache.FirstOrDefault(e =>
+            e.Name.Equals(supplierName, StringComparison.OrdinalIgnoreCase));
+        return entry is null ? null : new SupplierContactsDto(entry.ContactEmail, entry.ManagerContact, entry.OooContact);
     }
 
     /// <summary>Exposes the current cached supplier names (for API/dashboard use).</summary>
