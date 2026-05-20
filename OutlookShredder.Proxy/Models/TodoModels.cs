@@ -11,6 +11,7 @@ public class ShredderTodo
     public DateTimeOffset? DueDate      { get; set; }
     public string? RelatedRfqId { get; set; }
     public DateTimeOffset? CreatedAt   { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
 }
 
 public class CreateTodoRequest
@@ -24,8 +25,9 @@ public class CreateTodoRequest
 
 public class UpdateTodoRequest
 {
-    public string? Status     { get; set; }
-    public string? ClaimedBy  { get; set; }
-    public string? Notes      { get; set; }
+    public string? Status       { get; set; }
+    public string? ClaimedBy    { get; set; }
+    public string? Notes        { get; set; }
     public DateTimeOffset? DueDate { get; set; }
+    public bool ClearCompletedAt { get; set; }
 }

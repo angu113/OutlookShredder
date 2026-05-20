@@ -4456,6 +4456,7 @@ public class SharePointService
                 ("Notes",        "note"),
                 ("DueDate",      "dateTime"),
                 ("RelatedRfqId", "text"),
+                ("CompletedAt",  "dateTime"),
             ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
@@ -10179,11 +10180,14 @@ public class SharePointService
             DueDate      = d.TryGetValue("DueDate", out var dd) && dd is JsonElement dde && dde.ValueKind == JsonValueKind.String
                                ? DateTimeOffset.TryParse(dde.GetString(), out var dto) ? dto : null
                                : null,
+            CompletedAt  = d.TryGetValue("CompletedAt", out var cd) && cd is JsonElement cde && cde.ValueKind == JsonValueKind.String
+                               ? DateTimeOffset.TryParse(cde.GetString(), out var cto) ? cto : null
+                               : null,
             CreatedAt    = at,
         };
     }
 
-    public async Task<List<Models.ShredderTodo>> ReadTodosAsync(CancellationToken ct = default)
+    public async Task<List<Models.ShredderTodo>> ReadTodosAsync(DateTime? since = null, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetTodoListIdAsync(ct);
@@ -10192,6 +10196,8 @@ public class SharePointService
             {
                 r.QueryParameters.Expand = ["fields"];
                 r.QueryParameters.Top    = 500;
+                if (since.HasValue)
+                    r.QueryParameters.Filter = $"createdDateTime ge {since.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}";
             }, ct);
 
         var todos = new List<Models.ShredderTodo>();
@@ -10242,6 +10248,8 @@ public class SharePointService
         if (req.ClaimedBy is not null) fields["ClaimedBy"] = req.ClaimedBy == "" ? null : req.ClaimedBy;
         if (req.Notes     is not null) fields["Notes"]     = req.Notes;
         if (req.DueDate   is not null) fields["DueDate"]   = req.DueDate.Value.ToString("o");
+        if (req.Status == "Done")                  fields["CompletedAt"] = DateTimeOffset.UtcNow.ToString("o");
+        else if (req.Status is not null || req.ClearCompletedAt) fields["CompletedAt"] = null;
         if (fields.Count == 0) return null;
 
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
