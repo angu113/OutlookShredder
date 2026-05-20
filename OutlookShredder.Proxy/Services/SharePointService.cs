@@ -10204,16 +10204,19 @@ public class SharePointService
             {
                 r.QueryParameters.Expand = ["fields"];
                 r.QueryParameters.Top    = 500;
-                if (since.HasValue)
-                    r.QueryParameters.Filter = $"fields/Created ge '{since.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ss}Z'";
             }, ct);
 
-        var todos = new List<Models.ShredderTodo>();
+        var cutoff = since?.ToUniversalTime();
+        var todos  = new List<Models.ShredderTodo>();
         while (page is not null)
         {
             foreach (var item in page.Value ?? [])
-                if (item.Id is not null)
-                    todos.Add(MapTodo(item));
+            {
+                if (item.Id is null) continue;
+                if (cutoff.HasValue && item.CreatedDateTime.HasValue && item.CreatedDateTime.Value.UtcDateTime < cutoff.Value)
+                    continue;
+                todos.Add(MapTodo(item));
+            }
             if (page.OdataNextLink is null) break;
             var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter);
