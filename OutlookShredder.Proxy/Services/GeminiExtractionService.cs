@@ -175,19 +175,26 @@ public class GeminiExtractionService : IAiExtractionService
         - Indirect: "I can only quote the [other product]", "we only have [different item]",
           "only quoting [other product]", or any statement that prices only OTHER products
           listed in this same email, making it clear this product is excluded.
-        Also set isRegret = true for the whole email when it is an OOF reply,
-        acknowledgement with no pricing, or blanket regret.
+        - OOF (out-of-office) auto-reply: set isRegret = true on one product entry.
+        DO NOT set isRegret = true merely because pricing is absent. A conversational
+        reply ("Yes, I can", "Thanks, we will get back to you", delivery confirmations,
+        scheduling questions) contains no supplier quote — return an EMPTY products array
+        for these. Only create a regret entry when the supplier has explicitly or implicitly
+        stated they cannot or will not supply something.
         Leave all numeric price fields null on regret entries.
         Explain the reason in supplierProductComments.
-        Always return at least one entry in products[].
+        If the email/attachment contains no quote data and no supplier decline, return
+        products: [] (empty array). Do NOT invent a placeholder regret row.
 
         ATTACHMENT PRIORITY: when you are given a PDF or other attachment as the primary
         content, the attachment is the authoritative source for pricing. Email body context
         (provided under "Email body context:") is background only. If the attachment contains
         pricing for a product, extract those prices and do NOT set isRegret for that product —
         even if the body text mentions "no stock", "regret", or inability to supply other items.
-        Apply isRegret only to products for which the attachment itself contains no pricing AND
-        the supplier has clearly stated (in the attachment or body) they cannot supply it.
+        Apply isRegret only to products for which the supplier has explicitly stated (in the
+        attachment or body) they cannot supply it. An attachment that simply contains no
+        pricing (e.g. an internal picking slip, a purchase order, a delivery note) is NOT a
+        regret — return products: [] for such documents.
         Body-only regret phrases ("no stock on others", "regret", etc.) must not override
         prices that are visible in the attachment.
 
