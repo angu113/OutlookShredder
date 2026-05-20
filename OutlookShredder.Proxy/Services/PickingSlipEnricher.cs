@@ -126,9 +126,11 @@ internal static class PickingSlipEnricher
         double? hdrPsTop    = null;
         double? hdrPsHeight = null;
         List<CommentBlock> blocks;
+        int pdfPageCount;
 
         using (var pigDoc = PigDoc.Open(pdfBytes))
         {
+            pdfPageCount   = pigDoc.NumberOfPages;
             var page1      = pigDoc.GetPage(1);
             double pigPageH = page1.Height;
             double pigPageW = page1.Width;
@@ -154,7 +156,7 @@ internal static class PickingSlipEnricher
             foreach (var kw in b.Keywords)
                 keywords.Add(kw);
 
-        if (!hasHeaderBounds && blocks.Count == 0)
+        if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
             return (pdfBytes, shipToName);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
@@ -170,6 +172,8 @@ internal static class PickingSlipEnricher
 
         if (blocks.Count > 0)
             BoldCommentsOnDoc(doc, blocks);
+
+        StampPageNumbersOnDoc(doc);
 
         if (keywords.Count > 0)
             AppendCalloutPageToDoc(doc, keywords);
@@ -586,6 +590,60 @@ internal static class PickingSlipEnricher
             DrawCallout(gfx, labelFont, dimFont, kw, x + col * (cellW + 30), y);
             col++;
             if (col == 3) { col = 0; y += cellH + 20; }
+        }
+    }
+
+    private static void StampPageNumbersOnDoc(SharpDoc doc)
+    {
+        if (doc.Pages.Count <= 1) return;
+
+        const double boxSize = 72.0;  // 1 inch
+        const double margin  = 12.0;  // pt from bottom and right page edges
+        var border   = new XPen(XColors.Black, 1.5);
+        var textFont = new XFont("Arial", 14, XFontStyleEx.Bold);
+        int total    = doc.Pages.Count;
+
+        for (int i = 0; i < total; i++)
+        {
+            var page   = doc.Pages[i];
+            double pageW = page.Width.Point;
+            double pageH = page.Height.Point;
+            using var gfx = XGraphics.FromPdfPage(page);
+
+            double bx = pageW - boxSize - margin;
+            double by = pageH - boxSize - margin;
+
+            // Opaque white fill + black border
+            gfx.DrawRectangle(border, XBrushes.White, new XRect(bx, by, boxSize, boxSize));
+
+            bool   isLast  = (i == total - 1);
+            double glyphCx  = bx + boxSize / 2.0;
+            double glyphTop = by + 10.0;
+            const double gs = 12.0; // glyph size in points
+
+            if (isLast)
+            {
+                // Filled black square (last page indicator)
+                gfx.DrawRectangle(XBrushes.Black,
+                    new XRect(glyphCx - gs / 2, glyphTop, gs, gs));
+            }
+            else
+            {
+                // Filled right-pointing triangle (continue indicator)
+                var tri = new XPoint[]
+                {
+                    new XPoint(glyphCx - gs / 2, glyphTop),
+                    new XPoint(glyphCx - gs / 2, glyphTop + gs),
+                    new XPoint(glyphCx + gs / 2, glyphTop + gs / 2),
+                };
+                gfx.DrawPolygon(XBrushes.Black, tri, XFillMode.Winding);
+            }
+
+            // "Pág. X de Y" centered in lower portion of box
+            string label = $"Pág. {i + 1} de {total}";
+            gfx.DrawString(label, textFont, XBrushes.Black,
+                new XRect(bx + 2, by + 34, boxSize - 4, 28),
+                XStringFormats.TopCenter);
         }
     }
 
