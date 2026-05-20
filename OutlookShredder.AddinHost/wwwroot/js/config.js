@@ -3,10 +3,10 @@
 // Update PROXY_URL before deploying to production.
 
 export const CONFIG = {
-    // URL of OutlookShredder.Proxy — the C# API that holds the Anthropic key
-    // Development: IIS Express on port 7001
-    // Production:  your Azure App Service URL
-    PROXY_URL: 'https://localhost:7001',
+    // URL of OutlookShredder.Proxy.
+    // localhost HTTP is treated as a secure context by modern browsers, so
+    // fetching http://localhost from an https://localhost page is allowed.
+    PROXY_URL: 'http://localhost:7000',
 
     // SharePoint
     SP_SITE_URL:   'https://metalsupermarkets.sharepoint.com/sites/hackensack',

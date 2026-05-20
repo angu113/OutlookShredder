@@ -3,135 +3,178 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>RFQ Processor</title>
+  <title>Shredder</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <link rel="stylesheet" href="/css/taskpane.css"/>
+  <style>
+    :root {
+      --bg:      #111827;
+      --surface: #1f2937;
+      --border:  #374151;
+      --green:   #10b981;
+      --red:     #ef4444;
+      --amber:   #f59e0b;
+      --text:    #f3f4f6;
+      --dim:     #9ca3af;
+      --mono:    'Consolas', 'Courier New', monospace;
+      --sans:    'Segoe UI', system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .header-title {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+    }
+    .header-sub {
+      font-size: 11px;
+      color: var(--dim);
+      margin-left: auto;
+    }
+
+    /* ── Status bar ── */
+    .status-bar {
+      padding: 9px 14px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--amber);
+      flex-shrink: 0;
+      transition: background 0.4s;
+    }
+    .dot.ok    { background: var(--green); }
+    .dot.error { background: var(--red); }
+    .dot.wait  { background: var(--amber); animation: blink 1.2s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+    .status-label { font-size: 12px; }
+    .proxy-label  {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dim);
+      margin-left: auto;
+    }
+
+    /* ── Log section ── */
+    .log-label {
+      padding: 8px 14px 3px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--dim);
+      flex-shrink: 0;
+    }
+    .log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 14px 10px;
+    }
+    .beat {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .beat:last-child { border-bottom: none; }
+    .b-seq  { color: var(--dim); min-width: 32px; }
+    .b-ok   { color: var(--green); }
+    .b-err  { color: var(--red); }
+    .b-rtt  { color: var(--dim); min-width: 44px; text-align: right; }
+    .b-time { color: var(--dim); font-size: 10px; margin-left: 4px; }
+    .b-msg  { color: var(--red); font-size: 11px; flex: 1;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  </style>
 </head>
 <body>
 
 <div class="header">
-  <span class="icon">&#x1F4CB;</span>
-  <h2>RFQ Processor</h2>
+  <span class="header-title">SHREDDER</span>
+  <span class="header-sub">Outlook Add-in</span>
 </div>
 
-<div id="ref-row"><span class="hint">Scanning for job references&hellip;</span></div>
-
-<div id="path-row">
-  <div class="pill" id="pill-attach">&#x1F4CE; Attachment path</div>
-  <div class="pill" id="pill-body">&#x1F4C4; Body path</div>
+<div class="status-bar">
+  <div class="dot wait" id="statusDot"></div>
+  <span class="status-label" id="statusLabel">Connecting...</span>
+  <span class="proxy-label" id="proxyLabel"></span>
 </div>
 
-<div id="status">Ready &mdash; click Process RFQ to extract and save.</div>
-
-<div id="rows-area"></div>
-
-<button id="btn" onclick="run()">Process RFQ</button>
-
-<a href="/dashboard.html" class="dash-link" target="_blank">Open Dashboard &rarr;</a>
+<div class="log-label">Heartbeat Log</div>
+<div class="log" id="log"></div>
 
 <script type="module">
-import { processItem }              from '/js/criteriaEngine.js';
-import { findJobRefs }              from '/js/jobRef.js';
-import { hasProcessableAttachment } from '/js/attachmentReader.js';
+import { CONFIG }         from '/js/config.js';
+import { startHeartbeat } from '/js/heartbeat.js';
 
-const statusEl   = document.getElementById('status');
-const refRow     = document.getElementById('ref-row');
-const rowsArea   = document.getElementById('rows-area');
-const pillAttach = document.getElementById('pill-attach');
-const pillBody   = document.getElementById('pill-body');
-const btn        = document.getElementById('btn');
+const dot         = document.getElementById('statusDot');
+const statusLabel = document.getElementById('statusLabel');
+const logEl       = document.getElementById('log');
 
-async function quickScan() {
-  await new Promise(r => Office.onReady(r));
-  const item = Office.context.mailbox.item;
-  const subj = await new Promise(r =>
-    typeof item.subject === 'string' ? r(item.subject)
-    : item.subject.getAsync(res => r(res.value || '')));
-  const atts  = (item.attachments || []).map(a => a.name || '').join(' ');
-  renderRefs(findJobRefs(`${subj} ${atts}`));
-  const hasAtts = hasProcessableAttachment(item);
-  pillAttach.className = 'pill' + (hasAtts  ? ' active-attach' : '');
-  pillBody.className   = 'pill' + (!hasAtts ? ' active-body'   : '');
-}
+document.getElementById('proxyLabel').textContent = CONFIG.PROXY_URL;
 
-window.run = async function () {
-  btn.disabled = true;
-  statusEl.className = '';
-  statusEl.innerHTML = '<span class="spinner"></span>Extracting&hellip;';
-  rowsArea.innerHTML = '';
-  try {
-    await new Promise(r => Office.onReady(r));
-    const result = await processItem(Office.context.mailbox.item);
-    renderRefs(result.jobRefs || []);
-    pillAttach.className = 'pill' + (result.path === 'attachment' ? ' active-attach' : '');
-    pillBody.className   = 'pill' + (result.path === 'body'       ? ' active-body'   : '');
-    if (!result.matched) {
-      statusEl.className = 'error';
-      statusEl.textContent = result.message;
-      return;
-    }
-    const allRows = result.results.flatMap(r => r.rows || []);
-    statusEl.className   = allRows.some(r => !r.success) ? 'error' : 'ok';
-    statusEl.textContent = result.message;
-    if (allRows.length) rowsArea.appendChild(buildTable(allRows, result.results[0]?.extracted));
-  } catch (e) {
-    statusEl.className = 'error';
-    statusEl.textContent = 'Error: ' + e.message;
-  } finally { btn.disabled = false; }
-};
+const MAX = 25;
 
-function renderRefs(refs) {
-  refRow.innerHTML = refs.length
-    ? refs.map(r => `<span class="ref-chip">${r}</span>`).join('')
-    : '<span class="hint">No [XXXXXX] job reference detected</span>';
-}
+function onBeat(r) {
+  dot.className        = 'dot ' + (r.ok ? 'ok' : 'error');
+  statusLabel.textContent = r.ok ? 'Connected' : 'Disconnected';
 
-function n(v, pre='', suf='') {
-  return v == null ? '<span class="null-val">&mdash;</span>' : `${pre}${v}${suf}`;
-}
+  const entry = document.createElement('div');
+  entry.className = 'beat';
 
-function buildTable(rows, extracted) {
-  const wrap     = document.createElement('div');
-  // Product-level data comes from extracted.products[] (camelCase JSON from proxy).
-  // rows[] (SpWriteResult) provides the SharePoint write outcome for each product.
-  const products = extracted?.products || [];
-  const sup = extracted?.supplierName || '';
-  if (sup || extracted?.dateOfQuote) {
-    wrap.innerHTML = `<div class="sup-header"><strong>${sup || '&mdash;'}</strong>${extracted?.dateOfQuote ? ' &middot; Quote: ' + extracted.dateOfQuote : ''}${extracted?.estimatedDeliveryDate ? ' &middot; Delivery: ' + extracted.estimatedDeliveryDate : ''}</div>`;
+  const now = new Date();
+  const t = `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} UTC`;
+
+  if (r.ok) {
+    const st = r.serverTime
+      ? new Date(r.serverTime).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+      : t;
+    entry.innerHTML =
+      `<span class="b-seq">#${r.seq}</span>` +
+      `<span class="b-ok">&#x2714;</span>` +
+      `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${st}</span>` +
+      `<span class="b-rtt">${r.rtt}ms</span>`;
+  } else {
+    entry.innerHTML =
+      `<span class="b-seq">#${r.seq}</span>` +
+      `<span class="b-err">&#x2718;</span>` +
+      `<span class="b-msg">${r.error || 'failed'}</span>` +
+      `<span class="b-time">${t}</span>`;
   }
-  const t  = document.createElement('table');
-  t.className = 'rows-table';
-  t.innerHTML = `<thead><tr>
-    <th>Product</th><th>Req</th><th>Quoted</th>
-    <th>Length</th><th>Weight</th><th>$/lb</th><th>$/ft</th><th>Comments</th><th></th>
-  </tr></thead>`;
-  const tb = document.createElement('tbody');
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const p   = products[i] || {};   // parallel index into extracted.products
-    const tr  = document.createElement('tr');
-    if (!row.success) tr.className = 'err';
-    const len = p.lengthPerUnit != null ? `${p.lengthPerUnit}${p.lengthUnit ? ' '+p.lengthUnit : ''}` : null;
-    const wt  = p.weightPerUnit != null ? `${p.weightPerUnit}${p.weightUnit ? ' '+p.weightUnit : ''}` : null;
-    tr.innerHTML = `
-      <td>${n(p.productName)}</td>
-      <td>${n(p.unitsRequested)}</td>
-      <td>${n(p.unitsQuoted)}</td>
-      <td>${n(len)}</td>
-      <td>${n(wt)}</td>
-      <td>${p.pricePerPound != null ? '$'+Number(p.pricePerPound).toFixed(2) : '<span class="null-val">&mdash;</span>'}</td>
-      <td>${p.pricePerFoot  != null ? '$'+Number(p.pricePerFoot).toFixed(2)  : '<span class="null-val">&mdash;</span>'}</td>
-      <td class="comments" title="${p.supplierProductComments||''}">${n(p.supplierProductComments ? p.supplierProductComments.slice(0,40)+(p.supplierProductComments.length>40?'&hellip;':'') : null)}</td>
-      <td>${row.spWebUrl ? `<a href="${row.spWebUrl}" target="_blank" class="sp-link">&#x2197;</a>` : row.error ? `<span title="${row.error}" class="err-ico">&#x26A0;</span>` : ''}</td>
-    `;
-    tb.appendChild(tr);
-  }
-  t.appendChild(tb);
-  wrap.appendChild(t);
-  return wrap;
+
+  logEl.prepend(entry);
+  while (logEl.children.length > MAX) logEl.removeChild(logEl.lastChild);
 }
 
-quickScan();
+function pad(n) { return String(n).padStart(2, '0'); }
+
+startHeartbeat(onBeat);
 </script>
 </body>
 </html>

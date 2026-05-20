@@ -21,6 +21,17 @@ public class AddinController : ControllerBase
     }
 
     /// <summary>
+    /// Office.js heartbeat — called every 15 seconds from the task pane.
+    /// Returns ack + server time so the add-in can confirm proxy connectivity.
+    /// </summary>
+    [HttpPost("heartbeat")]
+    public IActionResult Heartbeat([FromBody] HeartbeatRequest? req)
+    {
+        _log.LogDebug("Add-in heartbeat #{Seq} clientTime={ClientTime}", req?.Seq ?? 0, req?.ClientTime);
+        return Ok(new { ack = true, serverTime = DateTimeOffset.UtcNow });
+    }
+
+    /// <summary>
     /// Receives a full email payload pushed by the VSTO add-in when a new message
     /// arrives in a monitored mailbox.  Publishes an AddinNewEmail Service Bus event
     /// so connected Shredder clients are notified in real time.
@@ -107,6 +118,8 @@ public class AddinController : ControllerBase
 }
 
 // ── Payload models ──────────────────────────────────────────────────────────
+
+public record HeartbeatRequest(int Seq, string? ClientTime);
 
 public class AddinEmailPayload
 {
