@@ -29,9 +29,18 @@ public class TodoService : IHostedService
     {
         try
         {
-            var todos = await _sp.ReadTodosAsync(null, ct);
+            DateTime? since = null;
+            try
+            {
+                var cfg = await _sp.GetShredderConfigAsync("RfqDataStartDate");
+                if (cfg.HasValue && DateTime.TryParse(cfg.Value.Value, out var d))
+                    since = d;
+            }
+            catch { /* config not set — load all */ }
+
+            var todos = await _sp.ReadTodosAsync(since, ct);
             _cache.AddRange(todos);
-            _log.LogInformation("[Todo] Loaded {Count} todos", todos.Count);
+            _log.LogInformation("[Todo] Loaded {Count} todos (since {Since})", todos.Count, since?.ToString("yyyy-MM-dd") ?? "all");
 
             // Backfill any todos that pre-date the TodoId column
             const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

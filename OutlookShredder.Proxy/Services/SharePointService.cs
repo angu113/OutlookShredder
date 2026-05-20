@@ -10205,7 +10205,7 @@ public class SharePointService
                 r.QueryParameters.Expand = ["fields"];
                 r.QueryParameters.Top    = 500;
                 if (since.HasValue)
-                    r.QueryParameters.Filter = $"createdDateTime ge {since.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}";
+                    r.QueryParameters.Filter = $"fields/Created ge '{since.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ss}Z'";
             }, ct);
 
         var todos = new List<Models.ShredderTodo>();
