@@ -840,6 +840,21 @@ internal static class PickingSlipEnricher
 
     /// <summary>
     /// Finds the "Description (Special Instructions)" box on the first page that contains it
+    /// Returns the dimensions of every page in the PDF, in points (1 pt = 1/72").
+    /// Useful for diagnosing stamp coordinate mismatches.
+    /// </summary>
+    public static List<(double WidthPt, double HeightPt)> GetPageDimensions(byte[] pdfBytes)
+    {
+        using var pigDoc = PigDoc.Open(pdfBytes);
+        var result = new List<(double, double)>();
+        for (int p = 1; p <= pigDoc.NumberOfPages; p++)
+        {
+            var page = pigDoc.GetPage(p);
+            result.Add((page.Width, page.Height));
+        }
+        return result;
+    }
+
     /// (typically the last page of a multi-page picking slip).
     /// Returns (0-based page index, fractional bounds with top-left origin), or null when not found.
     /// </summary>

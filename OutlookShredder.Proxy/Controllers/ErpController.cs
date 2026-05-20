@@ -53,9 +53,8 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
-    /// Returns the fractional bounding box (0–1, top-left origin) of the
-    /// "Description (Special Instructions)" cell on page 1 of a picking slip PDF.
-    /// Used by the Shredder UI to position stamp overlays correctly.
+    /// Returns page dimensions + fractional bounding box of the Description (Special Instructions)
+    /// cell in a picking slip PDF. url may be a SharePoint HTTPS URL or an absolute local file path.
     /// </summary>
     [HttpGet("/api/erp/stamp-bounds")]
     public async Task<IActionResult> GetStampBounds([FromQuery] string url, CancellationToken ct)
@@ -68,21 +67,82 @@ public class ErpController : ControllerBase
             var bytes = url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                 ? await _sp.DownloadSpFileAsync(url, ct)
                 : await System.IO.File.ReadAllBytesAsync(url, ct);
+
+            var dims   = PickingSlipEnricher.GetPageDimensions(bytes);
             var bounds = PickingSlipEnricher.ExtractDescriptionBoxBounds(bytes);
-            return bounds is null
-                ? NotFound(new { error = "Description (Special Instructions) section not found" })
-                : Ok(new
+
+            var pages = dims.Select((d, i) => new
+            {
+                pageIndex   = i,
+                widthPt     = Math.Round(d.WidthPt,  2),
+                heightPt    = Math.Round(d.HeightPt, 2),
+                widthIn     = Math.Round(d.WidthPt  / 72.0, 4),
+                heightIn    = Math.Round(d.HeightPt / 72.0, 4),
+            }).ToList();
+
+            if (bounds is null)
+                return Ok(new { pages, descriptionBox = (object?)null });
+
+            var b = bounds.Value;
+            var pg = dims.ElementAtOrDefault(b.PageIndex);
+            return Ok(new
+            {
+                pages,
+                descriptionBox = new
                 {
-                    pageIndex  = bounds.Value.PageIndex,
-                    leftFrac   = bounds.Value.LeftFrac,
-                    topFrac    = bounds.Value.TopFrac,
-                    widthFrac  = bounds.Value.WidthFrac,
-                    heightFrac = bounds.Value.HeightFrac,
-                });
+                    pageIndex   = b.PageIndex,
+                    leftFrac    = Math.Round(b.LeftFrac,   4),
+                    topFrac     = Math.Round(b.TopFrac,    4),
+                    widthFrac   = Math.Round(b.WidthFrac,  4),
+                    heightFrac  = Math.Round(b.HeightFrac, 4),
+                    // Absolute inches on that page (for direct coordinate comparison)
+                    leftIn      = Math.Round(b.LeftFrac   * pg.WidthPt  / 72.0, 4),
+                    topIn       = Math.Round(b.TopFrac    * pg.HeightPt / 72.0, 4),
+                    widthIn     = Math.Round(b.WidthFrac  * pg.WidthPt  / 72.0, 4),
+                    heightIn    = Math.Round(b.HeightFrac * pg.HeightPt / 72.0, 4),
+                },
+            });
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[ERP] stamp-bounds failed for {Url}", url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Returns page count and dimensions (points + inches) for any PDF.
+    /// url may be a SharePoint HTTPS URL or an absolute local file path.
+    /// </summary>
+    [HttpGet("/api/erp/page-info")]
+    public async Task<IActionResult> GetPageInfo([FromQuery] string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return BadRequest(new { error = "url parameter is required" });
+
+        try
+        {
+            var bytes = url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? await _sp.DownloadSpFileAsync(url, ct)
+                : await System.IO.File.ReadAllBytesAsync(url, ct);
+
+            var dims = PickingSlipEnricher.GetPageDimensions(bytes);
+            return Ok(new
+            {
+                pageCount = dims.Count,
+                pages = dims.Select((d, i) => new
+                {
+                    pageIndex = i,
+                    widthPt   = Math.Round(d.WidthPt,  2),
+                    heightPt  = Math.Round(d.HeightPt, 2),
+                    widthIn   = Math.Round(d.WidthPt  / 72.0, 4),
+                    heightIn  = Math.Round(d.HeightPt / 72.0, 4),
+                }),
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[ERP] page-info failed for {Url}", url);
             return StatusCode(502, new { error = ex.Message });
         }
     }
