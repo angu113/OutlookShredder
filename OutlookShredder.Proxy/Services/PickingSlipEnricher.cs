@@ -597,7 +597,7 @@ internal static class PickingSlipEnricher
     {
         if (doc.Pages.Count <= 1) return;
 
-        var textFont = new XFont("Arial", 14, XFontStyleEx.Bold);
+        var textFont = new XFont("Arial", 16, XFontStyleEx.Bold);
         int total    = doc.Pages.Count;
 
         // Measure the widest possible label so all stamps are identical in size
@@ -611,7 +611,7 @@ internal static class PickingSlipEnricher
         const double vPad   = 6.0;   // vertical padding top and bottom
         const double gs     = 11.0;  // glyph size (triangle / square)
         const double gap    = 6.0;   // gap between glyph and text
-        const double margin = 12.0;  // pt from page edges
+        const double margin = 24.0;  // pt from page edges
 
         double boxW = hPad + gs + gap + textSize.Width + hPad;
         double boxH = Math.Max(gs, textSize.Height) + vPad * 2;
