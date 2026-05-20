@@ -997,40 +997,50 @@ public class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var result = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged)"];
-                req.QueryParameters.Top    = 500;
-            });
-
         static string? FieldStr(IDictionary<string, object?> d, string key) =>
             d.TryGetValue(key, out var v) ? v?.ToString() : null;
 
-        return result?.Value?
-            .Where(i => i.Fields?.AdditionalData is not null)
-            .Select(i =>
+        static Dictionary<string, object?> MapItem(Microsoft.Graph.Models.ListItem i, string col)
+        {
+            var d = i.Fields!.AdditionalData!;
+            var rfqId = FieldStr(d, col)
+                     ?? FieldStr(d, "RFQ_x005F_ID")
+                     ?? FieldStr(d, "RFQ_ID");
+            return new Dictionary<string, object?>
             {
-                var d = i.Fields!.AdditionalData!;
-                var rfqId = FieldStr(d, col)
-                         ?? FieldStr(d, "RFQ_x005F_ID")
-                         ?? FieldStr(d, "RFQ_ID");
-                return new Dictionary<string, object?>
-                {
-                    ["Id"]               = i.Id,
-                    ["RFQ_ID"]           = rfqId,
-                    ["Notes"]            = FieldStr(d, "Notes"),
-                    ["Requester"]        = FieldStr(d, "Requester"),
-                    ["DateCreated"]      = d.TryGetValue("DateCreated", out var dc) ? dc : null,
-                    ["Created"]          = i.CreatedDateTime?.UtcDateTime.ToString("o"),
-                    ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
-                    ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
-                    ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
-                };
-            })
-            .Where(d => d["RFQ_ID"] is not null)
-            .ToList()
-            ?? [];
+                ["Id"]               = i.Id,
+                ["RFQ_ID"]           = rfqId,
+                ["Notes"]            = FieldStr(d, "Notes"),
+                ["Requester"]        = FieldStr(d, "Requester"),
+                ["DateCreated"]      = d.TryGetValue("DateCreated", out var dc) ? dc : null,
+                ["Created"]          = i.CreatedDateTime?.UtcDateTime.ToString("o"),
+                ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
+                ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
+                ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
+            };
+        }
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged)"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var output = new List<Dictionary<string, object?>>();
+        while (page?.Value is not null)
+        {
+            foreach (var i in page.Value)
+            {
+                if (i.Fields?.AdditionalData is null) continue;
+                var row = MapItem(i, col);
+                if (row["RFQ_ID"] is not null) output.Add(row);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync();
+        }
+        return output;
     }
 
     // ??"?????"??? Write: update Notes on an RFQ Reference ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
@@ -1047,7 +1057,7 @@ public class SharePointService
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Top    = 5000;
             });
 
         var matches = (allItems?.Value ?? [])
@@ -1105,7 +1115,7 @@ public class SharePointService
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Top    = 5000;
             });
 
         var matches = (allItems?.Value ?? [])
@@ -1141,7 +1151,7 @@ public class SharePointService
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Top    = 5000;
             });
 
         var matches = (allItems?.Value ?? [])
@@ -1205,7 +1215,7 @@ public class SharePointService
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Top    = 5000;
             });
 
         var matches = (allItems?.Value ?? [])
@@ -1422,7 +1432,7 @@ public class SharePointService
             .GetAsync(req2 =>
             {
                 req2.QueryParameters.Expand = [$"fields($select=id,{col},Requester,DateCreated,EmailRecipients)"];
-                req2.QueryParameters.Top    = 500;
+                req2.QueryParameters.Top    = 5000;
             });
 
         var matches = (allItems?.Value ?? [])
