@@ -597,11 +597,25 @@ internal static class PickingSlipEnricher
     {
         if (doc.Pages.Count <= 1) return;
 
-        const double boxSize = 72.0;  // 1 inch
-        const double margin  = 12.0;  // pt from bottom and right page edges
-        var border   = new XPen(XColors.Black, 1.5);
         var textFont = new XFont("Arial", 14, XFontStyleEx.Bold);
         int total    = doc.Pages.Count;
+
+        // Measure the widest possible label so all stamps are identical in size
+        string widestLabel = $"Pág. {total} de {total}";
+        XSize textSize;
+        using (var mc = XGraphics.CreateMeasureContext(
+                   new XSize(1000, 1000), XGraphicsUnit.Point, XPageDirection.Downwards))
+            textSize = mc.MeasureString(widestLabel, textFont);
+
+        const double hPad   = 8.0;   // horizontal padding each side
+        const double vPad   = 6.0;   // vertical padding top and bottom
+        const double gs     = 11.0;  // glyph size (triangle / square)
+        const double gap    = 6.0;   // gap between glyph and text
+        const double margin = 12.0;  // pt from page edges
+
+        double boxW = hPad + gs + gap + textSize.Width + hPad;
+        double boxH = Math.Max(gs, textSize.Height) + vPad * 2;
+        var    border = new XPen(XColors.Black, 1.5);
 
         for (int i = 0; i < total; i++)
         {
@@ -610,40 +624,40 @@ internal static class PickingSlipEnricher
             double pageH = page.Height.Point;
             using var gfx = XGraphics.FromPdfPage(page);
 
-            double bx = pageW - boxSize - margin;
-            double by = pageH - boxSize - margin;
+            double bx = pageW - boxW - margin;
+            double by = pageH - boxH - margin;
 
-            // Opaque white fill + black border
-            gfx.DrawRectangle(border, XBrushes.White, new XRect(bx, by, boxSize, boxSize));
+            // Opaque white fill + black border — sized to content, no clipping
+            gfx.DrawRectangle(border, XBrushes.White, new XRect(bx, by, boxW, boxH));
 
-            bool   isLast  = (i == total - 1);
-            double glyphCx  = bx + boxSize / 2.0;
-            double glyphTop = by + 10.0;
-            const double gs = 12.0; // glyph size in points
+            bool   isLast = (i == total - 1);
+            double glyphX = bx + hPad;
+            double glyphY = by + (boxH - gs) / 2.0;
 
             if (isLast)
             {
-                // Filled black square (last page indicator)
-                gfx.DrawRectangle(XBrushes.Black,
-                    new XRect(glyphCx - gs / 2, glyphTop, gs, gs));
+                // Filled black square (last page)
+                gfx.DrawRectangle(XBrushes.Black, new XRect(glyphX, glyphY, gs, gs));
             }
             else
             {
-                // Filled right-pointing triangle (continue indicator)
+                // Filled right-pointing triangle (continue)
                 var tri = new XPoint[]
                 {
-                    new XPoint(glyphCx - gs / 2, glyphTop),
-                    new XPoint(glyphCx - gs / 2, glyphTop + gs),
-                    new XPoint(glyphCx + gs / 2, glyphTop + gs / 2),
+                    new XPoint(glyphX,      glyphY),
+                    new XPoint(glyphX,      glyphY + gs),
+                    new XPoint(glyphX + gs, glyphY + gs / 2),
                 };
                 gfx.DrawPolygon(XBrushes.Black, tri, XFillMode.Winding);
             }
 
-            // "Pág. X de Y" centered in lower portion of box
+            // Label: glyph to the left, text to the right, both vertically centred
             string label = $"Pág. {i + 1} de {total}";
+            double textX = bx + hPad + gs + gap;
+            double textY = by + (boxH - textSize.Height) / 2.0;
             gfx.DrawString(label, textFont, XBrushes.Black,
-                new XRect(bx + 2, by + 34, boxSize - 4, 28),
-                XStringFormats.TopCenter);
+                new XRect(textX, textY, textSize.Width + 2, textSize.Height),
+                XStringFormats.TopLeft);
         }
     }
 
