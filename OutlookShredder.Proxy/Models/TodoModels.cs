@@ -12,6 +12,7 @@ public class ShredderTodo
     public string? RelatedRfqId { get; set; }
     public DateTimeOffset? CreatedAt   { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+    public string?         TodoId      { get; set; }
 }
 
 public class CreateTodoRequest

@@ -4457,6 +4457,7 @@ public class SharePointService
                 ("DueDate",      "dateTime"),
                 ("RelatedRfqId", "text"),
                 ("CompletedAt",  "dateTime"),
+                ("TodoId",       "text"),
             ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&
@@ -10150,6 +10151,12 @@ public class SharePointService
             .DeleteAsync(cancellationToken: ct);
     }
 
+    private static string GenerateTodoId()
+    {
+        const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        return "TD" + new string(Enumerable.Range(0, 6).Select(_ => chars[Random.Shared.Next(chars.Length)]).ToArray());
+    }
+
     // ── ShredderTodos ─────────────────────────────────────────────────────────
 
     private async Task<string> GetTodoListIdAsync(CancellationToken ct = default)
@@ -10183,6 +10190,7 @@ public class SharePointService
             CompletedAt  = d.TryGetValue("CompletedAt", out var cd) && cd is JsonElement cde && cde.ValueKind == JsonValueKind.String
                                ? DateTimeOffset.TryParse(cde.GetString(), out var cto) ? cto : null
                                : null,
+            TodoId       = GetStr(d, "TodoId"),
             CreatedAt    = at,
         };
     }
@@ -10231,6 +10239,7 @@ public class SharePointService
                         ["Notes"]        = req.Notes,
                         ["DueDate"]      = req.DueDate?.ToString("o"),
                         ["RelatedRfqId"] = req.RelatedRfqId,
+                        ["TodoId"]       = GenerateTodoId(),
                     }
                 }
             }, cancellationToken: ct);
@@ -10258,6 +10267,17 @@ public class SharePointService
         var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
             .GetAsync(r => r.QueryParameters.Expand = ["fields"], ct);
         return item is null ? null : MapTodo(item);
+    }
+
+    public async Task PatchTodoIdAsync(string spItemId, string todoId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetTodoListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["TodoId"] = todoId }
+            }, cancellationToken: ct);
     }
 
     public async Task DeleteTodoAsync(string spItemId, CancellationToken ct = default)

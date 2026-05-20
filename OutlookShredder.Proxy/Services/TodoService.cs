@@ -41,6 +41,16 @@ public class TodoService : IHostedService
             var todos = await _sp.ReadTodosAsync(since, ct);
             _cache.AddRange(todos);
             _log.LogInformation("[Todo] Loaded {Count} todos (since {Since})", todos.Count, since?.ToString("yyyy-MM-dd") ?? "all");
+
+            // Backfill any todos that pre-date the TodoId column
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            foreach (var todo in todos.Where(t => string.IsNullOrEmpty(t.TodoId) && t.SpItemId is not null))
+            {
+                var newId = "TD" + new string(Enumerable.Range(0, 6).Select(_ => chars[Random.Shared.Next(chars.Length)]).ToArray());
+                await _sp.PatchTodoIdAsync(todo.SpItemId!, newId, ct);
+                todo.TodoId = newId;
+                _log.LogInformation("[Todo] Backfilled TodoId={Id} on {SpId}", newId, todo.SpItemId);
+            }
         }
         catch (Exception ex)
         {
