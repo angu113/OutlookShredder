@@ -9525,9 +9525,9 @@ public class SharePointService
 
     private const int CallLogFetchCap = 2000;
 
-    /// <summary>Returns the most recent <paramref name="top"/> call log entries, newest first.</summary>
+    /// <summary>Returns all call log entries with ReceivedAt >= <paramref name="since"/>, newest first.</summary>
     public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
-        int top = 500, CancellationToken ct = default)
+        DateTimeOffset since, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateCallLogListIdAsync(ct);
@@ -9558,8 +9558,11 @@ public class SharePointService
                 Notes        = Get("Notes"),
             });
         }
-        // SP ignores $orderby when $expand is present — sort client-side by item ID descending (newest first), then apply the requested top.
-        return [.. results.OrderByDescending(r => int.TryParse(r.SpItemId, out var n) ? n : 0).Take(top)];
+        // Filter to today (since = midnight EST as UTC), sort newest-first by SP item ID.
+        return [.. results
+            .Where(r => DateTimeOffset.TryParse(r.ReceivedAt, null,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var t) && t >= since)
+            .OrderByDescending(r => int.TryParse(r.SpItemId, out var n) ? n : 0)];
     }
 
     /// <summary>Patches the Notes field on an existing PhoneCallLog item.</summary>

@@ -18,15 +18,19 @@ public class PhoneController : ControllerBase
         _log   = log;
     }
 
-    /// <summary>Returns the most recent call log entries, newest first.</summary>
+    /// <summary>Returns all call log entries for today (Eastern Time), newest first.</summary>
     [HttpGet("call-log")]
-    public async Task<IActionResult> GetCallLog(
-        [FromQuery] int top = 500,
-        CancellationToken ct = default)
+    public async Task<IActionResult> GetCallLog(CancellationToken ct = default)
     {
         try
         {
-            var records = await _sp.ReadPhoneCallLogAsync(top, ct);
+            var eastern       = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            var nowEastern    = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, eastern);
+            var todayStartUtc = TimeZoneInfo.ConvertTimeToUtc(
+                DateTime.SpecifyKind(nowEastern.Date, DateTimeKind.Unspecified), eastern);
+            var since = new DateTimeOffset(todayStartUtc, TimeSpan.Zero);
+
+            var records = await _sp.ReadPhoneCallLogAsync(since, ct);
             return Ok(records);
         }
         catch (Exception ex)
