@@ -1334,14 +1334,23 @@ public class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+        var allItems = new List<Microsoft.Graph.Models.ListItem>();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
                 req.QueryParameters.Expand = [$"fields($select=id,{col},Notes)"];
-                req.QueryParameters.Top    = 1000;
+                req.QueryParameters.Top    = 500;
             });
+        while (page is not null)
+        {
+            allItems.AddRange(page.Value ?? []);
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink)
+                .GetAsync();
+        }
 
-        var groups = (allItems?.Value ?? [])
+        var groups = allItems
             .Where(i => i.Fields?.AdditionalData is not null)
             .Select(i => new
             {
