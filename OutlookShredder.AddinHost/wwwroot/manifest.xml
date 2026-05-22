@@ -10,6 +10,8 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Shredder"/>
   <Description DefaultValue="Shredder — Outlook Add-in for Metal Supermarkets Hackensack"/>
+  <IconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-128.png"/>
   <SupportUrl DefaultValue="https://metalsupermarkets.com"/>
 
   <!-- Legacy fallback for pre-2013 Outlook (VersionOverrides takes precedence on modern clients) -->
