@@ -11,6 +11,7 @@ public class PhoneController : ControllerBase
     private readonly ProxyLeaseService    _lease;
     private readonly RfqNotificationService _notify;
     private readonly CustomerCacheService _crm;
+    private readonly IConfiguration       _config;
     private readonly ILogger<PhoneController> _log;
 
     public PhoneController(
@@ -18,27 +19,25 @@ public class PhoneController : ControllerBase
         ProxyLeaseService lease,
         RfqNotificationService notify,
         CustomerCacheService crm,
+        IConfiguration config,
         ILogger<PhoneController> log)
     {
         _sp     = sp;
         _lease  = lease;
         _notify = notify;
         _crm    = crm;
+        _config = config;
         _log    = log;
     }
 
-    /// <summary>Returns all call log entries for today (Eastern Time), newest first.</summary>
+    /// <summary>Returns call log entries for the last Phone:LookbackHours hours (default 36).</summary>
     [HttpGet("call-log")]
     public async Task<IActionResult> GetCallLog(CancellationToken ct = default)
     {
         try
         {
-            var eastern       = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
-            var nowEastern    = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, eastern);
-            var todayStartUtc = TimeZoneInfo.ConvertTimeToUtc(
-                DateTime.SpecifyKind(nowEastern.Date, DateTimeKind.Unspecified), eastern);
-            var since = new DateTimeOffset(todayStartUtc, TimeSpan.Zero);
-
+            var hours = _config.GetValue("Phone:LookbackHours", 36.0);
+            var since = DateTimeOffset.UtcNow.AddHours(-hours);
             var records = await _sp.ReadPhoneCallLogAsync(since, ct);
             return Ok(records);
         }
