@@ -105,9 +105,13 @@ public class ZoomCallWatcherService : BackgroundService
             return;
         }
 
+        // Steal the lease on startup — the most-recently-started proxy always wins.
+        // The previous holder stops its hook within ~15 s when its renewal detects loss.
+        // During that brief overlap both hooks may fire; the client deduplicates by phone+30s.
+        await _lease.StealLeaseAsync(ct);
+
         while (!ct.IsCancellationRequested)
         {
-            // Wait until this proxy holds the distributed Zoom lease.
             if (!_lease.IsLeaseHolder)
             {
                 _log.LogInformation("[Zoom] Waiting for lease (another proxy is active)");
