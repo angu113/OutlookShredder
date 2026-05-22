@@ -73,7 +73,7 @@ public class ProxyLeaseService : BackgroundService
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "[Lease:{Svc}] Post-steal verification failed");
+                _log.LogWarning(ex, "[Lease:{Svc}] Post-steal verification failed", ServiceName);
                 return;
             }
         }
