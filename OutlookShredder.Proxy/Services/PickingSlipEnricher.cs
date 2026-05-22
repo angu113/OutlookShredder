@@ -130,6 +130,7 @@ internal static class PickingSlipEnricher
         double? hdrPsTop    = null;
         double? hdrPsHeight = null;
         List<CommentBlock> blocks;
+        List<string> allLinesAcrossPages = [];
         int pdfPageCount;
 
         using (var pigDoc = PigDoc.Open(pdfBytes))
@@ -149,8 +150,10 @@ internal static class PickingSlipEnricher
                 page1Lines, pigPageW, pigPageH,
                 shipToName ?? knownCustomerName, log);
 
-            // 3. Comment blocks from all pages
-            blocks = ParseCommentBlocksFromDoc(pigDoc, log);
+            // 3. Comment blocks from all pages, plus the flat list of every text line on every page
+            //    (used for the broader processing-keyword scan below — the keyword list intentionally
+            //    targets words that appear as line-item product names, not only B: comments).
+            blocks = ParseCommentBlocksFromDoc(pigDoc, log, out allLinesAcrossPages);
         }
 
         bool hasHeaderBounds = hdrPsTop.HasValue && hdrPsHeight is > 0;
@@ -160,9 +163,11 @@ internal static class PickingSlipEnricher
             foreach (var kw in b.Keywords)
                 keywords.Add(kw);
 
-        // Processing-operation keyword scan over B: comment lines.
-        // Returns the canonical (config-list) form of each matched term.
-        var processOps = ScanProcessingKeywords(blocks, processingKeywords, log);
+        // Processing-operation keyword scan over EVERY text line on every page.
+        // Keywords (Laser Cutting / Bending / Welding / Drilling / Fabricating) typically appear
+        // either as B: shop-comment lines OR as service-line-items like "FABRICATING SERVICES"
+        // — broader scan keeps the rule simple and matches user expectation.
+        var processOps = ScanProcessingKeywords(allLinesAcrossPages, processingKeywords, log);
 
         if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
             return (pdfBytes, shipToName, processOps);
@@ -192,20 +197,23 @@ internal static class PickingSlipEnricher
     }
 
     private static IReadOnlyList<string> ScanProcessingKeywords(
-        List<CommentBlock> blocks,
+        IReadOnlyList<string> textLines,
         IReadOnlyList<string>? keywords,
         ILogger? log)
     {
-        if (keywords is null || keywords.Count == 0 || blocks.Count == 0)
+        if (keywords is null || keywords.Count == 0 || textLines.Count == 0)
             return [];
 
         var matched = new List<string>();
         foreach (var kw in keywords)
         {
             if (string.IsNullOrWhiteSpace(kw)) continue;
-            bool hit = blocks.Any(b => b.Lines.Any(l =>
-                l.Text.Contains(kw, StringComparison.OrdinalIgnoreCase)));
-            if (hit) matched.Add(kw);
+            var hitLine = textLines.FirstOrDefault(l => l.Contains(kw, StringComparison.OrdinalIgnoreCase));
+            if (hitLine is not null)
+            {
+                matched.Add(kw);
+                log?.LogInformation("[PSE] Keyword '{Kw}' matched in line: '{Line}'", kw, hitLine);
+            }
         }
 
         if (matched.Count > 0)
@@ -343,12 +351,18 @@ internal static class PickingSlipEnricher
     }
 
     private static List<CommentBlock> ParseCommentBlocksFromDoc(PigDoc doc, ILogger? log)
+        => ParseCommentBlocksFromDoc(doc, log, out _);
+
+    private static List<CommentBlock> ParseCommentBlocksFromDoc(PigDoc doc, ILogger? log, out List<string> allTextLines)
     {
         var result = new List<CommentBlock>();
+        allTextLines = [];
         foreach (var page in doc.GetPages())
         {
             int pageIdx = page.Number - 1;
             var rawLines = GroupIntoLines(page.GetWords().ToList());
+            foreach (var l in rawLines)
+                if (!string.IsNullOrWhiteSpace(l.Text)) allTextLines.Add(l.Text);
             var state = ParseState.Preamble;
             var commentLines = new List<TextLine>();
 
