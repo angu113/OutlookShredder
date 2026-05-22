@@ -237,7 +237,8 @@ public class ZoomCallWatcherService : BackgroundService
             try   { procName = Process.GetProcessById(pid).ProcessName; }
             catch { return; }
 
-            if (_config.GetValue("Zoom:DebugAllWindows", false))
+            var debugAll = _config.GetValue("Zoom:DebugAllWindows", false);
+            if (debugAll)
             {
                 string? winName  = null;
                 string? winClass = null;
@@ -251,60 +252,103 @@ public class ZoomCallWatcherService : BackgroundService
 
             try
             {
-                var el    = AutomationElement.FromHandle(hwnd);
-                var name  = TryGet(() => el.Current.Name)      ?? "";
-                var cls   = TryGet(() => el.Current.ClassName) ?? "";
+                var el   = AutomationElement.FromHandle(hwnd);
+                var name = TryGet(() => el.Current.Name)      ?? "";
+                var cls  = TryGet(() => el.Current.ClassName) ?? "";
 
-                // Incoming Zoom Phone call notification
-                if (cls == "SipCallNormalIncomingCallWindow" && name.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
+                // Fast path: "is calling you" text is on the top-level window name
+                if (name.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
                 {
-                    var (callerName, callerPhone) = ParseIncomingCallTitle(name);
-                    _log.LogInformation("[Zoom] Incoming call — name='{Name}' phone='{Phone}'", callerName, callerPhone);
-                    // CRM lookup runs on a thread-pool thread; notify once it resolves
+                    FireIncomingCall(name);
+                }
+                // Delayed path: Zoom now wraps the call UI inside a ZoomShadowFrameClass
+                // window. The child elements aren't populated yet when EVENT_OBJECT_SHOW fires,
+                // so wait briefly then search the UIA subtree. Also handles the legacy class.
+                else if (cls == "ZoomShadowFrameClass" || cls == "SipCallNormalIncomingCallWindow")
+                {
+                    var capturedEl = el;
                     _ = Task.Run(async () =>
                     {
-                        var allCrm = !string.IsNullOrWhiteSpace(callerPhone)
-                            ? _crmCache.LookupAllByPhone(callerPhone)
-                            : [];
-                        var crm = allCrm.Count > 0 ? allCrm[0] : null;
-                        if (crm is not null)
-                            _log.LogInformation("[Zoom] CRM match(es) — {Count} company(ies), primary bp='{Bp}'",
-                                allCrm.Count, crm.BusinessPartner);
-
-                        // Write call log first to get the SP item ID, then notify
-                        string spItemId = "";
-                        try
-                        {
-                            spItemId = await _sp.WritePhoneCallLogAsync(
-                                callerName, callerPhone ?? "",
-                                crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
-                                DateTimeOffset.UtcNow, CancellationToken.None);
-                        }
-                        catch (Exception ex)
-                        {
-                            _log.LogWarning(ex, "[Zoom] Call log write failed for {Name}", callerName);
-                        }
-                        _notify.NotifyIncomingCall(callerName, callerPhone,
-                            crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
-                            callLogSpItemId: spItemId,
-                            allMatches: allCrm.Count > 1 ? allCrm : null);
+                        await Task.Delay(400);
+                        var callText = FindCallTextInTree(capturedEl);
+                        if (callText is not null) FireIncomingCall(callText);
                     });
                 }
 
-                var sb = new StringBuilder();
-                sb.AppendLine($"[Zoom] WindowShown proc='{procName}' name='{name}' class='{cls}'");
-                DumpTree(el, sb, depth: 0);
-                _log.LogInformation("{Tree}", sb.ToString());
+                if (debugAll)
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"[Zoom] WindowShown proc='{procName}' name='{name}' class='{cls}'");
+                    DumpTree(el, sb, depth: 0);
+                    _log.LogInformation("{Tree}", sb.ToString());
+                }
             }
             catch (Exception ex)
             {
-                _log.LogDebug(ex, "[Zoom] tree dump failed (element may be stale)");
+                _log.LogDebug(ex, "[Zoom] tree walk failed (element may be stale)");
             }
         }
         catch (Exception ex)
         {
             _log.LogDebug(ex, "[Zoom] OnWinEvent error");
         }
+    }
+
+    /// <summary>
+    /// Recursively searches the UIA element tree for any node whose Name contains
+    /// "is calling you". Returns the first matching name, or null if not found.
+    /// </summary>
+    private string? FindCallTextInTree(AutomationElement root, int depth = 0)
+    {
+        if (depth > MaxTreeDepth) return null;
+        try
+        {
+            var name = TryGet(() => root.Current.Name) ?? "";
+            if (name.Contains("is calling you", StringComparison.OrdinalIgnoreCase)) return name;
+            var walker = TreeWalker.RawViewWalker;
+            var child  = walker.GetFirstChild(root);
+            while (child != null)
+            {
+                var found = FindCallTextInTree(child, depth + 1);
+                if (found is not null) return found;
+                child = walker.GetNextSibling(child);
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private void FireIncomingCall(string callTitle)
+    {
+        var (callerName, callerPhone) = ParseIncomingCallTitle(callTitle);
+        _log.LogInformation("[Zoom] Incoming call — name='{Name}' phone='{Phone}'", callerName, callerPhone);
+        _ = Task.Run(async () =>
+        {
+            var allCrm = !string.IsNullOrWhiteSpace(callerPhone)
+                ? _crmCache.LookupAllByPhone(callerPhone)
+                : [];
+            var crm = allCrm.Count > 0 ? allCrm[0] : null;
+            if (crm is not null)
+                _log.LogInformation("[Zoom] CRM match(es) — {Count} company(ies), primary bp='{Bp}'",
+                    allCrm.Count, crm.BusinessPartner);
+
+            string spItemId = "";
+            try
+            {
+                spItemId = await _sp.WritePhoneCallLogAsync(
+                    callerName, callerPhone ?? "",
+                    crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
+                    DateTimeOffset.UtcNow, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Zoom] Call log write failed for {Name}", callerName);
+            }
+            _notify.NotifyIncomingCall(callerName, callerPhone,
+                crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
+                callLogSpItemId: spItemId,
+                allMatches: allCrm.Count > 1 ? allCrm : null);
+        });
     }
 
     /// <summary>
