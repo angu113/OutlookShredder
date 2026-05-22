@@ -56,6 +56,20 @@ public class ZoomCallWatcherService : BackgroundService
     [DllImport("kernel32.dll")]
     private static extern int GetCurrentThreadId();
 
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeMsg
     {
@@ -261,16 +275,21 @@ public class ZoomCallWatcherService : BackgroundService
                 {
                     FireIncomingCall(name);
                 }
-                // Delayed path: Zoom now wraps the call UI inside a ZoomShadowFrameClass
-                // window. The child elements aren't populated yet when EVENT_OBJECT_SHOW fires,
-                // so wait briefly then search the UIA subtree. Also handles the legacy class.
+                // Delayed path: Zoom wraps the call UI inside a ZoomShadowFrameClass window.
+                // UIA children aren't populated at EVENT_OBJECT_SHOW time and Zoom doesn't
+                // expose accessible children, so try three Win32 fallbacks in sequence:
+                // UIA subtree → EnumChildWindows → EnumWindows across all Zoom top-level windows.
                 else if (cls == "ZoomShadowFrameClass" || cls == "SipCallNormalIncomingCallWindow")
                 {
-                    var capturedEl = el;
+                    var capturedHwnd = hwnd;
+                    var capturedPid  = pid;
+                    var capturedEl   = el;
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(400);
-                        var callText = FindCallTextInTree(capturedEl);
+                        var callText = FindCallTextInTree(capturedEl)
+                                    ?? FindCallTextInChildWindows(capturedHwnd)
+                                    ?? FindCallTextInZoomTopLevel(capturedPid);
                         if (callText is not null) FireIncomingCall(callText);
                     });
                 }
@@ -349,6 +368,51 @@ public class ZoomCallWatcherService : BackgroundService
                 callLogSpItemId: spItemId,
                 allMatches: allCrm.Count > 1 ? allCrm : null);
         });
+    }
+
+    /// Enumerates Win32 child HWNDs of <paramref name="parentHwnd"/> via GetWindowText.
+    /// Catches the case where the call content is a child window with no UIA exposure.
+    private string? FindCallTextInChildWindows(IntPtr parentHwnd)
+    {
+        string? result = null;
+        EnumWindowsProc cb = (hwnd, _) =>
+        {
+            var sb = new StringBuilder(512);
+            if (GetWindowText(hwnd, sb, sb.Capacity) > 0)
+            {
+                var text = sb.ToString();
+                if (text.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
+                { result = text; return false; }
+            }
+            return true;
+        };
+        EnumChildWindows(parentHwnd, cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return result;
+    }
+
+    /// Enumerates ALL top-level windows belonging to the Zoom process via GetWindowText.
+    /// Catches the case where the call content window is a sibling (not a child) of the
+    /// shadow frame — i.e. a separate top-level HWND that didn't fire EVENT_OBJECT_SHOW.
+    private string? FindCallTextInZoomTopLevel(int zoomPid)
+    {
+        string? result = null;
+        EnumWindowsProc cb = (hwnd, _) =>
+        {
+            GetWindowThreadProcessId(hwnd, out var winPid);
+            if (winPid != (uint)zoomPid) return true;
+            var sb = new StringBuilder(512);
+            if (GetWindowText(hwnd, sb, sb.Capacity) > 0)
+            {
+                var text = sb.ToString();
+                if (text.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
+                { result = text; return false; }
+            }
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return result;
     }
 
     /// <summary>
