@@ -30,6 +30,10 @@ public class FileWatcherService : BackgroundService
     private readonly WorkflowCardService _workflow;
     private readonly ILogger<FileWatcherService> _log;
 
+    // Configured shop-operation keywords scanned in PickingSlip B: comment lines.
+    // Drives auto-add into the Trigger Prioritize column (WorkflowCardService.AutoCreateFromPickingSlipAsync).
+    private readonly IReadOnlyList<string> _processingKeywords;
+
     // Files waiting to be processed — Channel gives immediate wake-up vs. poll loop
     private readonly Channel<string> _fileChannel = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleWriter = false, SingleReader = true });
@@ -63,6 +67,9 @@ public class FileWatcherService : BackgroundService
         _notify   = notify;
         _workflow = workflow;
         _log      = log;
+
+        _processingKeywords = config.GetSection("Workflow:ProcessingKeywords").Get<string[]>()
+                              ?? ["Laser Cutting", "Bending", "Welding", "Drilling", "Fabricating"];
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -371,9 +378,9 @@ public class FileWatcherService : BackgroundService
 
         // For PickingSlips: fire PDF enrichment on a background thread concurrently with the AI
         // call. Enrichment only needs raw bytes — PdfPig extracts the ship-to name independently.
-        Task<(byte[] Enriched, string? ShipToName)>? enrichTask = null;
+        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps)>? enrichTask = null;
         if (erpInfo.DocumentType == "PickingSlip")
-            enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log), ct);
+            enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
         // Call AI to extract detail fields (CustomerName, TotalAmount, DocumentDate, LineItems).
         // Filename already provides DocumentType and DocumentNumber — AI output for those is ignored.
@@ -412,11 +419,12 @@ public class FileWatcherService : BackgroundService
 
         // Await enrichment (already running in parallel with the AI call above).
         bool bytesModified = false;
+        IReadOnlyList<string> processOps = [];
         if (enrichTask is not null)
         {
             try
             {
-                var (enriched, shipToName) = await enrichTask;
+                var (enriched, shipToName, ops) = await enrichTask;
                 _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms (ran parallel with AI)", fileName, sw.ElapsedMilliseconds);
                 sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
@@ -429,6 +437,7 @@ public class FileWatcherService : BackgroundService
                     bytes = enriched;
                     bytesModified = true;
                 }
+                processOps = ops;
             }
             catch (Exception ex)
             {
@@ -559,6 +568,14 @@ public class FileWatcherService : BackgroundService
         {
             try { await TriggerPoMatchingAsync(extraction, fileName, ct); }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] PO matching failed for {File}", fileName); }
+        }
+
+        // For PickingSlips: route into the Trigger Prioritize column when keywords match
+        // or DeliveryMethod is literally "Delivery". WorkflowCardService handles dedup.
+        if (extraction.DocumentType == "PickingSlip")
+        {
+            try { await _workflow.AutoCreateFromPickingSlipAsync(extraction, spItemId, processOps, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[FW] Workflow auto-create failed for {File}", fileName); }
         }
 
         return true;

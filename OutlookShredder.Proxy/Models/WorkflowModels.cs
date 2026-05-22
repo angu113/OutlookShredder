@@ -16,6 +16,7 @@ public class WorkflowCard
     /// <summary>"Red" | "Amber" | "Green" | null</summary>
     public string? RagStatus         { get; set; }
     public string? DeliveryService   { get; set; }
+    public bool    WasAutoCreated    { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -30,6 +31,7 @@ public class CreateWorkflowCardRequest
     public string? DeliveryAddress { get; set; }
     public string? RagStatus       { get; set; }
     public string? DeliveryService { get; set; }
+    public bool    WasAutoCreated  { get; set; }
 }
 
 public class UpdateWorkflowCardRequest
@@ -43,4 +45,5 @@ public class UpdateWorkflowCardRequest
     public string? RagStatus       { get; set; }
     /// <summary>Pass "" to clear. Null means no change.</summary>
     public string? DeliveryService { get; set; }
+    public bool?   WasAutoCreated  { get; set; }
 }

@@ -10030,6 +10030,7 @@ public class SharePointService
             ("DeliveryAddress",   "note"),
             ("RagStatus",         "text"),
             ("DeliveryService",   "text"),
+            ("WasAutoCreated",    "boolean"),
         };
 
         foreach (var (name, type) in schema)
@@ -10100,6 +10101,10 @@ public class SharePointService
                 DeliveryAddress  = d.TryGetValue("DeliveryAddress",  out var da) ? da?.ToString() : null,
                 RagStatus        = d.TryGetValue("RagStatus",        out var rs) ? (rs?.ToString() is string rv && rv.Length > 0 ? rv : null) : null,
                 DeliveryService  = d.TryGetValue("DeliveryService",  out var ds) ? (ds?.ToString() is string dv && dv.Length > 0 ? dv : null) : null,
+                WasAutoCreated   = d.TryGetValue("WasAutoCreated",   out var wa) &&
+                                   (wa is System.Text.Json.JsonElement waEl
+                                       ? waEl.ValueKind == System.Text.Json.JsonValueKind.True
+                                       : wa is bool wb && wb),
             });
         }
         return cards;
@@ -10136,6 +10141,7 @@ public class SharePointService
                         ["DeliveryAddress"] = card.DeliveryAddress,
                         ["RagStatus"]       = card.RagStatus,
                         ["DeliveryService"] = card.DeliveryService,
+                        ["WasAutoCreated"]  = card.WasAutoCreated,
                     }
                 }
             }, cancellationToken: ct);
@@ -10158,6 +10164,7 @@ public class SharePointService
         if (req.IsCompleted     is not null) fields["IsCompleted"]     = req.IsCompleted.Value;
         if (req.RagStatus       is not null) fields["RagStatus"]       = req.RagStatus       == "" ? null : req.RagStatus;
         if (req.DeliveryService is not null) fields["DeliveryService"] = req.DeliveryService == "" ? null : req.DeliveryService;
+        if (req.WasAutoCreated  is not null) fields["WasAutoCreated"]  = req.WasAutoCreated.Value;
 
         if (fields.Count == 0) return;
 

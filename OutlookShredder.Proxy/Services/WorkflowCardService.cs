@@ -115,6 +115,7 @@ public class WorkflowCardService : IHostedService
                 DeliveryAddress = req.DeliveryAddress,
                 RagStatus       = req.RagStatus,
                 DeliveryService = req.DeliveryService,
+                WasAutoCreated  = req.WasAutoCreated,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -140,6 +141,7 @@ public class WorkflowCardService : IHostedService
             if (req.IsCompleted     is not null) card.IsCompleted     = req.IsCompleted.Value;
             if (req.RagStatus       is not null) card.RagStatus       = req.RagStatus       == "" ? null : req.RagStatus;
             if (req.DeliveryService is not null) card.DeliveryService = req.DeliveryService == "" ? null : req.DeliveryService;
+            if (req.WasAutoCreated  is not null) card.WasAutoCreated  = req.WasAutoCreated.Value;
 
             await _sp.UpdateWorkflowCardAsync(spItemId, req, ct);
             Publish("Updated", card);
@@ -167,16 +169,24 @@ public class WorkflowCardService : IHostedService
         finally { _lock.Release(); }
     }
 
-    /// <summary>Called by FileWatcherService after a PickingSlip is written to SP.</summary>
-    public async Task AutoCreateFromPickingSlipAsync(ErpExtraction extraction, string? erpSpItemId, CancellationToken ct)
+    /// <summary>
+    /// Called by FileWatcherService after a PickingSlip is written to SP.
+    /// Routes into the Trigger "Prioritize" intake (AssignedDate="") so the user can schedule it.
+    ///   Processing: created only when one or more configured shop-operation keywords matched in B: comments.
+    ///   Delivery:   created only when DeliveryMethod is literally "Delivery" (case-insensitive).
+    /// </summary>
+    public async Task AutoCreateFromPickingSlipAsync(
+        ErpExtraction extraction,
+        string? erpSpItemId,
+        IReadOnlyList<string> processOps,
+        CancellationToken ct)
     {
         if (extraction.DocumentType != "PickingSlip") return;
 
-        var today = DateOnly.FromDateTime(DateTime.Today).ToString("yyyy-MM-dd");
-
         var docNum = extraction.DocumentNumber ?? "";
+        if (string.IsNullOrEmpty(docNum)) return;
 
-        // Guard: skip if a non-completed card already exists for this doc + tab
+        // Guard: skip if a non-completed card already exists for this doc + tab (in any column, incl. Prioritize)
         bool hasProcessing, hasDelivery;
         await _lock.WaitAsync(ct);
         try
@@ -186,26 +196,23 @@ public class WorkflowCardService : IHostedService
         }
         finally { _lock.Release(); }
 
-        if (!hasProcessing)
+        if (processOps.Count > 0 && !hasProcessing)
             await CreateAsync(new CreateWorkflowCardRequest
             {
                 DocumentNumber  = docNum,
                 CustomerName    = extraction.CustomerName,
                 DocumentType    = extraction.DocumentType,
                 Tab             = "Processing",
-                AssignedDate    = today,
+                AssignedDate    = "",
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
+                WasAutoCreated  = true,
             }, ct);
 
-        // Delivery: only when delivery method is positively not a pickup variant.
-        // Treat null/unknown as pickup (conservative — avoids phantom Delivery cards).
         var dm = extraction.DeliveryMethod?.Trim();
-        bool isPickup = string.IsNullOrEmpty(dm) ||
-                        dm.Contains("pickup", StringComparison.OrdinalIgnoreCase) ||
-                        dm.Contains("will call", StringComparison.OrdinalIgnoreCase) ||
-                        dm.Contains("walk", StringComparison.OrdinalIgnoreCase);
-        if (!isPickup && !hasDelivery)
+        bool isLiteralDelivery = !string.IsNullOrEmpty(dm) &&
+                                 dm.Equals("Delivery", StringComparison.OrdinalIgnoreCase);
+        if (isLiteralDelivery && !hasDelivery)
         {
             await CreateAsync(new CreateWorkflowCardRequest
             {
@@ -213,9 +220,10 @@ public class WorkflowCardService : IHostedService
                 CustomerName    = extraction.CustomerName,
                 DocumentType    = extraction.DocumentType,
                 Tab             = "Delivery",
-                AssignedDate    = today,
+                AssignedDate    = "",
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
+                WasAutoCreated  = true,
             }, ct);
         }
     }

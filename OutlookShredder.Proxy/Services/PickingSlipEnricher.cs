@@ -112,11 +112,15 @@ internal static class PickingSlipEnricher
 
     /// <summary>
     /// Applies all picking-slip enrichments in two PDF passes (one read, one write).
-    /// Returns the enriched bytes and the ship-to customer name extracted from the PDF
-    /// (null when the Ship To label is not found).
+    /// Returns the enriched bytes, the ship-to customer name extracted from the PDF
+    /// (null when the Ship To label is not found), and any matched processing-operation
+    /// keywords found in B: shop-comment lines (used by the Trigger Prioritize auto-add rule).
     /// </summary>
-    public static (byte[] Bytes, string? ShipToName) EnrichPickingSlip(
-        byte[] pdfBytes, string? knownCustomerName = null, ILogger? log = null)
+    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps) EnrichPickingSlip(
+        byte[] pdfBytes,
+        string? knownCustomerName = null,
+        ILogger? log = null,
+        IReadOnlyList<string>? processingKeywords = null)
     {
         EnsureFontResolver();
 
@@ -156,8 +160,12 @@ internal static class PickingSlipEnricher
             foreach (var kw in b.Keywords)
                 keywords.Add(kw);
 
+        // Processing-operation keyword scan over B: comment lines.
+        // Returns the canonical (config-list) form of each matched term.
+        var processOps = ScanProcessingKeywords(blocks, processingKeywords, log);
+
         if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
-            return (pdfBytes, shipToName);
+            return (pdfBytes, shipToName, processOps);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
         using var ms  = new MemoryStream(pdfBytes);
@@ -180,7 +188,29 @@ internal static class PickingSlipEnricher
 
         using var outMs = new MemoryStream();
         doc.Save(outMs);
-        return (outMs.ToArray(), shipToName);
+        return (outMs.ToArray(), shipToName, processOps);
+    }
+
+    private static IReadOnlyList<string> ScanProcessingKeywords(
+        List<CommentBlock> blocks,
+        IReadOnlyList<string>? keywords,
+        ILogger? log)
+    {
+        if (keywords is null || keywords.Count == 0 || blocks.Count == 0)
+            return [];
+
+        var matched = new List<string>();
+        foreach (var kw in keywords)
+        {
+            if (string.IsNullOrWhiteSpace(kw)) continue;
+            bool hit = blocks.Any(b => b.Lines.Any(l =>
+                l.Text.Contains(kw, StringComparison.OrdinalIgnoreCase)));
+            if (hit) matched.Add(kw);
+        }
+
+        if (matched.Count > 0)
+            log?.LogInformation("[PSE] Processing keywords matched: {Ops}", string.Join(", ", matched));
+        return matched;
     }
 
     // ── PdfPig extraction helpers ─────────────────────────────────────────────
