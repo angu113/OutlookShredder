@@ -26,23 +26,60 @@ public class ProxyLeaseService : BackgroundService
     /// <summary>
     /// Unconditionally steals the lease from whoever holds it and sets IsLeaseHolder=true
     /// immediately so the caller can start the hook without waiting for the next renewal tick.
-    /// The previous holder detects loss within its next 15 s check and stops its hook.
+    /// Verifies the steal succeeded by reading back after 5 s (another proxy's concurrent
+    /// renewal can overwrite us in a race) and re-steals up to two more times if needed.
     /// </summary>
     public async Task StealLeaseAsync(CancellationToken ct)
     {
-        try
+        for (var attempt = 1; attempt <= 3; attempt++)
         {
-            var prev = await _sp.ForceClaimLeaseAsync(ServiceName, _machine, LeaseSeconds, ct);
-            _isLeaseHolder = true;
-            if (!string.IsNullOrEmpty(prev) && !string.Equals(prev, _machine, StringComparison.OrdinalIgnoreCase))
-                _log.LogInformation("[Lease:{Svc}] Stolen from {Prev} — hook starting immediately", ServiceName, prev);
-            else
-                _log.LogInformation("[Lease:{Svc}] Claimed on startup (uncontested)", ServiceName);
+            try
+            {
+                var prev = await _sp.ForceClaimLeaseAsync(ServiceName, _machine, LeaseSeconds, ct);
+                _isLeaseHolder = true;
+                if (attempt == 1)
+                {
+                    if (!string.IsNullOrEmpty(prev) && !string.Equals(prev, _machine, StringComparison.OrdinalIgnoreCase))
+                        _log.LogInformation("[Lease:{Svc}] Stolen from {Prev} — verifying hold", ServiceName, prev);
+                    else
+                        _log.LogInformation("[Lease:{Svc}] Claimed on startup (uncontested) — verifying hold", ServiceName);
+                }
+                else
+                {
+                    _log.LogInformation("[Lease:{Svc}] Re-steal attempt {N} — verifying hold", ServiceName, attempt);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Lease:{Svc}] Steal attempt {N} failed — will wait for normal acquisition", ServiceName, attempt);
+                return;
+            }
+
+            // Wait 5 s, then renew to verify we still hold it.
+            // A concurrent renewal from another proxy can overwrite our steal within milliseconds;
+            // this read-back catches that and re-steals if needed.
+            try { await Task.Delay(TimeSpan.FromSeconds(5), ct); }
+            catch (OperationCanceledException) { return; }
+
+            try
+            {
+                var held = await _sp.AcquireOrRenewLeaseAsync(ServiceName, _machine, LeaseSeconds, ct);
+                if (held)
+                {
+                    _log.LogInformation("[Lease:{Svc}] Hold confirmed on {Machine} — hook can start", ServiceName, _machine);
+                    return;
+                }
+                _log.LogInformation("[Lease:{Svc}] Steal attempt {N} overwritten by concurrent renewal — retrying", ServiceName, attempt);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[Lease:{Svc}] Post-steal verification failed");
+                return;
+            }
         }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "[Lease:{Svc}] Startup steal failed — will wait for normal acquisition", ServiceName);
-        }
+
+        _log.LogWarning("[Lease:{Svc}] Could not confirm hold after 3 steal attempts — will wait for normal acquisition", ServiceName);
+        _isLeaseHolder = false;
     }
 
     public ProxyLeaseService(SharePointService sp, ILogger<ProxyLeaseService> log)

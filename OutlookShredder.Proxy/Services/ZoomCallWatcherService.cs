@@ -17,9 +17,10 @@ public class ZoomCallWatcherService : BackgroundService
     private const int MaxTreeDepth = 8;
 
     // WinEvent
-    private const uint EVENT_OBJECT_SHOW       = 0x8002;
-    private const uint WINEVENT_OUTOFCONTEXT   = 0x0000;
-    private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    private const uint EVENT_OBJECT_SHOW        = 0x8002;
+    private const uint EVENT_OBJECT_NAMECHANGE  = 0x800C;
+    private const uint WINEVENT_OUTOFCONTEXT    = 0x0000;
+    private const uint WINEVENT_SKIPOWNPROCESS  = 0x0002;
     private const int  OBJID_WINDOW            = 0;
     private const uint WM_QUIT                 = 0x0012;
 
@@ -159,8 +160,9 @@ public class ZoomCallWatcherService : BackgroundService
 
         var thread = new Thread(() =>
         {
-            var threadId = GetCurrentThreadId();
-            IntPtr hook  = IntPtr.Zero;
+            var threadId  = GetCurrentThreadId();
+            IntPtr hookShow = IntPtr.Zero;
+            IntPtr hookName = IntPtr.Zero;
 
             _winEventCallback = (_, eventType, hwnd, idObject, _, _, _) =>
                 OnWinEvent(eventType, hwnd, idObject);
@@ -170,14 +172,19 @@ public class ZoomCallWatcherService : BackgroundService
             {
                 PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE);
 
-                hook = SetWinEventHook(
-                    EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
-                    IntPtr.Zero,
-                    callback,
-                    0, 0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+                var flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
 
-                if (hook == IntPtr.Zero)
+                hookShow = SetWinEventHook(
+                    EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+                    IntPtr.Zero, callback, 0, 0, flags);
+
+                // Second hook for name-change events only — avoids capturing the
+                // noisy range of events between SHOW and NAMECHANGE (focus, state, etc.)
+                hookName = SetWinEventHook(
+                    EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                    IntPtr.Zero, callback, 0, 0, flags);
+
+                if (hookShow == IntPtr.Zero || hookName == IntPtr.Zero)
                 {
                     _log.LogError("[Zoom] SetWinEventHook failed (error {Err})", Marshal.GetLastWin32Error());
                     tcs.TrySetResult();
@@ -202,7 +209,8 @@ public class ZoomCallWatcherService : BackgroundService
             }
             finally
             {
-                if (hook != IntPtr.Zero) UnhookWinEvent(hook);
+                if (hookShow != IntPtr.Zero) UnhookWinEvent(hookShow);
+                if (hookName != IntPtr.Zero) UnhookWinEvent(hookName);
                 tcs.TrySetResult();
             }
         });
@@ -258,8 +266,9 @@ public class ZoomCallWatcherService : BackgroundService
                 string? winClass = null;
                 try { winName  = AutomationElement.FromHandle(hwnd).Current.Name;      } catch { }
                 try { winClass = AutomationElement.FromHandle(hwnd).Current.ClassName; } catch { }
-                _log.LogInformation("[Zoom:dbg] WindowShown proc='{Proc}' name='{Name}' class='{Class}'",
-                    procName, winName ?? "", winClass ?? "");
+                var evtLabel = eventType == EVENT_OBJECT_NAMECHANGE ? "NameChange" : "WindowShown";
+                _log.LogInformation("[Zoom:dbg] {Evt} proc='{Proc}' name='{Name}' class='{Class}'",
+                    evtLabel, procName, winName ?? "", winClass ?? "");
             }
 
             if (!procName.StartsWith("Zoom", StringComparison.OrdinalIgnoreCase)) return;
@@ -270,31 +279,36 @@ public class ZoomCallWatcherService : BackgroundService
                 var name = TryGet(() => el.Current.Name)      ?? "";
                 var cls  = TryGet(() => el.Current.ClassName) ?? "";
 
-                // Fast path: "is calling you" text is on the top-level window name
+                // Fast path: "is calling you" text is already on the window name
+                // (works for both EVENT_OBJECT_SHOW and EVENT_OBJECT_NAMECHANGE).
                 if (name.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
                 {
                     FireIncomingCall(name);
                 }
-                // Delayed path: Zoom wraps the call UI inside a ZoomShadowFrameClass window.
-                // UIA children aren't populated at EVENT_OBJECT_SHOW time and Zoom doesn't
-                // expose accessible children, so try three Win32 fallbacks in sequence:
-                // UIA subtree → EnumChildWindows → EnumWindows across all Zoom top-level windows.
-                else if (cls == "ZoomShadowFrameClass" || cls == "SipCallNormalIncomingCallWindow")
+                // Delayed path (SHOW only): Zoom wraps the call UI inside a ZoomShadowFrameClass window.
+                // UIA children aren't populated at EVENT_OBJECT_SHOW time, so try three Win32
+                // fallbacks after a short delay: UIA subtree → EnumChildWindows → EnumWindows.
+                // For NAMECHANGE events the name is already current — skip the delayed search.
+                else if (eventType == EVENT_OBJECT_SHOW &&
+                         (cls == "ZoomShadowFrameClass" || cls == "SipCallNormalIncomingCallWindow"))
                 {
                     var capturedHwnd = hwnd;
                     var capturedPid  = pid;
                     var capturedEl   = el;
+                    var capturedDebug = debugAll;
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(400);
                         var callText = FindCallTextInTree(capturedEl)
-                                    ?? FindCallTextInChildWindows(capturedHwnd)
-                                    ?? FindCallTextInZoomTopLevel(capturedPid);
+                                    ?? FindCallTextInChildWindows(capturedHwnd, capturedDebug)
+                                    ?? FindCallTextInZoomTopLevel(capturedPid, capturedDebug);
                         if (callText is not null) FireIncomingCall(callText);
+                        else if (capturedDebug)
+                            _log.LogInformation("[Zoom:dbg] No call text found in ZoomShadowFrame children or siblings");
                     });
                 }
 
-                if (debugAll)
+                if (debugAll && eventType == EVENT_OBJECT_SHOW)
                 {
                     var sb = new StringBuilder();
                     sb.AppendLine($"[Zoom] WindowShown proc='{procName}' name='{name}' class='{cls}'");
@@ -372,15 +386,18 @@ public class ZoomCallWatcherService : BackgroundService
 
     /// Enumerates Win32 child HWNDs of <paramref name="parentHwnd"/> via GetWindowText.
     /// Catches the case where the call content is a child window with no UIA exposure.
-    private string? FindCallTextInChildWindows(IntPtr parentHwnd)
+    private string? FindCallTextInChildWindows(IntPtr parentHwnd, bool debugAll = false)
     {
         string? result = null;
+        var childTexts = debugAll ? new List<string>() : null;
         EnumWindowsProc cb = (hwnd, _) =>
         {
             var sb = new StringBuilder(512);
-            if (GetWindowText(hwnd, sb, sb.Capacity) > 0)
+            var len = GetWindowText(hwnd, sb, sb.Capacity);
+            if (len > 0)
             {
                 var text = sb.ToString();
+                childTexts?.Add(text);
                 if (text.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
                 { result = text; return false; }
             }
@@ -388,15 +405,19 @@ public class ZoomCallWatcherService : BackgroundService
         };
         EnumChildWindows(parentHwnd, cb, IntPtr.Zero);
         GC.KeepAlive(cb);
+        if (debugAll)
+            _log.LogInformation("[Zoom:dbg] EnumChildWindows found {N} text(s): [{Texts}]",
+                childTexts!.Count, string.Join(", ", childTexts.Select(t => $"'{t}'")));
         return result;
     }
 
     /// Enumerates ALL top-level windows belonging to the Zoom process via GetWindowText.
     /// Catches the case where the call content window is a sibling (not a child) of the
     /// shadow frame — i.e. a separate top-level HWND that didn't fire EVENT_OBJECT_SHOW.
-    private string? FindCallTextInZoomTopLevel(int zoomPid)
+    private string? FindCallTextInZoomTopLevel(int zoomPid, bool debugAll = false)
     {
         string? result = null;
+        var topTexts = debugAll ? new List<string>() : null;
         EnumWindowsProc cb = (hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out var winPid);
@@ -405,6 +426,7 @@ public class ZoomCallWatcherService : BackgroundService
             if (GetWindowText(hwnd, sb, sb.Capacity) > 0)
             {
                 var text = sb.ToString();
+                topTexts?.Add(text);
                 if (text.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
                 { result = text; return false; }
             }
@@ -412,6 +434,9 @@ public class ZoomCallWatcherService : BackgroundService
         };
         EnumWindows(cb, IntPtr.Zero);
         GC.KeepAlive(cb);
+        if (debugAll)
+            _log.LogInformation("[Zoom:dbg] EnumWindows (Zoom PID {Pid}) found {N} window(s): [{Texts}]",
+                zoomPid, topTexts!.Count, string.Join(", ", topTexts.Select(t => $"'{t}'")));
         return result;
     }
 
