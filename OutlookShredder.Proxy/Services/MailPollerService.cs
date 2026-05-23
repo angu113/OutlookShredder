@@ -1103,6 +1103,18 @@ public class MailPollerService : BackgroundService
                 }
             }
 
+            // Conv-tracked replies with no pricing skip SLI writes — SupplierConversations already has the message.
+            bool hasPricing = products.Any(p =>
+                p.PricePerPound.HasValue || p.PricePerFoot.HasValue ||
+                p.PricePerPiece.HasValue || p.TotalPrice.HasValue);
+            if (!hasPricing && !string.IsNullOrEmpty(req.ResolvedSupplierName))
+            {
+                _log.LogInformation(
+                    "[Mail] Conv-tracked reply from {From} has no pricing — skipping SLI write to preserve existing rows",
+                    req.EmailFrom);
+                return false;
+            }
+
             // Body-only emails often carry only a unit price ($/ft, $/lb, each) without
             // repeating the quantity and size from the RFQ — the supplier assumes we know.
             // Enrich those product lines with RLI qty + size before writing so that
