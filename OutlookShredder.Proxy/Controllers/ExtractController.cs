@@ -891,6 +891,31 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── RFQ Line Items admin ─────────────────────────────────────────────────
+
+    [HttpGet("rfq-line-items/{rfqId}")]
+    public async Task<IActionResult> GetRfqLineItems(string rfqId)
+    {
+        var items = await _sp.ReadRfqLineItemsFullAsync(rfqId);
+        return Ok(items);
+    }
+
+    [HttpPatch("rfq-line-items/{spItemId}/notes")]
+    public async Task<IActionResult> PatchRliNotes(string spItemId, [FromBody] PatchNotesRequest req)
+    {
+        await _sp.PatchRfqLineItemNotesAsync(spItemId, req.Notes);
+        return Ok(new { patched = spItemId });
+    }
+
+    [HttpDelete("rfq-line-items/{spItemId}")]
+    public async Task<IActionResult> DeleteRfqLineItem(string spItemId)
+    {
+        await _sp.DeleteRfqLineItemAsync(spItemId);
+        return Ok(new { deleted = spItemId });
+    }
+
+    public record PatchNotesRequest(string? Notes);
+
     // ── POST /api/rfq-import/dedupe-supplier-responses ──────────────────────
     /// <summary>
     /// Merges duplicate SupplierResponse rows that share the same (RFQ_ID, SupplierName).

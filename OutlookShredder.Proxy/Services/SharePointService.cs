@@ -1619,6 +1619,58 @@ public class SharePointService
         return result;
     }
 
+    public async Task<List<object>> ReadRfqLineItemsFullAsync(string rfqId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var items = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col},MSPC,Product,Units,SizeOfUnits,Notes)"];
+                req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
+                req.QueryParameters.Top    = 100;
+            });
+
+        var result = new List<object>();
+        foreach (var item in items?.Value ?? [])
+        {
+            if (item.Fields?.AdditionalData is not { } d) continue;
+            result.Add(new
+            {
+                spItemId    = item.Id,
+                rfqId       = d.TryGetValue(col, out var v0) ? v0?.ToString() : null,
+                mspc        = d.TryGetValue("MSPC", out var vm) ? vm?.ToString() : null,
+                product     = d.TryGetValue("Product", out var vp) ? vp?.ToString() : null,
+                units       = d.TryGetValue("Units", out var vu) ? vu?.ToString() : null,
+                sizeOfUnits = d.TryGetValue("SizeOfUnits", out var vs) ? vs?.ToString() : null,
+                notes       = d.TryGetValue("Notes", out var vn) ? vn?.ToString() : null,
+            });
+        }
+        return result;
+    }
+
+    public async Task PatchRfqLineItemNotesAsync(string spItemId, string? notes)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Notes"] = notes }
+            });
+        _log.LogInformation("[SP] Patched Notes on RLI {Id}", spItemId);
+    }
+
+    public async Task DeleteRfqLineItemAsync(string spItemId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].DeleteAsync();
+        _log.LogInformation("[SP] Deleted RLI {Id}", spItemId);
+    }
+
     /// <summary>
     /// For every RFQ Line Item row under <paramref name="rfqId"/> that has no MSPC,
     /// creates a deterministic CUSTOM_ID and patches it back to SharePoint.
