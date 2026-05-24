@@ -161,6 +161,13 @@ public class GeminiExtractionService : IAiExtractionService
         ── MULTIPLE PRODUCTS ──────────────────────────────────────────────────────
         Every distinct grade, form, size, or finish is a SEPARATE entry in products[].
         "1\" and 2\" flat bar" → two entries. "304 and 316 sheet" → two entries.
+        EXCEPTION — cutting/fabrication instructions ("Cut to 25' and 15'", "CUT TO:
+        1 PC 25' + 1 PC 15'", "saw cut included", etc.) are NOT separate products.
+        They describe processing on an adjacent product line. Include cutting details
+        in the parent product's supplierProductComments and, if applicable, in its
+        productName (e.g. append "CUT TO: 1 PC 25' / 1 PC 15'"). Do NOT create a
+        separate products[] entry for cutting instructions, saw charges, or fabrication
+        services that apply to another line item in the same quote.
 
         ── COMMENTS ───────────────────────────────────────────────────────────────
         Capture in supplierProductComments: partial availability, spec deviations,
