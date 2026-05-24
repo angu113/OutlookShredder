@@ -71,6 +71,9 @@ public class SupplierConversationsController : ControllerBase
             contactEmail    = contacts?.ContactEmail,
             managerContact  = contacts?.ManagerContact,
             oooContact      = contacts?.OooContact,
+            primaryFirstName = contacts?.PrimaryFirstName,
+            managerFirstName = contacts?.ManagerFirstName,
+            oooFirstName     = contacts?.OooFirstName,
         });
     }
 
