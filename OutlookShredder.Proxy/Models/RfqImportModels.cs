@@ -45,6 +45,7 @@ public class RfqReferenceRequest
     public string   Requester       { get; set; } = "";
     public DateTime DateSent        { get; set; }
     public string   EmailRecipients { get; set; } = "";
+    public string?  Notes           { get; set; }
 }
 
 /// <summary>One entry in POST /api/rfq-import/line-items array.</summary>
@@ -61,6 +62,7 @@ public class RfqLineItemRequest
     public string? ProductShape     { get; set; }
     public string? JobReference     { get; set; }
     public string? ProcessingSource { get; set; }
+    public string? Notes            { get; set; }
 }
 
 /// <summary>One entry returned by GET /api/mail/processed-emails.</summary>

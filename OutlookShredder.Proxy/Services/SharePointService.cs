@@ -1465,6 +1465,7 @@ public class SharePointService
                             ["Requester"]       = req.Requester,
                             ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
                             ["EmailRecipients"] = req.EmailRecipients,
+                            ["Notes"]           = req.Notes,
                         }
                     }
                 });
@@ -1489,6 +1490,9 @@ public class SharePointService
 
         if (IsBlank(data, "EmailRecipients") && !string.IsNullOrWhiteSpace(req.EmailRecipients))
             patch["EmailRecipients"] = req.EmailRecipients;
+
+        if (IsBlank(data, "Notes") && !string.IsNullOrWhiteSpace(req.Notes))
+            patch["Notes"] = req.Notes;
 
         if (patch.Count > 0)
         {
@@ -1585,7 +1589,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits)"];
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,Notes)"];
                 req.QueryParameters.Filter = $"fields/{col} eq '{rfqId}'";
                 req.QueryParameters.Top    = 100;
             });
@@ -1608,8 +1612,9 @@ public class SharePointService
                 double.TryParse(vu.ToString(), System.Globalization.NumberStyles.Any,
                     System.Globalization.CultureInfo.InvariantCulture, out var qv))
                 qty = qv;
+            var notes = d.TryGetValue("Notes", out var vn) ? vn?.ToString() : null;
             if (!string.IsNullOrEmpty(product) || !string.IsNullOrEmpty(mspc))
-                result.Add(new RliContextItem { Mspc = mspc, ProductName = product, Quantity = qty, SizeOfUnits = sizeStr });
+                result.Add(new RliContextItem { Mspc = mspc, ProductName = product, Quantity = qty, SizeOfUnits = sizeStr, Notes = notes });
         }
         return result;
     }
@@ -1828,6 +1833,7 @@ public class SharePointService
             if (req.ProductShape    is not null) data["ProductShape"]     = req.ProductShape;
             if (req.JobReference    is not null) data["JobReference"]     = req.JobReference;
             if (req.ProcessingSource is not null) data["ProcessingSource"] = req.ProcessingSource;
+            if (req.Notes            is not null) data["Notes"]            = req.Notes;
 
             var fieldsSummary = string.Join(", ", data.Select(kv => $"{kv.Key}={kv.Value}"));
             _log.LogInformation("[SP] CreateRfqLineItem posting: {Fields}", fieldsSummary);
@@ -4409,6 +4415,7 @@ public class SharePointService
             [
                 ("IsPurchased", "boolean"),
                 ("PoNumber",    "text"),
+                ("Notes",       "note"),
             ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [

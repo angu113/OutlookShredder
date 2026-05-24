@@ -76,4 +76,6 @@ public class RliContextItem
     public double? Quantity    { get; set; }
     /// <summary>Size/length string as stored on the RLI (e.g. "288", "24'", "20 ft"). Null when not specified.</summary>
     public string? SizeOfUnits { get; set; }
+    /// <summary>Per-item notes from the RFQ composer (cutting instructions, conditions, etc.).</summary>
+    public string? Notes       { get; set; }
 }
