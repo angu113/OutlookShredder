@@ -593,6 +593,37 @@ public class ProductCatalogService : BackgroundService
         return (customId, term);
     }
 
+    public async Task<int> DeleteBySearchKeysAsync(IReadOnlyList<string> searchKeys, CancellationToken ct = default)
+    {
+        var siteId = _cachedSiteId;
+        var listId = _cachedListId;
+        if (siteId is null || listId is null)
+            throw new InvalidOperationException("Catalog site/list IDs not cached — call GET /api/catalog first");
+
+        var graph = GetGraph();
+        int deleted = 0;
+        foreach (var key in searchKeys)
+        {
+            var match = _cache.Where(e =>
+                string.Equals(e.SearchKey, key, StringComparison.OrdinalIgnoreCase) && e.SpItemId is not null).ToList();
+            foreach (var entry in match)
+            {
+                try
+                {
+                    await graph.Sites[siteId].Lists[listId].Items[entry.SpItemId!].DeleteAsync(cancellationToken: ct);
+                    _log.LogInformation("[Catalog] Deleted {Key} '{Name}' (SpItemId={Id})", key, entry.Name, entry.SpItemId);
+                    deleted++;
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "[Catalog] Failed to delete {Key} (SpItemId={Id})", key, entry.SpItemId);
+                }
+            }
+        }
+        _cache = _cache.Where(e => !searchKeys.Contains(e.SearchKey, StringComparer.OrdinalIgnoreCase)).ToList().AsReadOnly();
+        return deleted;
+    }
+
     /// <summary>
     /// PATCHes TkMetal/TkShape/TkAlloy/TkTemper/TkConditions onto SP catalog items.
     /// Called by CatalogAnalysisService after each tokenization batch.

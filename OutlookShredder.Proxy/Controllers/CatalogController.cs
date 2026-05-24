@@ -120,6 +120,21 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     /// <summary>
+    /// DELETE /api/catalog/custom — deletes catalog entries by searchKey.
+    /// Body: { "searchKeys": ["CUST_1867F76F", ...] }
+    /// </summary>
+    [HttpDelete("custom")]
+    public async Task<IActionResult> DeleteCustomEntries([FromBody] DeleteCustomRequest req, CancellationToken ct)
+    {
+        if (req.SearchKeys is null || req.SearchKeys.Count == 0)
+            return BadRequest("Provide searchKeys[].");
+        var deleted = await catalog.DeleteBySearchKeysAsync(req.SearchKeys, ct);
+        return Ok(new { deleted, requested = req.SearchKeys.Count });
+    }
+
+    public record DeleteCustomRequest(List<string> SearchKeys);
+
+    /// <summary>
     /// GET /api/catalog/resolve?name=foo — resolves a vendor description against the cache.
     /// Returns the matched catalog entry, or 404 with the raw name if no match.
     /// </summary>
