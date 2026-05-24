@@ -101,13 +101,16 @@ public class SupplierConversationsController : ControllerBase
     public IActionResult GetAllContacts()
     {
         var result = _suppliers.CachedNames
-            .Select(name => new
+            .Select(name => { var c = _suppliers.GetContactsForSupplier(name); return new
             {
-                supplierName    = name,
-                contactEmail    = _suppliers.GetContactsForSupplier(name)?.ContactEmail,
-                managerContact  = _suppliers.GetContactsForSupplier(name)?.ManagerContact,
-                oooContact      = _suppliers.GetContactsForSupplier(name)?.OooContact,
-            })
+                supplierName     = name,
+                contactEmail     = c?.ContactEmail,
+                managerContact   = c?.ManagerContact,
+                oooContact       = c?.OooContact,
+                primaryFirstName = c?.PrimaryFirstName,
+                managerFirstName = c?.ManagerFirstName,
+                oooFirstName     = c?.OooFirstName,
+            }; })
             .Where(x => x.contactEmail != null || x.managerContact != null || x.oooContact != null)
             .OrderBy(x => x.supplierName)
             .ToList();
