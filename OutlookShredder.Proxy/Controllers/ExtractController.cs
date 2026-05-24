@@ -833,7 +833,7 @@ public class ExtractController : ControllerBase
         try
         {
             var items  = await _sp.ReadAllRfqLineItemsAsync();
-            var result = items.Select(x => new { rfqId = x.RfqId, mspc = x.Mspc, product = x.Product, units = x.Units, sizeOfUnits = x.SizeOfUnits, isPurchased = x.IsPurchased, poNumber = x.PoNumber }).ToList();
+            var result = items.Select(x => new { rfqId = x.RfqId, mspc = x.Mspc, product = x.Product, units = x.Units, sizeOfUnits = x.SizeOfUnits, isPurchased = x.IsPurchased, poNumber = x.PoNumber, notes = x.Notes }).ToList();
             return Ok(result);
         }
         catch (Exception ex)

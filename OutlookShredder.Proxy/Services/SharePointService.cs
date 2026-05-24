@@ -1539,7 +1539,7 @@ public class SharePointService
     /// Returns all rows from the RFQ Line Items list.
     /// Used by the Shredder dashboard to display requested items under each RFQ group header.
     /// </summary>
-    public async Task<List<(string RfqId, string? Mspc, string? Product, string? Units, string? SizeOfUnits, bool IsPurchased, string? PoNumber)>> ReadAllRfqLineItemsAsync()
+    public async Task<List<(string RfqId, string? Mspc, string? Product, string? Units, string? SizeOfUnits, bool IsPurchased, string? PoNumber, string? Notes)>> ReadAllRfqLineItemsAsync()
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqLineItemsListIdAsync();
@@ -1548,11 +1548,11 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,IsPurchased,PoNumber)"];
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,IsPurchased,PoNumber,Notes)"];
                 req.QueryParameters.Top    = 5000;
             });
 
-        var result = new List<(string, string?, string?, string?, string?, bool, string?)>();
+        var result = new List<(string, string?, string?, string?, string?, bool, string?, string?)>();
         foreach (var item in items?.Value ?? [])
         {
             if (item.Fields?.AdditionalData is null) continue;
@@ -1571,7 +1571,8 @@ public class SharePointService
             var isPurchased = d.TryGetValue("IsPurchased", out var ip) &&
                               ip is true or JsonElement { ValueKind: JsonValueKind.True };
             var poNumber = d.TryGetValue("PoNumber", out var vpo) ? vpo?.ToString() : null;
-            result.Add((id, mspc, product, units, size, isPurchased, poNumber));
+            var notes    = d.TryGetValue("Notes",    out var vn)  ? vn?.ToString()  : null;
+            result.Add((id, mspc, product, units, size, isPurchased, poNumber, notes));
         }
         return result;
     }
