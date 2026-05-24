@@ -77,6 +77,23 @@ public class SupplierConversationsController : ControllerBase
     /// <summary>
     /// Returns all suppliers that have at least one contact email configured.
     /// </summary>
+    [HttpGet("suppliers/data")]
+    public IActionResult GetAllSuppliersData() => Ok(_suppliers.GetAllSuppliersFull());
+
+    [HttpPatch("suppliers/{spItemId}")]
+    public async Task<IActionResult> PatchSupplier(string spItemId, [FromBody] Dictionary<string, string?> fields)
+    {
+        await _suppliers.PatchSupplierAsync(spItemId, fields);
+        return Ok(new { patched = spItemId });
+    }
+
+    [HttpPost("suppliers/create")]
+    public async Task<IActionResult> CreateSupplier([FromBody] Dictionary<string, string?> fields)
+    {
+        var id = await _suppliers.CreateSupplierAsync(fields);
+        return Ok(new { created = id });
+    }
+
     [HttpGet("supplier-contacts/all")]
     public IActionResult GetAllContacts()
     {

@@ -26,10 +26,13 @@ public class SupplierCacheService : BackgroundService
 
     // Pre-tokenised entries for lock-free reads — reference swap is atomic.
     private sealed record Entry(string Name, HashSet<string> Tokens, string? EmailDomain,
-        string? ContactEmail, string? ManagerContact, string? OooContact);
+        string? ContactEmail, string? ManagerContact, string? OooContact,
+        string? PrimaryFirstName = null, string? ManagerFirstName = null, string? OooFirstName = null,
+        string? SpItemId = null);
     private volatile IReadOnlyList<Entry> _cache = [];
 
-    public record SupplierContactsDto(string? ContactEmail, string? ManagerContact, string? OooContact);
+    public record SupplierContactsDto(string? ContactEmail, string? ManagerContact, string? OooContact,
+        string? PrimaryFirstName = null, string? ManagerFirstName = null, string? OooFirstName = null);
 
     public SupplierCacheService(IConfiguration config, ILogger<SupplierCacheService> log)
     {
@@ -89,6 +92,9 @@ public class SupplierCacheService : BackgroundService
 
             await AddTextCol("ManagerContact");
             await AddTextCol("OooContact");
+            await AddTextCol("PrimaryContactFirstName");
+            await AddTextCol("ManagerContactFirstName");
+            await AddTextCol("OooContactFirstName");
         }
         catch (Exception ex)
         {
@@ -143,7 +149,7 @@ public class SupplierCacheService : BackgroundService
         var page = await graph.Sites[site.Id].Lists[list.Id].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,ContactEmail,ManagerContact,OooContact)"];
+                r.QueryParameters.Expand = ["fields($select=Title,ContactEmail,ManagerContact,OooContact,PrimaryContactFirstName,ManagerContactFirstName,OooContactFirstName)"];
                 r.QueryParameters.Top    = 500;
             });
 
@@ -165,9 +171,12 @@ public class SupplierCacheService : BackgroundService
                 var email   = d.TryGetValue("ContactEmail",  out var e) ? e?.ToString() : null;
                 var manager = d.TryGetValue("ManagerContact",out var m) ? m?.ToString() : null;
                 var ooo     = d.TryGetValue("OooContact",    out var o) ? o?.ToString() : null;
+                var pfn     = d.TryGetValue("PrimaryContactFirstName", out var p1) ? p1?.ToString() : null;
+                var mfn     = d.TryGetValue("ManagerContactFirstName", out var m1) ? m1?.ToString() : null;
+                var ofn     = d.TryGetValue("OooContactFirstName",     out var o1) ? o1?.ToString() : null;
                 if (string.IsNullOrWhiteSpace(name)) return null;
                 var domain = ExtractDomain(email);
-                return new Entry(name, Tokenize(name), domain, email, manager, ooo);
+                return new Entry(name, Tokenize(name), domain, email, manager, ooo, pfn, mfn, ofn, i.Id);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -251,7 +260,64 @@ public class SupplierCacheService : BackgroundService
         var cache = _cache;
         var entry = cache.FirstOrDefault(e =>
             e.Name.Equals(supplierName, StringComparison.OrdinalIgnoreCase));
-        return entry is null ? null : new SupplierContactsDto(entry.ContactEmail, entry.ManagerContact, entry.OooContact);
+        return entry is null ? null : new SupplierContactsDto(
+            entry.ContactEmail, entry.ManagerContact, entry.OooContact,
+            entry.PrimaryFirstName, entry.ManagerFirstName, entry.OooFirstName);
+    }
+
+    public List<object> GetAllSuppliersFull() => _cache.Select(e => (object)new
+    {
+        spItemId                 = e.SpItemId,
+        supplierName             = e.Name,
+        contactEmail             = e.ContactEmail,
+        managerContact           = e.ManagerContact,
+        oooContact               = e.OooContact,
+        primaryContactFirstName  = e.PrimaryFirstName,
+        managerContactFirstName  = e.ManagerFirstName,
+        oooContactFirstName      = e.OooFirstName,
+    }).ToList();
+
+    public async Task PatchSupplierAsync(string spItemId, Dictionary<string, string?> fields)
+    {
+        var (graph, site, list) = await ResolveGraphSiteListAsync();
+        var data = new Dictionary<string, object?>();
+        foreach (var (key, value) in fields)
+            data[key] = string.IsNullOrWhiteSpace(value) ? null : value;
+        await graph.Sites[site.Id!].Lists[list.Id!].Items[spItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data });
+        _log.LogInformation("[Suppliers] Patched {Id}: {Fields}", spItemId, string.Join(", ", fields.Keys));
+        await RefreshAsync();
+    }
+
+    public async Task<string?> CreateSupplierAsync(Dictionary<string, string?> fields)
+    {
+        var (graph, site, list) = await ResolveGraphSiteListAsync();
+        var data = new Dictionary<string, object?>();
+        foreach (var (key, value) in fields)
+            data[key] = string.IsNullOrWhiteSpace(value) ? null : value;
+        var created = await graph.Sites[site.Id!].Lists[list.Id!].Items
+            .PostAsync(new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }
+            });
+        _log.LogInformation("[Suppliers] Created: {Id}", created?.Id);
+        await RefreshAsync();
+        return created?.Id;
+    }
+
+    private async Task<(GraphServiceClient graph, Microsoft.Graph.Models.Site site, Microsoft.Graph.Models.List list)> ResolveGraphSiteListAsync()
+    {
+        var graph   = GetGraph();
+        var siteUrl = _config["Suppliers:SiteUrl"] ?? "https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com";
+        var uri     = new Uri(siteUrl);
+        var siteKey = $"{uri.Host}:{uri.AbsolutePath}";
+        var site    = await graph.Sites[siteKey].GetAsync();
+        if (site?.Id is null) throw new InvalidOperationException($"Suppliers site not found: {siteKey}");
+        var listName = _config["Suppliers:ListName"] ?? "Suppliers";
+        var lists    = await graph.Sites[site.Id].Lists.GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'");
+        var list     = lists?.Value?.FirstOrDefault();
+        if (list?.Id is null) throw new InvalidOperationException($"Suppliers list not found: {listName}");
+        return (graph, site, list);
     }
 
     /// <summary>Exposes the current cached supplier names (for API/dashboard use).</summary>
