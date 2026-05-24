@@ -1024,7 +1024,7 @@ public class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments)"];
                 req.QueryParameters.Top    = 5000;
             });
 
