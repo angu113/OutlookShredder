@@ -72,6 +72,7 @@ public class ErpDocumentRecord
     /// <summary>JSON array of ErpAnnotation objects added by the user in the Focus view.</summary>
     public string? UserAnnotations { get; set; }
     public string? DeliveryAddress { get; set; }
+    public string? LineItemsJson  { get; set; }
 }
 
 /// <summary>User-applied stamp on an ERP document in the Focus view.</summary>

@@ -8763,7 +8763,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,LineItemsJson)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -8798,6 +8798,7 @@ public class SharePointService
                 SourceUser        = Get("SourceUser"),
                 UserAnnotations   = Get("UserAnnotations"),
                 DeliveryAddress   = Get("DeliveryAddress"),
+                LineItemsJson     = Get("LineItemsJson"),
             });
         }
 
