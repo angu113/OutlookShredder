@@ -1018,13 +1018,14 @@ public class SharePointService
                 ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
                 ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
                 ["RequestComments"]  = FieldStr(d, "RequestComments"),
+                ["Priority"]         = FieldStr(d, "Priority"),
             };
         }
 
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments,Priority)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -1488,6 +1489,9 @@ public class SharePointService
         if (!string.IsNullOrWhiteSpace(req.Notes) && IsBlank(data, "RequestComments"))
             patch["RequestComments"] = req.Notes;
 
+        if (!string.IsNullOrWhiteSpace(req.Priority))
+            patch["Priority"] = req.Priority;
+
         if (patch.Count > 0)
         {
             await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
@@ -1512,6 +1516,8 @@ public class SharePointService
         };
         if (!string.IsNullOrWhiteSpace(req.Notes))
             d["RequestComments"] = req.Notes;
+        if (!string.IsNullOrWhiteSpace(req.Priority))
+            d["Priority"] = req.Priority;
         return d;
     }
 
@@ -4481,6 +4487,7 @@ public class SharePointService
             ["RFQ References"] = await EnsureListColumnsAsync(siteId, "RFQ References",
             [
                 ("RequestComments", "note"),
+                ("Priority",        "text"),
             ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [

@@ -46,6 +46,7 @@ public class RfqReferenceRequest
     public DateTime DateSent        { get; set; }
     public string   EmailRecipients { get; set; } = "";
     public string?  Notes           { get; set; }
+    public string?  Priority        { get; set; }
 }
 
 /// <summary>One entry in POST /api/rfq-import/line-items array.</summary>
