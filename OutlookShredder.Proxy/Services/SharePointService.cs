@@ -4478,6 +4478,10 @@ public class SharePointService
                 ("PoNumber",    "text"),
                 ("Notes",       "note"),
             ]),
+            ["RFQ References"] = await EnsureListColumnsAsync(siteId, "RFQ References",
+            [
+                ("RequestComments", "note"),
+            ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [
                 ("RFQ_ID",       "text"),
