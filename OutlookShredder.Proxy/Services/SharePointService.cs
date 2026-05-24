@@ -1017,13 +1017,14 @@ public class SharePointService
                 ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
                 ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
                 ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
+                ["RequestComments"]  = FieldStr(d, "RequestComments"),
             };
         }
 
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -1464,8 +1465,8 @@ public class SharePointService
                             [col]               = req.RfqId,
                             ["Requester"]       = req.Requester,
                             ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
-                            ["EmailRecipients"] = req.EmailRecipients,
-                            ["Notes"]           = req.Notes,
+                            ["EmailRecipients"]  = req.EmailRecipients,
+                            ["RequestComments"]  = req.Notes,
                         }
                     }
                 });
@@ -1491,8 +1492,8 @@ public class SharePointService
         if (IsBlank(data, "EmailRecipients") && !string.IsNullOrWhiteSpace(req.EmailRecipients))
             patch["EmailRecipients"] = req.EmailRecipients;
 
-        if (IsBlank(data, "Notes") && !string.IsNullOrWhiteSpace(req.Notes))
-            patch["Notes"] = req.Notes;
+        if (IsBlank(data, "RequestComments") && !string.IsNullOrWhiteSpace(req.Notes))
+            patch["RequestComments"] = req.Notes;
 
         if (patch.Count > 0)
         {
