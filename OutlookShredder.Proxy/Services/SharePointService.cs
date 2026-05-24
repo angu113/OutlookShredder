@@ -1460,14 +1460,7 @@ public class SharePointService
                 {
                     Fields = new FieldValueSet
                     {
-                        AdditionalData = new Dictionary<string, object?>
-                        {
-                            [col]               = req.RfqId,
-                            ["Requester"]       = req.Requester,
-                            ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
-                            ["EmailRecipients"]  = req.EmailRecipients,
-                            ["RequestComments"]  = req.Notes,
-                        }
+                        AdditionalData = BuildRfqRefData(col, req)
                     }
                 });
             _log.LogInformation("[SP] Created RFQ Reference '{Id}'", req.RfqId);
@@ -1492,7 +1485,7 @@ public class SharePointService
         if (IsBlank(data, "EmailRecipients") && !string.IsNullOrWhiteSpace(req.EmailRecipients))
             patch["EmailRecipients"] = req.EmailRecipients;
 
-        if (IsBlank(data, "RequestComments") && !string.IsNullOrWhiteSpace(req.Notes))
+        if (!string.IsNullOrWhiteSpace(req.Notes) && IsBlank(data, "RequestComments"))
             patch["RequestComments"] = req.Notes;
 
         if (patch.Count > 0)
@@ -1506,6 +1499,20 @@ public class SharePointService
         {
             _log.LogInformation("[SP] RFQ Reference '{Id}' already complete  -- no update needed", req.RfqId);
         }
+    }
+
+    private static Dictionary<string, object?> BuildRfqRefData(string col, RfqReferenceRequest req)
+    {
+        var d = new Dictionary<string, object?>
+        {
+            [col]               = req.RfqId,
+            ["Requester"]       = req.Requester,
+            ["DateCreated"]     = (req.DateSent == default ? DateTime.UtcNow : req.DateSent.ToUniversalTime()).ToString("o"),
+            ["EmailRecipients"] = req.EmailRecipients,
+        };
+        if (!string.IsNullOrWhiteSpace(req.Notes))
+            d["RequestComments"] = req.Notes;
+        return d;
     }
 
     /// <summary>Returns the set of RFQ_ID values that already have at least one row in the RFQ Line Items list.</summary>
