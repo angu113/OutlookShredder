@@ -1493,17 +1493,19 @@ public class ExtractController : ControllerBase
             var body = new
             {
                 model = "claude-haiku-4-5-20251001",
-                max_tokens = 300,
+                max_tokens = 500,
                 messages = new[]
                 {
                     new { role = "user", content =
-                        "You are writing release notes for store employees at a metals distribution company. " +
-                        "Summarize these software changes into 4-6 short bullet points. " +
-                        "Rules: (1) Focus ONLY on what the user can now DO differently — new buttons, new screens, new workflows. " +
-                        "(2) Skip anything about column widths, JSON, scrollbars, code fixes, or technical plumbing. " +
-                        "(3) Use everyday language — no developer terms. " +
-                        "(4) Start each bullet with a verb (e.g. 'Send', 'View', 'Filter', 'Click'). " +
-                        "(5) One sentence per bullet, max 15 words.\n\n" +
+                        "You are writing release notes for store employees at a metals distribution company who use a desktop app called Shredder. " +
+                        "The changes have [TAGS] like RFQ, TRIGGER, HOME, TOOLS, etc. indicating the app area.\n\n" +
+                        "Format the summary as grouped sections:\n" +
+                        "- Group related changes under a bold area heading (e.g. **Quoting (RFQ)**, **Picking Slips**, **Tools**, **General**)\n" +
+                        "- Under each heading, write 1-3 short bullets describing what the user can now do\n" +
+                        "- Focus ONLY on what changed for the user — new buttons, new screens, new workflows, fixes they'll notice\n" +
+                        "- Skip technical internals (column widths, JSON, cache, scrollbars, code cleanup)\n" +
+                        "- Use everyday language, start bullets with verbs, max 15 words each\n" +
+                        "- Omit sections with no user-facing changes\n\n" +
                         req.Changelog }
                 }
             };
