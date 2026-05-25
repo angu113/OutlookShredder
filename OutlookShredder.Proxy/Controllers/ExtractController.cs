@@ -1497,9 +1497,13 @@ public class ExtractController : ControllerBase
                 messages = new[]
                 {
                     new { role = "user", content =
-                        "Summarize these software release notes into 3-5 short bullet points for business users. " +
-                        "Focus on features and fixes they care about, not technical details. " +
-                        "Use plain language, no jargon. Each bullet should be one sentence max.\n\n" +
+                        "You are writing release notes for store employees at a metals distribution company. " +
+                        "Summarize these software changes into 4-6 short bullet points. " +
+                        "Rules: (1) Focus ONLY on what the user can now DO differently — new buttons, new screens, new workflows. " +
+                        "(2) Skip anything about column widths, JSON, scrollbars, code fixes, or technical plumbing. " +
+                        "(3) Use everyday language — no developer terms. " +
+                        "(4) Start each bullet with a verb (e.g. 'Send', 'View', 'Filter', 'Click'). " +
+                        "(5) One sentence per bullet, max 15 words.\n\n" +
                         req.Changelog }
                 }
             };
