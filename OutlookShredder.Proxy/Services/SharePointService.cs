@@ -1242,6 +1242,53 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Sets the Priority text on a single RFQ Reference. Pass null/empty/"Pricing"/
+    /// "Normal" to clear (no badge). Other valid values: Required, Wishlist (new
+    /// names) or Hot, Urgent (legacy, kept for back-compat on read).
+    /// </summary>
+    public async Task SetRfqPriorityAsync(string rfqId, string? priority)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
+                req.QueryParameters.Top    = 5000;
+            });
+
+        var matches = (allItems?.Value ?? [])
+            .Where(i => i.Fields?.AdditionalData is { } d &&
+                        string.Equals(
+                            d.TryGetValue(col, out var v) ? v?.ToString() : null,
+                            rfqId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            _log.LogWarning("[SP] SetRfqPriorityAsync: RFQ Reference '{Id}' not found", rfqId);
+            return;
+        }
+
+        // Empty / "Pricing" / "Normal" all stored as null in SP so back-compat
+        // reads see a single canonical "no priority" state.
+        var stored = (string.IsNullOrWhiteSpace(priority) ||
+                      priority!.Equals("Pricing", StringComparison.OrdinalIgnoreCase) ||
+                      priority.Equals("Normal", StringComparison.OrdinalIgnoreCase))
+            ? null
+            : priority;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[matches[0].Id!].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["Priority"] = stored }
+            });
+        _log.LogInformation("[SP] Set Priority='{Priority}' for RFQ '{Id}'", stored ?? "(none)", rfqId);
+    }
+
+    /// <summary>
     /// Removes duplicate RFQ Reference rows (same RFQ_ID).
     /// Keeps the entry with Notes (if any), otherwise the oldest item.
     /// Returns the number of rows deleted.

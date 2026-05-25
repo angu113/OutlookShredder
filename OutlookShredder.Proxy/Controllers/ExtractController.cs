@@ -465,6 +465,31 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/rfq-references/priority ───────────────────────────────────
+    /// <summary>
+    /// Sets the Priority text on a single RFQ Reference. Accepts the new level
+    /// names (Required / Wishlist / Pricing) or the legacy ones (Hot / Urgent /
+    /// Normal); empty / "Pricing" / "Normal" all clear the priority.
+    /// </summary>
+    [HttpPatch("rfq-references/priority")]
+    public async Task<IActionResult> SetRfqPriority(
+        [FromQuery] string  rfqId,
+        [FromQuery] string? priority)
+    {
+        if (string.IsNullOrWhiteSpace(rfqId))
+            return BadRequest(new { error = "rfqId query param is required" });
+        try
+        {
+            await _sp.SetRfqPriorityAsync(rfqId, priority);
+            return Ok(new { updated = true, priority });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to set Priority for RFQ '{Id}'", rfqId);
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
     // ── GET /api/mail/body ────────────────────────────────────────────────────
     /// <summary>
     /// Returns the plain-text body and subject of the email identified by sender address
