@@ -1476,6 +1476,49 @@ public class ExtractController : ControllerBase
         return Ok(new { scanned = emails.Count, showing = Math.Min(top, emails.Count), preview });
     }
 
+    // ── POST /api/changelog/summarize ───────────────────────────────────────
+    [HttpPost("changelog/summarize")]
+    public async Task<IActionResult> SummarizeChangelog([FromBody] ChangelogSummarizeRequest req)
+    {
+        var apiKey = _config["Anthropic:ApiKey"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return Ok(new { summary = req.Changelog });
+
+        try
+        {
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+
+            var body = new
+            {
+                model = "claude-haiku-4-5-20251001",
+                max_tokens = 300,
+                messages = new[]
+                {
+                    new { role = "user", content =
+                        "Summarize these software release notes into 3-5 short bullet points for business users. " +
+                        "Focus on features and fixes they care about, not technical details. " +
+                        "Use plain language, no jargon. Each bullet should be one sentence max.\n\n" +
+                        req.Changelog }
+                }
+            };
+
+            var resp = await http.PostAsJsonAsync("https://api.anthropic.com/v1/messages", body);
+            var json = await resp.Content.ReadAsStringAsync();
+            var doc = System.Text.Json.JsonDocument.Parse(json);
+            var text = doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString();
+            return Ok(new { summary = text });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Changelog summarize failed — returning raw");
+            return Ok(new { summary = req.Changelog });
+        }
+    }
+
+    public record ChangelogSummarizeRequest(string Changelog);
+
     // ── GET /api/publish/version ─────────────────────────────────────────────
     /// <summary>
     /// Returns the version string from version.txt in the SharePoint publish folder.
