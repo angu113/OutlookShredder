@@ -1517,7 +1517,7 @@ public class ExtractController : ControllerBase
         }
     }
 
-    public record ChangelogSummarizeRequest(string Changelog);
+    public class ChangelogSummarizeRequest { public string Changelog { get; set; } = ""; }
 
     // ── GET /api/publish/version ─────────────────────────────────────────────
     /// <summary>
