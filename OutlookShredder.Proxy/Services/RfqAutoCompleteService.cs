@@ -77,6 +77,14 @@ public sealed class RfqAutoCompleteService : BackgroundService
 
             if (IsTrue(r.TryGetValue("Complete", out var cv) ? cv : null)) continue;
 
+            // Required and Wishlist RFQs are actively prioritised — never auto-complete them.
+            var priority = r.TryGetValue("Priority", out var pv) ? pv?.ToString() : null;
+            if (IsElevatedPriority(priority))
+            {
+                _log.LogDebug("[AutoComplete] Skipping {RfqId} — priority '{Priority}'", rfqId, priority);
+                continue;
+            }
+
             var created = ResolveCreatedUtc(r);
             if (created is null || created > cutoff) continue;
 
@@ -135,6 +143,17 @@ public sealed class RfqAutoCompleteService : BackgroundService
     private int    DaysThreshold  => _config.GetValue("RfqAutoComplete:DaysThreshold", 7);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true when the stored priority value means the RFQ is actively
+    /// prioritised (Required or Wishlist, including legacy names Hot/Urgent).
+    /// Null / empty / "Pricing" / "Normal" all mean default priority → not elevated.
+    /// </summary>
+    private static bool IsElevatedPriority(string? priority)
+    {
+        if (string.IsNullOrWhiteSpace(priority)) return false;
+        return priority.Trim().ToLowerInvariant() is "required" or "hot" or "wishlist" or "urgent";
+    }
 
     private static bool IsTrue(object? v) => v switch
     {
