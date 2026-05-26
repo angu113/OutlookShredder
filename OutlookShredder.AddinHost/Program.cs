@@ -13,7 +13,9 @@ builder.Services.AddCors(options =>
                 "https://outlook.office.com",
                 "https://outlook.office365.com",
                 "https://*.office365.com",
-                "https://*.microsoft.com")
+                "https://*.microsoft.com",
+                "https://outlook.cloud.microsoft",
+                "https://*.cloud.microsoft")
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
@@ -21,6 +23,16 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 app.UseCors();
+
+// Chrome Private Network Access: allow public origins (OWA) to load iframes from localhost.
+// Chrome 94+ blocks public → private network requests unless the server opts in.
+// Edge is permissive by default; Chrome requires this header.
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["Access-Control-Allow-Private-Network"] = "true";
+    await next();
+});
+
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.Run();
