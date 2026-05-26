@@ -8962,6 +8962,51 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Fetches a single ERP document record from SharePoint by its SP item ID.
+    /// Returns null if the item does not exist or has no field data.
+    /// </summary>
+    public async Task<OutlookShredder.Proxy.Models.ErpDocumentRecord?> GetErpDocumentByIdAsync(
+        string spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,LineItemsJson)"];
+            }, ct);
+
+        var d = item?.Fields?.AdditionalData;
+        if (d is null) return null;
+
+        string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
+        bool GetBool(string k) => d.TryGetValue(k, out var v) &&
+                                  v is true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
+
+        return new OutlookShredder.Proxy.Models.ErpDocumentRecord
+        {
+            SpItemId          = item!.Id,
+            DocumentNumber    = Get("Title"),
+            DocumentType      = Get("DocumentType"),
+            DocumentDate      = Get("DocumentDate"),
+            CustomerName      = Get("CustomerName"),
+            CustomerReference = Get("CustomerRef"),
+            TotalAmount       = Get("TotalAmount"),
+            Currency          = Get("Currency"),
+            FileName          = Get("FileName"),
+            PdfUrl            = Get("PdfUrl"),
+            ReceivedAt        = Get("ReceivedAt"),
+            IsArchived        = GetBool("IsArchived"),
+            SourceMachine     = Get("SourceMachine"),
+            SourceUser        = Get("SourceUser"),
+            UserAnnotations   = Get("UserAnnotations"),
+            DeliveryAddress   = Get("DeliveryAddress"),
+            LineItemsJson     = Get("LineItemsJson"),
+        };
+    }
+
+    /// <summary>
     /// Deletes ErpDocuments records whose DocumentType is in <paramref name="types"/>.
     /// Returns the number of records deleted.
     /// </summary>

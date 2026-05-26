@@ -170,6 +170,18 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// Returns a single ERP document record from SharePoint by its SP item ID.
+    /// Used by Shredder to backfill LineItemsJson when a bus notification arrived without it.
+    /// </summary>
+    [HttpGet("/api/erp/documents/{spItemId}")]
+    public async Task<IActionResult> GetDocument(string spItemId, CancellationToken ct)
+    {
+        var doc = await _sp.GetErpDocumentByIdAsync(spItemId, ct);
+        if (doc is null) return NotFound();
+        return Ok(doc);
+    }
+
+    /// <summary>
     /// Returns recent ERP document records from SharePoint.
     /// </summary>
     [HttpGet("/api/erp/documents")]
