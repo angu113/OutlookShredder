@@ -1019,13 +1019,15 @@ public class SharePointService
                 ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
                 ["RequestComments"]  = FieldStr(d, "RequestComments"),
                 ["Priority"]         = FieldStr(d, "Priority"),
+                ["CustomerName"]     = FieldStr(d, "CustomerName"),
+                ["HskNumber"]        = FieldStr(d, "HskNumber"),
             };
         }
 
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments,Priority)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments,Priority,CustomerName,HskNumber)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -1539,6 +1541,12 @@ public class SharePointService
         if (!string.IsNullOrWhiteSpace(req.Priority))
             patch["Priority"] = req.Priority;
 
+        if (!string.IsNullOrWhiteSpace(req.CustomerName) && IsBlank(data, "CustomerName"))
+            patch["CustomerName"] = req.CustomerName;
+
+        if (!string.IsNullOrWhiteSpace(req.HskNumber) && IsBlank(data, "HskNumber"))
+            patch["HskNumber"] = req.HskNumber;
+
         if (patch.Count > 0)
         {
             await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
@@ -1565,6 +1573,10 @@ public class SharePointService
             d["RequestComments"] = req.Notes;
         if (!string.IsNullOrWhiteSpace(req.Priority))
             d["Priority"] = req.Priority;
+        if (!string.IsNullOrWhiteSpace(req.CustomerName))
+            d["CustomerName"] = req.CustomerName;
+        if (!string.IsNullOrWhiteSpace(req.HskNumber))
+            d["HskNumber"] = req.HskNumber;
         return d;
     }
 
@@ -4620,6 +4632,8 @@ public class SharePointService
             [
                 ("RequestComments", "note"),
                 ("Priority",        "text"),
+                ("CustomerName",    "text"),
+                ("HskNumber",       "text"),
             ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [

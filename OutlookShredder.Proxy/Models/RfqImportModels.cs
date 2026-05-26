@@ -47,6 +47,10 @@ public class RfqReferenceRequest
     public string   EmailRecipients { get; set; } = "";
     public string?  Notes           { get; set; }
     public string?  Priority        { get; set; }
+    /// <summary>Customer name from the originating picking slip (populated via Order Products flow).</summary>
+    public string?  CustomerName    { get; set; }
+    /// <summary>Hackensack document/job number from the originating picking slip (e.g. "HSK-12345").</summary>
+    public string?  HskNumber       { get; set; }
 }
 
 /// <summary>One entry in POST /api/rfq-import/line-items array.</summary>
