@@ -279,10 +279,16 @@ public class ZoomCallWatcherService : BackgroundService
                 var name = TryGet(() => el.Current.Name)      ?? "";
                 var cls  = TryGet(() => el.Current.ClassName) ?? "";
 
+                // Always log every Zoom window event so we can see the detection pipeline.
+                var evtLabel = eventType == EVENT_OBJECT_NAMECHANGE ? "NameChange" : "WindowShown";
+                var namePreview = name.Length > 100 ? name[..100] + "..." : name;
+                _log.LogInformation("[Zoom] {Evt} class='{Class}' name='{Name}'", evtLabel, cls, namePreview);
+
                 // Fast path: "is calling you" text is already on the window name
                 // (works for both EVENT_OBJECT_SHOW and EVENT_OBJECT_NAMECHANGE).
                 if (name.Contains("is calling you", StringComparison.OrdinalIgnoreCase))
                 {
+                    _log.LogInformation("[Zoom] Fast path triggered — firing incoming call");
                     FireIncomingCall(name);
                 }
                 // Delayed path (SHOW only): Zoom wraps the call UI inside a ZoomShadowFrameClass window.
@@ -292,9 +298,11 @@ public class ZoomCallWatcherService : BackgroundService
                 else if (eventType == EVENT_OBJECT_SHOW &&
                          (cls == "ZoomShadowFrameClass" || cls == "SipCallNormalIncomingCallWindow"))
                 {
+                    _log.LogInformation("[Zoom] Delayed search starting for class '{Class}' (400ms delay)", cls);
                     var capturedHwnd = hwnd;
                     var capturedPid  = pid;
                     var capturedEl   = el;
+                    var capturedCls  = cls;
                     var capturedDebug = debugAll;
                     _ = Task.Run(async () =>
                     {
@@ -302,10 +310,20 @@ public class ZoomCallWatcherService : BackgroundService
                         var callText = FindCallTextInTree(capturedEl)
                                     ?? FindCallTextInChildWindows(capturedHwnd, capturedDebug)
                                     ?? FindCallTextInZoomTopLevel(capturedPid, capturedDebug);
-                        if (callText is not null) FireIncomingCall(callText);
-                        else if (capturedDebug)
-                            _log.LogInformation("[Zoom:dbg] No call text found in ZoomShadowFrame children or siblings");
+                        if (callText is not null)
+                        {
+                            _log.LogInformation("[Zoom] Delayed search found call text: '{Text}'", callText);
+                            FireIncomingCall(callText);
+                        }
+                        else
+                        {
+                            _log.LogWarning("[Zoom] Delayed search: no call text found in '{Class}' children or siblings after 400ms", capturedCls);
+                        }
                     });
+                }
+                else if (eventType == EVENT_OBJECT_SHOW)
+                {
+                    _log.LogDebug("[Zoom] WindowShown ignored — class '{Class}' is not a known call window", cls);
                 }
 
                 if (debugAll && eventType == EVENT_OBJECT_SHOW)
@@ -354,17 +372,24 @@ public class ZoomCallWatcherService : BackgroundService
     private void FireIncomingCall(string callTitle)
     {
         var (callerName, callerPhone) = ParseIncomingCallTitle(callTitle);
-        _log.LogInformation("[Zoom] Incoming call — name='{Name}' phone='{Phone}'", callerName, callerPhone);
+        _log.LogInformation("[Zoom] Incoming call — raw='{Raw}' → name='{Name}' phone='{Phone}'",
+            callTitle.Length > 120 ? callTitle[..120] + "..." : callTitle, callerName, callerPhone);
+
         _ = Task.Run(async () =>
         {
+            // CRM lookup
             var allCrm = !string.IsNullOrWhiteSpace(callerPhone)
                 ? _crmCache.LookupAllByPhone(callerPhone)
                 : [];
             var crm = allCrm.Count > 0 ? allCrm[0] : null;
-            if (crm is not null)
-                _log.LogInformation("[Zoom] CRM match(es) — {Count} company(ies), primary bp='{Bp}'",
-                    allCrm.Count, crm.BusinessPartner);
 
+            if (allCrm.Count == 0)
+                _log.LogInformation("[Zoom] CRM: no match for phone '{Phone}'", callerPhone);
+            else
+                _log.LogInformation("[Zoom] CRM: {Count} match(es) — primary bp='{Bp}' contact='{Contact}'",
+                    allCrm.Count, crm!.BusinessPartner, crm.ContactName ?? "(none)");
+
+            // SharePoint call log write
             string spItemId = "";
             try
             {
@@ -372,15 +397,20 @@ public class ZoomCallWatcherService : BackgroundService
                     callerName, callerPhone ?? "",
                     crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
                     DateTimeOffset.UtcNow, CancellationToken.None);
+                _log.LogInformation("[Zoom] Call log written — SpItemId={SpItemId}", spItemId);
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "[Zoom] Call log write failed for {Name}", callerName);
+                _log.LogWarning(ex, "[Zoom] Call log write FAILED for '{Name}' / '{Phone}'", callerName, callerPhone);
             }
+
+            // Publish to Service Bus + SSE
             _notify.NotifyIncomingCall(callerName, callerPhone,
                 crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
                 callLogSpItemId: spItemId,
                 allMatches: allCrm.Count > 1 ? allCrm : null);
+            _log.LogInformation("[Zoom] Notification published — name='{Name}' phone='{Phone}' spItemId='{SpItemId}'",
+                callerName, callerPhone, spItemId);
         });
     }
 
