@@ -110,6 +110,8 @@ public class ErpBusRecord
     public string? UserAnnotations   { get; set; }
     public string? DeliveryMethod    { get; set; }
     public string? DeliveryAddress   { get; set; }
+    /// <summary>JSON array of ErpLineItem — carried so Order Products can read line items on fresh bus arrivals without an SP re-fetch.</summary>
+    public string? LineItemsJson     { get; set; }
 }
 
 public class RfqNotificationProduct

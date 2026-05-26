@@ -485,7 +485,10 @@ public class FileWatcherService : BackgroundService
 
         // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
         // Other machines that reload later get the SP URL from the follow-up notification below.
-        var receivedAt = DateTimeOffset.UtcNow.ToString("o");
+        var receivedAt    = DateTimeOffset.UtcNow.ToString("o");
+        var lineItemsJson = extraction.LineItems.Count > 0
+            ? System.Text.Json.JsonSerializer.Serialize(extraction.LineItems)
+            : null;
         _notify.NotifyErpDocument(new ErpBusRecord
         {
             SpItemId          = spItemId,
@@ -504,6 +507,7 @@ public class FileWatcherService : BackgroundService
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
             DeliveryAddress   = extraction.DeliveryAddress,
+            LineItemsJson     = lineItemsJson,
         });
 
         _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (upload pending)",
@@ -532,6 +536,7 @@ public class FileWatcherService : BackgroundService
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
             DeliveryAddress   = extraction.DeliveryAddress,
+            LineItemsJson     = lineItemsJson,
         };
         _ = Task.Run(async () =>
         {
