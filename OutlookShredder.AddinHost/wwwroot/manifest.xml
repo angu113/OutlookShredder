@@ -84,11 +84,11 @@
           <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
         </bt:Urls>
         <bt:ShortStrings>
-          <bt:String id="GroupLabel"      DefaultValue="Shredder"/>
-          <bt:String id="OpenBtn.Label"   DefaultValue="Open Shredder"/>
-          <bt:String id="OpenBtn.Tooltip" DefaultValue="Open the Shredder task pane."/>
+          <bt:String id="GroupLabel"    DefaultValue="Shredder"/>
+          <bt:String id="OpenBtn.Label" DefaultValue="Open Shredder"/>
         </bt:ShortStrings>
         <bt:LongStrings>
+          <bt:String id="OpenBtn.Tooltip"     DefaultValue="Open the Shredder task pane."/>
           <bt:String id="OpenBtn.Description" DefaultValue="Open the Shredder task pane."/>
         </bt:LongStrings>
       </Resources>
