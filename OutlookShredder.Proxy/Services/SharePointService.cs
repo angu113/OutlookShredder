@@ -3434,6 +3434,91 @@ public class SharePointService
     }
 
     /// <summary>
+    /// Bulk-patches all SupplierLineItems where ProductSearchKey matches <paramref name="custKey"/>
+    /// to the new MSPC. Returns the number of rows patched.
+    /// Requires ProductSearchKey to be indexed on the SupplierLineItems list.
+    /// </summary>
+    public async Task<int> BulkPatchSliProductKeyAsync(
+        string custKey, string newMspc, string? newProductName, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,ProductSearchKey)"];
+                r.QueryParameters.Filter = $"fields/ProductSearchKey eq '{custKey}'";
+                r.QueryParameters.Top    = 5000;
+            }, cancellationToken: ct);
+
+        int count = 0;
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                if (item.Id is null) continue;
+                await GetGraph().Sites[siteId].Lists[sliListId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["ProductSearchKey"]   = newMspc,
+                            ["CatalogProductName"] = newProductName,
+                        }
+                    }, cancellationToken: ct);
+                count++;
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[SP] Promoted {Count} SLI rows {Cust} → {Mspc}", count, custKey, newMspc);
+        return count;
+    }
+
+    /// <summary>
+    /// Bulk-patches all RFQ Line Items where MSPC matches <paramref name="custKey"/>
+    /// to the new MSPC. Returns the number of rows patched.
+    /// Requires MSPC to be indexed on the RFQ Line Items list.
+    /// </summary>
+    public async Task<int> BulkPatchRliMspcAsync(string custKey, string newMspc, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var rliListId = await GetRfqLineItemsListIdAsync();
+
+        var page = await GetGraph().Sites[siteId].Lists[rliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,MSPC)"];
+                r.QueryParameters.Filter = $"fields/MSPC eq '{custKey}'";
+                r.QueryParameters.Top    = 5000;
+            }, cancellationToken: ct);
+
+        int count = 0;
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                if (item.Id is null) continue;
+                await GetGraph().Sites[siteId].Lists[rliListId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?> { ["MSPC"] = newMspc }
+                    }, cancellationToken: ct);
+                count++;
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[rliListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[SP] Promoted {Count} RLI rows {Cust} → {Mspc}", count, custKey, newMspc);
+        return count;
+    }
+
+    /// <summary>
     /// Deletes a SupplierResponse row and all SupplierLineItem rows that reference it.
     /// Returns (sliDeleted, srDeleted) counts.
     /// </summary>
@@ -4623,7 +4708,9 @@ public class SharePointService
         results["Indexes:SupplierResponses"] = await EnsureColumnIndexesAsync(
             siteId, "SupplierResponses",     "RFQ_ID", "SupplierName", "MessageId");
         results["Indexes:SupplierLineItems"] = await EnsureColumnIndexesAsync(
-            siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId", "Created");
+            siteId, "SupplierLineItems",     "RFQ_ID", "SupplierName", "MessageId", "Created", "ProductSearchKey");
+        results["Indexes:RfqLineItems"] = await EnsureColumnIndexesAsync(
+            siteId, "RFQ Line Items",        "MSPC");
         results["Indexes:PurchaseOrders"] = await EnsureColumnIndexesAsync(
             siteId, "PurchaseOrders",        "RFQ_ID", "MessageId");
         results["Indexes:SupplierProductMappings"] = await EnsureColumnIndexesAsync(

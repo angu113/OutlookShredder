@@ -1379,6 +1379,112 @@ public class CatalogAnalysisService
             .ToDictionary(t => t.SearchKey!, StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// For each CUST_* entry, finds the best-matching real (non-CUST_) catalog MSPC using two methods:
+    ///   1. Prefix match — catalog product name starts with (or is a prefix of) the CUST_ OriginalTerm.
+    ///   2. Token score >= 3.5 via <see cref="FindBestMatchSingle"/> (when tokens are available).
+    /// Returns one candidate per CUST_ key (highest score wins). The caller shows results to the
+    /// user before committing via <c>POST /api/catalog/commit-promotions</c>.
+    /// </summary>
+    public Task<List<PromotionCandidate>> FindPromotionCandidatesAsync(
+        IReadOnlyList<CustomCatalogEntry> custEntries, CancellationToken ct = default)
+    {
+        // Non-CUST_ catalog entries for name-based matching (includes newly imported rows)
+        var allEntries = _catalog.CachedEntries
+            .Where(e => e.SearchKey != null &&
+                        !e.SearchKey.StartsWith("CUST_", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Non-CUST_ catalog tokens for token-based matching (may be empty for freshly imported rows)
+        var allTokens = _catalog.GetTokensByKey()
+            .Where(kv => !kv.Key.StartsWith("CUST_", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+
+        var candidates = new List<PromotionCandidate>();
+
+        foreach (var cust in custEntries)
+        {
+            string? bestMspc      = null;
+            string? bestName      = null;
+            double  bestScore     = -1;
+            string  bestMatchType = "";
+
+            // Method 1 — prefix match on OriginalTerm vs catalog names (no tokens needed)
+            if (cust.OriginalTerm is { Length: > 0 })
+            {
+                foreach (var (catName, catKey) in allEntries)
+                {
+                    if (catKey is null) continue;
+                    bool fwd = catName.StartsWith(cust.OriginalTerm, StringComparison.OrdinalIgnoreCase);
+                    bool rev = cust.OriginalTerm.StartsWith(catName, StringComparison.OrdinalIgnoreCase);
+                    if (!fwd && !rev) continue;
+
+                    // Score = shorter/longer ratio; 1.0 when lengths are equal
+                    double ratio = (double)Math.Min(cust.OriginalTerm.Length, catName.Length)
+                                         / Math.Max(cust.OriginalTerm.Length, catName.Length);
+                    if (ratio > bestScore)
+                    {
+                        bestScore     = ratio;
+                        bestMspc      = catKey;
+                        bestName      = catName;
+                        bestMatchType = "prefix";
+                    }
+                }
+            }
+
+            // Method 2 — token score >= 3.5 (requires AI tokens on both sides)
+            if (cust.TkMetal is not null || cust.TkShape is not null)
+            {
+                var custTokens = new OutlookShredder.Proxy.Models.ProductTokens
+                {
+                    Name         = cust.OriginalTerm ?? cust.ProductName ?? cust.SearchKey,
+                    SearchKey    = cust.SearchKey,
+                    TkMetal      = cust.TkMetal,
+                    TkShape      = cust.TkShape,
+                    TkAlloy      = cust.TkAlloy,
+                    TkTemper     = cust.TkTemper,
+                    TkConditions = cust.TkConditions ?? [],
+                };
+
+                foreach (var (mspc, catTokens) in allTokens)
+                {
+                    var (match, score, _) = FindBestMatchSingle(custTokens, catTokens);
+                    if (match is not null && score >= 3.5 && score > bestScore)
+                    {
+                        bestScore     = score;
+                        bestMspc      = mspc;
+                        bestName      = catTokens.Name;
+                        bestMatchType = "token";
+                    }
+                }
+            }
+
+            if (bestMspc is not null)
+            {
+                candidates.Add(new PromotionCandidate(
+                    CustSearchKey:     cust.SearchKey,
+                    CustSpItemId:      cust.SpItemId,
+                    OriginalTerm:      cust.OriginalTerm,
+                    ProductName:       cust.ProductName,
+                    TargetMspc:        bestMspc,
+                    TargetProductName: bestName ?? "",
+                    Score:             bestScore,
+                    MatchType:         bestMatchType));
+            }
+        }
+
+        // One candidate per CUST_ key — take highest score
+        var result = candidates
+            .GroupBy(c => c.CustSearchKey, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(c => c.Score).First())
+            .ToList();
+
+        _log.LogInformation("[Catalog] Promotion scan: {Cust} CUST_ entries, {Candidates} candidates",
+            custEntries.Count, result.Count);
+
+        return Task.FromResult(result);
+    }
+
     private async Task<ProductTokens?> TokeniseSingleLiveAsync(string productName, CancellationToken ct)
     {
         await _liveSemaphore.WaitAsync(ct);
@@ -1719,3 +1825,14 @@ public class CatalogAnalysisService
         return null;
     }
 }
+
+/// <summary>A CUST_* → real MSPC promotion candidate returned by FindPromotionCandidatesAsync.</summary>
+public record PromotionCandidate(
+    string  CustSearchKey,
+    string  CustSpItemId,
+    string? OriginalTerm,
+    string? ProductName,
+    string  TargetMspc,
+    string  TargetProductName,
+    double  Score,
+    string  MatchType);

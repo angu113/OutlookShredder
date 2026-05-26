@@ -50,7 +50,9 @@ public class ProductCatalogService : BackgroundService
         string? SpItemId = null,
         string? TkMetal = null, string? TkShape = null,
         string? TkAlloy = null, string? TkTemper = null, string[]? TkConditions = null,
-        bool IsCustom = false);
+        bool IsCustom = false,
+        string? OriginalTerm = null,
+        string? SupersededBy = null);
     private volatile IReadOnlyList<Entry> _cache = [];
     private string? _cachedSiteId;
     private string? _cachedListId;
@@ -179,11 +181,16 @@ public class ProductCatalogService : BackgroundService
                 var tkConds    = Str(data, "TkConditions");
                 var tkCondArr  = string.IsNullOrEmpty(tkConds) ? null
                     : tkConds.Split(';', StringSplitOptions.RemoveEmptyEntries);
-                var isCustom   = data.TryGetValue("IsCustom", out var ic) && ic is bool icb && icb;
+                var isCustom     = data.TryGetValue("IsCustom", out var ic) && ic is bool icb && icb;
+                var supersededBy = Str(data, "SupersededBy");
+                // Skip superseded custom entries — they've been promoted to a real MSPC.
+                if (!string.IsNullOrEmpty(supersededBy)) return null;
                 return new Entry(name!, key, Tokenize(name!), wt, wtUnit, i.Id,
                     Str(data, "TkMetal"), Str(data, "TkShape"),
                     Str(data, "TkAlloy"), Str(data, "TkTemper"), tkCondArr,
-                    IsCustom: isCustom);
+                    IsCustom: isCustom,
+                    OriginalTerm: Str(data, "OriginalTerm"),
+                    SupersededBy: null);
             })
             .Where(e => e is not null)
             .Select(e => e!)
@@ -483,7 +490,7 @@ public class ProductCatalogService : BackgroundService
                 });
             _log.LogInformation("[Catalog] Created 'IsCustom' column");
         }
-        foreach (var metaCol in new[] { ("OriginalTerm", 255), ("Source", 20) })
+        foreach (var metaCol in new[] { ("OriginalTerm", 255), ("Source", 20), ("SupersededBy", 100) })
         {
             var hasMeta = (cols?.Value ?? []).Any(c =>
                 c.DisplayName?.Equals(metaCol.Item1, StringComparison.OrdinalIgnoreCase) == true);
@@ -969,6 +976,55 @@ public class ProductCatalogService : BackgroundService
         return (jac >= threshold, jac, entry.Name);
     }
 
+    // ── Custom entry promotion ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all CUST_* catalog entries currently in the in-memory cache.
+    /// Called after a CSV load to find entries that might be promoted to real MSPCs.
+    /// </summary>
+    public IReadOnlyList<CustomCatalogEntry> GetCustomCatalogEntries()
+        => _cache
+            .Where(e => e.IsCustom && e.SearchKey is not null && e.SpItemId is not null)
+            .Select(e => new CustomCatalogEntry(
+                SpItemId:     e.SpItemId!,
+                SearchKey:    e.SearchKey!,
+                OriginalTerm: e.OriginalTerm,
+                ProductName:  e.Name,
+                TkMetal:      e.TkMetal,
+                TkShape:      e.TkShape,
+                TkAlloy:      e.TkAlloy,
+                TkTemper:     e.TkTemper,
+                TkConditions: e.TkConditions))
+            .ToList()
+            .AsReadOnly();
+
+    /// <summary>
+    /// PATCHes <c>SupersededBy = <paramref name="mspc"/></c> on the catalog SP item so it is
+    /// skipped by <see cref="FetchEntriesAsync"/> on the next refresh. Removes from the local
+    /// in-memory cache immediately so subsequent lookups in this process skip it.
+    /// Requires <c>_cachedSiteId</c>/<c>_cachedListId</c> — trigger a catalog refresh first.
+    /// </summary>
+    public async Task MarkCatalogEntrySupersededAsync(
+        string spItemId, string mspc, CancellationToken ct = default)
+    {
+        var siteId = _cachedSiteId;
+        var listId = _cachedListId;
+        if (siteId is null || listId is null)
+            throw new InvalidOperationException(
+                "Catalog site/list IDs not cached — trigger a catalog refresh first");
+
+        var graph = GetGraph();
+        await graph.Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["SupersededBy"] = mspc }
+            }, cancellationToken: ct);
+
+        // Remove from local cache immediately so it no longer participates in lookups.
+        _cache = _cache.Where(e => e.SpItemId != spItemId).ToList().AsReadOnly();
+        _log.LogInformation("[Catalog] Marked custom entry {SpId} superseded by {Mspc}", spItemId, mspc);
+    }
+
     // ── Service item detection ────────────────────────────────────────────────
 
     // Products that are services/processing — never a catalog match.
@@ -1320,3 +1376,15 @@ public class ProductCatalogService : BackgroundService
 public record DedupCatalogExtra(string SpId, string? Name);
 public record DedupCatalogGroup(string SearchKey, string KeeperSpId, string? KeeperName,
     List<DedupCatalogExtra> Extras);
+
+/// <summary>A CUST_* catalog entry snapshot used for promotion candidate matching.</summary>
+public record CustomCatalogEntry(
+    string    SpItemId,
+    string    SearchKey,
+    string?   OriginalTerm,
+    string?   ProductName,
+    string?   TkMetal,
+    string?   TkShape,
+    string?   TkAlloy,
+    string?   TkTemper,
+    string[]? TkConditions);

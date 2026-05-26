@@ -5,7 +5,10 @@ namespace OutlookShredder.Proxy.Controllers;
 
 [ApiController]
 [Route("api/catalog")]
-public class CatalogController(ProductCatalogService catalog, SharePointService sp) : ControllerBase
+public class CatalogController(
+    ProductCatalogService catalog,
+    SharePointService sp,
+    CatalogAnalysisService analysis) : ControllerBase
 {
     /// <summary>
     /// GET /api/catalog — lists the products currently loaded in the in-memory cache.
@@ -91,7 +94,16 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
             _ = ex;
         }
 
-        return Ok(new { added, skipped, total = added + skipped, weightsComputed });
+        // Find CUST_* entries that now have a matching real MSPC in the catalog (dry-run; user confirms)
+        var custEntries = catalog.GetCustomCatalogEntries();
+        List<PromotionCandidate> promotionCandidates = [];
+        if (custEntries.Count > 0)
+        {
+            try { promotionCandidates = await analysis.FindPromotionCandidatesAsync(custEntries, ct); }
+            catch (Exception ex) { _ = ex; /* non-fatal */ }
+        }
+
+        return Ok(new { added, skipped, total = added + skipped, weightsComputed, promotionCandidates });
     }
 
     /// <summary>
@@ -133,6 +145,56 @@ public class CatalogController(ProductCatalogService catalog, SharePointService 
     }
 
     public record DeleteCustomRequest(List<string> SearchKeys);
+
+    /// <summary>
+    /// POST /api/catalog/commit-promotions — applies confirmed CUST_* → MSPC promotions:
+    ///   1. PATCHes ProductSearchKey + CatalogProductName on all matching SLI rows.
+    ///   2. PATCHes MSPC on all matching RLI rows.
+    ///   3. Marks the CUST_* catalog entry as superseded (excluded from future lookups).
+    /// Call after the user has reviewed the dry-run candidates returned by POST /api/catalog/load.
+    /// </summary>
+    [HttpPost("commit-promotions")]
+    public async Task<IActionResult> CommitPromotions(
+        [FromBody] CommitPromotionsRequest req, CancellationToken ct)
+    {
+        if (req.Promotions is null || req.Promotions.Count == 0)
+            return BadRequest("Provide at least one promotion.");
+
+        int sliPatched = 0, rliPatched = 0, catalogMarked = 0;
+        var errors = new List<string>();
+
+        foreach (var p in req.Promotions)
+        {
+            try
+            {
+                sliPatched += await sp.BulkPatchSliProductKeyAsync(
+                    p.CustSearchKey, p.TargetMspc, p.TargetProductName, ct);
+            }
+            catch (Exception ex) { errors.Add($"SLI {p.CustSearchKey}: {ex.Message}"); }
+
+            try
+            {
+                rliPatched += await sp.BulkPatchRliMspcAsync(p.CustSearchKey, p.TargetMspc, ct);
+            }
+            catch (Exception ex) { errors.Add($"RLI {p.CustSearchKey}: {ex.Message}"); }
+
+            try
+            {
+                await catalog.MarkCatalogEntrySupersededAsync(p.CustSpItemId, p.TargetMspc, ct);
+                catalogMarked++;
+            }
+            catch (Exception ex) { errors.Add($"Catalog {p.CustSearchKey}: {ex.Message}"); }
+        }
+
+        return Ok(new { sliPatched, rliPatched, catalogMarked, errors });
+    }
+
+    public record CommitPromotionsRequest(List<PromotionItem> Promotions);
+    public record PromotionItem(
+        string CustSearchKey,
+        string CustSpItemId,
+        string TargetMspc,
+        string TargetProductName);
 
     /// <summary>
     /// GET /api/catalog/resolve?name=foo — resolves a vendor description against the cache.
