@@ -615,6 +615,23 @@ public class MailService
     }
 
     /// <summary>
+    /// Fetches a named attachment directly from a known Graph message ID.
+    /// Avoids the sender+timestamp search used by <see cref="GetAttachmentAsync"/>
+    /// so it works even when the stored timestamp has a timezone quirk.
+    /// </summary>
+    public async Task<(string ContentType, byte[] Bytes, string FileName)?> GetAttachmentByMessageIdAsync(
+        string messageId, string filename)
+    {
+        var mailbox = GetMailbox();
+        var items   = await GetAttachmentsAsync(mailbox, messageId);
+        var fa = items
+            .OfType<FileAttachment>()
+            .FirstOrDefault(a => string.Equals(a.Name, filename, StringComparison.OrdinalIgnoreCase));
+        if (fa?.ContentBytes is null) return null;
+        return (fa.ContentType ?? "application/octet-stream", fa.ContentBytes, fa.Name ?? filename);
+    }
+
+    /// <summary>
     /// Returns all attachments for a message. Caller should filter by ContentType.
     /// For large attachments (>~3 MB) the list endpoint returns null ContentBytes;
     /// those are fetched individually by ID so the bytes are always populated.

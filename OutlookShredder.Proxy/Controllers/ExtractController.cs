@@ -522,28 +522,50 @@ public class ExtractController : ControllerBase
     /// <summary>
     /// Returns the raw attachment bytes so the Shredder client can save them to a
     /// temp file and open them with the default system viewer.
+    /// Accepts two modes:
+    ///   (a) messageId + filename — direct Graph lookup, no search required; preferred
+    ///       when the caller holds the Graph message ID (e.g. from ConversationMessage).
+    ///   (b) from + receivedAt + filename — searches mailbox by sender + timestamp window.
     /// </summary>
     [HttpGet("mail/attachment")]
     public async Task<IActionResult> GetMailAttachment(
-        [FromQuery] string from,
-        [FromQuery] string receivedAt,
+        [FromQuery] string? messageId,
+        [FromQuery] string? from,
+        [FromQuery] string? receivedAt,
         [FromQuery] string filename)
     {
-        if (!DateTimeOffset.TryParse(receivedAt, out var dt))
-            return BadRequest(new { error = "receivedAt must be ISO 8601" });
+        if (string.IsNullOrWhiteSpace(filename))
+            return BadRequest(new { error = "filename is required" });
 
         try
         {
-            var result = await _mail.GetAttachmentAsync(from, dt, filename);
-            if (result is null)
+            // Mode (a): direct lookup by Graph messageId — no timezone/search issues.
+            if (!string.IsNullOrWhiteSpace(messageId))
+            {
+                var result = await _mail.GetAttachmentByMessageIdAsync(messageId, filename);
+                if (result is null)
+                    return NotFound(new { error = $"Attachment '{filename}' not found on message {messageId}." });
+                return File(result.Value.Bytes, result.Value.ContentType, result.Value.FileName);
+            }
+
+            // Mode (b): sender + timestamp search (legacy; used when messageId is unavailable).
+            if (string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(receivedAt))
+                return BadRequest(new { error = "Provide either messageId, or both from and receivedAt." });
+
+            if (!DateTimeOffset.TryParse(receivedAt, out var dt))
+                return BadRequest(new { error = "receivedAt must be ISO 8601" });
+
+            var searchResult = await _mail.GetAttachmentAsync(from, dt, filename);
+            if (searchResult is null)
                 return NotFound(new { error = $"Attachment '{filename}' not found in mailbox. " +
                     "The email may have been processed from a different mailbox that this proxy does not have access to." });
 
-            return File(result.Value.Bytes, result.Value.ContentType, result.Value.FileName);
+            return File(searchResult.Value.Bytes, searchResult.Value.ContentType, searchResult.Value.FileName);
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "GetMailAttachment failed for from={From} file={File}", from, filename);
+            _log.LogError(ex, "GetMailAttachment failed for messageId={MsgId} from={From} file={File}",
+                messageId, from, filename);
             return StatusCode(500, new { error = ex.Message });
         }
     }
