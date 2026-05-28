@@ -12,6 +12,8 @@ namespace OutlookShredder.Proxy.Controllers;
 ///                (extension fills Contact box)            → extension POST /api/phone-search/consume
 /// Customer flow: Shredder POST /api/phone-search/customer → extension GET /api/phone-search/pending-customer
 ///                (extension fills Customer box)           → extension POST /api/phone-search/consume-customer
+/// Document flow: Shredder POST /api/phone-search/document → extension GET /api/phone-search/pending-document
+///                (extension fills Doc # filter box)       → extension POST /api/phone-search/consume-document
 ///
 /// CORS: "PhoneSearch" policy allows any origin so the extension content script
 /// (running on the OpenBravo origin) can call localhost:7000 without a CORS block.
@@ -23,6 +25,7 @@ public class PhoneSearchController : ControllerBase
 {
     private static string? _pending;
     private static string? _pendingCustomer;
+    private static string? _pendingDocument;
 
     [HttpOptions]
     [HttpOptions("pending")]
@@ -30,6 +33,9 @@ public class PhoneSearchController : ControllerBase
     [HttpOptions("customer")]
     [HttpOptions("pending-customer")]
     [HttpOptions("consume-customer")]
+    [HttpOptions("document")]
+    [HttpOptions("pending-document")]
+    [HttpOptions("consume-document")]
     [HttpOptions("scan")]
     [HttpOptions("scan-result")]
     public IActionResult Preflight() => NoContent();
@@ -84,6 +90,31 @@ public class PhoneSearchController : ControllerBase
         return Ok(new { ok = true });
     }
 
+    // ── Document # (Sales Order Doc # filter) ──────────────────────────────────
+
+    [HttpPost("document")]
+    public IActionResult SetDocument([FromBody] DocumentSearchRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.DocumentNo))
+            return BadRequest(new { error = "documentNo is required" });
+        Volatile.Write(ref _pendingDocument, req.DocumentNo);
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("pending-document")]
+    public IActionResult GetPendingDocument()
+    {
+        var documentNo = Volatile.Read(ref _pendingDocument);
+        return Ok(new { documentNo });
+    }
+
+    [HttpPost("consume-document")]
+    public IActionResult ConsumeDocument()
+    {
+        Volatile.Write(ref _pendingDocument, null);
+        return Ok(new { ok = true });
+    }
+
     // ── Page scanner (dev tool) ───────────────────────────────────────────────
     // Shredder POSTs to /scan to request a scan; the extension GETs /scan,
     // runs scanPage(), and POSTs the JSON back to /scan-result.
@@ -120,4 +151,5 @@ public class PhoneSearchController : ControllerBase
 
     public record PhoneSearchRequest(string Phone);
     public record CustomerSearchRequest(string CustomerName);
+    public record DocumentSearchRequest(string DocumentNo);
 }
