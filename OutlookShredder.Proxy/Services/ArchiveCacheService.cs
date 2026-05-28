@@ -354,13 +354,14 @@ public sealed class ArchiveCacheService : IHostedService, ICacheStatusProvider
             if (!_rli.TryGetValue(rfqId, out var items)) continue;
             foreach (var item in items)
                 rliRows.Add(new { rfqId, mspc = item.Mspc, product = item.ProductName,
-                    quantity = item.Quantity, sizeOfUnits = item.SizeOfUnits, notes = item.Notes });
+                    units = item.Quantity, sizeOfUnits = item.SizeOfUnits, notes = item.Notes });
         }
 
         return new ArchiveSearchResponse
         {
             Sli        = sliRows,
             Rli        = rliRows,
+            Refs       = page,
             TotalCount = totalCount,
             NextCursor = page.Count == req.PageSize ? lastDate : null,
         };

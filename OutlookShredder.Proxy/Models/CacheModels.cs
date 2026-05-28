@@ -72,6 +72,7 @@ public record ArchiveSearchResponse
 {
     [JsonPropertyName("sli")]        public List<Dictionary<string, object?>> Sli { get; init; } = [];
     [JsonPropertyName("rli")]        public List<object> Rli { get; init; } = [];
+    [JsonPropertyName("refs")]       public List<ArchiveRfqRef> Refs { get; init; } = [];
     [JsonPropertyName("totalCount")] public int TotalCount { get; init; }
     [JsonPropertyName("nextCursor")] public DateTime? NextCursor { get; init; }
 }
