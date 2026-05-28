@@ -1,6 +1,7 @@
 // OutlookShredder.Proxy — Program.cs
 using System.Reflection;
 using OutlookShredder.Proxy.Extensions;
+using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Ai;
 using Serilog;
@@ -44,6 +45,14 @@ try
     // Secrets file: gitignored, deployed alongside the exe.
     // Overrides appsettings.json values — put real API keys and credentials here.
     builder.Configuration.AddJsonFile("appsettings.secrets.json", optional: true, reloadOnChange: false);
+
+    // Persistent secrets file: survives reinstall; wins over the install-dir copy.
+    // reinstall.ps1 merges new keys from the template on every install so new
+    // secret fields are added with default values without overwriting existing ones.
+    var persistentSecretsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ShredderData", "Secrets", "appsettings.secrets.json");
+    builder.Configuration.AddJsonFile(persistentSecretsPath, optional: true, reloadOnChange: false);
 
     // Replace the default Microsoft.Extensions.Logging with Serilog so all
     // ILogger<T> calls (including from third-party libraries) go through Serilog.
@@ -138,6 +147,12 @@ try
     builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierProductMappingsCacheService>());
+
+    // Persistent cache services — registered as both their concrete type (for direct injection)
+    // and as ICacheStatusProvider (for CacheController enumeration).
+    builder.Services.AddSingleton<ArchiveCacheService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ArchiveCacheService>());
 
     var app = builder.Build();
 

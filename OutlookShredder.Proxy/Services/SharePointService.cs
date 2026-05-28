@@ -1047,7 +1047,133 @@ public class SharePointService
         return output;
     }
 
-    // ??"?????"??? Write: update Notes on an RFQ Reference ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
+    // ── Read: Complete=true RFQ References (for ArchiveCacheService) ───────────
+
+    public async Task<List<ArchiveRfqRef>> ReadCompletedRfqReferencesAsync(CancellationToken ct = default)
+        => await ReadRfqRefsInternalAsync(since: null, ct);
+
+    public async Task<List<ArchiveRfqRef>> ReadCompletedRfqReferencesSinceAsync(DateTime since, CancellationToken ct = default)
+        => await ReadRfqRefsInternalAsync(since, ct);
+
+    private async Task<List<ArchiveRfqRef>> ReadRfqRefsInternalAsync(DateTime? since, CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqReferencesListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        static string? FieldStr(IDictionary<string, object?> d, string key) =>
+            d.TryGetValue(key, out var v) ? v?.ToString() : null;
+
+        static DateTime? ParseDate(string? s)
+            => DateTime.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt)
+               ? dt.ToUniversalTime() : null;
+
+        static bool IsComplete(IDictionary<string, object?> d)
+        {
+            if (!d.TryGetValue("Complete", out var v) || v is null) return false;
+            if (v is bool b) return b;
+            if (v is System.Text.Json.JsonElement je)
+                return je.ValueKind == System.Text.Json.JsonValueKind.True;
+            return string.Equals(v.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        var output = new List<ArchiveRfqRef>();
+        var page   = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,CustomerName,HskNumber)"];
+                req.QueryParameters.Top    = 5000;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var i in page.Value)
+            {
+                if (i.Fields?.AdditionalData is not { } d) continue;
+                if (!IsComplete(d)) continue;
+
+                var rfqId   = FieldStr(d, col) ?? FieldStr(d, "RFQ_x005F_ID") ?? FieldStr(d, "RFQ_ID");
+                if (rfqId is null) continue;
+
+                var dateSent = ParseDate(FieldStr(d, "DateCreated"))
+                            ?? (i.CreatedDateTime?.UtcDateTime);
+
+                if (since.HasValue && dateSent < since.Value) continue;
+
+                output.Add(new ArchiveRfqRef
+                {
+                    RfqId          = rfqId,
+                    CustomerName   = FieldStr(d, "CustomerName"),
+                    Requester      = FieldStr(d, "Requester"),
+                    Notes          = FieldStr(d, "Notes"),
+                    HskNumber      = FieldStr(d, "HskNumber"),
+                    DateSent       = dateSent,
+                    EmailRecipients = FieldStr(d, "EmailRecipients"),
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+        return output;
+    }
+
+    // ── Read: all RFQ Line Items (for archive cache pre-load) ────────────────
+
+    public async Task<Dictionary<string, List<RliContextItem>>> ReadAllRliAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqLineItemsListIdAsync();
+        var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+
+        var result = new Dictionary<string, List<RliContextItem>>(StringComparer.OrdinalIgnoreCase);
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,Notes)"];
+                req.QueryParameters.Top    = 5000;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var i in page.Value)
+            {
+                if (i.Fields?.AdditionalData is not { } d) continue;
+                var rfqId = GetStr(d, col) ?? GetStr(d, "RFQ_x005F_ID") ?? GetStr(d, "RFQ_ID");
+                if (rfqId is null) continue;
+
+                var product = GetStr(d, "Product");
+                var mspc    = GetStr(d, "MSPC");
+                if (string.IsNullOrEmpty(product) && string.IsNullOrEmpty(mspc)) continue;
+
+                string? GetStr2(IDictionary<string, object?> d2, string key) =>
+                    d2.TryGetValue(key, out var v) ? v?.ToString() : null;
+                double? qty = null;
+                if (d.TryGetValue("Units", out var vu) && vu is not null &&
+                    double.TryParse(vu.ToString(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var qv))
+                    qty = qv;
+
+                if (!result.TryGetValue(rfqId, out var list))
+                    result[rfqId] = list = [];
+                list.Add(new RliContextItem
+                {
+                    Mspc        = mspc,
+                    ProductName = product,
+                    Quantity    = qty,
+                    SizeOfUnits = GetStr2(d, "SizeOfUnits"),
+                    Notes       = GetStr2(d, "Notes"),
+                });
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+        return result;
+    }
+
+    // ── Write: update Notes on an RFQ Reference ──────────────────────────────
 
     public async Task UpdateRfqNotesAsync(string rfqId, string notes)
     {

@@ -54,6 +54,9 @@ public sealed class SliCacheService
     public List<Dictionary<string, object?>>? TryGet()
         => (_items is not null && DateTime.UtcNow < _populatedAt + Ttl) ? _items : null;
 
+    /// <summary>Returns whatever is in memory regardless of TTL. Null if never populated.</summary>
+    public List<Dictionary<string, object?>>? GetSnapshot() => _items;
+
     /// <summary>
     /// Populates the cache from SP.  Idempotent when already fresh unless
     /// <paramref name="force"/> is true.  Safe to call concurrently.
