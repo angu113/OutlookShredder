@@ -14,16 +14,31 @@ namespace OutlookShredder.Proxy.Services;
 /// Thread safety: SemaphoreSlim(1) serialises SP population so only one fetch runs at a time.
 /// TTL is 5 minutes; forceRefresh=true bypasses it and re-fetches from SP live.
 /// </summary>
-public sealed class SliCacheService
+public sealed class SliCacheService : ICacheStatusProvider
 {
     private readonly SharePointService           _sp;
     private readonly ILogger<SliCacheService>    _log;
     private readonly DiskBackedCache<List<Dictionary<string, object?>>> _disk;
 
     private volatile List<Dictionary<string, object?>>? _items;
-    private DateTime  _populatedAt = DateTime.MinValue;
+    private DateTime  _populatedAt  = DateTime.MinValue;
+    private DateTime? _cacheBuilt;
     private static readonly TimeSpan Ttl = TimeSpan.FromMinutes(5);
     private readonly SemaphoreSlim _sem = new(1, 1);
+
+    // ICacheStatusProvider
+    public string    Name          => "sli";
+    public string    DisplayName   => "Live Quote Data";
+    public int       SchemaVersion => 1;
+    public int       ItemCount     => _items?.Count ?? 0;
+    public DateTime? CacheBuiltUtc => _cacheBuilt;
+    public DateTime? LastDeltaUtc  => _populatedAt == DateTime.MinValue ? null : _populatedAt;
+    public bool      IsLoading     => _sem.CurrentCount == 0;
+
+    public async Task ForceRebuildAsync(CancellationToken ct = default)
+        => await PopulateAsync(force: true, ct);
+    public async Task ForceDeltaAsync(CancellationToken ct = default)
+        => await PopulateAsync(force: true, ct);
 
     private static readonly JsonSerializerOptions SliJsonOpts = new()
     {
@@ -37,7 +52,7 @@ public sealed class SliCacheService
 
         var cacheDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Shredder", "Proxy", "cache");
+            "ShredderData", "Cache", "v1");
         _disk = new DiskBackedCache<List<Dictionary<string, object?>>>(cacheDir, "sli", log, SliJsonOpts);
 
         // Warm L1 from disk immediately so early requests don't block on SP pagination
@@ -88,6 +103,7 @@ public sealed class SliCacheService
 
             _items       = all;
             _populatedAt = DateTime.UtcNow;
+            _cacheBuilt  ??= DateTime.UtcNow;
             _log.LogInformation("[SliCache] Populated {Count} rows in {Pages} pages ({Ms}ms)",
                 all.Count, pages, sw.ElapsedMilliseconds);
 

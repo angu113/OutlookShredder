@@ -39,7 +39,7 @@ namespace OutlookShredder.Proxy.Services;
 ///   ProductCatalog:SiteUrl   default: https://metalsupermarkets-my.sharepoint.com/personal/angus_mithrilmetals_com
 ///   ProductCatalog:ListName  default: Product Catalog
 /// </summary>
-public class ProductCatalogService : BackgroundService
+public class ProductCatalogService : BackgroundService, ICacheStatusProvider
 {
     private readonly IConfiguration _config;
     private readonly ILogger<ProductCatalogService> _log;
@@ -59,6 +59,18 @@ public class ProductCatalogService : BackgroundService
     public string? LastError    { get; private set; }
     public string? LastDiag     { get; private set; }
     public DateTime? LastRefreshAt { get; private set; }
+
+    // ICacheStatusProvider
+    public string    Name          => "catalog";
+    public string    DisplayName   => "Product Catalog";
+    public int       SchemaVersion => 1;
+    public int       ItemCount     => _cache.Count;
+    public DateTime? CacheBuiltUtc => LastRefreshAt;
+    public DateTime? LastDeltaUtc  => LastRefreshAt;
+    public bool      IsLoading     => false;
+
+    public async Task ForceRebuildAsync(CancellationToken ct = default) => await RefreshAsync();
+    public async Task ForceDeltaAsync(CancellationToken ct = default)   => await RefreshAsync();
 
     public ProductCatalogService(IConfiguration config, ILogger<ProductCatalogService> log)
     {

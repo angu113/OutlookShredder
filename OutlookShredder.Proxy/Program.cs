@@ -148,11 +148,13 @@ try
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierProductMappingsCacheService>());
 
-    // Persistent cache services — registered as both their concrete type (for direct injection)
-    // and as ICacheStatusProvider (for CacheController enumeration).
+    // Persistent cache services — registered as ICacheStatusProvider for CacheController enumeration.
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ArchiveCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ProductCatalogService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SliCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
-    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ArchiveCacheService>());
 
     var app = builder.Build();
 

@@ -18,7 +18,7 @@ namespace OutlookShredder.Proxy.Services;
 /// The Azure AD app must have Sites.ReadWrite.All (or Sites.Read.All) consented for
 /// the OneDrive personal site as well as the main SharePoint site.
 /// </summary>
-public class SupplierCacheService : BackgroundService
+public class SupplierCacheService : BackgroundService, ICacheStatusProvider
 {
     private readonly IConfiguration _config;
     private readonly ILogger<SupplierCacheService> _log;
@@ -30,9 +30,22 @@ public class SupplierCacheService : BackgroundService
         string? PrimaryFirstName = null, string? ManagerFirstName = null, string? OooFirstName = null,
         string? SpItemId = null);
     private volatile IReadOnlyList<Entry> _cache = [];
+    private DateTime? _lastRefreshAt;
 
     public record SupplierContactsDto(string? ContactEmail, string? ManagerContact, string? OooContact,
         string? PrimaryFirstName = null, string? ManagerFirstName = null, string? OooFirstName = null);
+
+    // ICacheStatusProvider
+    public string    Name          => "suppliers";
+    public string    DisplayName   => "Suppliers";
+    public int       SchemaVersion => 1;
+    public int       ItemCount     => _cache.Count;
+    public DateTime? CacheBuiltUtc => _lastRefreshAt;
+    public DateTime? LastDeltaUtc  => _lastRefreshAt;
+    public bool      IsLoading     => false;
+
+    public async Task ForceRebuildAsync(CancellationToken ct = default) => await RefreshAsync();
+    public async Task ForceDeltaAsync(CancellationToken ct = default)   => await RefreshAsync();
 
     public SupplierCacheService(IConfiguration config, ILogger<SupplierCacheService> log)
     {
@@ -107,7 +120,8 @@ public class SupplierCacheService : BackgroundService
         try
         {
             var entries = await FetchEntriesAsync();
-            _cache = entries.AsReadOnly();
+            _cache         = entries.AsReadOnly();
+            _lastRefreshAt = DateTime.UtcNow;
 
             _log.LogInformation("[Suppliers] Cache refreshed — {Count} supplier(s) loaded", entries.Count);
         }
