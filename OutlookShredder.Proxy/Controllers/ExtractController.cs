@@ -11,6 +11,7 @@ public class ExtractController : ControllerBase
     private readonly AiServiceFactory            _aiFactory;
     private readonly SharePointService          _sp;
     private readonly SliCacheService            _sliCache;
+    private readonly ArchiveCacheService        _archiveCache;
     private readonly MailService                _mail;
     private readonly MailPollerService          _poller;
     private readonly OutlookComPollerService    _comPoller;
@@ -25,6 +26,7 @@ public class ExtractController : ControllerBase
         AiServiceFactory            aiFactory,
         SharePointService           sp,
         SliCacheService             sliCache,
+        ArchiveCacheService         archiveCache,
         MailService                 mail,
         MailPollerService           poller,
         OutlookComPollerService     comPoller,
@@ -38,6 +40,7 @@ public class ExtractController : ControllerBase
         _aiFactory     = aiFactory;
         _sp            = sp;
         _sliCache      = sliCache;
+        _archiveCache  = archiveCache;
         _mail          = mail;
         _poller        = poller;
         _comPoller     = comPoller;
@@ -433,6 +436,26 @@ public class ExtractController : ControllerBase
         try
         {
             await _sp.SetRfqCompleteAsync(rfqId, complete);
+
+            if (complete)
+            {
+                _ = _archiveCache.OnRfqCompletedAsync(rfqId);
+                _notifications.NotifyRfqProcessed(new RfqProcessedNotification
+                {
+                    EventType = "RFQ_AUTOCOMPLETE",
+                    RfqId     = rfqId,
+                });
+            }
+            else
+            {
+                _archiveCache.OnRfqReactivated(rfqId);
+                _notifications.NotifyRfqProcessed(new RfqProcessedNotification
+                {
+                    EventType = "RFQ_REACTIVATED",
+                    RfqId     = rfqId,
+                });
+            }
+
             return Ok(new { updated = true });
         }
         catch (Exception ex)
