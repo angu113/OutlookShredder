@@ -507,6 +507,7 @@ public class FileWatcherService : BackgroundService
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
             DeliveryAddress   = extraction.DeliveryAddress,
+            DeliveryMethod    = extraction.DeliveryMethod,
             LineItemsJson     = lineItemsJson,
         });
 
@@ -536,6 +537,7 @@ public class FileWatcherService : BackgroundService
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
             DeliveryAddress   = extraction.DeliveryAddress,
+            DeliveryMethod    = extraction.DeliveryMethod,
             LineItemsJson     = lineItemsJson,
         };
         _ = Task.Run(async () =>

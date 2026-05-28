@@ -13,6 +13,7 @@ public class WorkflowCard
     public string? ErpSpItemId       { get; set; }
     public bool    IsCompleted       { get; set; }
     public string? DeliveryAddress   { get; set; }
+    public string? DeliveryMethod    { get; set; }   // "Pickup", "Delivery", "UPS Ground", "Our Truck", etc.
     /// <summary>"Red" | "Amber" | "Green" | null</summary>
     public string? RagStatus         { get; set; }
     public string? DeliveryService   { get; set; }
@@ -29,6 +30,7 @@ public class CreateWorkflowCardRequest
     public string? Notes           { get; set; }
     public string? ErpSpItemId     { get; set; }
     public string? DeliveryAddress { get; set; }
+    public string? DeliveryMethod  { get; set; }
     public string? RagStatus       { get; set; }
     public string? DeliveryService { get; set; }
     public bool    WasAutoCreated  { get; set; }

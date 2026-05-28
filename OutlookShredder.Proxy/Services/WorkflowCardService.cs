@@ -113,6 +113,7 @@ public class WorkflowCardService : IHostedService
                 Notes           = req.Notes,
                 ErpSpItemId     = req.ErpSpItemId,
                 DeliveryAddress = req.DeliveryAddress,
+                DeliveryMethod  = req.DeliveryMethod,
                 RagStatus       = req.RagStatus,
                 DeliveryService = req.DeliveryService,
                 WasAutoCreated  = req.WasAutoCreated,
@@ -206,6 +207,7 @@ public class WorkflowCardService : IHostedService
                 AssignedDate    = "",
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
+                DeliveryMethod  = extraction.DeliveryMethod,
                 WasAutoCreated  = true,
             }, ct);
 
@@ -223,6 +225,7 @@ public class WorkflowCardService : IHostedService
                 AssignedDate    = "",
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
+                DeliveryMethod  = extraction.DeliveryMethod,
                 WasAutoCreated  = true,
             }, ct);
         }

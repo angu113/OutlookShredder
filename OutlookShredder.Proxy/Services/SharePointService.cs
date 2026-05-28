@@ -8644,6 +8644,7 @@ public class SharePointService
             ("ExtractionLog",   "note"),
             ("UserAnnotations", "note"),
             ("DeliveryAddress", "note"),
+            ("DeliveryMethod",  "text"),
         };
 
         foreach (var (name, type) in schema)
@@ -8725,6 +8726,7 @@ public class SharePointService
             ["LineItemsJson"]    = lineItemsJson,
             ["ExtractionLog"]    = System.Text.Json.JsonSerializer.Serialize(extraction),
             ["DeliveryAddress"]  = extraction.DeliveryAddress,
+            ["DeliveryMethod"]   = extraction.DeliveryMethod,
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
@@ -8911,7 +8913,7 @@ public class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,LineItemsJson)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -8946,6 +8948,7 @@ public class SharePointService
                 SourceUser        = Get("SourceUser"),
                 UserAnnotations   = Get("UserAnnotations"),
                 DeliveryAddress   = Get("DeliveryAddress"),
+                DeliveryMethod    = Get("DeliveryMethod"),
                 LineItemsJson     = Get("LineItemsJson"),
             });
         }
@@ -8974,7 +8977,7 @@ public class SharePointService
         var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,LineItemsJson)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
             }, ct);
 
         var d = item?.Fields?.AdditionalData;
@@ -9002,6 +9005,7 @@ public class SharePointService
             SourceUser        = Get("SourceUser"),
             UserAnnotations   = Get("UserAnnotations"),
             DeliveryAddress   = Get("DeliveryAddress"),
+            DeliveryMethod    = Get("DeliveryMethod"),
             LineItemsJson     = Get("LineItemsJson"),
         };
     }
@@ -10301,6 +10305,7 @@ public class SharePointService
             ("ErpSpItemId",     "text"),
             ("IsCompleted",       "boolean"),
             ("DeliveryAddress",   "note"),
+            ("DeliveryMethod",    "text"),
             ("RagStatus",         "text"),
             ("DeliveryService",   "text"),
             ("WasAutoCreated",    "boolean"),
@@ -10372,6 +10377,7 @@ public class SharePointService
                                        ? icEl.ValueKind == System.Text.Json.JsonValueKind.True
                                        : ic is bool b && b),
                 DeliveryAddress  = d.TryGetValue("DeliveryAddress",  out var da) ? da?.ToString() : null,
+                DeliveryMethod   = d.TryGetValue("DeliveryMethod",   out var dm) ? dm?.ToString() : null,
                 RagStatus        = d.TryGetValue("RagStatus",        out var rs) ? (rs?.ToString() is string rv && rv.Length > 0 ? rv : null) : null,
                 DeliveryService  = d.TryGetValue("DeliveryService",  out var ds) ? (ds?.ToString() is string dv && dv.Length > 0 ? dv : null) : null,
                 WasAutoCreated   = d.TryGetValue("WasAutoCreated",   out var wa) &&
@@ -10412,6 +10418,7 @@ public class SharePointService
                         ["ErpSpItemId"]     = card.ErpSpItemId,
                         ["IsCompleted"]     = card.IsCompleted,
                         ["DeliveryAddress"] = card.DeliveryAddress,
+                        ["DeliveryMethod"]  = card.DeliveryMethod,
                         ["RagStatus"]       = card.RagStatus,
                         ["DeliveryService"] = card.DeliveryService,
                         ["WasAutoCreated"]  = card.WasAutoCreated,
