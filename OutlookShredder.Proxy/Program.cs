@@ -155,6 +155,7 @@ try
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SliCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
+    builder.Services.AddHostedService<ShutdownWatcherService>();
 
     var app = builder.Build();
 
