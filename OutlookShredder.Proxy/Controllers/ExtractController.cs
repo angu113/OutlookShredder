@@ -269,7 +269,11 @@ public class ExtractController : ControllerBase
                 {
                     var items = FilterCompleted(cached, includeCompleted
                         ? null : await _sp.GetCompletedRfqIdsAsync());
-                    _log.LogInformation("[SliCache] Serving {Count} items from cache", items.Count);
+                    // Apply the since lower-bound so the cache path matches the SP live path.
+                    if (since.HasValue)
+                        items = FilterSince(items, since.Value);
+                    _log.LogInformation("[SliCache] Serving {Count} items from cache (since={Since})",
+                        items.Count, since?.ToString("yyyy-MM-dd") ?? "any");
                     return Ok(new { items, nextLink = (string?)null, totalCount = items.Count });
                 }
             }
@@ -313,6 +317,27 @@ public class ExtractController : ControllerBase
             if (!row.TryGetValue("RFQ_ID", out var idv)) return true;
             var rid = idv?.ToString();
             return string.IsNullOrEmpty(rid) || !completed.Contains(rid!);
+        }).ToList();
+    }
+
+    // Filters raw SLI rows to those whose SrCreatedAt (or ReceivedAt as fallback) is on or after
+    // the given cutoff. Rows with no parseable date are kept (pass-through).
+    private static List<Dictionary<string, object?>> FilterSince(
+        List<Dictionary<string, object?>> items, DateTime cutoff)
+    {
+        var cutoffUtc = cutoff.ToUniversalTime();
+        return items.Where(row =>
+        {
+            foreach (var key in new[] { "SrCreatedAt", "ReceivedAt", "ProcessedAt" })
+            {
+                if (!row.TryGetValue(key, out var raw) || raw is null) continue;
+                DateTime dt;
+                if (raw is DateTime d)          dt = d.ToUniversalTime();
+                else if (raw is DateTimeOffset o) dt = o.UtcDateTime;
+                else if (!DateTime.TryParse(raw.ToString(), out dt)) continue;
+                return dt >= cutoffUtc;
+            }
+            return true; // no date field found — include by default
         }).ToList();
     }
 

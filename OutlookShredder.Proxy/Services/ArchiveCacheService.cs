@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -26,6 +27,7 @@ public sealed class ArchiveCacheService : IHostedService, ICacheStatusProvider
     private readonly SliCacheService               _sli;
     private readonly ILogger<ArchiveCacheService>  _log;
     private readonly DiskBackedCache<ArchiveCacheFile> _disk;
+    private readonly int                           _maxCacheAgeDays;
 
     private readonly SemaphoreSlim _sem = new(1, 1);
 
@@ -57,11 +59,13 @@ public sealed class ArchiveCacheService : IHostedService, ICacheStatusProvider
     public ArchiveCacheService(
         SharePointService sp,
         SliCacheService sli,
-        ILogger<ArchiveCacheService> log)
+        ILogger<ArchiveCacheService> log,
+        IConfiguration cfg)
     {
         _sp  = sp;
         _sli = sli;
         _log = log;
+        _maxCacheAgeDays = cfg.GetValue<int>("PersistentCache:ArchiveCacheMaxDays", 60);
 
         var dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -82,8 +86,28 @@ public sealed class ArchiveCacheService : IHostedService, ICacheStatusProvider
         _cacheBuiltUtc = file.CacheBuiltUtc;
         _lastDeltaUtc  = file.LastDeltaUtc;
 
+        // Prune refs older than the configured max age so stale entries don't accumulate on disk.
+        PruneOldRefs();
+
         _log.LogInformation("[ArchiveCache] Warmed from disk — {Count} refs, built {At:yyyy-MM-dd}",
             _refs.Count, _cacheBuiltUtc);
+    }
+
+    // Removes refs whose DateSent is before the max-age cutoff, and drops orphaned RLI entries.
+    private void PruneOldRefs()
+    {
+        var cutoff = DateTime.UtcNow.AddDays(-_maxCacheAgeDays);
+        var before = _refs.Count;
+        var kept   = _refs.Where(r => r.DateSent is null || r.DateSent.Value >= cutoff).ToList();
+        if (kept.Count == before) return;
+
+        var keptIds = kept.Select(r => r.RfqId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var id in _rli.Keys.Where(k => !keptIds.Contains(k)).ToList())
+            _rli.Remove(id);
+
+        _refs = kept;
+        _log.LogInformation("[ArchiveCache] Pruned {N} ref(s) older than {Days}d (cutoff {Cutoff:yyyy-MM-dd})",
+            before - kept.Count, _maxCacheAgeDays, cutoff);
     }
 
     // ── IHostedService ────────────────────────────────────────────────────────
@@ -135,10 +159,12 @@ public sealed class ArchiveCacheService : IHostedService, ICacheStatusProvider
         _isLoading = true;
         try
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            _log.LogInformation("[ArchiveCache] Full rebuild started");
+            var sw     = System.Diagnostics.Stopwatch.StartNew();
+            var cutoff = DateTime.UtcNow.AddDays(-_maxCacheAgeDays);
+            _log.LogInformation("[ArchiveCache] Full rebuild started (since {Cutoff:yyyy-MM-dd}, max {Days}d)",
+                cutoff, _maxCacheAgeDays);
 
-            var refs = await _sp.ReadCompletedRfqReferencesAsync(ct);
+            var refs = await _sp.ReadCompletedRfqReferencesSinceAsync(cutoff, ct);
             var rli  = await _sp.ReadAllRliAsync(ct);
 
             _refs          = refs;
