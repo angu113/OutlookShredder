@@ -1374,9 +1374,12 @@ public class CatalogAnalysisService
         if (fromSp.Count > 0) return fromSp;
 
         var tokens = await GetCatalogTokensAsync();
+        // Group to handle duplicate SearchKey entries (e.g. CUST_ keys inserted twice).
+        // First occurrence wins; duplicates are silently skipped.
         return tokens
             .Where(t => !string.IsNullOrWhiteSpace(t.SearchKey) && !t.TokenizationFailed)
-            .ToDictionary(t => t.SearchKey!, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(t => t.SearchKey!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
