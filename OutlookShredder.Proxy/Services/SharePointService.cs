@@ -10725,6 +10725,262 @@ public class SharePointService
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
             .DeleteAsync(cancellationToken: ct);
     }
+
+    /// <summary>
+    /// Computes per-QC-row analytics: recency-weighted sharp price, data aging, and quote count.
+    /// Falls back to metal-category index when a product has thin quote coverage.
+    /// </summary>
+    public async Task<List<QcAnalyticsRow>> ComputeQcAnalyticsAsync()
+    {
+        var (qcSiteId, qcListId, _) = await ResolveQcAsync();
+        var graph = GetGraph();
+
+        // Config
+        var primaryDays   = int.TryParse(_config["QC:AnalyticsPrimaryDays"],   out var pd) ? pd : 7;
+        var fallbackDays  = int.TryParse(_config["QC:AnalyticsFallbackDays"],  out var fd) ? fd : 60;
+        var recentDays    = int.TryParse(_config["QC:AnalyticsRecentDays"],    out var rd) ? rd : 2;
+        var recentWeight  = double.TryParse(_config["QC:AnalyticsRecentWeight"],
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var rw) ? rw : 3.0;
+        var thinThreshold = int.TryParse(_config["QC:AnalyticsThinThreshold"], out var tt) ? tt : 2;
+
+        // Local helpers (mirrors UpdateQcLqAsync)
+        static double? GetNum(Dictionary<string, object?> row, string key)
+        {
+            if (!row.TryGetValue(key, out var v) || v is null) return null;
+            return v switch
+            {
+                double d => d,
+                int    i => (double)i,
+                JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetDouble(),
+                _ => double.TryParse(v.ToString(), out var d) ? d : null
+            };
+        }
+
+        static bool IsRegret(Dictionary<string, object?> row)
+        {
+            if (!row.TryGetValue("IsRegret", out var v) || v is null) return false;
+            return v switch
+            {
+                bool b => b,
+                JsonElement je => je.ValueKind == JsonValueKind.True,
+                _ => false
+            };
+        }
+
+        static double ToPounds(double weight, string? unit) => (unit?.ToLowerInvariant()) switch
+        {
+            "kg" => weight * 2.20462,
+            "oz" => weight / 16.0,
+            "g"  => weight / 453.592,
+            _    => weight
+        };
+
+        static double ToFeet(double v, string? unit) => (unit?.ToLowerInvariant()) switch
+        {
+            "in" or "\"" or "inch" or "inches" => v / 12.0,
+            "mm" => v / 304.8,
+            "cm" => v / 30.48,
+            "m"  => v * 3.28084,
+            _    => v
+        };
+
+        static double? DerivePerPound(Dictionary<string, object?> row, double? catWeightPerFoot = null)
+        {
+            var total = GetNum(row, "TotalPrice");
+            var qty   = GetNum(row, "UnitsQuoted") ?? GetNum(row, "UnitsRequested");
+
+            if (catWeightPerFoot is > 0)
+            {
+                var ppf = GetNum(row, "PricePerFoot");
+                if (ppf is > 0) return ppf.Value / catWeightPerFoot.Value;
+
+                if (total is > 0 && qty is > 0)
+                {
+                    var len = GetNum(row, "LengthPerUnit");
+                    if (len is > 0)
+                    {
+                        var lenUnit  = row.TryGetValue("LengthUnit", out var lu) ? lu?.ToString() : null;
+                        var totalLb2 = qty.Value * ToFeet(len.Value, lenUnit) * catWeightPerFoot.Value;
+                        if (totalLb2 > 0) return total.Value / totalLb2;
+                    }
+                }
+            }
+
+            var ppp = GetNum(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+
+            var weight = GetNum(row, "WeightPerUnit");
+            if (total is > 0 && qty is > 0 && weight is > 0)
+            {
+                var unit    = row.TryGetValue("WeightUnit", out var wu) ? wu?.ToString() : null;
+                var totalLb = qty.Value * ToPounds(weight.Value, unit);
+                if (totalLb > 0) return total.Value / totalLb;
+            }
+
+            return null;
+        }
+
+        // 1. Load QC rows (Metal, Shape, Title only — no patching needed)
+        var wantedCols = new[] { "Metal", "Shape", "Title" };
+        var colsResp   = await graph.Sites[qcSiteId].Lists[qcListId].Columns.GetAsync();
+        var fields = (colsResp?.Value ?? [])
+            .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.DisplayName)
+                     && wantedCols.Contains(c.DisplayName, StringComparer.OrdinalIgnoreCase)
+                     && !c.Name!.StartsWith("LinkTitle", StringComparison.OrdinalIgnoreCase))
+            .Select(c => (Display: c.DisplayName!, Internal: c.Name!))
+            .ToArray();
+
+        string? ColInternal(string display) =>
+            fields.FirstOrDefault(f => f.Display.Equals(display, StringComparison.OrdinalIgnoreCase)).Internal;
+
+        var metalField   = ColInternal("Metal") ?? throw new Exception("[QC Analytics] 'Metal' column not found");
+        var shapeField   = ColInternal("Shape") ?? throw new Exception("[QC Analytics] 'Shape' column not found");
+        var titleField   = ColInternal("Title") ?? "Title";
+        var selectFields = string.Join(",", fields.Select(f => f.Internal));
+
+        var qcItemsResp = await graph.Sites[qcSiteId].Lists[qcListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = [$"fields($select={selectFields})"];
+                r.QueryParameters.Top    = 5000;
+            });
+
+        var qcRows = (qcItemsResp?.Value ?? [])
+            .Where(i => i.Id is not null && i.Fields?.AdditionalData is not null)
+            .Select(i =>
+            {
+                var d      = i.Fields!.AdditionalData!;
+                var metals = (d.TryGetValue(metalField, out var mv) ? SerializeQcValue(mv) : "")
+                             .Split(';').Select(m => m.Trim()).Where(m => m.Length > 0).ToArray();
+                var shapes = (d.TryGetValue(shapeField, out var sv) ? SerializeQcValue(sv) : "")
+                             .Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+                var titles = (d.TryGetValue(titleField, out var tv) ? SerializeQcValue(tv) : "")
+                             .Split('|').Select(t => t.Trim().ToLowerInvariant()).Where(t => t.Length > 0).ToArray();
+                return (Id: i.Id!, Metals: metals, Shapes: shapes, Titles: titles);
+            })
+            .Where(r => r.Metals.Length > 0 && r.Shapes.Length > 0)
+            .ToArray();
+
+        // 2. Load SLI rows from fallbackDays window and build priced token list
+        var fallbackCutoff = DateTime.UtcNow.AddDays(-fallbackDays);
+        var catalogByKey   = await _catalogAnalysis.Value.GetCatalogTokensByKeyAsync();
+        var (allSli, _)    = await ReadSupplierItemsAsync(top: 5000, since: fallbackCutoff);
+
+        var priced = new List<PricedSliToken>();
+        foreach (var sli in allSli)
+        {
+            if (IsRegret(sli)) continue;
+
+            DateTime? quoteDate = null;
+            foreach (var key in new[] { "ReceivedAt", "ProcessedAt", "DateOfQuote", "Created", "Modified" })
+            {
+                if (!sli.TryGetValue(key, out var dv) || dv is null) continue;
+                var ds = dv is JsonElement je ? je.ToString() : dv.ToString();
+                if (DateTime.TryParse(ds, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                { quoteDate = dt.ToUniversalTime(); break; }
+            }
+
+            var searchKey = GetStr(sli, "CatalogProductSearchKey") ?? GetStr(sli, "ProductSearchKey");
+            if (string.IsNullOrWhiteSpace(searchKey)) continue;
+            if (!catalogByKey.TryGetValue(searchKey, out var tok)) continue;
+            if (string.IsNullOrWhiteSpace(tok.TkMetal) || string.IsNullOrWhiteSpace(tok.TkShape)) continue;
+
+            var catWt = _catalog.FindWeightPerFoot(searchKey!);
+            var ppl   = DerivePerPound(sli, catWt);
+            if (ppl is null or <= 0) continue;
+
+            priced.Add(new PricedSliToken(tok.TkMetal!, tok.TkShape!, tok.TkAlloy, tok.TkTemper,
+                tok.TkConditions ?? [], ppl.Value, quoteDate ?? DateTime.UtcNow,
+                GetStr(sli, "SpItemId")));
+        }
+
+        var now = DateTime.UtcNow;
+
+        // Recency weight: heavy on very recent, 1x for primary window, gentle decay in fallback zone
+        double RecencyWeight(DateTime quoteDate)
+        {
+            var ageDays = (now - quoteDate).TotalDays;
+            if (ageDays <= recentDays)  return recentWeight;
+            if (ageDays <= primaryDays) return 1.0;
+            return Math.Max(0.1, 1.0 - ageDays / fallbackDays);
+        }
+
+        static double? WeightedAvg(IEnumerable<(double Price, double W)> items)
+        {
+            var pSum = 0.0; var wSum = 0.0;
+            foreach (var (p, w) in items) { pSum += p * w; wSum += w; }
+            return wSum > 0 ? pSum / wSum : null;
+        }
+
+        // 3. Compute analytics per QC row
+        var results = new List<QcAnalyticsRow>(qcRows.Length);
+
+        foreach (var (id, metals, shapes, titles) in qcRows)
+        {
+            var qcMetals          = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var impliedConditions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var m in metals)
+            {
+                var (metal, cond) = ClassifyQcMetal(m);
+                if (metal is not null) qcMetals.Add(metal);
+                if (cond  is not null) impliedConditions.Add(cond);
+            }
+
+            var qcShapes = shapes
+                .Select(NormalizeQcShape)
+                .Where(s => s is not null)
+                .Cast<string>()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var titleFilters = titles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in impliedConditions) titleFilters.Add(c);
+            var filtered = titleFilters.Count > 0;
+
+            var matched = priced
+                .Where(p => qcMetals.Contains(p.TkMetal)
+                         && qcShapes.Contains(p.TkShape)
+                         && (!filtered || MatchesTitleFilter(p, titleFilters)))
+                .ToList();
+
+            var primaryCount = matched.Count(p => (now - p.QuoteDate).TotalDays <= primaryDays);
+            var newestAgeDays = matched.Count > 0
+                ? (int?)Math.Round((now - matched.Max(p => p.QuoteDate)).TotalDays)
+                : null;
+
+            double? sharpPrice;
+            bool    isExtrapolated;
+
+            if (primaryCount >= thinThreshold || matched.Count >= thinThreshold)
+            {
+                // Enough product-specific data — weighted avg across full fallback window
+                sharpPrice     = WeightedAvg(matched.Select(p => (p.PricePerPound, RecencyWeight(p.QuoteDate))));
+                isExtrapolated = false;
+            }
+            else
+            {
+                // Thin or no data — extrapolate from metal-category index
+                var metalPool = priced.Where(p => qcMetals.Contains(p.TkMetal)).ToList();
+                sharpPrice    = metalPool.Count > 0
+                    ? WeightedAvg(metalPool.Select(p => (p.PricePerPound, RecencyWeight(p.QuoteDate))))
+                    : null;
+                isExtrapolated = sharpPrice is not null;
+                if (newestAgeDays is null && metalPool.Count > 0)
+                    newestAgeDays = (int?)Math.Round((now - metalPool.Max(p => p.QuoteDate)).TotalDays);
+            }
+
+            results.Add(new QcAnalyticsRow(
+                ItemId:             id,
+                SharpPrice:         sharpPrice,
+                NewestQuoteAgeDays: newestAgeDays,
+                QuoteCount:         matched.Count,
+                IsExtrapolated:     isExtrapolated));
+        }
+
+        _log.LogInformation("[QC Analytics] Computed {Count} rows ({Extrapolated} extrapolated)",
+            results.Count, results.Count(r => r.IsExtrapolated));
+        return results;
+    }
 }
 
 public record CustomerContactRow(string CustomerName, string ContactName, string Phone);
@@ -10786,3 +11042,10 @@ public record LqAnalysisProduct(
     double? CatalogWeightPerFoot,
     double? AvgPricePerFoot,
     double? AvgDerivedPricePerPound);
+
+public record QcAnalyticsRow(
+    string  ItemId,
+    double? SharpPrice,
+    int?    NewestQuoteAgeDays,
+    int     QuoteCount,
+    bool    IsExtrapolated);

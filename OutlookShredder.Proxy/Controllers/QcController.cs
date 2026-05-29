@@ -139,6 +139,18 @@ public class QcController : ControllerBase
         if (detail is null) return NotFound();
         return Ok(detail);
     }
+
+    /// <summary>
+    /// Returns per-QC-row analytics: recency-weighted sharp price, suggested QC/QC Cut
+    /// (markup applied client-side), and data aging.
+    /// Falls back to metal-category index for products with thin quote coverage.
+    /// </summary>
+    [HttpGet("analytics")]
+    public async Task<IActionResult> GetAnalyticsAsync()
+    {
+        var rows = await _sp.ComputeQcAnalyticsAsync();
+        return Ok(rows);
+    }
 }
 
 public record QcRowUpdateRequest(string ItemId, string? Qc, string? QcCut);
