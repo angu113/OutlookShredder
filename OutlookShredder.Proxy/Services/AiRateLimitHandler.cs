@@ -27,6 +27,26 @@ public sealed class AiRateLimitHandler(
         else
             ReadGeminiHeaders(response);
 
+        // Fail-fast on 429 / overload at the HTTP layer so the AI SDK can't
+        // swallow it and retry internally. Throws AiServiceOverloadedException
+        // so RoundRobinAiExtractionService / FallbackAiExtractionService can
+        // hand off to the other provider on the very next call (CLAUDE.md
+        // "fail fast: fail over to the fallback immediately" rule).
+        var status = (int)response.StatusCode;
+        if (status == 429 || status == 503 || status == 529)
+        {
+            string body;
+            try { body = await response.Content.ReadAsStringAsync(ct); }
+            catch { body = ""; }
+            response.Dispose();
+
+            var snippet = body.Length > 200 ? body[..200] : body;
+            log.LogWarning("[{Provider}] HTTP {Status} — failing fast for round-robin handoff. Body: {Body}",
+                provider, status, snippet);
+            throw new AiServiceOverloadedException(provider,
+                new HttpRequestException($"HTTP {status}: {snippet}"));
+        }
+
         return response;
     }
 

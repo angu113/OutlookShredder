@@ -480,16 +480,18 @@ public class ClaudeExtractionService : IAiExtractionService
 
             var status = (int)lastResponse.StatusCode;
 
-            // 503 / 529 = provider overloaded — switch providers immediately, don't burn retries
-            if (status == 503 || status == 529)
+            // 429 / 503 / 529 = rate-limited or overloaded — switch providers immediately
+            // so the round-robin fallback can hand off to Gemini within a single round-trip
+            // instead of burning retries inside one provider for minutes (CLAUDE.md fail-fast rule).
+            if (status == 429 || status == 503 || status == 529)
             {
                 var body = await lastResponse.Content.ReadAsStringAsync();
                 throw new AiServiceOverloadedException("Claude",
                     new HttpRequestException($"HTTP {status}: {(body.Length > 200 ? body[..200] : body)}"));
             }
 
-            // Retryable: rate limit (429) or other server errors (5xx)
-            if (attempt < maxRetries && (status == 429 || status >= 500))
+            // Retryable inside the provider: transient 5xx (excluding 503/529).
+            if (attempt < maxRetries && status >= 500)
             {
                 var snippet = await lastResponse.Content.ReadAsStringAsync();
                 _log.LogWarning(

@@ -17,16 +17,20 @@ public class RoundRobinAiExtractionService : IAiExtractionService
     private readonly IAiExtractionService _a;
     private readonly IAiExtractionService _b;
     private readonly ILogger<RoundRobinAiExtractionService> _log;
+    private readonly TimeSpan _primaryTimeout;
     private long _counter = -1;
 
     public RoundRobinAiExtractionService(
         IAiExtractionService a,
         IAiExtractionService b,
-        ILogger<RoundRobinAiExtractionService> log)
+        ILogger<RoundRobinAiExtractionService> log,
+        IConfiguration? config = null)
     {
         _a = a;
         _b = b;
         _log = log;
+        var seconds = int.TryParse(config?["AI:PrimaryTimeoutSeconds"], out var s) ? s : 30;
+        _primaryTimeout = TimeSpan.FromSeconds(seconds);
     }
 
     public string ProviderName => $"round-robin({_a.ProviderName}, {_b.ProviderName})";
@@ -38,7 +42,7 @@ public class RoundRobinAiExtractionService : IAiExtractionService
             "ExtractRfq",
             primary,
             secondary,
-            svc => svc.ExtractRfqAsync(request, ct),
+            (svc, innerCt) => svc.ExtractRfqAsync(request, innerCt),
             ct);
     }
 
@@ -55,7 +59,7 @@ public class RoundRobinAiExtractionService : IAiExtractionService
             "ExtractPurchaseOrder",
             primary,
             secondary,
-            svc => svc.ExtractPurchaseOrderAsync(base64Pdf, fileName, emailBodyContext, emailSubject, jobRefs, ct),
+            (svc, innerCt) => svc.ExtractPurchaseOrderAsync(base64Pdf, fileName, emailBodyContext, emailSubject, jobRefs, innerCt),
             ct);
     }
 
@@ -65,24 +69,48 @@ public class RoundRobinAiExtractionService : IAiExtractionService
         return (n & 1) == 0 ? (_a, _b) : (_b, _a);
     }
 
+    /// <summary>
+    /// Tries the primary first. If it throws (after its own internal retries) OR doesn't
+    /// return within <see cref="_primaryTimeout"/>, falls over to the secondary. The
+    /// timeout exists because some SDK paths swallow 429s and retry internally for
+    /// minutes — we don't want a quota-throttled provider to block the request when the
+    /// other provider could answer in seconds (CLAUDE.md fail-fast rule).
+    /// </summary>
     private async Task<T> InvokeWithFallback<T>(
         string op,
         IAiExtractionService primary,
         IAiExtractionService secondary,
-        Func<IAiExtractionService, Task<T>> invoke,
+        Func<IAiExtractionService, CancellationToken, Task<T>> invoke,
         CancellationToken ct)
     {
         _log.LogInformation("[RoundRobin] Routing {Op} to {Primary}", op, primary.ProviderName);
-        try
+
+        using var primaryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var primaryTask = invoke(primary, primaryCts.Token);
+        var timeoutTask = Task.Delay(_primaryTimeout, ct);
+        var winner      = await Task.WhenAny(primaryTask, timeoutTask);
+
+        if (winner == primaryTask)
         {
-            return await invoke(primary);
+            try
+            {
+                return await primaryTask;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _log.LogWarning(ex,
+                    "[RoundRobin] {Primary} failed for {Op} — retrying on {Secondary}",
+                    primary.ProviderName, op, secondary.ProviderName);
+                return await invoke(secondary, ct);
+            }
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _log.LogWarning(ex,
-                "[RoundRobin] {Primary} failed for {Op} — retrying on {Secondary}",
-                primary.ProviderName, op, secondary.ProviderName);
-            return await invoke(secondary);
-        }
+
+        // Timeout fired first — cancel the primary (best-effort; if the SDK ignores
+        // cancellation it'll keep running but we'll move on) and fall over.
+        _log.LogWarning(
+            "[RoundRobin] {Primary} did not respond within {Timeout}s for {Op} — falling over to {Secondary}",
+            primary.ProviderName, _primaryTimeout.TotalSeconds, op, secondary.ProviderName);
+        primaryCts.Cancel();
+        return await invoke(secondary, ct);
     }
 }

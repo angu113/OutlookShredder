@@ -90,7 +90,7 @@ public class AiServiceFactory
             claude.ProviderName, gemini.ProviderName);
 
         var rrLog = _serviceProvider.GetRequiredService<ILogger<RoundRobinAiExtractionService>>();
-        return new RoundRobinAiExtractionService(claude, gemini, rrLog);
+        return new RoundRobinAiExtractionService(claude, gemini, rrLog, _serviceProvider.GetService<IConfiguration>());
     }
 
     private IAiExtractionService ResolveByName(string name) => name switch

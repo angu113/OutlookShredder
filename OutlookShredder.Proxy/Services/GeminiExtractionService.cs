@@ -359,9 +359,14 @@ public class GeminiExtractionService : IAiExtractionService
 
     private static bool IsOverloadException(Exception ex) =>
         ex is GeminiApiTimeoutException ||
-        ex.Message.Contains("503",          StringComparison.Ordinal) ||
-        ex.Message.Contains("high demand",  StringComparison.OrdinalIgnoreCase) ||
-        ex.Message.Contains("UNAVAILABLE",  StringComparison.OrdinalIgnoreCase);
+        ex.Message.Contains("503",                 StringComparison.Ordinal) ||
+        ex.Message.Contains("high demand",         StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("UNAVAILABLE",         StringComparison.OrdinalIgnoreCase) ||
+        // 429 / quota exhaustion: fail fast so the round-robin fallback can hand off
+        // to Claude immediately instead of looping inside Gemini for minutes.
+        ex.Message.Contains("429",                 StringComparison.Ordinal) ||
+        ex.Message.Contains("TooManyRequests",     StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("RESOURCE_EXHAUSTED",  StringComparison.OrdinalIgnoreCase);
 
     public async Task<PoExtraction?> ExtractPurchaseOrderAsync(
         string base64Pdf, string fileName, string emailBodyContext,
