@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -49,6 +49,7 @@ public class SharePointService
     private string? _messagesListId;         // Messages
     private string? _leaseListId;            // ProxyLease
     private string? _todoListId;             // ShredderTodos
+    private string? _stockNeededListId;      // StockNeeded
 
     // Per-SR next SliVersion cache — set at rowIndex==0 after soft-deleting stale rows;
     // looked up for all subsequent rows in the same batch so all rows share one version number.
@@ -11011,6 +11012,185 @@ public class SharePointService
         _log.LogInformation("[QC Analytics] Computed {Count} rows ({Extrapolated} extrapolated)",
             results.Count, results.Count(r => r.IsExtrapolated));
         return results;
+    }
+    // ── StockNeeded list ─────────────────────────────────────────────────────
+
+    public async Task EnsureStockNeededListAsync(CancellationToken ct = default)
+        => await GetOrCreateStockNeededListIdAsync(ct);
+
+    private async Task<string> GetOrCreateStockNeededListIdAsync(CancellationToken ct = default)
+    {
+        if (_stockNeededListId is not null) return _stockNeededListId;
+
+        var siteId    = await GetSiteIdAsync();
+        const string listName = "StockNeeded";
+
+        var existing = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (existing?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+            _log.LogInformation("[SP] StockNeeded list found: {Id}", listId);
+        }
+        else
+        {
+            var created = await GetGraph().Sites[siteId].Lists.PostAsync(new Microsoft.Graph.Models.List
+            {
+                DisplayName = listName,
+                ListProp    = new Microsoft.Graph.Models.ListInfo { Template = "genericList" }
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("StockNeeded list creation returned no ID");
+            _log.LogInformation("[SP] Created StockNeeded list: {Id}", listId);
+        }
+
+        var cols   = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var byName = (cols?.Value ?? [])
+            .Where(c => c.Name is not null)
+            .ToDictionary(c => c.Name!, c => c, StringComparer.OrdinalIgnoreCase);
+
+        var schema = new (string Name, string Type)[]
+        {
+            ("ProductSearchKey", "text"),
+            ("Category",         "text"),
+            ("Shape",            "text"),
+            ("QuantityNeeded",   "text"),
+            ("SizeRequested",    "text"),
+            ("Notes",            "note"),
+            ("RfqId",            "text"),
+        };
+
+        foreach (var (name, type) in schema)
+        {
+            if (byName.ContainsKey(name)) continue;
+            var def = type == "note"
+                ? new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } }
+                : new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text = new Microsoft.Graph.Models.TextColumn() };
+            await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
+            _log.LogInformation("[SP] Created StockNeeded column '{Col}'", name);
+        }
+
+        foreach (var colName in new[] { "RfqId", "ProductSearchKey" })
+        {
+            if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
+            if (col.Indexed == true) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Microsoft.Graph.Models.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not index StockNeeded column '{Col}'", colName); }
+        }
+
+        return _stockNeededListId = listId;
+    }
+
+    public async Task<List<StockNeededItem>> ReadStockNeededItemsAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateStockNeededListIdAsync(ct);
+        var items  = new List<StockNeededItem>();
+        string? nextLink = null;
+        do
+        {
+            Microsoft.Graph.Models.ListItemCollectionResponse? page;
+            if (nextLink is null)
+            {
+                page = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .GetAsync(r =>
+                    {
+                        r.QueryParameters.Expand = ["fields($select=Title,ProductSearchKey,Category,Shape,QuantityNeeded,SizeRequested,Notes,RfqId)"];
+                        r.QueryParameters.Top    = 500;
+                    }, ct);
+            }
+            else
+            {
+                page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                    nextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+            }
+            foreach (var item in page?.Value ?? [])
+            {
+                var fd = item.Fields?.AdditionalData;
+                if (fd is null) continue;
+                int.TryParse(item.Id, out var spId);
+                items.Add(new StockNeededItem
+                {
+                    SpItemId         = spId,
+                    ProductName      = GetStr(fd, "Title") ?? "",
+                    ProductSearchKey = GetStr(fd, "ProductSearchKey"),
+                    Category         = GetStr(fd, "Category"),
+                    Shape            = GetStr(fd, "Shape"),
+                    QuantityNeeded   = GetStr(fd, "QuantityNeeded"),
+                    SizeRequested    = GetStr(fd, "SizeRequested"),
+                    Notes            = GetStr(fd, "Notes"),
+                    RfqId            = GetStr(fd, "RfqId"),
+                    CreatedAt        = item.CreatedDateTime?.UtcDateTime ?? DateTime.UtcNow,
+                });
+            }
+            nextLink = page?.OdataNextLink;
+        } while (nextLink is not null);
+        return items;
+    }
+
+    public async Task<StockNeededItem> WriteStockNeededItemAsync(CreateStockNeededItemRequest req, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateStockNeededListIdAsync(ct);
+        var data   = new Dictionary<string, object?>
+        {
+            ["Title"]           = req.ProductName,
+            ["ProductSearchKey"] = req.ProductSearchKey,
+            ["Category"]        = req.Category,
+            ["Shape"]           = req.Shape,
+            ["QuantityNeeded"]  = req.QuantityNeeded,
+            ["SizeRequested"]   = req.SizeRequested,
+            ["Notes"]           = req.Notes,
+        };
+        var created = await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new Microsoft.Graph.Models.ListItem
+            {
+                Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }
+            }, null, ct);
+        int.TryParse(created?.Id, out var spId);
+        return new StockNeededItem
+        {
+            SpItemId         = spId,
+            ProductName      = req.ProductName,
+            ProductSearchKey = req.ProductSearchKey,
+            Category         = req.Category,
+            Shape            = req.Shape,
+            QuantityNeeded   = req.QuantityNeeded,
+            SizeRequested    = req.SizeRequested,
+            Notes            = req.Notes,
+            CreatedAt        = DateTime.UtcNow,
+        };
+    }
+
+    public async Task PatchStockNeededItemAsync(int spItemId, PatchStockNeededItemRequest req, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateStockNeededListIdAsync(ct);
+        var data   = new Dictionary<string, object?>();
+        if (req.ProductName      is not null) data["Title"]            = req.ProductName;
+        if (req.ProductSearchKey is not null) data["ProductSearchKey"] = req.ProductSearchKey;
+        if (req.Category         is not null) data["Category"]         = req.Category;
+        if (req.Shape            is not null) data["Shape"]            = req.Shape;
+        if (req.QuantityNeeded   is not null) data["QuantityNeeded"]   = req.QuantityNeeded;
+        if (req.SizeRequested    is not null) data["SizeRequested"]    = req.SizeRequested;
+        if (req.Notes            is not null) data["Notes"]            = req.Notes;
+        if (req.RfqId            is not null) data["RfqId"]            = req.RfqId;
+        if (data.Count == 0) return;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }, cancellationToken: ct);
+    }
+
+    public async Task DeleteStockNeededItemAsync(int spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateStockNeededListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()]
+            .DeleteAsync(cancellationToken: ct);
     }
 }
 
