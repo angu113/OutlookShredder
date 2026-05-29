@@ -251,9 +251,10 @@ public class ProductCatalogService : BackgroundService, ICacheStatusProvider
     {
         return _cache
             .Where(e => e.SearchKey != null && e.TkMetal != null && e.TkShape != null)
+            .GroupBy(e => e.SearchKey!, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
-                e => e.SearchKey!,
-                e => new OutlookShredder.Proxy.Models.ProductTokens
+                g => g.Key,
+                g => { var e = g.First(); return new OutlookShredder.Proxy.Models.ProductTokens
                 {
                     Name         = e.Name,
                     SearchKey    = e.SearchKey,
@@ -262,7 +263,7 @@ public class ProductCatalogService : BackgroundService, ICacheStatusProvider
                     TkAlloy      = e.TkAlloy,
                     TkTemper     = e.TkTemper,
                     TkConditions = e.TkConditions ?? [],
-                },
+                }; },
                 StringComparer.OrdinalIgnoreCase);
     }
 
