@@ -10899,6 +10899,11 @@ public class SharePointService
 
         var now = DateTime.UtcNow;
 
+        var outlierRatio    = double.TryParse(_config["QC:AnalyticsOutlierRatio"],
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var orv) ? orv : 3.0;
+        var outlierMinTokens = int.TryParse(_config["QC:AnalyticsOutlierMinTokens"], out var omv) ? omv : 4;
+
         // Recency weight: heavy on very recent, 1x for primary window, gentle decay in fallback zone
         double RecencyWeight(DateTime quoteDate)
         {
@@ -10913,6 +10918,30 @@ public class SharePointService
             var pSum = 0.0; var wSum = 0.0;
             foreach (var (p, w) in items) { pSum += p * w; wSum += w; }
             return wSum > 0 ? pSum / wSum : null;
+        }
+
+        // Iteratively reject tokens outside [median/outlierRatio, median*outlierRatio]
+        // until stable (no more removals), keeping at least 2 tokens.
+        // Skip the first pass entirely if group has < outlierMinTokens.
+        List<PricedSliToken> FilterOutliers(List<PricedSliToken> tokens)
+        {
+            if (tokens.Count < outlierMinTokens) return tokens;
+            var current = tokens;
+            while (current.Count >= 2)
+            {
+                var sorted = current.Select(t => t.PricePerPound).Order().ToArray();
+                var mid    = sorted.Length / 2;
+                var median = sorted.Length % 2 == 1
+                    ? sorted[mid]
+                    : (sorted[mid - 1] + sorted[mid]) / 2.0;
+                if (median <= 0) break;
+                var lo   = median / outlierRatio;
+                var hi   = median * outlierRatio;
+                var next = current.Where(t => t.PricePerPound >= lo && t.PricePerPound <= hi).ToList();
+                if (next.Count == current.Count) break;
+                current = next;
+            }
+            return current;
         }
 
         // 3. Compute analytics per QC row
@@ -10939,11 +10968,11 @@ public class SharePointService
             foreach (var c in impliedConditions) titleFilters.Add(c);
             var filtered = titleFilters.Count > 0;
 
-            var matched = priced
+            var matched = FilterOutliers(priced
                 .Where(p => qcMetals.Contains(p.TkMetal)
                          && qcShapes.Contains(p.TkShape)
                          && (!filtered || MatchesTitleFilter(p, titleFilters)))
-                .ToList();
+                .ToList());
 
             var primaryCount = matched.Count(p => (now - p.QuoteDate).TotalDays <= primaryDays);
             var newestAgeDays = matched.Count > 0
@@ -10962,7 +10991,7 @@ public class SharePointService
             else
             {
                 // Thin or no data — extrapolate from metal-category index
-                var metalPool = priced.Where(p => qcMetals.Contains(p.TkMetal)).ToList();
+                var metalPool = FilterOutliers(priced.Where(p => qcMetals.Contains(p.TkMetal)).ToList());
                 sharpPrice    = metalPool.Count > 0
                     ? WeightedAvg(metalPool.Select(p => (p.PricePerPound, RecencyWeight(p.QuoteDate))))
                     : null;
