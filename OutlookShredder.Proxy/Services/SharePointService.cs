@@ -6038,6 +6038,10 @@ public class SharePointService
         // which can be wrong when Claude misidentifies total vs per-unit weight).
         static double? DerivePerPound(Dictionary<string, object?> row, double? catWeightPerFoot = null)
         {
+            // PricePerPound first — direct extraction; immune to bad catalog-weight mismatches
+            var ppp = GetNum(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+
             var total  = GetNum(row, "TotalPrice");
             var qty    = GetNum(row, "UnitsQuoted") ?? GetNum(row, "UnitsRequested");
 
@@ -6057,9 +6061,6 @@ public class SharePointService
                     }
                 }
             }
-
-            var ppp = GetNum(row, "PricePerPound");
-            if (ppp is > 0) return ppp;
 
             var weight = GetNum(row, "WeightPerUnit");
             if (total is > 0 && qty is > 0 && weight is > 0)
@@ -10787,6 +10788,10 @@ public class SharePointService
 
         static double? DerivePerPound(Dictionary<string, object?> row, double? catWeightPerFoot = null)
         {
+            // PricePerPound first — direct extraction; immune to bad catalog-weight mismatches
+            var ppp = GetNum(row, "PricePerPound");
+            if (ppp is > 0) return ppp;
+
             var total = GetNum(row, "TotalPrice");
             var qty   = GetNum(row, "UnitsQuoted") ?? GetNum(row, "UnitsRequested");
 
@@ -10806,9 +10811,6 @@ public class SharePointService
                     }
                 }
             }
-
-            var ppp = GetNum(row, "PricePerPound");
-            if (ppp is > 0) return ppp;
 
             var weight = GetNum(row, "WeightPerUnit");
             if (total is > 0 && qty is > 0 && weight is > 0)
