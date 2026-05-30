@@ -70,8 +70,10 @@ internal static class PickingSlipEnricher
     private static readonly Regex _bendRegex =
         new(@"\bbend\s+([ULJZ])\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Numeric size code after the slash may be a single digit (e.g. HR/1), so allow \d{1,8};
+    // requiring 2+ digits silently dropped single-digit-MSPC products from detection.
     private static readonly Regex _mspcRegex =
-        new(@"^[A-Z][A-Z0-9]{0,9}/\d{2,8}", RegexOptions.Compiled);
+        new(@"^[A-Z][A-Z0-9]{0,9}/\d{1,8}", RegexOptions.Compiled);
 
     private static readonly Regex _bLineRegex =
         new(@"^B:\s", RegexOptions.Compiled);
