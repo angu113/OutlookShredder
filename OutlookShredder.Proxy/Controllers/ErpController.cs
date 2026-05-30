@@ -110,6 +110,64 @@ public class ErpController : ControllerBase
         }
     }
 
+    public sealed class ProductBoxesRequest
+    {
+        public string? Url { get; set; }
+        public string? DocType { get; set; }
+        public List<ProductBoxLineItem>? LineItems { get; set; }
+    }
+
+    public sealed class ProductBoxLineItem
+    {
+        public string? Code { get; set; }
+        public string? Description { get; set; }
+    }
+
+    /// <summary>
+    /// Returns an anchor box per product found in the PDF so the UI can render a "+ Stock"
+    /// marker beside each one. Picking slips are detected by the leading MSPC code; other
+    /// doc types are matched against the supplied line items. url may be an SP HTTPS URL or
+    /// an absolute local file path.
+    /// </summary>
+    [HttpPost("/api/erp/product-boxes")]
+    public async Task<IActionResult> GetProductBoxes([FromBody] ProductBoxesRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.Url))
+            return BadRequest(new { error = "url is required" });
+
+        try
+        {
+            var bytes = req.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? await _sp.DownloadSpFileAsync(req.Url, ct)
+                : await System.IO.File.ReadAllBytesAsync(req.Url, ct);
+
+            var hints = (req.LineItems ?? new())
+                .Select(li => new PickingSlipEnricher.ProductHint(li.Code, li.Description))
+                .ToList();
+
+            var boxes = PickingSlipEnricher.ExtractProductBoxes(bytes, req.DocType, hints);
+
+            return Ok(new
+            {
+                products = boxes.Select(b => new
+                {
+                    pageIndex   = b.PageIndex,
+                    leftFrac    = Math.Round(b.LeftFrac,   4),
+                    topFrac     = Math.Round(b.TopFrac,    4),
+                    widthFrac   = Math.Round(b.WidthFrac,  4),
+                    heightFrac  = Math.Round(b.HeightFrac, 4),
+                    productName = b.ProductName,
+                    mspc        = b.Mspc,
+                }).ToList(),
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[ERP] product-boxes failed for {Url}", req.Url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Returns page count and dimensions (points + inches) for any PDF.
     /// url may be a SharePoint HTTPS URL or an absolute local file path.

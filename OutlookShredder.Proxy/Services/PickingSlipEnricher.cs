@@ -931,6 +931,132 @@ internal static class PickingSlipEnricher
         return null;
     }
 
+    // ── Product-box detection (for the WPF "+ Stock" decorators) ──────────────
+
+    /// <summary>Anchor box for one product found on a PDF page (top-left origin fractions).</summary>
+    public sealed record ProductBox(
+        int PageIndex, double LeftFrac, double TopFrac, double WidthFrac, double HeightFrac,
+        string ProductName, string? Mspc);
+
+    /// <summary>A known line item from the ERP document, used to locate non-picking-slip products.</summary>
+    public sealed record ProductHint(string? Code, string? Description);
+
+    private static readonly HashSet<string> _productDocTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "PickingSlip", "Invoice", "SalesOrder", "Quotation" };
+
+    /// <summary>
+    /// Finds an anchor box per product on each page so the UI can render a "+ Stock" marker
+    /// beside it. Picking slips are detected by the MSPC code at the start of each product row;
+    /// invoices/sales-orders/quotes are matched against the document's known line items.
+    /// Returns top-left-origin fractional bounds (same convention as ExtractDescriptionBoxBounds).
+    /// </summary>
+    public static List<ProductBox> ExtractProductBoxes(
+        byte[] pdfBytes, string? docType, IReadOnlyList<ProductHint>? hints)
+    {
+        var result = new List<ProductBox>();
+        if (docType is null || !_productDocTypes.Contains(docType))
+            return result;
+
+        bool isPickingSlip = docType.Equals("PickingSlip", StringComparison.OrdinalIgnoreCase);
+
+        using var pigDoc = PigDoc.Open(pdfBytes);
+
+        if (isPickingSlip)
+        {
+            for (int p = 1; p <= pigDoc.NumberOfPages; p++)
+            {
+                var page  = pigDoc.GetPage(p);
+                double pigW = page.Width, pigH = page.Height;
+                foreach (var line in GroupIntoLines(page.GetWords().ToList()))
+                {
+                    var text = line.Text.Trim();
+                    if (!_mspcRegex.IsMatch(text)) continue;
+                    var mspc = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    result.Add(MakeBox(p - 1, line, pigW, pigH, text, mspc));
+                }
+            }
+            return result;
+        }
+
+        // Invoice / SalesOrder / Quotation: match the document's known line items to PDF lines.
+        if (hints is null || hints.Count == 0) return result;
+
+        for (int p = 1; p <= pigDoc.NumberOfPages; p++)
+        {
+            var page  = pigDoc.GetPage(p);
+            double pigW = page.Width, pigH = page.Height;
+            var lines = GroupIntoLines(page.GetWords().ToList());
+            var usedLineKeys = new HashSet<double>();
+
+            foreach (var hint in hints)
+            {
+                var match = FindLineForHint(lines, hint, usedLineKeys);
+                if (match is null) continue;
+                usedLineKeys.Add(Math.Round(match.Y, 1));
+                var name = !string.IsNullOrWhiteSpace(hint.Description) ? hint.Description!.Trim() : match.Text.Trim();
+                result.Add(MakeBox(p - 1, match, pigW, pigH, name, null));
+            }
+        }
+        return result;
+    }
+
+    private static ProductBox MakeBox(
+        int pageIndex, TextLine line, double pigW, double pigH, string name, string? mspc)
+    {
+        double topFrac = (pigH - (line.Y + line.Height)) / pigH;
+        return new ProductBox(
+            pageIndex,
+            line.X / pigW,
+            topFrac,
+            line.Width / pigW,
+            line.Height / pigH,
+            name,
+            mspc);
+    }
+
+    private static TextLine? FindLineForHint(
+        List<TextLine> lines, ProductHint hint, HashSet<double> usedLineKeys)
+    {
+        // Prefer an exact code hit (codes are distinctive enough to anchor on).
+        if (!string.IsNullOrWhiteSpace(hint.Code) && hint.Code!.Trim().Length >= 3)
+        {
+            var code = hint.Code.Trim();
+            var byCode = lines.FirstOrDefault(l =>
+                !usedLineKeys.Contains(Math.Round(l.Y, 1)) &&
+                l.Text.Contains(code, StringComparison.OrdinalIgnoreCase));
+            if (byCode is not null) return byCode;
+        }
+
+        // Else fuzzy-match the description by shared significant tokens.
+        var hintTokens = Tokenize(hint.Description);
+        if (hintTokens.Count == 0) return null;
+
+        TextLine? best = null;
+        int bestShared = 0;
+        foreach (var line in lines)
+        {
+            if (usedLineKeys.Contains(Math.Round(line.Y, 1))) continue;
+            var lineTokens = Tokenize(line.Text);
+            if (lineTokens.Count == 0) continue;
+            int shared = hintTokens.Count(t => lineTokens.Contains(t));
+            if (shared > bestShared) { bestShared = shared; best = line; }
+        }
+        // Require a couple of shared tokens so we don't anchor on a stray header word.
+        return bestShared >= Math.Min(2, hintTokens.Count) ? best : null;
+    }
+
+    private static HashSet<string> Tokenize(string? text)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(text)) return set;
+        foreach (var raw in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var t = new string(raw.Where(char.IsLetterOrDigit).ToArray());
+            if (t.Length >= 2) set.Add(t);
+        }
+        return set;
+    }
+
     // ── Legacy public methods (kept for isolated call-sites) ──────────────────
 
     /// <summary>
