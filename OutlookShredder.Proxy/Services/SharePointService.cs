@@ -11059,6 +11059,7 @@ public class SharePointService
             ("SizeRequested",    "text"),
             ("Notes",            "note"),
             ("RfqId",            "text"),
+            ("CreatedBy",        "text"),
         };
 
         foreach (var (name, type) in schema)
@@ -11100,7 +11101,7 @@ public class SharePointService
                 page = await GetGraph().Sites[siteId].Lists[listId].Items
                     .GetAsync(r =>
                     {
-                        r.QueryParameters.Expand = ["fields($select=Title,ProductSearchKey,Category,Shape,QuantityNeeded,SizeRequested,Notes,RfqId)"];
+                        r.QueryParameters.Expand = ["fields($select=Title,ProductSearchKey,Category,Shape,QuantityNeeded,SizeRequested,Notes,RfqId,CreatedBy)"];
                         r.QueryParameters.Top    = 500;
                     }, ct);
             }
@@ -11126,6 +11127,7 @@ public class SharePointService
                     Notes            = GetStr(fd, "Notes"),
                     RfqId            = GetStr(fd, "RfqId"),
                     CreatedAt        = item.CreatedDateTime?.UtcDateTime ?? DateTime.UtcNow,
+                    CreatedBy        = GetStr(fd, "CreatedBy"),
                 });
             }
             nextLink = page?.OdataNextLink;
@@ -11146,6 +11148,7 @@ public class SharePointService
             ["QuantityNeeded"]  = req.QuantityNeeded,
             ["SizeRequested"]   = req.SizeRequested,
             ["Notes"]           = req.Notes,
+            ["CreatedBy"]       = req.CreatedBy,
         };
         var created = await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new Microsoft.Graph.Models.ListItem
@@ -11164,6 +11167,7 @@ public class SharePointService
             SizeRequested    = req.SizeRequested,
             Notes            = req.Notes,
             CreatedAt        = DateTime.UtcNow,
+            CreatedBy        = req.CreatedBy,
         };
     }
 

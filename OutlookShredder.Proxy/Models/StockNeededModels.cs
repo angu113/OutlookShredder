@@ -12,6 +12,7 @@ public class StockNeededItem
     public string? Notes            { get; set; }
     public string? RfqId            { get; set; }
     public DateTime CreatedAt       { get; set; }
+    public string? CreatedBy        { get; set; }
 }
 
 public class CreateStockNeededItemRequest
@@ -23,6 +24,7 @@ public class CreateStockNeededItemRequest
     public string? QuantityNeeded   { get; set; }
     public string? SizeRequested    { get; set; }
     public string? Notes            { get; set; }
+    public string? CreatedBy        { get; set; }
 }
 
 public class PatchStockNeededItemRequest
