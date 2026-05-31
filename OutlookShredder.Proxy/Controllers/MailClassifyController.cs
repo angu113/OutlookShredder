@@ -255,6 +255,18 @@ public sealed class MailClassifyController : ControllerBase
         public string? Hint { get; set; }
     }
 
+    /// <summary>Retire a confirmed custom leaf: delete its hint(s) and re-file its items to Other.</summary>
+    [HttpPost("remove-leaf")]
+    public async Task<IActionResult> RemoveLeaf([FromBody] RemoveLeafRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.CategoryPath))
+            return BadRequest(new { error = "categoryPath is required." });
+        try { return Ok(await _workbench.RemoveLeafAsync(req.CategoryPath.Trim(), ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public sealed class RemoveLeafRequest { public string CategoryPath { get; set; } = ""; }
+
     /// <summary>The operator-confirmed hints currently shaping the classifier prompt (dev inspection).</summary>
     [HttpGet("hints")]
     public async Task<IActionResult> Hints(CancellationToken ct) =>

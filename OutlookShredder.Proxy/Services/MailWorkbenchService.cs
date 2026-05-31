@@ -486,6 +486,47 @@ public sealed class MailWorkbenchService
         return await AmendAsync(mailItemId, categoryPath, $"Confirmed emergent leaf '{categoryPath}'" + (string.IsNullOrWhiteSpace(hint) ? "" : $": {hint}"), ct);
     }
 
+    /// <summary>
+    /// Retires a confirmed custom leaf (path + any sub-paths): deletes its SP hints and re-files every
+    /// item currently under it back to "Other" (new classification version, non-destructive). Returns
+    /// how many hint rows were removed and items re-filed.
+    /// </summary>
+    public async Task<object> RemoveLeafAsync(string categoryPath, CancellationToken ct = default)
+    {
+        var path = (categoryPath ?? "").Trim().Trim('/');
+        if (path.Length == 0) throw new ArgumentException("categoryPath is required.");
+        var hintsRemoved = await _taxonomy.RemoveLeafAsync(path, ct);
+
+        var prefix   = path + "/";
+        var currents = await _sp.ReadCurrentClassificationsAsync(ct);
+        var victims  = currents.Where(c => string.Equals(c.CategoryPath, path, StringComparison.OrdinalIgnoreCase)
+                                           || c.CategoryPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList();
+        var refiled = 0;
+        foreach (var c in victims)
+        {
+            var result = new MailClassificationResult
+            {
+                Category    = "Other",
+                Confidence  = 1.0,
+                Keywords    = (c.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList(),
+                Reasoning   = $"Taxonomy leaf '{path}' was removed; re-filed to Other.",
+                AiProvider  = "system",
+                AiModel     = "remove-leaf",
+                RawResponse = "{}",
+            };
+            try
+            {
+                var version = await _sp.WriteClassificationAsync(c.MailItemId, result, ct);
+                await MoveItemFilesAsync(c.MailItemId, c.CategoryPath, "Other", ct);
+                CacheAndPublishClass("Amended", c.MailItemId, result, version);
+                refiled++;
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] remove-leaf re-file failed {Id}", c.MailItemId); }
+        }
+        _log.LogInformation("[MailWB] remove-leaf '{Path}': {Hints} hints, {Refiled} items re-filed", path, hintsRemoved, refiled);
+        return new { hintsRemoved, refiled };
+    }
+
     private static readonly object _feedbackLock = new();
 
     /// <summary>Path to the local prompt-tuning feedback log (dev machine; survives reinstall).</summary>
@@ -631,7 +672,11 @@ public sealed class MailWorkbenchService
             projTop.Open  = projTop.Subs.Sum(s => s.Open);
             tops.Add(projTop);
         }
-        return tops;
+        // Alphabetical top order, but "Other" is always pinned last.
+        return tops
+            .OrderBy(t => string.Equals(t.Name, "Other", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     // ── Supplier grouping (third virtual level under Supplier leaves) ─────────────────

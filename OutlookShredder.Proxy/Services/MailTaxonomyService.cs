@@ -118,4 +118,20 @@ public sealed class MailTaxonomyService
         _validPaths = _leaves.Select(l => l.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         _log.LogInformation("[MailTaxonomy] leaf added in-memory: {Path}", path);
     }
+
+    /// <summary>Retires a confirmed custom leaf: deletes its SP hint rows (path + any sub-paths) and drops
+    /// the matching leaves from the in-memory set immediately. Returns the number of hint rows removed.</summary>
+    public async Task<int> RemoveLeafAsync(string categoryPath, CancellationToken ct = default)
+    {
+        var path = (categoryPath ?? "").Trim().Trim('/');
+        if (path.Length == 0) return 0;
+        var removed = await _sp.DeleteTaxonomyHintsAsync(path, ct);
+        var prefix  = path + "/";
+        _leaves     = _leaves.Where(l => !(string.Equals(l.Path, path, StringComparison.OrdinalIgnoreCase)
+                                           || l.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToList();
+        _validPaths = _leaves.Select(l => l.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _loadedAt   = DateTimeOffset.MinValue;   // reconcile from SP on next use
+        _log.LogInformation("[MailTaxonomy] removed leaf '{Path}' ({N} hint row(s))", path, removed);
+        return removed;
+    }
 }

@@ -168,6 +168,27 @@ public partial class SharePointService
         _log.LogInformation("[MailWB] taxonomy hint added: {Path} ({Source})", categoryPath, source);
     }
 
+    /// <summary>Deletes taxonomy-hint rows whose CategoryPath equals <paramref name="path"/> or sits under it
+    /// (path + "/"). Returns the number removed. Used to retire a confirmed custom leaf.</summary>
+    public async Task<int> DeleteTaxonomyHintsAsync(string path, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailHintsList);
+        var rows = await ReadAllListItemsAsync(MailHintsList, ["CategoryPath"], null, ct);
+        var prefix = path.TrimEnd('/') + "/";
+        var removed = 0;
+        foreach (var f in rows)
+        {
+            var cp = GetStr(f, "CategoryPath") ?? "";
+            if (!(string.Equals(cp, path, StringComparison.OrdinalIgnoreCase) || cp.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) continue;
+            var spId = GetStr(f, "__spId");
+            if (spId is null) continue;
+            try { await GetGraph().Sites[siteId].Lists[listId].Items[spId].DeleteAsync(cancellationToken: ct); removed++; }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] hint delete failed {Cp}", cp); }
+        }
+        return removed;
+    }
+
     private async Task IndexListColumnsAsync(string siteId, string listName, params string[] colNames)
     {
         var listId = await ResolveListIdAsync(listName);
