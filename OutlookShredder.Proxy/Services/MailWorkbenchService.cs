@@ -19,16 +19,17 @@ public sealed class MailWorkbenchService
     private readonly MailTaxonomyService _taxonomy;
     private readonly MailCacheService _cache;
     private readonly RfqNotificationService _notify;
+    private readonly SupplierCacheService _suppliers;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
     private readonly string _archiveRoot;
 
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
-        RfqNotificationService notify, IConfiguration config, ILogger<MailWorkbenchService> log)
+        RfqNotificationService notify, SupplierCacheService suppliers, IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
-        _cache = cache; _notify = notify; _log = log;
+        _cache = cache; _notify = notify; _suppliers = suppliers; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -515,6 +516,9 @@ public sealed class MailWorkbenchService
     {
         var (items, currents) = await GetSnapshotAsync(ct);
         var completedById = items.ToDictionary(i => i.MailItemId, i => i.Completed, StringComparer.Ordinal);
+        var itemsById     = items.GroupBy(i => i.MailItemId, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        var currentsByCat = currents.GroupBy(c => c.CategoryPath, StringComparer.OrdinalIgnoreCase)
+                                     .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
         // count per CategoryPath
         var counts = new Dictionary<string, (int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
@@ -550,11 +554,16 @@ public sealed class MailWorkbenchService
             }
 
             // Real sub-leaves (alphabetical).
+            var isSupplier = string.Equals(top, "Supplier", StringComparison.OrdinalIgnoreCase);
             foreach (var leaf in leaves.Where(l => l.Top == top && !string.IsNullOrEmpty(l.Sub))
                                        .OrderBy(l => l.Sub, StringComparer.OrdinalIgnoreCase))
             {
                 counts.TryGetValue(leaf.Path, out var c);
-                node.Subs.Add(new TreeNode { Name = leaf.Sub, Path = leaf.Path, Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed });
+                var child = new TreeNode { Name = leaf.Sub, Path = leaf.Path, Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed };
+                // Third level: group a Supplier leaf's mail by sender (catalog name, else sender name / domain).
+                if (isSupplier && c.Total > 0 && currentsByCat.TryGetValue(leaf.Path, out var leafCurrents))
+                    child.Children = BuildSupplierChildren(leaf.Path, leafCurrents, itemsById, completedById);
+                node.Subs.Add(child);
                 node.Total += c.Total; node.Open += c.Total - c.Completed;
             }
 
@@ -579,10 +588,75 @@ public sealed class MailWorkbenchService
         return tops;
     }
 
+    // ── Supplier grouping (third virtual level under Supplier leaves) ─────────────────
+
+    /// <summary>The grouping key for a sender: its email domain (stable; lower-cased).</summary>
+    private static string SupplierDomain(string? fromAddress)
+    {
+        var a = fromAddress ?? "";
+        var at = a.LastIndexOf('@');
+        return at >= 0 && at < a.Length - 1 ? a[(at + 1)..].Trim().ToLowerInvariant() : "";
+    }
+
+    private static string? MostCommon(List<string> xs) =>
+        xs.Where(s => !string.IsNullOrWhiteSpace(s))
+          .GroupBy(s => s.Trim(), StringComparer.OrdinalIgnoreCase)
+          .OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
+
+    /// <summary>
+    /// Display name + catalog-resolution for a sender domain: catalog supplier name when known
+    /// (DomainMap → token-substring), otherwise the sender's display name (e.g. "The Home Depot"),
+    /// otherwise the bare domain. Uncatalogued senders are still named so they surface as their own leaf.
+    /// </summary>
+    private (string Display, bool Resolved) ResolveSupplierDisplay(string domain, List<string> fromNames)
+    {
+        if (domain.Length == 0)
+            return (MostCommon(fromNames) ?? "(unknown sender)", false);
+        if (_suppliers.DomainMap.TryGetValue(domain, out var nm) && !string.IsNullOrWhiteSpace(nm)) return (nm, true);
+        var sub = _suppliers.ResolveByDomainSubstring(domain);
+        if (!string.IsNullOrWhiteSpace(sub)) return (sub, true);
+        return (MostCommon(fromNames) ?? domain, false);
+    }
+
+    private List<TreeNode> BuildSupplierChildren(string leafPath, List<MailClassRow> leafCurrents,
+        Dictionary<string, MailItemRow> itemsById, Dictionary<string, bool> completedById)
+    {
+        var groups = new Dictionary<string, (List<string> Names, int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in leafCurrents)
+        {
+            if (!itemsById.TryGetValue(c.MailItemId, out var it)) continue;
+            var domain = SupplierDomain(it.FromAddress);
+            completedById.TryGetValue(c.MailItemId, out var done);
+            if (!groups.TryGetValue(domain, out var g)) g = (new List<string>(), 0, 0);
+            if (!string.IsNullOrWhiteSpace(it.FromName)) g.Names.Add(it.FromName);
+            g.Total++; if (done) g.Completed++;
+            groups[domain] = g;
+        }
+
+        var result = new List<TreeNode>();
+        foreach (var (domain, g) in groups)
+        {
+            var (display, resolved) = ResolveSupplierDisplay(domain, g.Names);
+            result.Add(new TreeNode
+            {
+                Name = display, Path = $"{leafPath}|sup:{domain}",
+                Total = g.Total, Completed = g.Completed, Open = g.Total - g.Completed,
+                Resolved = resolved,
+            });
+        }
+        // Catalog-matched suppliers first, then alphabetical.
+        return result.OrderByDescending(n => n.Resolved).ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     /// <summary>Items currently classified under a taxonomy path.</summary>
     public async Task<List<WorkbenchItem>> GetItemsAsync(string category, bool includeCompleted, CancellationToken ct = default)
     {
         var (items, allCurrents) = await GetSnapshotAsync(ct);
+
+        // Virtual supplier bucket "{category}|sup:{domain}" → that leaf's items from the given sender domain.
+        string? supDomain = null;
+        var supIdx = category.IndexOf("|sup:", StringComparison.Ordinal);
+        if (supIdx >= 0) { supDomain = category[(supIdx + 5)..]; category = category[..supIdx]; }
 
         // Virtual suggested bucket "Other:<label>" → Other items whose emergent AI label matches.
         var suggLabel = category.StartsWith("Other:", StringComparison.Ordinal) ? category["Other:".Length..] : null;
@@ -598,6 +672,7 @@ public sealed class MailWorkbenchService
         {
             if (!currents.TryGetValue(i.MailItemId, out var c)) continue;
             if (!includeCompleted && i.Completed) continue;
+            if (supDomain is not null && !SupplierDomain(i.FromAddress).Equals(supDomain, StringComparison.OrdinalIgnoreCase)) continue;
             list.Add(new WorkbenchItem
             {
                 MailItemId = i.MailItemId, Subject = i.Subject, FromAddress = i.FromAddress, FromName = i.FromName,
@@ -1098,6 +1173,10 @@ public sealed class MailWorkbenchService
         public int Completed { get; set; }
         /// <summary>AI-proposed Other sub-label not yet confirmed as a real leaf — rendered muted in the UI.</summary>
         public bool Suggested { get; set; }
+        /// <summary>True when this supplier node maps to a catalog supplier; false = uncatalogued (call-out candidate).</summary>
+        public bool Resolved { get; set; } = true;
+        /// <summary>Third-level virtual supplier groupings (populated under Supplier sub-leaves).</summary>
+        public List<TreeNode> Children { get; set; } = [];
     }
 
     public sealed class WorkbenchItem
