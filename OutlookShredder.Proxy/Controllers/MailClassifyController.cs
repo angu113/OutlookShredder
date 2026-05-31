@@ -106,6 +106,15 @@ public sealed class MailClassifyController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
+    /// <summary>Full reset (dev): delete all items+classifications, clear claim categories, remove stored files. Follow with backfill.</summary>
+    [HttpPost("purge")]
+    public async Task<IActionResult> Purge([FromQuery] string? upn, CancellationToken ct)
+    {
+        var u = string.IsNullOrWhiteSpace(upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : upn;
+        if (string.IsNullOrWhiteSpace(u)) return BadRequest(new { error = "No watched mailbox configured." });
+        return Ok(await _workbench.PurgeAsync(u, ct));
+    }
+
     /// <summary>Safety-net dedup sweep: remove MailItems sharing a WrapperGraphId (cross-proxy claim race).</summary>
     [HttpPost("dedup")]
     public async Task<IActionResult> Dedup(CancellationToken ct) => Ok(new { removed = await _workbench.DedupMailItemsAsync(ct) });

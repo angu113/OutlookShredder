@@ -46,6 +46,9 @@ public sealed class MailboxBridgeService : BackgroundService
         // Ids classified as "not a forward-as-attachment" (inline forwards etc.) so they
         // are ignored per the product rule and never re-fetched on subsequent polls.
         public readonly HashSet<string> Skipped = new(StringComparer.Ordinal);
+        // Wrapper ids already parsed + cached (cache keys are composite "{wrapperId}#{index}" for
+        // multi-.eml forwards, so we track parsed wrappers separately from the ById cache).
+        public readonly HashSet<string> ParsedWrappers = new(StringComparer.Ordinal);
         // Newest receivedDateTime processed — drives incremental polling (fetch only mail at/after
         // this minus an overlap). Null until the first seed poll has run.
         public DateTimeOffset? HighWater;
@@ -186,21 +189,8 @@ public sealed class MailboxBridgeService : BackgroundService
                 continue;
 
             bool known, skipped;
-            lock (state.Lock) { known = state.ById.ContainsKey(m.Id); skipped = state.Skipped.Contains(m.Id); }
-
-            if (known)
-            {
-                // Keep read-state fresh without re-parsing the MIME.
-                lock (state.Lock)
-                {
-                    if (state.ById.TryGetValue(m.Id, out var c))
-                    {
-                        c.Header.IsRead = m.IsRead == true;
-                        c.Body.IsRead   = m.IsRead == true;
-                    }
-                }
-                continue;
-            }
+            lock (state.Lock) { known = state.ParsedWrappers.Contains(m.Id); skipped = state.Skipped.Contains(m.Id); }
+            if (known) continue;     // wrapper already parsed + cached this session
             if (skipped) continue;
 
             // Forward-as-attachment always carries the original as an .eml attachment, so a
@@ -213,10 +203,10 @@ public sealed class MailboxBridgeService : BackgroundService
 
             try
             {
-                var parsed = await ParseMirrorMessageAsync(cfg.DestinationUpn, m, ct);
+                var parsedList = await ParseMirrorMessagesAsync(cfg.DestinationUpn, m, ct);
                 lock (state.Lock)
                 {
-                    if (parsed is null)
+                    if (parsedList.Count == 0)
                     {
                         // Has attachments but no embedded message/rfc822 — an inline forward
                         // whose original carried files. Not a relayed message; ignore it.
@@ -224,7 +214,8 @@ public sealed class MailboxBridgeService : BackgroundService
                     }
                     else
                     {
-                        state.ById[m.Id] = parsed;
+                        state.ParsedWrappers.Add(m.Id);
+                        foreach (var p in parsedList) state.ById[p.Header.Id] = p;
                         PruneCache(state);
                     }
                 }
@@ -248,6 +239,7 @@ public sealed class MailboxBridgeService : BackgroundService
         lock (state.Lock)
         {
             state.Skipped.IntersectWith(pageIds);
+            state.ParsedWrappers.IntersectWith(pageIds);
 
             // Advance the high-water mark to the newest message seen this poll (incremental polls
             // re-fetch the overlap window, so this only moves forward).
@@ -264,60 +256,59 @@ public sealed class MailboxBridgeService : BackgroundService
     }
 
     /// <summary>
-    /// Fetches the wrapper message's raw MIME and parses the embedded original (message/rfc822)
-    /// produced by "Forward as attachment". Returns null when there is no embedded message —
-    /// the folder also receives inline forwards, which serve a different purpose and are ignored.
+    /// Fetches the wrapper MIME and parses EVERY embedded original (message/rfc822) — a single
+    /// forward may carry multiple .eml attachments (bulk history import). Returns one CachedMessage
+    /// per embedded email, each with a composite id "{wrapperId}#{index}" (the bare wrapper id when
+    /// there is exactly one, for backward-compatibility) and the embedded email's own Internet
+    /// Message-ID (the global dedup key). Empty list ⇒ inline forward (ignored).
     /// </summary>
-    private async Task<CachedMessage?> ParseMirrorMessageAsync(string destUpn, Message wrapper, CancellationToken ct)
+    private async Task<List<CachedMessage>> ParseMirrorMessagesAsync(string destUpn, Message wrapper, CancellationToken ct)
     {
         await using var mime = await GetGraph().Users[destUpn].Messages[wrapper.Id!].Content.GetAsync(cancellationToken: ct)
             ?? throw new InvalidOperationException("Graph returned no MIME content");
         var wrapperMsg = await MimeMessage.LoadAsync(mime, ct);
 
-        // Only true forward-as-attachment messages carry the original as an embedded
-        // message/rfc822 part. No embedded message ⇒ inline forward ⇒ ignore.
-        var src = FindEmbeddedMessage(wrapperMsg.Body);
-        if (src is null) return null;
+        var embedded = FindAllEmbeddedMessages(wrapperMsg.Body);
+        if (embedded.Count == 0) return [];
 
-        var fromMb = src.From?.Mailboxes?.FirstOrDefault();
-        var receivedIso = (wrapper.ReceivedDateTime ?? src.Date).ToString("o");
-        var bodyText = ExtractPlainBody(src);
-        var attachments = src.Attachments
-            .OfType<MimePart>()
-            .Select(p => new MailboxAttachmentMeta
+        var result = new List<CachedMessage>(embedded.Count);
+        for (int i = 0; i < embedded.Count; i++)
+        {
+            var src    = embedded[i];
+            var id     = embedded.Count == 1 ? wrapper.Id! : $"{wrapper.Id}#{i}";
+            var fromMb = src.From?.Mailboxes?.FirstOrDefault();
+            var receivedIso = (wrapper.ReceivedDateTime ?? src.Date).ToString("o");
+            var bodyText = ExtractPlainBody(src);
+            var attachments = src.Attachments
+                .OfType<MimePart>()
+                .Select(p => new MailboxAttachmentMeta
+                {
+                    Name        = p.FileName ?? p.ContentType?.Name ?? "attachment",
+                    ContentType = p.ContentType?.MimeType ?? "application/octet-stream",
+                    Size        = p.ContentDisposition?.Size ?? 0,
+                })
+                .ToList();
+            var subject = src.Subject ?? wrapper.Subject ?? "(no subject)";
+
+            result.Add(new CachedMessage
             {
-                Name        = p.FileName ?? p.ContentType?.Name ?? "attachment",
-                ContentType = p.ContentType?.MimeType ?? "application/octet-stream",
-                Size        = p.ContentDisposition?.Size ?? 0,
-            })
-            .ToList();
-
-        var subject = src.Subject ?? wrapper.Subject ?? "(no subject)";
-        var header = new MailboxMessageHeader
-        {
-            Id             = wrapper.Id!,
-            Subject        = subject,
-            FromAddress    = fromMb?.Address ?? "",
-            FromName       = fromMb?.Name ?? "",
-            ReceivedAt     = receivedIso,
-            IsRead         = wrapper.IsRead == true,
-            HasAttachments = attachments.Count > 0,
-            Preview        = Truncate(bodyText, 200),
-        };
-        var body = new MailboxMessageBody
-        {
-            Id          = wrapper.Id!,
-            Subject     = subject,
-            FromAddress = fromMb?.Address ?? "",
-            FromName    = fromMb?.Name ?? "",
-            ToLine      = src.To?.ToString() ?? "",
-            CcLine      = src.Cc?.ToString() ?? "",
-            ReceivedAt  = receivedIso,
-            IsRead      = wrapper.IsRead == true,
-            BodyText    = bodyText,
-            Attachments = attachments,
-        };
-        return new CachedMessage { Header = header, Body = body };
+                Header = new MailboxMessageHeader
+                {
+                    Id = id, Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
+                    ReceivedAt = receivedIso, IsRead = wrapper.IsRead == true,
+                    HasAttachments = attachments.Count > 0, Preview = Truncate(bodyText, 200),
+                },
+                Body = new MailboxMessageBody
+                {
+                    Id = id, InternetMessageId = src.MessageId ?? "",
+                    Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
+                    ToLine = src.To?.ToString() ?? "", CcLine = src.Cc?.ToString() ?? "",
+                    ReceivedAt = receivedIso, IsRead = wrapper.IsRead == true,
+                    BodyText = bodyText, Attachments = attachments,
+                },
+            });
+        }
+        return result;
     }
 
     // ── Public read facade (called by MailboxController) ─────────────────────────
@@ -401,8 +392,8 @@ public sealed class MailboxBridgeService : BackgroundService
                     continue;   // already claimed/processed by some proxy
                 try
                 {
-                    var parsed = await ParseMirrorMessageAsync(cfg.DestinationUpn, m, ct);
-                    if (parsed is not null) result.Add(parsed.Body);
+                    foreach (var p in await ParseMirrorMessagesAsync(cfg.DestinationUpn, m, ct))
+                        result.Add(p.Body);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex) { _log.LogWarning(ex, "[MailboxBridge] backfill parse failed for {Id}", m.Id); }
@@ -424,10 +415,12 @@ public sealed class MailboxBridgeService : BackgroundService
         if (!_states.TryGetValue(watchedUpn, out var s)) return null;
         var destUpn = s.Config.DestinationUpn;
 
-        await using var mime = await GetGraph().Users[destUpn].Messages[messageId].Content.GetAsync(cancellationToken: ct);
+        var (wrapperId, index) = SplitId(messageId);
+        await using var mime = await GetGraph().Users[destUpn].Messages[wrapperId].Content.GetAsync(cancellationToken: ct);
         if (mime is null) return null;
         var wrapperMsg = await MimeMessage.LoadAsync(mime, ct);
-        var src = FindEmbeddedMessage(wrapperMsg.Body) ?? wrapperMsg;
+        var embedded = FindAllEmbeddedMessages(wrapperMsg.Body);
+        var src = index < embedded.Count ? embedded[index] : (embedded.FirstOrDefault() ?? wrapperMsg);
 
         var part = src.Attachments
             .OfType<MimePart>()
@@ -470,15 +463,53 @@ public sealed class MailboxBridgeService : BackgroundService
         await GetGraph().Users[dest].Messages[messageId].PatchAsync(new Message { Categories = cats }, cancellationToken: ct);
     }
 
+    /// <summary>
+    /// Strips the Inbox-Claiming/Inbox-Processed categories from every mirror message and resets the
+    /// in-memory poll state so everything re-surfaces for a fresh re-capture (used by purge/reset).
+    /// </summary>
+    public async Task<int> ResetClaimCategoriesAsync(string watchedUpn, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var state)) return 0;
+        var cfg = state.Config;
+        state.FolderId ??= await ResolveFolderIdAsync(cfg.DestinationUpn, cfg.DestinationFolderPath, ct);
+        if (state.FolderId is null) return 0;
+
+        int cleared = 0;
+        var page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
+            .GetAsync(req => { req.QueryParameters.Select = ["id", "categories"]; req.QueryParameters.Top = 50; }, ct);
+        while (page?.Value is not null)
+        {
+            foreach (var m in page.Value)
+            {
+                if (m.Id is null || m.Categories is null) continue;
+                if (!m.Categories.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase) &&
+                    !m.Categories.Contains(DoneCategory,  StringComparer.OrdinalIgnoreCase)) continue;
+                var kept = m.Categories.Where(c => !string.Equals(c, ClaimCategory, StringComparison.OrdinalIgnoreCase)
+                                                && !string.Equals(c, DoneCategory,  StringComparison.OrdinalIgnoreCase)).ToList();
+                await GetGraph().Users[cfg.DestinationUpn].Messages[m.Id].PatchAsync(new Message { Categories = kept }, cancellationToken: ct);
+                cleared++;
+            }
+            if (string.IsNullOrEmpty(page.OdataNextLink)) break;
+            page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        lock (state.Lock) { state.ById.Clear(); state.ParsedWrappers.Clear(); state.Skipped.Clear(); state.HighWater = null; }
+        _log.LogInformation("[MailboxBridge] reset: cleared claim/processed categories on {N} message(s)", cleared);
+        return cleared;
+    }
+
     /// <summary>Returns the raw .eml bytes of the embedded original message (for archival).</summary>
     public async Task<byte[]?> GetRawEmlAsync(string watchedUpn, string messageId, CancellationToken ct = default)
     {
         if (!_states.TryGetValue(watchedUpn, out var s)) return null;
-        await using var mime = await GetGraph().Users[s.Config.DestinationUpn].Messages[messageId].Content.GetAsync(cancellationToken: ct);
+        var (wrapperId, index) = SplitId(messageId);
+        await using var mime = await GetGraph().Users[s.Config.DestinationUpn].Messages[wrapperId].Content.GetAsync(cancellationToken: ct);
         if (mime is null) return null;
         var wrapperMsg = await MimeMessage.LoadAsync(mime, ct);
-        var src = FindEmbeddedMessage(wrapperMsg.Body);
-        if (src is null) return null;
+        var embedded = FindAllEmbeddedMessages(wrapperMsg.Body);
+        if (index >= embedded.Count) return null;
+        var src = embedded[index];
         using var ms = new MemoryStream();
         await src.WriteToAsync(ms, ct);
         return ms.ToArray();
@@ -541,22 +572,28 @@ public sealed class MailboxBridgeService : BackgroundService
         return page?.Value?.FirstOrDefault()?.Id;
     }
 
-    /// <summary>Depth-first search for the first embedded message/rfc822 part (the forwarded original).</summary>
-    private static MimeMessage? FindEmbeddedMessage(MimeEntity? entity)
+    /// <summary>Depth-first collection of ALL embedded message/rfc822 parts (forwarded originals).</summary>
+    private static List<MimeMessage> FindAllEmbeddedMessages(MimeEntity? entity)
     {
-        switch (entity)
+        var found = new List<MimeMessage>();
+        void Walk(MimeEntity? e)
         {
-            case null: return null;
-            case MessagePart mp: return mp.Message;
-            case Multipart multi:
-                foreach (var child in multi)
-                {
-                    var found = FindEmbeddedMessage(child);
-                    if (found is not null) return found;
-                }
-                return null;
-            default: return null;
+            switch (e)
+            {
+                case MessagePart mp: if (mp.Message is not null) found.Add(mp.Message); break;
+                case Multipart multi: foreach (var child in multi) Walk(child); break;
+            }
         }
+        Walk(entity);
+        return found;
+    }
+
+    /// <summary>Splits a cached item id into (wrapperGraphId, embeddedIndex). Bare ids ⇒ index 0.</summary>
+    private static (string WrapperId, int Index) SplitId(string id)
+    {
+        var h = id.LastIndexOf('#');
+        if (h < 0) return (id, 0);
+        return (id[..h], int.TryParse(id[(h + 1)..], out var n) ? n : 0);
     }
 
     private static readonly Regex _htmlTag = new(@"<[^>]+>", RegexOptions.Compiled);

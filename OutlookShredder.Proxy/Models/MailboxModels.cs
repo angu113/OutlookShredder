@@ -77,6 +77,8 @@ public sealed class MailboxMessageHeader
 public sealed class MailboxMessageBody
 {
     public string Id          { get; set; } = "";
+    /// <summary>The embedded original email's own Internet Message-ID — the global dedup key.</summary>
+    public string InternetMessageId { get; set; } = "";
     public string Subject     { get; set; } = "";
     public string FromAddress { get; set; } = "";
     public string FromName    { get; set; } = "";

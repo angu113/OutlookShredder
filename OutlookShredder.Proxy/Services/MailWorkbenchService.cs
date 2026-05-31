@@ -41,36 +41,80 @@ public sealed class MailWorkbenchService
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not create archive folder tree at {Root}", _archiveRoot); }
     }
 
-    /// <summary>Local folder for an item's stored files: {root}\{category}\{mailItemId}\</summary>
-    private string ItemFolder(string category, string mailItemId) =>
-        Path.Combine(_archiveRoot, category.Replace('/', Path.DirectorySeparatorChar), mailItemId);
+    /// <summary>Human-readable folder for an item's files: {root}\{category}\{yyyy-MM-dd}_{subject}_{shortId}\</summary>
+    private string ItemFolder(string category, string receivedIso, string subject, string mailItemId) =>
+        Path.Combine(_archiveRoot, category.Replace('/', Path.DirectorySeparatorChar),
+            FolderName(receivedIso, subject, mailItemId));
+
+    private static string FolderName(string receivedIso, string subject, string mailItemId)
+    {
+        var date = DateTimeOffset.TryParse(receivedIso, out var d) ? d.ToString("yyyy-MM-dd") : "nodate";
+        var sid  = mailItemId.Length >= 8 ? mailItemId[..8] : mailItemId;   // short uniqueness suffix
+        return $"{date}_{SlugText(subject, 50)}_{sid}";
+    }
+
+    /// <summary>Turns a subject into a filesystem-safe, readable slug.</summary>
+    private static string SlugText(string? s, int max)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in (s ?? "").Trim())
+        {
+            if (char.IsLetterOrDigit(c)) sb.Append(c);
+            else if (c is ' ' or '-' or '_' or '.' or ',') sb.Append('-');
+        }
+        var slug = sb.ToString().Trim('-');
+        while (slug.Contains("--")) slug = slug.Replace("--", "-");
+        if (slug.Length > max) slug = slug[..max].Trim('-');
+        return slug.Length == 0 ? "item" : slug;
+    }
+
+    /// <summary>Dedup set seeded with existing Internet Message-IDs ∪ wrapper/composite ids (handles
+    /// both new Message-ID-keyed items and legacy wrapper-id-keyed ones).</summary>
+    private async Task<ConcurrentDictionary<string, byte>> BuildSeenAsync(CancellationToken ct)
+    {
+        var d = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        foreach (var k in await _sp.GetExistingMessageIdsAsync(ct)) d.TryAdd(k, 0);
+        foreach (var k in await _sp.GetExistingWrapperIdsAsync(ct)) d.TryAdd(k, 0);
+        return d;
+    }
+
+    /// <summary>Splits a composite item id "{wrapperId}#{index}" into its parts (bare id ⇒ index 0).</summary>
+    private static (string WrapperId, int Index) SplitId(string id)
+    {
+        var h = id.LastIndexOf('#');
+        return h < 0 ? (id, 0) : (id[..h], int.TryParse(id[(h + 1)..], out var n) ? n : 0);
+    }
 
     /// <summary>Capture a cached bridge message → MailItems (dedup) → classify → MailClassifications.</summary>
-    public async Task<CaptureResult> CaptureAndClassifyAsync(string watchedUpn, string wrapperId,
-        ConcurrentDictionary<string, byte>? seen = null, CancellationToken ct = default)
+    public async Task<CaptureResult> CaptureAndClassifyAsync(string watchedUpn, string messageId,
+        ConcurrentDictionary<string, byte>? seen = null,
+        ConcurrentDictionary<string, Lazy<Task<bool>>>? wrapperClaims = null, CancellationToken ct = default)
     {
-        var body = _bridge.GetMessage(watchedUpn, wrapperId)
+        var body = _bridge.GetMessage(watchedUpn, messageId)
             ?? throw new InvalidOperationException("Message not in bridge cache (not polled yet).");
-        return await CaptureBodyAsync(watchedUpn, body, seen, ct);
+        return await CaptureBodyAsync(watchedUpn, body, seen, wrapperClaims, ct);
     }
 
     /// <summary>Capture+classify a parsed message body directly — used by both the cache path and the full-folder backfill.</summary>
     public async Task<CaptureResult> CaptureBodyAsync(string watchedUpn, MailboxMessageBody body,
-        ConcurrentDictionary<string, byte>? seen = null, CancellationToken ct = default)
+        ConcurrentDictionary<string, byte>? seen = null,
+        ConcurrentDictionary<string, Lazy<Task<bool>>>? wrapperClaims = null, CancellationToken ct = default)
     {
-        // Reliable in-memory dedup on the wrapper id (the SP eq-filter false-matches these long,
-        // near-identical Graph ids). Single-call path loads the existing set; bulk passes a shared one.
-        if (seen is null)
-        {
-            var existingIds = await _sp.GetExistingWrapperIdsAsync(ct);
-            seen = new ConcurrentDictionary<string, byte>(
-                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
-        }
-        if (!seen.TryAdd(body.Id, 0))
+        seen ??= await BuildSeenAsync(ct);
+        wrapperClaims ??= new(StringComparer.Ordinal);
+
+        // Dedup on the embedded email's own Internet Message-ID (stable across re-forwards) so a
+        // re-sent .eml is DISCARDED, not duplicated; fall back to the wrapper/composite id when an
+        // email lacks a Message-ID.
+        var dedupKey = !string.IsNullOrEmpty(body.InternetMessageId) ? body.InternetMessageId : body.Id;
+        if (!seen.TryAdd(dedupKey, 0))
             return new CaptureResult { MailItemId = "", IsNew = false };
 
-        // Cross-proxy claim on the wrapper message — skip if another proxy already claimed/landed it.
-        if (!await _bridge.TryClaimAsync(watchedUpn, body.Id, ct))
+        // Cross-proxy claim on the WRAPPER message — one claim covers all its embedded .emls.
+        // Lazy<Task> ensures TryClaim runs exactly once per wrapper even under concurrent siblings.
+        var (wrapperId, _) = SplitId(body.Id);
+        var claim = wrapperClaims.GetOrAdd(wrapperId, w => new Lazy<Task<bool>>(() => _bridge.TryClaimAsync(watchedUpn, w, ct)));
+        if (!await claim.Value)
             return new CaptureResult { MailItemId = "", IsNew = false };
 
         var manifest = body.Attachments
@@ -79,10 +123,11 @@ public sealed class MailWorkbenchService
 
         var mailItemId = await _sp.WriteMailItemAsync(new MailItemInput
         {
-            SourceType      = "email",
-            SourceMailbox   = watchedUpn,
-            WrapperGraphId  = body.Id,
-            FromAddress     = body.FromAddress,
+            SourceType        = "email",
+            SourceMailbox     = watchedUpn,
+            WrapperGraphId    = body.Id,
+            InternetMessageId = body.InternetMessageId,
+            FromAddress       = body.FromAddress,
             FromName        = body.FromName,
             ToLine          = body.ToLine,
             CcLine          = body.CcLine,
@@ -107,8 +152,8 @@ public sealed class MailWorkbenchService
 
         var version = result is not null ? await _sp.WriteClassificationAsync(mailItemId, result, ct) : 0;
 
-        // Fully landed (item + classification + files) → mark the wrapper processed so no proxy reprocesses it.
-        await _bridge.MarkProcessedAsync(watchedUpn, body.Id, ct);
+        // Fully landed (item + classification + files) → mark the WRAPPER processed so no proxy reprocesses it.
+        await _bridge.MarkProcessedAsync(watchedUpn, wrapperId, ct);
 
         return new CaptureResult
         {
@@ -126,7 +171,7 @@ public sealed class MailWorkbenchService
     private async Task StoreFilesAsync(string watchedUpn, MailboxMessageBody body, string mailItemId,
         string category, string receivedAtIso, CancellationToken ct)
     {
-        var folder = ItemFolder(category, mailItemId);
+        var folder = ItemFolder(category, receivedAtIso, body.Subject, mailItemId);
         Directory.CreateDirectory(folder);
 
         var manifest = new List<MailAttManifest>();
@@ -167,9 +212,20 @@ public sealed class MailWorkbenchService
     private async Task MoveItemFilesAsync(string mailItemId, string oldCategory, string newCategory, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(oldCategory) || string.Equals(oldCategory, newCategory, StringComparison.OrdinalIgnoreCase)) return;
-        var src = ItemFolder(oldCategory, mailItemId);
-        var dst = ItemFolder(newCategory, mailItemId);
-        if (!Directory.Exists(src)) return;
+
+        var item = (await _sp.ReadMailItemsAsync(ct)).FirstOrDefault(i => i.MailItemId == mailItemId);
+        if (item is null) return;
+        var manifest = string.IsNullOrWhiteSpace(item.AttachmentsJson)
+            ? new List<MailAttManifest>()
+            : (JsonSerializer.Deserialize<List<MailAttManifest>>(item.AttachmentsJson) ?? []);
+
+        // Source = the item's ACTUAL stored folder (parent of a manifest file) — robust to the
+        // naming scheme (legacy GUID folders or the new readable ones). Dest = the readable folder.
+        var anyPath = manifest.FirstOrDefault(m => !string.IsNullOrEmpty(m.WebUrl))?.WebUrl;
+        var src = !string.IsNullOrEmpty(anyPath) ? Path.GetDirectoryName(anyPath)
+            : ItemFolder(oldCategory, item.ReceivedAt, item.Subject, mailItemId);
+        var dst = ItemFolder(newCategory, item.ReceivedAt, item.Subject, mailItemId);
+        if (string.IsNullOrEmpty(src) || !Directory.Exists(src) || string.Equals(src, dst, StringComparison.OrdinalIgnoreCase)) return;
 
         try
         {
@@ -177,16 +233,10 @@ public sealed class MailWorkbenchService
             if (Directory.Exists(dst)) Directory.Delete(dst, true);
             Directory.Move(src, dst);
 
-            // Rewrite stored paths (old folder -> new folder) in the item's manifest + eml pointer.
-            var item = (await _sp.ReadMailItemsAsync(ct)).FirstOrDefault(i => i.MailItemId == mailItemId);
-            if (item is not null && !string.IsNullOrWhiteSpace(item.AttachmentsJson))
-            {
-                var manifest = JsonSerializer.Deserialize<List<MailAttManifest>>(item.AttachmentsJson) ?? [];
-                foreach (var m in manifest)
-                    if (!string.IsNullOrEmpty(m.WebUrl)) m.WebUrl = m.WebUrl.Replace(src, dst, StringComparison.OrdinalIgnoreCase);
-                var newEml = File.Exists(Path.Combine(dst, $"{mailItemId}.eml")) ? Path.Combine(dst, $"{mailItemId}.eml") : null;
-                await _sp.UpdateMailItemFilesAsync(mailItemId, JsonSerializer.Serialize(manifest), newEml, ct);
-            }
+            foreach (var m in manifest)
+                if (!string.IsNullOrEmpty(m.WebUrl)) m.WebUrl = m.WebUrl!.Replace(src, dst, StringComparison.OrdinalIgnoreCase);
+            var newEml = File.Exists(Path.Combine(dst, $"{mailItemId}.eml")) ? Path.Combine(dst, $"{mailItemId}.eml") : null;
+            await _sp.UpdateMailItemFilesAsync(mailItemId, JsonSerializer.Serialize(manifest), newEml, ct);
             _log.LogInformation("[MailWB] moved files {Id}: {Old} -> {New}", mailItemId, oldCategory, newCategory);
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not move files for {Id}", mailItemId); }
@@ -449,6 +499,37 @@ public sealed class MailWorkbenchService
     }
 
     /// <summary>
+    /// Full reset (dev): deletes all MailItems + classifications, clears the wrapper claim/processed
+    /// categories (so everything re-surfaces), and removes the stored taxonomy folders (keeps Inbox).
+    /// Follow with a backfill to re-import fresh (Message-IDs populated, readable folders, multi-.eml).
+    /// </summary>
+    public async Task<object> PurgeAsync(string watchedUpn, CancellationToken ct = default)
+    {
+        var items = await _sp.ReadMailItemsAsync(ct);
+        foreach (var i in items)
+        {
+            try { await _sp.DeleteClassificationsForItemAsync(i.MailItemId, ct); await _sp.DeleteMailItemAsync(i.SpId, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge delete failed {Id}", i.MailItemId); }
+        }
+        var cleared = await _bridge.ResetClaimCategoriesAsync(watchedUpn, ct);
+
+        int dirs = 0;
+        try
+        {
+            if (Directory.Exists(_archiveRoot))
+                foreach (var dir in Directory.EnumerateDirectories(_archiveRoot))
+                {
+                    if (Path.GetFileName(dir).Equals("Inbox", StringComparison.OrdinalIgnoreCase)) continue;
+                    try { Directory.Delete(dir, true); dirs++; } catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge folder delete failed {Dir}", dir); }
+                }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge folder enumerate failed"); }
+
+        _log.LogInformation("[MailWB] purge: {Items} items, {Cats} categories cleared, {Dirs} folders", items.Count, cleared, dirs);
+        return new { itemsDeleted = items.Count, categoriesCleared = cleared, foldersDeleted = dirs };
+    }
+
+    /// <summary>
     /// One auto-capture pass (used by MailAutoCaptureService): capture+classify any new surfaced
     /// message not yet in SP. Quiet (no seed-progress tracker); dedup via the in-memory wrapper-id
     /// set + the cross-proxy claim.
@@ -457,13 +538,12 @@ public sealed class MailWorkbenchService
     {
         var headers = _bridge.GetMessages(watchedUpn, 250) ?? [];
         if (headers.Count == 0) return;
-        var existing = await _sp.GetExistingWrapperIdsAsync(ct);
-        var seen = new ConcurrentDictionary<string, byte>(
-            existing.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+        var seen   = await BuildSeenAsync(ct);
+        var claims = new ConcurrentDictionary<string, Lazy<Task<bool>>>(StringComparer.Ordinal);
         foreach (var h in headers)
         {
             if (ct.IsCancellationRequested) break;
-            try { await CaptureAndClassifyAsync(watchedUpn, h.Id, seen, ct); }
+            try { await CaptureAndClassifyAsync(watchedUpn, h.Id, seen, claims, ct); }
             catch (Exception ex) { _log.LogWarning(ex, "[MailWB] auto-capture item failed"); }
         }
     }
@@ -483,16 +563,15 @@ public sealed class MailWorkbenchService
 
         _ = Task.Run(async () =>
         {
-            var existingIds = await _sp.GetExistingWrapperIdsAsync();
-            var seen = new ConcurrentDictionary<string, byte>(
-                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+            var seen   = await BuildSeenAsync(CancellationToken.None);
+            var claims = new ConcurrentDictionary<string, Lazy<Task<bool>>>(StringComparer.Ordinal);
             using var sem = new SemaphoreSlim(maxConcurrency);
             var tasks = headers.Select(async h =>
             {
                 await sem.WaitAsync();
                 try
                 {
-                    var r = await CaptureAndClassifyAsync(watchedUpn, h.Id, seen);
+                    var r = await CaptureAndClassifyAsync(watchedUpn, h.Id, seen, claims);
                     if (!r.IsNew) _seed.RecordExisting();
                     else if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
                     else _seed.RecordFailed("classify returned null");
@@ -525,9 +604,8 @@ public sealed class MailWorkbenchService
             catch (Exception ex) { _seed.RecordFailed(ex.Message); _seed.End(); _log.LogWarning(ex, "[MailWB] backfill enumerate failed"); return; }
 
             _seed.SetTotal(bodies.Count);
-            var existingIds = await _sp.GetExistingWrapperIdsAsync();
-            var seen = new ConcurrentDictionary<string, byte>(
-                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+            var seen   = await BuildSeenAsync(CancellationToken.None);
+            var claims = new ConcurrentDictionary<string, Lazy<Task<bool>>>(StringComparer.Ordinal);
 
             using var sem = new SemaphoreSlim(maxConcurrency);
             var tasks = bodies.Select(async b =>
@@ -535,7 +613,7 @@ public sealed class MailWorkbenchService
                 await sem.WaitAsync();
                 try
                 {
-                    var r = await CaptureBodyAsync(watchedUpn, b, seen);
+                    var r = await CaptureBodyAsync(watchedUpn, b, seen, claims);
                     if (!r.IsNew) _seed.RecordExisting();
                     else if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
                     else _seed.RecordFailed("classify returned null");

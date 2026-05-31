@@ -119,6 +119,15 @@ public partial class SharePointService
                    .ToHashSet(StringComparer.Ordinal);
     }
 
+    /// <summary>All captured embedded Internet Message-IDs — the primary dedup key (discards re-sends).</summary>
+    public async Task<HashSet<string>> GetExistingMessageIdsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList, ["InternetMessageId"], null, ct);
+        return rows.Select(f => GetStr(f, "InternetMessageId") ?? "")
+                   .Where(s => s.Length > 0)
+                   .ToHashSet(StringComparer.Ordinal);
+    }
+
     public async Task<List<MailItemRow>> ReadMailItemsAsync(CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailItemsList,
