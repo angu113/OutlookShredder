@@ -580,6 +580,12 @@ public sealed class MailWorkbenchService
         var (items, currents) = await GetSnapshotAsync(ct);
         var completedById = items.ToDictionary(i => i.MailItemId, i => i.Completed, StringComparer.Ordinal);
         var itemsById     = items.GroupBy(i => i.MailItemId, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        // Items claimed by an active project are shown only under Projects, not in the taxonomy tree.
+        var claimed = await _projects.AllProjectConversationIdsAsync(ct);
+        if (claimed.Count > 0)
+            currents = currents.Where(c => !claimed.Contains(ConvKey(itemsById, c.MailItemId))).ToList();
+
         var currentsByCat = currents.GroupBy(c => c.CategoryPath, StringComparer.OrdinalIgnoreCase)
                                      .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
@@ -680,6 +686,10 @@ public sealed class MailWorkbenchService
     }
 
     // ── Supplier grouping (third virtual level under Supplier leaves) ─────────────────
+
+    /// <summary>Stable conversation key for an item (its ConversationId, else a per-item fallback).</summary>
+    private static string ConvKey(Dictionary<string, MailItemRow> itemsById, string mailItemId) =>
+        itemsById.TryGetValue(mailItemId, out var it) && !string.IsNullOrEmpty(it.ConversationId) ? it.ConversationId : "id:" + mailItemId;
 
     /// <summary>The grouping key for a sender: its email domain (stable; lower-cased).</summary>
     private static string SupplierDomain(string? fromAddress)
@@ -783,12 +793,17 @@ public sealed class MailWorkbenchService
                 : string.Equals(c.CategoryPath, category, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(c => c.MailItemId, c => c, StringComparer.Ordinal);
 
+        // Items claimed by an active project show only under Projects, not in the taxonomy leaves.
+        var claimed = await _projects.AllProjectConversationIdsAsync(ct);
+
         var list = new List<WorkbenchItem>();
         foreach (var i in items)
         {
             if (!currents.TryGetValue(i.MailItemId, out var c)) continue;
             if (!includeCompleted && i.Completed) continue;
             if (supDomain is not null && !SupplierDomain(i.FromAddress).Equals(supDomain, StringComparison.OrdinalIgnoreCase)) continue;
+            var conv = string.IsNullOrEmpty(i.ConversationId) ? "id:" + i.MailItemId : i.ConversationId;
+            if (claimed.Contains(conv)) continue;
             list.Add(new WorkbenchItem
             {
                 MailItemId = i.MailItemId, Subject = i.Subject, FromAddress = i.FromAddress, FromName = i.FromName,

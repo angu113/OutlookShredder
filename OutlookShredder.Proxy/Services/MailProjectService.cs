@@ -88,6 +88,14 @@ public sealed class MailProjectService
         return p is null ? new(StringComparer.OrdinalIgnoreCase) : p.ConversationIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>All conversation keys claimed by ANY active project — these items are shown only under
+    /// Projects, not in the main taxonomy tree, until removed from the project.</summary>
+    public async Task<HashSet<string>> AllProjectConversationIdsAsync(CancellationToken ct = default)
+    {
+        var ps = await GetProjectsAsync(activeOnly: true, ct);
+        return ps.SelectMany(p => p.ConversationIds).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// Proposes projects: a business ref shared by ≥2 conversations that aren't already grouped. Refs
     /// linking the same conversation set are merged into one suggestion. Refs spanning too many
