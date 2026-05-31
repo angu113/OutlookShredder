@@ -271,6 +271,12 @@ public sealed class MailboxBridgeService : BackgroundService
         var embedded = FindAllEmbeddedMessages(wrapperMsg.Body);
         if (embedded.Count == 0) return [];
 
+        // The wrapper's From is the franchise mailbox that forwarded this (hackensack@ / awathen@ / …),
+        // i.e. the originating source mailbox. Fall back to the watched bridge mailbox if absent.
+        var sourceMailbox = wrapperMsg.From?.Mailboxes?.FirstOrDefault()?.Address
+                            ?? wrapper.From?.EmailAddress?.Address
+                            ?? destUpn;
+
         var result = new List<CachedMessage>(embedded.Count);
         for (int i = 0; i < embedded.Count; i++)
         {
@@ -303,6 +309,7 @@ public sealed class MailboxBridgeService : BackgroundService
                     Id = id, InternetMessageId = src.MessageId ?? "",
                     Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
                     ToLine = src.To?.ToString() ?? "", CcLine = src.Cc?.ToString() ?? "",
+                    SourceMailbox = sourceMailbox,
                     ReceivedAt = receivedIso, IsRead = wrapper.IsRead == true,
                     BodyText = bodyText, Attachments = attachments,
                 },

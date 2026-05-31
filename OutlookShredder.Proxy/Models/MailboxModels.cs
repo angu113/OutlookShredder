@@ -84,6 +84,9 @@ public sealed class MailboxMessageBody
     public string FromName    { get; set; } = "";
     public string ToLine      { get; set; } = "";
     public string CcLine      { get; set; } = "";
+    /// <summary>The franchise mailbox this forward came through (the wrapper's From) — distinguishes
+    /// hackensack@ vs awathen@ now that multiple mailboxes forward into the same mirror folder.</summary>
+    public string SourceMailbox { get; set; } = "";
     public string ReceivedAt  { get; set; } = "";
     public bool   IsRead      { get; set; }
     public string BodyText    { get; set; } = "";

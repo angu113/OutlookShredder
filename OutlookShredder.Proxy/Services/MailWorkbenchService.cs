@@ -129,7 +129,7 @@ public sealed class MailWorkbenchService
         var mailItemId = await _sp.WriteMailItemAsync(new MailItemInput
         {
             SourceType        = "email",
-            SourceMailbox     = watchedUpn,
+            SourceMailbox     = string.IsNullOrWhiteSpace(body.SourceMailbox) ? watchedUpn : body.SourceMailbox,
             WrapperGraphId    = body.Id,
             InternetMessageId = body.InternetMessageId,
             FromAddress       = body.FromAddress,
@@ -654,7 +654,8 @@ public sealed class MailWorkbenchService
         return new MailItemDetail
         {
             MailItemId = d.MailItemId, Subject = d.Subject, FromAddress = d.FromAddress, FromName = d.FromName,
-            ToLine = d.ToLine, CcLine = d.CcLine, ReceivedAt = d.ReceivedAt,
+            ToLine = d.ToLine, CcLine = d.CcLine, SourceType = d.SourceType, SourceMailbox = d.SourceMailbox,
+            ReceivedAt = d.ReceivedAt,
             Html = html, IsHtml = isHtml, BodyText = text,
             HasAttachments = d.HasAttachments, Completed = d.Completed, CompletedAt = d.CompletedAt, CompletedBy = d.CompletedBy,
             IsRead = d.IsRead, ReadAt = d.ReadAt, ReadBy = d.ReadBy, ClaimedBy = d.ClaimedBy, ClaimedAt = d.ClaimedAt,
@@ -1011,6 +1012,8 @@ public sealed class MailWorkbenchService
         public string  FromName    { get; set; } = "";
         public string  ToLine      { get; set; } = "";
         public string  CcLine      { get; set; } = "";
+        public string  SourceType  { get; set; } = "email";   // email | sms | file
+        public string  SourceMailbox { get; set; } = "";       // originating franchise mailbox (email)
         public string  ReceivedAt  { get; set; } = "";
         public string? Html        { get; set; }
         public bool    IsHtml      { get; set; }
