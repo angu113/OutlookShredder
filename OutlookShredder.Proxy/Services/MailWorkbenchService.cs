@@ -206,7 +206,7 @@ public sealed class MailWorkbenchService
     private static MailClassRow ToClassRow(string mailItemId, MailClassificationResult r, int version) => new()
     {
         MailItemId = mailItemId, Version = version, IsCurrent = true, CategoryPath = r.Category,
-        OtherLabel = r.OtherLabel, Confidence = r.Confidence, KeywordTags = string.Join(", ", r.Keywords),
+        OtherLabel = r.OtherLabel, SupplierName = r.SupplierName, Confidence = r.Confidence, KeywordTags = string.Join(", ", r.Keywords),
         PoNumber = r.PoNumber, SoNumber = r.SoNumber, Amount = r.Amount,
         AiProvider = r.AiProvider, AiModel = r.AiModel,
     };
@@ -527,6 +527,38 @@ public sealed class MailWorkbenchService
         return new { hintsRemoved, refiled };
     }
 
+    /// <summary>
+    /// Operator correction for supplier attribution (payment-processor mail): records a sender→supplier
+    /// hint for the item's sender domain (guides the classifier for future mail) AND sets this item's
+    /// SupplierName now (new classification version, category preserved) so it re-groups immediately.
+    /// </summary>
+    public async Task<object> SetSupplierAsync(string mailItemId, string supplier, CancellationToken ct = default)
+    {
+        supplier = (supplier ?? "").Trim();
+        var d = await _sp.ReadMailItemDetailAsync(mailItemId, ct)
+            ?? throw new InvalidOperationException($"MailItem '{mailItemId}' not found.");
+        var domain = SupplierDomain(d.FromAddress);
+        if (domain.Length > 0 && supplier.Length > 0)
+            await _taxonomy.AddSenderSupplierHintAsync(domain, supplier, ct);
+
+        var prior = (await _sp.ReadClassificationsForItemAsync(mailItemId, ct)).OrderByDescending(c => c.Version).FirstOrDefault();
+        var result = new MailClassificationResult
+        {
+            Category     = prior?.CategoryPath ?? "Other",
+            OtherLabel   = prior?.OtherLabel,
+            SupplierName = supplier.Length == 0 ? null : supplier,
+            Confidence   = prior?.Confidence ?? 1.0,
+            Keywords     = (prior?.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList(),
+            PoNumber     = prior?.PoNumber, SoNumber = prior?.SoNumber,
+            Reasoning    = $"Supplier set to '{supplier}' by operator (sender {domain}).",
+            AiProvider   = "human", AiModel = "set-supplier", RawResponse = "{}",
+        };
+        var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
+        CacheAndPublishClass("Amended", mailItemId, result, version);
+        _log.LogInformation("[MailWB] set-supplier {Id}: {Domain} -> '{Supplier}'", mailItemId, domain, supplier);
+        return new { supplier, domain, version };
+    }
+
     private static readonly object _feedbackLock = new();
 
     /// <summary>Path to the local prompt-tuning feedback log (dev machine; survives reinstall).</summary>
@@ -722,32 +754,44 @@ public sealed class MailWorkbenchService
     private List<TreeNode> BuildSupplierChildren(string leafPath, List<MailClassRow> leafCurrents,
         Dictionary<string, MailItemRow> itemsById, Dictionary<string, bool> completedById)
     {
-        var groups = new Dictionary<string, (List<string> Names, int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+        // Group key = the AI-resolved supplier name ("name:…", e.g. read from a payment-processor bill's
+        // body) when present, else the sender domain ("dom:…"). The |sup: path carries this key verbatim.
+        var groups = new Dictionary<string, (List<string> Names, string? AiName, int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in leafCurrents)
         {
             if (!itemsById.TryGetValue(c.MailItemId, out var it)) continue;
-            var domain = SupplierDomain(it.FromAddress);
             completedById.TryGetValue(c.MailItemId, out var done);
-            if (!groups.TryGetValue(domain, out var g)) g = (new List<string>(), 0, 0);
+            var fromAi = !string.IsNullOrWhiteSpace(c.SupplierName);
+            var key    = fromAi ? "name:" + c.SupplierName!.Trim().ToLowerInvariant() : "dom:" + SupplierDomain(it.FromAddress);
+            if (!groups.TryGetValue(key, out var g)) g = (new List<string>(), fromAi ? c.SupplierName!.Trim() : null, 0, 0);
             if (!string.IsNullOrWhiteSpace(it.FromName)) g.Names.Add(it.FromName);
             g.Total++; if (done) g.Completed++;
-            groups[domain] = g;
+            groups[key] = g;
         }
 
         var result = new List<TreeNode>();
-        foreach (var (domain, g) in groups)
+        foreach (var (key, g) in groups)
         {
-            var (display, resolved) = ResolveSupplierDisplay(domain, g.Names);
+            string display; bool resolved;
+            if (g.AiName is not null) { display = g.AiName; resolved = true; }   // AI/hint-resolved real supplier
+            else (display, resolved) = ResolveSupplierDisplay(key["dom:".Length..], g.Names);
             result.Add(new TreeNode
             {
-                Name = display, Path = $"{leafPath}|sup:{domain}",
+                Name = display, Path = $"{leafPath}|sup:{key}",
                 Total = g.Total, Completed = g.Completed, Open = g.Total - g.Completed,
                 Resolved = resolved,
             });
         }
-        // Catalog-matched suppliers first, then alphabetical.
+        // Catalog/AI-matched suppliers first, then alphabetical.
         return result.OrderByDescending(n => n.Resolved).ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
+
+    /// <summary>The supplier grouping key for an item: its current classification's AI SupplierName ("name:…"),
+    /// else the sender domain ("dom:…"). Must match BuildSupplierChildren so the |sup: filter is consistent.</summary>
+    private static string SupplierKeyFor(MailItemRow item, MailClassRow? cls) =>
+        !string.IsNullOrWhiteSpace(cls?.SupplierName)
+            ? "name:" + cls!.SupplierName!.Trim().ToLowerInvariant()
+            : "dom:" + SupplierDomain(item.FromAddress);
 
     /// <summary>Items currently classified under a taxonomy path.</summary>
     public async Task<List<WorkbenchItem>> GetItemsAsync(string category, bool includeCompleted, CancellationToken ct = default)
@@ -779,10 +823,11 @@ public sealed class MailWorkbenchService
             return plist.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
         }
 
-        // Virtual supplier bucket "{category}|sup:{domain}" → that leaf's items from the given sender domain.
-        string? supDomain = null;
+        // Virtual supplier bucket "{category}|sup:{key}" → that leaf's items whose supplier key matches
+        // (key = "name:<aiSupplier>" or "dom:<senderDomain>"); see SupplierKeyFor.
+        string? supKey = null;
         var supIdx = category.IndexOf("|sup:", StringComparison.Ordinal);
-        if (supIdx >= 0) { supDomain = category[(supIdx + 5)..]; category = category[..supIdx]; }
+        if (supIdx >= 0) { supKey = category[(supIdx + 5)..]; category = category[..supIdx]; }
 
         // Virtual suggested bucket "Other:<label>" → Other items whose emergent AI label matches.
         var suggLabel = category.StartsWith("Other:", StringComparison.Ordinal) ? category["Other:".Length..] : null;
@@ -801,7 +846,7 @@ public sealed class MailWorkbenchService
         {
             if (!currents.TryGetValue(i.MailItemId, out var c)) continue;
             if (!includeCompleted && i.Completed) continue;
-            if (supDomain is not null && !SupplierDomain(i.FromAddress).Equals(supDomain, StringComparison.OrdinalIgnoreCase)) continue;
+            if (supKey is not null && !SupplierKeyFor(i, c).Equals(supKey, StringComparison.OrdinalIgnoreCase)) continue;
             var conv = string.IsNullOrEmpty(i.ConversationId) ? "id:" + i.MailItemId : i.ConversationId;
             if (claimed.Contains(conv)) continue;
             list.Add(new WorkbenchItem
@@ -868,7 +913,8 @@ public sealed class MailWorkbenchService
             Html = html, IsHtml = isHtml, BodyText = text,
             HasAttachments = d.HasAttachments, Completed = d.Completed, CompletedAt = d.CompletedAt, CompletedBy = d.CompletedBy,
             IsRead = d.IsRead, ReadAt = d.ReadAt, ReadBy = d.ReadBy, ClaimedBy = d.ClaimedBy, ClaimedAt = d.ClaimedAt,
-            CategoryPath = cls?.CategoryPath ?? "Other", OtherLabel = cls?.OtherLabel, Confidence = cls?.Confidence ?? 0,
+            CategoryPath = cls?.CategoryPath ?? "Other", OtherLabel = cls?.OtherLabel, SupplierName = cls?.SupplierName,
+            Confidence = cls?.Confidence ?? 0,
             KeywordTags = cls?.KeywordTags ?? "", PoNumber = cls?.PoNumber, SoNumber = cls?.SoNumber,
             Reasoning = null, AiProvider = cls?.AiProvider, AiModel = cls?.AiModel, Version = cls?.Version ?? 0,
             Attachments = manifest.Select(m => new MailAttachmentInfo
@@ -1360,6 +1406,7 @@ public sealed class MailWorkbenchService
         public string? ClaimedAt   { get; set; }
         public string  CategoryPath { get; set; } = "Other";
         public string? OtherLabel  { get; set; }
+        public string? SupplierName { get; set; }
         public double  Confidence  { get; set; }
         public string  KeywordTags { get; set; } = "";
         public string? PoNumber    { get; set; }

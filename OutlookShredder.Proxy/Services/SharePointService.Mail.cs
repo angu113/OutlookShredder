@@ -41,7 +41,7 @@ public partial class SharePointService
         var cls = await EnsureListColumnsAsync(siteId, MailClassList,
         [
             ("MailItemId","text"), ("Version","number"), ("IsCurrent","boolean"),
-            ("CategoryPath","text"), ("OtherLabel","text"), ("Confidence","number"),
+            ("CategoryPath","text"), ("OtherLabel","text"), ("SupplierName","text"), ("Confidence","number"),
             ("KeywordTags","note"), ("PoNumber","text"), ("SoNumber","text"), ("Amount","text"),
             ("Reasoning","note"), ("AiProvider","text"), ("AiModel","text"),
             ("RawAiResponse","note"), ("ClassifiedAt","dateTime"),
@@ -488,6 +488,7 @@ public partial class SharePointService
                     ["IsCurrent"]    = true,
                     ["CategoryPath"] = r.Category,
                     ["OtherLabel"]   = r.OtherLabel,
+                    ["SupplierName"] = r.SupplierName,
                     ["Confidence"]   = r.Confidence,
                     ["KeywordTags"]  = string.Join(", ", r.Keywords),
                     ["PoNumber"]     = r.PoNumber,
@@ -523,7 +524,7 @@ public partial class SharePointService
         // would show stale/zero counts immediately after capture/reclassify). Compute the current
         // row per item as the highest Version in memory — always correct and lag-free.
         var rows = await ReadAllListItemsAsync(MailClassList,
-            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","Confidence","KeywordTags",
+            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","SupplierName","Confidence","KeywordTags",
              "PoNumber","SoNumber","Amount","AiProvider","AiModel","ClassifiedAt"],
             null, ct);
         return rows.Select(MapClassRow)
@@ -540,6 +541,7 @@ public partial class SharePointService
         IsCurrent    = GetBool(f, "IsCurrent"),
         CategoryPath = GetStr(f, "CategoryPath") ?? "Other",
         OtherLabel   = GetStr(f, "OtherLabel"),
+        SupplierName = GetStr(f, "SupplierName"),
         Confidence   = GetDouble(f, "Confidence"),
         KeywordTags  = GetStr(f, "KeywordTags") ?? "",
         PoNumber     = GetStr(f, "PoNumber"),
@@ -702,6 +704,7 @@ public sealed class MailClassRow
     public bool    IsCurrent    { get; set; }
     public string  CategoryPath { get; set; } = "Other";
     public string? OtherLabel   { get; set; }
+    public string? SupplierName { get; set; }
     public double  Confidence   { get; set; }
     public string  KeywordTags  { get; set; } = "";
     public string? PoNumber     { get; set; }

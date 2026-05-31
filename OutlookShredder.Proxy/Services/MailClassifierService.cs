@@ -129,6 +129,7 @@ public class MailClassifierService
                 {
                     ["category"]   = new { type = "string", @enum = categories, description = "The single best taxonomy path." },
                     ["otherLabel"] = new { type = new[] { "string", "null" }, description = "When category is 'Other', a concise proposed sub-label; otherwise null." },
+                    ["supplierName"] = new { type = new[] { "string", "null" }, description = "The actual supplier/vendor this email is from or about. If the sender is a payment processor or billing service (see sender guidance), read the REAL supplier from the body (e.g. 'your bill from Hadco Metal Trading' -> Hadco Metal Trading), not the sender. Null if not a supplier email." },
                     ["confidence"] = new { type = "number", description = "Confidence 0.0-1.0 in the chosen category." },
                     ["keywords"]   = new { type = "array", items = new { type = "string" }, description = "5-15 lowercase search keywords/tags." },
                     ["poNumber"]   = new { type = new[] { "string", "null" }, description = "Our PO number if present, e.g. HSK-PO0001234." },
@@ -171,6 +172,12 @@ public class MailClassifierService
         if (!response.IsSuccessStatusCode) { _log.LogError("[MailClassify] Claude {Status}: {Body}", response.StatusCode, raw); return null; }
 
         using var doc = JsonDocument.Parse(raw);
+        if (doc.RootElement.TryGetProperty("usage", out var u))
+        {
+            int U(string n) => u.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+            _log.LogInformation("[MailClassify] Claude usage in={In} cacheWrite={CW} cacheRead={CR} out={Out}",
+                U("input_tokens"), U("cache_creation_input_tokens"), U("cache_read_input_tokens"), U("output_tokens"));
+        }
         if (!doc.RootElement.TryGetProperty("content", out var content)) return null;
 
         foreach (var block in content.EnumerateArray())
@@ -229,6 +236,7 @@ public class MailClassifierService
             {
                 ["category"]   = new { type = "string", @enum = categories },
                 ["otherLabel"] = new { type = "string", nullable = true },
+                ["supplierName"] = new { type = "string", nullable = true },
                 ["confidence"] = new { type = "number" },
                 ["keywords"]   = new { type = "array", items = new { type = "string" }, nullable = true },
                 ["poNumber"]   = new { type = "string", nullable = true },
@@ -295,6 +303,7 @@ public class MailClassifierService
         {
             Category    = category,
             OtherLabel  = category == "Other" ? raw.OtherLabel?.Trim() : null,
+            SupplierName = string.IsNullOrWhiteSpace(raw.SupplierName) ? null : raw.SupplierName.Trim(),
             Confidence  = Math.Clamp(raw.Confidence, 0, 1),
             Keywords    = raw.Keywords?.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim().ToLowerInvariant()).Distinct().ToList() ?? [],
             PoNumber    = string.IsNullOrWhiteSpace(raw.PoNumber) ? null : raw.PoNumber.Trim(),
@@ -320,6 +329,7 @@ public class MailClassifierService
     {
         public string? Category   { get; set; }
         public string? OtherLabel { get; set; }
+        public string? SupplierName { get; set; }
         public double  Confidence { get; set; }
         public List<string>? Keywords { get; set; }
         public string? PoNumber   { get; set; }

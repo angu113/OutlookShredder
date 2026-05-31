@@ -110,6 +110,9 @@ public sealed class MailClassificationResult
     public string? OtherLabel     { get; set; }
     public double Confidence      { get; set; }
     public List<string> Keywords  { get; set; } = [];
+    /// <summary>The actual supplier/vendor the email is from or about — for payment-processor senders the
+    /// real supplier read from the body, not the sender domain. Drives the supplier grouping.</summary>
+    public string? SupplierName   { get; set; }
     public string? PoNumber       { get; set; }
     public string? SoNumber       { get; set; }
     public string? Amount         { get; set; }

@@ -19,7 +19,12 @@ public sealed class MailTaxonomyService
     private volatile List<MailTaxonomy.Leaf> _leaves = MailTaxonomy.Leaves.ToList();
     private volatile List<TaxonomyHintRow> _hints = new();
     private volatile HashSet<string> _validPaths = MailTaxonomy.ValidPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    private volatile Dictionary<string, string> _senderMap = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
+
+    /// <summary>Sender-supplier hint prefix: a hint row with CategoryPath "@sender:{domain}" maps a payment-
+    /// processor domain to the real supplier it bills for (guides the classifier; not a taxonomy leaf).</summary>
+    public const string SenderPrefix = "@sender:";
 
     public MailTaxonomyService(SharePointService sp, ILogger<MailTaxonomyService> log) { _sp = sp; _log = log; }
 
@@ -30,7 +35,13 @@ public sealed class MailTaxonomyService
         try
         {
             if (DateTimeOffset.UtcNow - _loadedAt < Ttl) return;
-            var hints = await _sp.ReadTaxonomyHintsAsync(ct);
+            var allRows = await _sp.ReadTaxonomyHintsAsync(ct);
+            // Partition: "@sender:{domain}" rows are payment-processor → supplier maps, not taxonomy leaves.
+            var senderRows = allRows.Where(h => h.CategoryPath.StartsWith(SenderPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            var hints      = allRows.Where(h => !h.CategoryPath.StartsWith(SenderPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            _senderMap = senderRows
+                .GroupBy(h => h.CategoryPath[SenderPrefix.Length..].Trim().ToLowerInvariant(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First().Hint, StringComparer.OrdinalIgnoreCase);
 
             // Custom leaves = hint CategoryPaths not already in the static taxonomy.
             var custom = hints.Select(h => h.CategoryPath)
@@ -90,7 +101,24 @@ public sealed class MailTaxonomyService
             sb.Append("\nLearned hints (operator-confirmed — apply these):\n");
             foreach (var h in guidance) sb.Append("    ").Append(h.CategoryPath).Append(": ").Append(h.Hint).Append('\n');
         }
+        if (_senderMap.Count > 0)
+        {
+            sb.Append("\nPayment-processor / billing-service senders — mail from these domains is sent VIA a billing\n");
+            sb.Append("provider, so set supplierName to the REAL supplier read from the email body, not the sender:\n");
+            foreach (var kv in _senderMap)
+                sb.Append("    ").Append(kv.Key).Append(string.IsNullOrWhiteSpace(kv.Value) ? "" : $"  (often: {kv.Value})").Append('\n');
+        }
         return sb.ToString();
+    }
+
+    /// <summary>Records a payment-processor → real-supplier mapping (guides the classifier; not a leaf).</summary>
+    public async Task AddSenderSupplierHintAsync(string domain, string supplier, CancellationToken ct = default)
+    {
+        var d = (domain ?? "").Trim().ToLowerInvariant();
+        if (d.Length == 0) return;
+        await _sp.WriteTaxonomyHintAsync(SenderPrefix + d, supplier, "supplier-map", ct);
+        var map = new Dictionary<string, string>(_senderMap, StringComparer.OrdinalIgnoreCase) { [d] = supplier };
+        _senderMap = map;   // optimistic; reconciles on next TTL
     }
 
     /// <summary>

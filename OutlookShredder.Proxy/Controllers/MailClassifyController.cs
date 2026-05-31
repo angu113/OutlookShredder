@@ -267,6 +267,19 @@ public sealed class MailClassifyController : ControllerBase
 
     public sealed class RemoveLeafRequest { public string CategoryPath { get; set; } = ""; }
 
+    /// <summary>Correct supplier attribution for an item: record a sender→supplier hint (for future
+    /// payment-processor mail) and set this item's supplier now.</summary>
+    [HttpPost("supplier-hint/{mailItemId}")]
+    public async Task<IActionResult> SupplierHint(string mailItemId, [FromBody] SupplierHintRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.Supplier))
+            return BadRequest(new { error = "supplier is required." });
+        try { return Ok(await _workbench.SetSupplierAsync(mailItemId, req.Supplier.Trim(), ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public sealed class SupplierHintRequest { public string Supplier { get; set; } = ""; }
+
     /// <summary>The operator-confirmed hints currently shaping the classifier prompt (dev inspection).</summary>
     [HttpGet("hints")]
     public async Task<IActionResult> Hints(CancellationToken ct) =>
