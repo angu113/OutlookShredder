@@ -282,6 +282,30 @@ public sealed class MailboxBridgeService : BackgroundService
         return (wrapperReceived ?? src.Date).ToUniversalTime().ToString("o");
     }
 
+    /// <summary>
+    /// Stable per-conversation key from the original email's headers: the Outlook Thread-Index
+    /// conversation prefix (first 22 decoded bytes) → References root id → In-Reply-To → own Message-ID.
+    /// Lets all messages of one back-and-forth thread group together.
+    /// </summary>
+    public static string ResolveConversationId(MimeMessage src)
+    {
+        var ti = src.Headers["Thread-Index"];
+        if (!string.IsNullOrWhiteSpace(ti))
+        {
+            try
+            {
+                var bytes = Convert.FromBase64String(ti.Trim());
+                if (bytes.Length >= 22) return "ti:" + Convert.ToHexString(bytes, 0, 22).ToLowerInvariant();
+            }
+            catch { /* not valid base64 — fall through */ }
+        }
+        var root = src.References?.FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(root)) return "ref:" + root.Trim().Trim('<', '>').ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(src.InReplyTo)) return "ref:" + src.InReplyTo.Trim().Trim('<', '>').ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(src.MessageId)) return "msg:" + src.MessageId.Trim().Trim('<', '>').ToLowerInvariant();
+        return "";
+    }
+
     private async Task<List<CachedMessage>> ParseMirrorMessagesAsync(string destUpn, Message wrapper, CancellationToken ct)
     {
         await using var mime = await GetGraph().Users[destUpn].Messages[wrapper.Id!].Content.GetAsync(cancellationToken: ct)
@@ -331,7 +355,7 @@ public sealed class MailboxBridgeService : BackgroundService
                     Id = id, InternetMessageId = src.MessageId ?? "",
                     Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
                     ToLine = src.To?.ToString() ?? "", CcLine = src.Cc?.ToString() ?? "",
-                    SourceMailbox = sourceMailbox,
+                    SourceMailbox = sourceMailbox, ConversationId = ResolveConversationId(src),
                     ReceivedAt = receivedIso, IsRead = wrapper.IsRead == true,
                     BodyText = bodyText, Attachments = attachments,
                 },

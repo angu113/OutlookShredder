@@ -94,6 +94,8 @@ public sealed class MailClassifyInput
     public string ToLine          { get; set; } = "";
     public string BodyText        { get; set; } = "";
     public List<string> AttachmentNames { get; set; } = [];
+    /// <summary>Category a prior message in the same conversation got — biases this one for thread consistency.</summary>
+    public string? ThreadCategoryHint { get; set; }
 }
 
 /// <summary>

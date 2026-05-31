@@ -87,6 +87,9 @@ public sealed class MailboxMessageBody
     /// <summary>The franchise mailbox this forward came through (the wrapper's From) — distinguishes
     /// hackensack@ vs awathen@ now that multiple mailboxes forward into the same mirror folder.</summary>
     public string SourceMailbox { get; set; } = "";
+    /// <summary>Stable per-thread key from the original headers (Thread-Index conv prefix → References
+    /// root → In-Reply-To → Message-ID) so replies in one conversation group together.</summary>
+    public string ConversationId { get; set; } = "";
     public string ReceivedAt  { get; set; } = "";
     public bool   IsRead      { get; set; }
     public string BodyText    { get; set; } = "";

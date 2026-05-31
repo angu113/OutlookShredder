@@ -26,7 +26,7 @@ public partial class SharePointService
         var items = await EnsureListColumnsAsync(siteId, MailItemsList,
         [
             ("MailItemId","text"), ("SourceType","text"), ("SourceMailbox","text"),
-            ("InternetMessageId","text"), ("WrapperGraphId","text"),
+            ("InternetMessageId","text"), ("WrapperGraphId","text"), ("ConversationId","text"),
             ("FromAddress","text"), ("FromName","text"), ("ToLine","note"), ("CcLine","note"),
             ("EmailSubject","text"), ("ReceivedAt","dateTime"),
             ("BodyText","note"), ("HasAttachments","boolean"), ("AttachmentsJson","note"),
@@ -35,7 +35,7 @@ public partial class SharePointService
             ("IsRead","boolean"), ("ReadAt","dateTime"), ("ReadBy","text"),
             ("ClaimedBy","text"), ("ClaimedAt","dateTime"),
         ]);
-        await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed", "IsRead");
+        await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed", "IsRead", "ConversationId");
 
         var cls = await EnsureListColumnsAsync(siteId, MailClassList,
         [
@@ -134,6 +134,7 @@ public partial class SharePointService
                     ["SourceMailbox"]     = input.SourceMailbox,
                     ["InternetMessageId"] = input.InternetMessageId,
                     ["WrapperGraphId"]    = input.WrapperGraphId,
+                    ["ConversationId"]    = input.ConversationId,
                     ["FromAddress"]       = input.FromAddress,
                     ["FromName"]          = input.FromName,
                     ["ToLine"]            = Trunc(input.ToLine, 8000),
@@ -175,7 +176,7 @@ public partial class SharePointService
     public async Task<List<MailItemRow>> ReadMailItemsAsync(CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailItemsList,
-            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","FromAddress","FromName",
+            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","FromAddress","FromName",
              "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt","CompletedBy",
              "IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"], null, ct);
         return rows.Select(MapItemRow).ToList();
@@ -186,6 +187,7 @@ public partial class SharePointService
         SpId           = GetStr(f, "__spId") ?? "",
         MailItemId     = GetStr(f, "MailItemId") ?? "",
         WrapperGraphId = GetStr(f, "WrapperGraphId") ?? "",
+        ConversationId = GetStr(f, "ConversationId") ?? "",
         SourceType     = GetStr(f, "SourceType") ?? "email",
         SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
         FromAddress    = GetStr(f, "FromAddress") ?? "",
@@ -237,21 +239,25 @@ public partial class SharePointService
         return true;
     }
 
-    /// <summary>Patches a MailItem's ReceivedAt (used by the original-received repair pass).</summary>
-    public async Task<bool> UpdateMailReceivedAsync(string mailItemId, string receivedIso, CancellationToken ct = default)
+    /// <summary>Patches a MailItem's header-derived fields (ReceivedAt + ConversationId) from the repair pass.</summary>
+    public async Task<bool> UpdateMailDerivedAsync(string mailItemId, string receivedIso, string conversationId, CancellationToken ct = default)
     {
         var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
         if (spId is null) return false;
         await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields.PatchAsync(
-            new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["ReceivedAt"] = receivedIso } }, cancellationToken: ct);
+            new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+            {
+                ["ReceivedAt"]     = receivedIso,
+                ["ConversationId"] = conversationId,
+            } }, cancellationToken: ct);
         return true;
     }
 
-    /// <summary>All items' (MailItemId, RawEmlUrl, ReceivedAt) — for the received-date repair pass.</summary>
-    public async Task<List<(string MailItemId, string RawEmlUrl, string ReceivedAt)>> ReadMailEmlPathsAsync(CancellationToken ct = default)
+    /// <summary>All items' (MailItemId, RawEmlUrl, ReceivedAt, ConversationId) — for the header-repair pass.</summary>
+    public async Task<List<(string MailItemId, string RawEmlUrl, string ReceivedAt, string ConversationId)>> ReadMailEmlPathsAsync(CancellationToken ct = default)
     {
-        var rows = await ReadAllListItemsAsync(MailItemsList, ["MailItemId", "RawEmlUrl", "ReceivedAt"], null, ct);
-        return rows.Select(f => (GetStr(f, "MailItemId") ?? "", GetStr(f, "RawEmlUrl") ?? "", GetStr(f, "ReceivedAt") ?? ""))
+        var rows = await ReadAllListItemsAsync(MailItemsList, ["MailItemId", "RawEmlUrl", "ReceivedAt", "ConversationId"], null, ct);
+        return rows.Select(f => (GetStr(f, "MailItemId") ?? "", GetStr(f, "RawEmlUrl") ?? "", GetStr(f, "ReceivedAt") ?? "", GetStr(f, "ConversationId") ?? ""))
                    .Where(t => t.Item1.Length > 0).ToList();
     }
 
@@ -259,7 +265,7 @@ public partial class SharePointService
     public async Task<MailItemDetailRow?> ReadMailItemDetailAsync(string mailItemId, CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailItemsList,
-            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","FromAddress","FromName","ToLine","CcLine",
+            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","FromAddress","FromName","ToLine","CcLine",
              "EmailSubject","ReceivedAt","BodyText","HasAttachments","AttachmentsJson","RawEmlUrl",
              "Completed","CompletedAt","CompletedBy","IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"],
             $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
@@ -269,6 +275,7 @@ public partial class SharePointService
         return new MailItemDetailRow
         {
             SpId = baseRow.SpId, MailItemId = baseRow.MailItemId, WrapperGraphId = baseRow.WrapperGraphId,
+            ConversationId = baseRow.ConversationId,
             SourceType = baseRow.SourceType, SourceMailbox = baseRow.SourceMailbox,
             FromAddress = baseRow.FromAddress, FromName = baseRow.FromName, Subject = baseRow.Subject,
             ReceivedAt = baseRow.ReceivedAt, HasAttachments = baseRow.HasAttachments, AttachmentsJson = baseRow.AttachmentsJson,
@@ -526,6 +533,7 @@ public sealed class MailItemInput
     public string SourceMailbox     { get; set; } = "";
     public string InternetMessageId { get; set; } = "";
     public string WrapperGraphId    { get; set; } = "";
+    public string ConversationId    { get; set; } = "";
     public string FromAddress       { get; set; } = "";
     public string FromName          { get; set; } = "";
     public string ToLine            { get; set; } = "";
@@ -542,6 +550,7 @@ public class MailItemRow
     public string  SpId            { get; set; } = "";
     public string  MailItemId      { get; set; } = "";
     public string  WrapperGraphId  { get; set; } = "";
+    public string  ConversationId  { get; set; } = "";
     public string  SourceType      { get; set; } = "email";
     public string  SourceMailbox   { get; set; } = "";
     public string  FromAddress     { get; set; } = "";

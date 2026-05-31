@@ -133,6 +133,7 @@ public sealed class MailWorkbenchService
             SourceMailbox     = string.IsNullOrWhiteSpace(body.SourceMailbox) ? watchedUpn : body.SourceMailbox,
             WrapperGraphId    = body.Id,
             InternetMessageId = body.InternetMessageId,
+            ConversationId    = body.ConversationId,
             FromAddress       = body.FromAddress,
             FromName        = body.FromName,
             ToLine          = body.ToLine,
@@ -149,6 +150,9 @@ public sealed class MailWorkbenchService
             Subject = body.Subject, FromAddress = body.FromAddress, FromName = body.FromName,
             ToLine = body.ToLine, BodyText = body.BodyText,
             AttachmentNames = manifest.Select(a => a.Name).ToList(),
+            // Thread-consistent classification: bias toward the category a prior message in this same
+            // conversation already received, so a reply doesn't scatter to a different leaf.
+            ThreadCategoryHint = ThreadCategory(body.ConversationId),
         };
         var result   = await _classifier.ClassifyAsync(input, ct);
         var category = result?.Category ?? "Unclassified";
@@ -164,7 +168,8 @@ public sealed class MailWorkbenchService
 
         var row = new MailItemRow
         {
-            MailItemId = mailItemId, WrapperGraphId = body.Id, SourceType = "email", SourceMailbox = watchedUpn,
+            MailItemId = mailItemId, WrapperGraphId = body.Id, ConversationId = body.ConversationId,
+            SourceType = "email", SourceMailbox = string.IsNullOrWhiteSpace(body.SourceMailbox) ? watchedUpn : body.SourceMailbox,
             FromAddress = body.FromAddress, FromName = body.FromName, Subject = body.Subject,
             ReceivedAt = body.ReceivedAt, HasAttachments = manifest.Count > 0,
             AttachmentsJson = JsonSerializer.Serialize(manifest), Completed = false,
@@ -177,6 +182,19 @@ public sealed class MailWorkbenchService
             MailItemId = mailItemId, IsNew = true, Classified = result is not null,
             Category = result?.Category, Confidence = result?.Confidence ?? 0, Version = version,
         };
+    }
+
+    /// <summary>The category a prior message in this same conversation already received (most common), or null.</summary>
+    private string? ThreadCategory(string conversationId)
+    {
+        if (string.IsNullOrEmpty(conversationId)) return null;
+        var cats = _cache.GetItems()
+            .Where(i => string.Equals(i.ConversationId, conversationId, StringComparison.OrdinalIgnoreCase))
+            .Select(i => _cache.GetClass(i.MailItemId)?.CategoryPath)
+            .Where(c => !string.IsNullOrEmpty(c))
+            .ToList();
+        return cats.GroupBy(c => c!, StringComparer.OrdinalIgnoreCase)
+                   .OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
     }
 
     // ── Cache + bus fan-out (keeps every machine's Inbox coherent without per-request SP reads) ──
@@ -680,6 +698,7 @@ public sealed class MailWorkbenchService
                 CategoryPath = c.CategoryPath, OtherLabel = c.OtherLabel, Confidence = c.Confidence,
                 KeywordTags = c.KeywordTags, PoNumber = c.PoNumber, SoNumber = c.SoNumber, Version = c.Version,
                 IsRead = i.IsRead, ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, CompletedBy = i.CompletedBy,
+                ConversationId = i.ConversationId,
             });
         }
         return list.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
@@ -732,7 +751,7 @@ public sealed class MailWorkbenchService
         {
             MailItemId = d.MailItemId, Subject = d.Subject, FromAddress = d.FromAddress, FromName = d.FromName,
             ToLine = d.ToLine, CcLine = d.CcLine, SourceType = d.SourceType, SourceMailbox = d.SourceMailbox,
-            ReceivedAt = d.ReceivedAt,
+            ConversationId = d.ConversationId, ReceivedAt = d.ReceivedAt,
             Html = html, IsHtml = isHtml, BodyText = text,
             HasAttachments = d.HasAttachments, Completed = d.Completed, CompletedAt = d.CompletedAt, CompletedBy = d.CompletedBy,
             IsRead = d.IsRead, ReadAt = d.ReadAt, ReadBy = d.ReadBy, ClaimedBy = d.ClaimedBy, ClaimedAt = d.ClaimedAt,
@@ -1025,33 +1044,36 @@ public sealed class MailWorkbenchService
     public SeedSnapshot StartRepairReceived()
     {
         if (!_seed.TryBegin()) return _seed.SnapshotNow();
-        _log.LogInformation("[MailWB] repair-received started");
+        _log.LogInformation("[MailWB] repair (received + conversation) started");
 
         _ = Task.Run(async () =>
         {
             var rows = await _sp.ReadMailEmlPathsAsync(CancellationToken.None);
             _seed.SetTotal(rows.Count);
-            foreach (var (id, eml, oldReceived) in rows)
+            foreach (var (id, eml, oldReceived, oldConv) in rows)
             {
                 try
                 {
                     if (string.IsNullOrEmpty(eml)) { _seed.RecordExisting(); continue; }
                     var path = ReRootToLocalArchive(eml);
                     if (!File.Exists(path)) { _seed.RecordExisting(); continue; }
-                    var msg   = MimeKit.MimeMessage.Load(path);
-                    var newIso = MailboxBridgeService.ResolveOriginalReceivedIso(msg, null);
-                    if (!string.IsNullOrEmpty(newIso) && !string.Equals(newIso, oldReceived, StringComparison.Ordinal))
+                    var msg     = MimeKit.MimeMessage.Load(path);
+                    var newIso  = MailboxBridgeService.ResolveOriginalReceivedIso(msg, null);
+                    var newConv = MailboxBridgeService.ResolveConversationId(msg);
+                    if ((!string.IsNullOrEmpty(newIso)  && !string.Equals(newIso, oldReceived, StringComparison.Ordinal)) ||
+                        (!string.IsNullOrEmpty(newConv) && !string.Equals(newConv, oldConv, StringComparison.Ordinal)))
                     {
-                        await _sp.UpdateMailReceivedAsync(id, newIso);
-                        _cache.SetReceived(id, newIso);
+                        await _sp.UpdateMailDerivedAsync(id, string.IsNullOrEmpty(newIso) ? oldReceived : newIso, newConv);
+                        if (!string.IsNullOrEmpty(newIso)) _cache.SetReceived(id, newIso);
+                        _cache.SetConversation(id, newConv);
                         _seed.RecordClassified("patched");
                     }
                     else _seed.RecordExisting();
                 }
-                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] repair-received item {Id} failed", id); }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] repair item {Id} failed", id); }
             }
             _seed.End();
-            _log.LogInformation("[MailWB] repair-received done: {S}", _seed.SnapshotNow().Summary());
+            _log.LogInformation("[MailWB] repair done: {S}", _seed.SnapshotNow().Summary());
         });
 
         return _seed.SnapshotNow();
@@ -1199,6 +1221,7 @@ public sealed class MailWorkbenchService
         public string? ClaimedBy    { get; set; }
         public string? ClaimedAt    { get; set; }
         public string? CompletedBy  { get; set; }
+        public string  ConversationId { get; set; } = "";
     }
 
     public sealed class MailItemDetail
@@ -1209,6 +1232,7 @@ public sealed class MailWorkbenchService
         public string  FromName    { get; set; } = "";
         public string  ToLine      { get; set; } = "";
         public string  CcLine      { get; set; } = "";
+        public string  ConversationId { get; set; } = "";
         public string  SourceType  { get; set; } = "email";   // email | sms | file
         public string  SourceMailbox { get; set; } = "";       // originating franchise mailbox (email)
         public string  ReceivedAt  { get; set; } = "";

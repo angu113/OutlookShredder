@@ -99,11 +99,14 @@ public class MailClassifierService
         var body = m.BodyText ?? "";
         if (body.Length > BodyCharCap) body = body[..BodyCharCap] + "\n…[truncated]";
         var atts = m.AttachmentNames.Count > 0 ? string.Join(", ", m.AttachmentNames) : "(none)";
+        var threadLine = string.IsNullOrWhiteSpace(m.ThreadCategoryHint) ? "" :
+            $"\nConversation context: a previous message in this same email thread was classified as \"{m.ThreadCategoryHint}\". " +
+            "Strongly prefer that same category unless this message clearly belongs elsewhere.";
         return $"""
             From: {m.FromName} <{m.FromAddress}>
             To: {m.ToLine}
             Subject: {m.Subject}
-            Attachments: {atts}
+            Attachments: {atts}{threadLine}
 
             Body:
             {body}
