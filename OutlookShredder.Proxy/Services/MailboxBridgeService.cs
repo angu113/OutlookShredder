@@ -46,6 +46,9 @@ public sealed class MailboxBridgeService : BackgroundService
         // Ids classified as "not a forward-as-attachment" (inline forwards etc.) so they
         // are ignored per the product rule and never re-fetched on subsequent polls.
         public readonly HashSet<string> Skipped = new(StringComparer.Ordinal);
+        // Newest receivedDateTime processed — drives incremental polling (fetch only mail at/after
+        // this minus an overlap). Null until the first seed poll has run.
+        public DateTimeOffset? HighWater;
     }
 
     private sealed class CachedMessage
@@ -55,6 +58,11 @@ public sealed class MailboxBridgeService : BackgroundService
     }
 
     private const int CacheCap = 250;
+
+    // Overlap subtracted from the high-water mark on incremental polls — tolerates out-of-order
+    // delivery / commit lag; re-fetched messages in the overlap window dedup cheaply against
+    // the ById/Skipped caches.
+    private static readonly TimeSpan IncrementalOverlap = TimeSpan.FromMinutes(2);
 
     private readonly Dictionary<string, MailboxState> _states = new(StringComparer.OrdinalIgnoreCase);
 
@@ -135,6 +143,9 @@ public sealed class MailboxBridgeService : BackgroundService
             throw new InvalidOperationException(
                 $"Mirror folder '{cfg.DestinationFolderPath}' not found in {cfg.DestinationUpn}");
 
+        DateTimeOffset? highWater;
+        lock (state.Lock) highWater = state.HighWater;
+
         var page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
             .GetAsync(req =>
             {
@@ -142,6 +153,17 @@ public sealed class MailboxBridgeService : BackgroundService
                                                "hasAttachments", "bodyPreview"];
                 req.QueryParameters.Top     = 50;
                 req.QueryParameters.Orderby = ["receivedDateTime desc"];
+
+                // Incremental ("delta") fetch: after the first poll, pull only messages at/after the
+                // high-water mark minus a small overlap, instead of re-listing the newest 50 every
+                // cycle. This keeps fast polling cheap as the mirror folder grows. The first poll
+                // (no high-water) seeds the most-recent page so the list view is populated. New mail
+                // always sorts newest-first, so a single Top=50 page never misses arrivals between polls.
+                if (highWater is { } hw)
+                {
+                    var since = hw.Subtract(IncrementalOverlap).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    req.QueryParameters.Filter = $"receivedDateTime ge {since}";
+                }
             }, ct);
 
         var msgs = page?.Value ?? [];
@@ -213,6 +235,13 @@ public sealed class MailboxBridgeService : BackgroundService
         lock (state.Lock)
         {
             state.Skipped.IntersectWith(pageIds);
+
+            // Advance the high-water mark to the newest message seen this poll (incremental polls
+            // re-fetch the overlap window, so this only moves forward).
+            foreach (var m in msgs)
+                if (m.ReceivedDateTime is { } r && (state.HighWater is null || r > state.HighWater))
+                    state.HighWater = r;
+
             state.Status.PollSucceeded = true;
             state.Status.LastError = null;
             state.Status.LastPollAt = DateTimeOffset.UtcNow;

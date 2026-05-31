@@ -18,15 +18,24 @@
   <ItemGroup>
     <PackageReference Include="Anthropic.SDK" Version="3.2.0" />
     <PackageReference Include="Azure.Identity" Version="1.11.4" />
-    <PackageReference Include="MailKit" Version="4.9.0" />
+    <PackageReference Include="MailKit" Version="4.17.0" />
     <PackageReference Include="Microsoft.Identity.Client" Version="4.65.0" />
     <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.20.1" />
-    <PackageReference Include="Microsoft.Graph" Version="5.56.0" />
+    <!-- Microsoft.Graph 5.105.0 (latest 5.x): bumped from 5.56.0 to pull a patched Kiota family
+         (clears the GHSA-7j59-v9qr-6fq9 high-severity Microsoft.Kiota.Abstractions advisory).
+         Stayed on 5.x deliberately — v6 is a breaking API migration, out of scope for an advisory
+         cleanup. -->
+    <PackageReference Include="Microsoft.Graph" Version="5.105.0" />
+    <!-- Direct pin overriding the Kiota.Abstractions 1.21.1 that Graph 5.105 pulls transitively
+         (still flagged by GHSA-7j59-v9qr-6fq9; fixed in 1.22.x). Same 1.x line as the rest of the
+         Kiota family Graph 5.x ships, so it's drop-in compatible. -->
+    <PackageReference Include="Microsoft.Kiota.Abstractions" Version="1.22.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
     <PackageReference Include="Mscc.GenerativeAI" Version="3.1.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.3" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.3" />
+    <!-- Microsoft.Extensions.Configuration[.Abstractions] removed 2026-05-31: provided by the
+         Microsoft.AspNetCore.App shared framework on net10 (Sdk.Web), so explicit refs were
+         redundant and triggered NU1510. -->
     <PackageReference Include="PDFsharp" Version="6.2.4" />
     <PackageReference Include="PdfPig" Version="0.1.14" />
     <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
