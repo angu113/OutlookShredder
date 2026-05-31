@@ -14,11 +14,65 @@ public sealed class MailClassifyController : ControllerBase
 {
     private readonly MailboxBridgeService _bridge;
     private readonly MailClassifierService _classifier;
+    private readonly MailWorkbenchService _workbench;
+    private readonly SharePointService _sp;
 
-    public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier)
+    public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier,
+        MailWorkbenchService workbench, SharePointService sp)
     {
         _bridge     = bridge;
         _classifier = classifier;
+        _workbench  = workbench;
+        _sp         = sp;
+    }
+
+    /// <summary>Idempotently provision the MailItems + MailClassifications SP lists (Phase 1b setup).</summary>
+    [HttpPost("setup-lists")]
+    public async Task<IActionResult> SetupLists() => Ok(await _sp.EnsureMailListsAsync());
+
+    /// <summary>Capture a cached bridge message → MailItems (dedup) → classify → MailClassifications.</summary>
+    [HttpPost("capture")]
+    public async Task<IActionResult> Capture([FromBody] PreviewRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Id)) return BadRequest(new { error = "id is required." });
+        var upn = string.IsNullOrWhiteSpace(req.Upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : req.Upn;
+        if (string.IsNullOrWhiteSpace(upn)) return BadRequest(new { error = "No watched mailbox configured." });
+        try { return Ok(await _workbench.CaptureAndClassifyAsync(upn, req.Id, ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>The classification tree with per-leaf total/open/completed counts.</summary>
+    [HttpGet("tree")]
+    public async Task<IActionResult> Tree(CancellationToken ct) => Ok(await _workbench.GetTreeAsync(ct));
+
+    /// <summary>Items currently classified under a taxonomy path.</summary>
+    [HttpGet("items")]
+    public async Task<IActionResult> Items([FromQuery] string category, [FromQuery] bool includeCompleted = false, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return BadRequest(new { error = "category is required." });
+        return Ok(await _workbench.GetItemsAsync(category, includeCompleted, ct));
+    }
+
+    /// <summary>Re-run classification on a stored item (writes a new version; never mutates the email).</summary>
+    [HttpPost("reclassify/{mailItemId}")]
+    public async Task<IActionResult> Reclassify(string mailItemId, CancellationToken ct)
+    {
+        try { return Ok(await _workbench.ReclassifyAsync(mailItemId, ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Mark a captured item complete/incomplete (configurable UI retention applies in the view).</summary>
+    [HttpPost("complete/{mailItemId}")]
+    public async Task<IActionResult> Complete(string mailItemId, [FromBody] CompleteRequest req, CancellationToken ct)
+    {
+        var ok = await _sp.SetMailCompletedAsync(mailItemId, req?.Completed ?? true, req?.By, ct);
+        return ok ? Ok(new { success = true }) : NotFound(new { error = "MailItem not found." });
+    }
+
+    public sealed class CompleteRequest
+    {
+        public bool Completed { get; set; } = true;
+        public string? By { get; set; }
     }
 
     /// <summary>The taxonomy the classifier targets (for UI/inspection).</summary>

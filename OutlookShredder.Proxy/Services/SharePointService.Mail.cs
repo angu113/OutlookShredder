@@ -1,0 +1,414 @@
+using System.Text.Json;
+using Microsoft.Graph.Models;
+using OutlookShredder.Proxy.Models;
+
+namespace OutlookShredder.Proxy.Services;
+
+/// <summary>
+/// Mail-workbench persistence (wip/mail-classification.md, Phase 1b). Two lists:
+///   MailItems          — immutable captured email/document (never mutated by classification).
+///   MailClassifications — versioned descriptive layer (FK MailItemId, IsCurrent flag, full history).
+/// Lives on SharePointService (the single SP write layer) as a partial class so it reuses the
+/// Graph client, site-id resolution, EnsureListColumnsAsync, and GetStr helpers.
+/// </summary>
+public partial class SharePointService
+{
+    private const string MailItemsList = "MailItems";
+    private const string MailClassList = "MailClassifications";
+
+    // ── Provisioning ──────────────────────────────────────────────────────────────
+
+    public async Task<object> EnsureMailListsAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+
+        var items = await EnsureListColumnsAsync(siteId, MailItemsList,
+        [
+            ("MailItemId","text"), ("SourceType","text"), ("SourceMailbox","text"),
+            ("InternetMessageId","text"), ("WrapperGraphId","text"),
+            ("FromAddress","text"), ("FromName","text"), ("ToLine","note"), ("CcLine","note"),
+            ("EmailSubject","text"), ("ReceivedAt","dateTime"),
+            ("BodyText","note"), ("HasAttachments","boolean"), ("AttachmentsJson","note"),
+            ("RawEmlUrl","text"), ("CapturedAt","dateTime"),
+            ("Completed","boolean"), ("CompletedAt","dateTime"), ("CompletedBy","text"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed");
+
+        var cls = await EnsureListColumnsAsync(siteId, MailClassList,
+        [
+            ("MailItemId","text"), ("Version","number"), ("IsCurrent","boolean"),
+            ("CategoryPath","text"), ("OtherLabel","text"), ("Confidence","number"),
+            ("KeywordTags","note"), ("PoNumber","text"), ("SoNumber","text"), ("Amount","text"),
+            ("Reasoning","note"), ("AiProvider","text"), ("AiModel","text"),
+            ("RawAiResponse","note"), ("ClassifiedAt","dateTime"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailClassList, "MailItemId", "IsCurrent", "CategoryPath");
+
+        return new { mailItems = items, mailClassifications = cls };
+    }
+
+    private async Task IndexListColumnsAsync(string siteId, string listName, params string[] colNames)
+    {
+        var listId = await ResolveListIdAsync(listName);
+        var cols   = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
+        foreach (var n in colNames)
+        {
+            var c = cols?.Value?.FirstOrDefault(x => string.Equals(x.Name, n, StringComparison.OrdinalIgnoreCase));
+            if (c?.Id is null || c.Indexed == true) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Columns[c.Id].PatchAsync(new ColumnDefinition { Indexed = true });
+                _log.LogInformation("[SP] Indexed {List} column '{Col}'", listName, n);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] could not index {List}.{Col}", listName, n); }
+        }
+    }
+
+    // ── MailItems write/read ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Captures a mail item if not already present (dedup by WrapperGraphId). Returns the stable
+    /// MailItemId and whether it was newly created.
+    /// </summary>
+    public async Task<(string MailItemId, bool IsNew)> WriteMailItemAsync(MailItemInput input, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailItemsList);
+
+        // Dedup on the mirror wrapper id (stable, indexed).
+        var dupe = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=MailItemId)"];
+            req.QueryParameters.Top    = 1;
+            req.QueryParameters.Filter = $"fields/WrapperGraphId eq '{Esc(input.WrapperGraphId)}'";
+        }, ct);
+        if (dupe?.Value is { Count: > 0 })
+        {
+            var ad = dupe.Value[0].Fields?.AdditionalData;
+            var existingId = ad is not null && ad.TryGetValue("MailItemId", out var ev) ? ev?.ToString() : null;
+            if (!string.IsNullOrEmpty(existingId)) return (existingId, false);
+        }
+
+        var mailItemId = Guid.NewGuid().ToString("N");
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]             = Trunc(input.Subject, 250),
+                    ["MailItemId"]        = mailItemId,
+                    ["SourceType"]        = input.SourceType,
+                    ["SourceMailbox"]     = input.SourceMailbox,
+                    ["InternetMessageId"] = input.InternetMessageId,
+                    ["WrapperGraphId"]    = input.WrapperGraphId,
+                    ["FromAddress"]       = input.FromAddress,
+                    ["FromName"]          = input.FromName,
+                    ["ToLine"]            = Trunc(input.ToLine, 8000),
+                    ["CcLine"]            = Trunc(input.CcLine, 8000),
+                    ["EmailSubject"]      = Trunc(input.Subject, 250),
+                    ["ReceivedAt"]        = input.ReceivedAtIso,
+                    ["BodyText"]          = Trunc(input.BodyText, 100000),
+                    ["HasAttachments"]    = input.HasAttachments,
+                    ["AttachmentsJson"]   = input.AttachmentsJson,
+                    ["CapturedAt"]        = DateTimeOffset.UtcNow.ToString("o"),
+                    ["Completed"]         = false,
+                }
+            }
+        }, cancellationToken: ct);
+
+        _log.LogInformation("[MailWB] Captured MailItem {Id} from {From} subj='{Subj}'",
+            mailItemId, input.FromAddress, Trunc(input.Subject, 60));
+        return (mailItemId, true);
+    }
+
+    public async Task<List<MailItemRow>> ReadMailItemsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList,
+            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","FromAddress","FromName",
+             "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt"], null, ct);
+        return rows.Select(f => new MailItemRow
+        {
+            SpId           = GetStr(f, "__spId") ?? "",
+            MailItemId     = GetStr(f, "MailItemId") ?? "",
+            SourceType     = GetStr(f, "SourceType") ?? "email",
+            SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
+            FromAddress    = GetStr(f, "FromAddress") ?? "",
+            FromName       = GetStr(f, "FromName") ?? "",
+            Subject        = GetStr(f, "EmailSubject") ?? "",
+            ReceivedAt     = GetStr(f, "ReceivedAt") ?? "",
+            HasAttachments = GetBool(f, "HasAttachments"),
+            AttachmentsJson= GetStr(f, "AttachmentsJson") ?? "",
+            Completed      = GetBool(f, "Completed"),
+            CompletedAt    = GetStr(f, "CompletedAt"),
+        }).ToList();
+    }
+
+    public async Task<bool> SetMailCompletedAsync(string mailItemId, bool completed, string? by, CancellationToken ct = default)
+    {
+        var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields.PatchAsync(new FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["Completed"]   = completed,
+                ["CompletedAt"] = completed ? DateTimeOffset.UtcNow.ToString("o") : null,
+                ["CompletedBy"] = completed ? by : null,
+            }
+        }, cancellationToken: ct);
+        return true;
+    }
+
+    private async Task<(string SiteId, string ListId, string? SpId)> ResolveMailItemSpIdAsync(string mailItemId, CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailItemsList);
+        var res = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=MailItemId)"];
+            req.QueryParameters.Top    = 1;
+            req.QueryParameters.Filter = $"fields/MailItemId eq '{Esc(mailItemId)}'";
+        }, ct);
+        return (siteId, listId, res?.Value?.FirstOrDefault()?.Id);
+    }
+
+    /// <summary>Reads one captured item's classify-relevant text (for re-classification).</summary>
+    public async Task<MailClassifyInput?> GetClassifyInputAsync(string mailItemId, CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList,
+            ["MailItemId","FromAddress","FromName","ToLine","EmailSubject","BodyText","AttachmentsJson"],
+            $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
+        var f = rows.FirstOrDefault();
+        if (f is null) return null;
+
+        var names = new List<string>();
+        try
+        {
+            var arr = JsonSerializer.Deserialize<List<MailAttManifest>>(GetStr(f, "AttachmentsJson") ?? "[]");
+            if (arr is not null) names = arr.Select(a => a.Name).Where(n => !string.IsNullOrEmpty(n)).ToList();
+        }
+        catch { /* manifest optional */ }
+
+        return new MailClassifyInput
+        {
+            Subject         = GetStr(f, "EmailSubject") ?? "",
+            FromAddress     = GetStr(f, "FromAddress") ?? "",
+            FromName        = GetStr(f, "FromName") ?? "",
+            ToLine          = GetStr(f, "ToLine") ?? "",
+            BodyText        = GetStr(f, "BodyText") ?? "",
+            AttachmentNames = names,
+        };
+    }
+
+    // ── MailClassifications write/read ───────────────────────────────────────────────
+
+    /// <summary>Writes a new classification version for an item; supersedes the prior current one.</summary>
+    public async Task<int> WriteClassificationAsync(string mailItemId, MailClassificationResult r, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailClassList);
+
+        var prior = await ReadClassificationsForItemAsync(mailItemId, ct);
+        var nextVersion = prior.Count == 0 ? 1 : prior.Max(p => p.Version) + 1;
+
+        // Flip any current rows to not-current.
+        foreach (var p in prior.Where(p => p.IsCurrent && p.SpId.Length > 0))
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[p.SpId].Fields.PatchAsync(
+                new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["IsCurrent"] = false } }, cancellationToken: ct);
+        }
+
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]        = mailItemId,
+                    ["MailItemId"]   = mailItemId,
+                    ["Version"]      = nextVersion,
+                    ["IsCurrent"]    = true,
+                    ["CategoryPath"] = r.Category,
+                    ["OtherLabel"]   = r.OtherLabel,
+                    ["Confidence"]   = r.Confidence,
+                    ["KeywordTags"]  = string.Join(", ", r.Keywords),
+                    ["PoNumber"]     = r.PoNumber,
+                    ["SoNumber"]     = r.SoNumber,
+                    ["Amount"]       = r.Amount,
+                    ["Reasoning"]    = Trunc(r.Reasoning, 8000),
+                    ["AiProvider"]   = r.AiProvider,
+                    ["AiModel"]      = r.AiModel,
+                    ["RawAiResponse"]= Trunc(r.RawResponse, 100000),
+                    ["ClassifiedAt"] = DateTimeOffset.UtcNow.ToString("o"),
+                }
+            }
+        }, cancellationToken: ct);
+
+        _log.LogInformation("[MailWB] Classified {Id} v{Ver} -> {Cat}", mailItemId, nextVersion, r.Category);
+        return nextVersion;
+    }
+
+    public async Task<List<MailClassRow>> ReadClassificationsForItemAsync(string mailItemId, CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailClassList,
+            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","Confidence","KeywordTags",
+             "PoNumber","SoNumber","Amount","Reasoning","AiProvider","AiModel","ClassifiedAt"],
+            $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
+        return rows.Select(MapClassRow).OrderByDescending(c => c.Version).ToList();
+    }
+
+    /// <summary>All current classifications (one per item). Used for the tree + item lists.</summary>
+    public async Task<List<MailClassRow>> ReadCurrentClassificationsAsync(CancellationToken ct = default)
+    {
+        // Read ALL classification rows (no server-side "IsCurrent eq true" filter — that boolean
+        // filter lags badly on SP's eventual-consistency index right after a write, so the tree
+        // would show stale/zero counts immediately after capture/reclassify). Compute the current
+        // row per item as the highest Version in memory — always correct and lag-free.
+        var rows = await ReadAllListItemsAsync(MailClassList,
+            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","Confidence","KeywordTags",
+             "PoNumber","SoNumber","Amount","AiProvider","AiModel","ClassifiedAt"],
+            null, ct);
+        return rows.Select(MapClassRow)
+            .GroupBy(c => c.MailItemId, StringComparer.Ordinal)
+            .Select(g => g.OrderByDescending(c => c.Version).First())
+            .ToList();
+    }
+
+    private static MailClassRow MapClassRow(Dictionary<string, object?> f) => new()
+    {
+        SpId         = GetStr(f, "__spId") ?? "",
+        MailItemId   = GetStr(f, "MailItemId") ?? "",
+        Version      = (int)GetDouble(f, "Version"),
+        IsCurrent    = GetBool(f, "IsCurrent"),
+        CategoryPath = GetStr(f, "CategoryPath") ?? "Other",
+        OtherLabel   = GetStr(f, "OtherLabel"),
+        Confidence   = GetDouble(f, "Confidence"),
+        KeywordTags  = GetStr(f, "KeywordTags") ?? "",
+        PoNumber     = GetStr(f, "PoNumber"),
+        SoNumber     = GetStr(f, "SoNumber"),
+        Amount       = GetStr(f, "Amount"),
+        AiProvider   = GetStr(f, "AiProvider") ?? "",
+        AiModel      = GetStr(f, "AiModel") ?? "",
+        ClassifiedAt = GetStr(f, "ClassifiedAt") ?? "",
+    };
+
+    // ── Shared helpers ────────────────────────────────────────────────────────────
+
+    private async Task<List<Dictionary<string, object?>>> ReadAllListItemsAsync(
+        string listName, string[] selectFields, string? filter, CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(listName);
+        var rows   = new List<Dictionary<string, object?>>();
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = [$"fields($select={string.Join(",", selectFields)})"];
+            req.QueryParameters.Top    = 200;
+            if (filter is not null) req.QueryParameters.Filter = filter;
+        }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var it in page.Value)
+            {
+                var f = new Dictionary<string, object?>();
+                var ad = it.Fields?.AdditionalData;
+                if (ad is not null) foreach (var kv in ad) f[kv.Key] = kv.Value;
+                f["__spId"] = it.Id;
+                rows.Add(f);
+            }
+            if (string.IsNullOrEmpty(page.OdataNextLink)) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items.WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+        return rows;
+    }
+
+    private static string Esc(string s) => (s ?? "").Replace("'", "''");
+    private static string? Trunc(string? s, int max) =>
+        string.IsNullOrEmpty(s) ? s : (s.Length <= max ? s : s[..max]);
+
+    private static bool GetBool(IDictionary<string, object?> d, string key)
+    {
+        if (!d.TryGetValue(key, out var v) || v is null) return false;
+        if (v is bool b) return b;
+        if (v is JsonElement je) return je.ValueKind == JsonValueKind.True || (je.ValueKind == JsonValueKind.String && bool.TryParse(je.GetString(), out var pb) && pb);
+        return bool.TryParse(v.ToString(), out var p) && p;
+    }
+
+    private static double GetDouble(IDictionary<string, object?> d, string key)
+    {
+        if (!d.TryGetValue(key, out var v) || v is null) return 0;
+        if (v is double dv) return dv;
+        if (v is JsonElement je)
+        {
+            if (je.ValueKind == JsonValueKind.Number) return je.GetDouble();
+            if (je.ValueKind == JsonValueKind.String && double.TryParse(je.GetString(), out var sd)) return sd;
+            return 0;
+        }
+        return double.TryParse(v.ToString(), out var p) ? p : 0;
+    }
+}
+
+// ── DTOs ────────────────────────────────────────────────────────────────────────
+
+/// <summary>Attachment manifest entry stored as AttachmentsJson on a MailItem.</summary>
+public sealed class MailAttManifest
+{
+    public string Name        { get; set; } = "";
+    public string ContentType { get; set; } = "";
+    public long   Size        { get; set; }
+    public string? WebUrl     { get; set; }   // set in Phase 1b doc-library storage
+}
+
+public sealed class MailItemInput
+{
+    public string SourceType        { get; set; } = "email";
+    public string SourceMailbox     { get; set; } = "";
+    public string InternetMessageId { get; set; } = "";
+    public string WrapperGraphId    { get; set; } = "";
+    public string FromAddress       { get; set; } = "";
+    public string FromName          { get; set; } = "";
+    public string ToLine            { get; set; } = "";
+    public string CcLine            { get; set; } = "";
+    public string Subject           { get; set; } = "";
+    public string ReceivedAtIso     { get; set; } = "";
+    public string BodyText          { get; set; } = "";
+    public bool   HasAttachments    { get; set; }
+    public string AttachmentsJson   { get; set; } = "[]";
+}
+
+public sealed class MailItemRow
+{
+    public string  SpId            { get; set; } = "";
+    public string  MailItemId      { get; set; } = "";
+    public string  SourceType      { get; set; } = "email";
+    public string  SourceMailbox   { get; set; } = "";
+    public string  FromAddress     { get; set; } = "";
+    public string  FromName        { get; set; } = "";
+    public string  Subject         { get; set; } = "";
+    public string  ReceivedAt      { get; set; } = "";
+    public bool    HasAttachments  { get; set; }
+    public string  AttachmentsJson { get; set; } = "";
+    public bool    Completed       { get; set; }
+    public string? CompletedAt     { get; set; }
+}
+
+public sealed class MailClassRow
+{
+    public string  SpId         { get; set; } = "";
+    public string  MailItemId   { get; set; } = "";
+    public int     Version      { get; set; }
+    public bool    IsCurrent    { get; set; }
+    public string  CategoryPath { get; set; } = "Other";
+    public string? OtherLabel   { get; set; }
+    public double  Confidence   { get; set; }
+    public string  KeywordTags  { get; set; } = "";
+    public string? PoNumber     { get; set; }
+    public string? SoNumber     { get; set; }
+    public string? Amount       { get; set; }
+    public string  AiProvider   { get; set; } = "";
+    public string  AiModel      { get; set; } = "";
+    public string  ClassifiedAt { get; set; } = "";
+}

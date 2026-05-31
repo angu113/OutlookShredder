@@ -20,7 +20,7 @@ namespace OutlookShredder.Proxy.Services;
 ///
 /// Azure AD app requires:  Sites.FullControl.All  (Application, admin consented)
 /// </summary>
-public class SharePointService
+public partial class SharePointService
 {
     private readonly IConfiguration          _config;
     private readonly ILogger<SharePointService> _log;
