@@ -125,9 +125,12 @@ try
     builder.Services.AddSingleton<FileWatcherService>();
     builder.Services.AddSingleton<TodoService>();
     builder.Services.AddSingleton<MailboxBridgeService>();
+    builder.Services.AddSingleton<MailTaxonomyService>();
+    builder.Services.AddSingleton<MailCacheService>();
     builder.Services.AddSingleton<MailClassifierService>();
     builder.Services.AddSingleton<MailWorkbenchService>();
     builder.Services.AddSingleton<MailAutoCaptureService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MailCacheService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailAutoCaptureService>());
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
@@ -161,6 +164,7 @@ try
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierCacheService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SliCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<MailCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
     builder.Services.AddHostedService<ShutdownWatcherService>();

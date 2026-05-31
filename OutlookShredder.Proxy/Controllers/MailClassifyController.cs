@@ -15,14 +15,16 @@ public sealed class MailClassifyController : ControllerBase
     private readonly MailboxBridgeService _bridge;
     private readonly MailClassifierService _classifier;
     private readonly MailWorkbenchService _workbench;
+    private readonly MailTaxonomyService _taxonomy;
     private readonly SharePointService _sp;
 
     public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier,
-        MailWorkbenchService workbench, SharePointService sp)
+        MailWorkbenchService workbench, MailTaxonomyService taxonomy, SharePointService sp)
     {
         _bridge     = bridge;
         _classifier = classifier;
         _workbench  = workbench;
+        _taxonomy   = taxonomy;
         _sp         = sp;
     }
 
@@ -133,7 +135,7 @@ public sealed class MailClassifyController : ControllerBase
     [HttpPost("complete/{mailItemId}")]
     public async Task<IActionResult> Complete(string mailItemId, [FromBody] CompleteRequest req, CancellationToken ct)
     {
-        var ok = await _sp.SetMailCompletedAsync(mailItemId, req?.Completed ?? true, req?.By, ct);
+        var ok = await _workbench.CompleteAsync(mailItemId, req?.Completed ?? true, req?.By, ct);
         return ok ? Ok(new { success = true }) : NotFound(new { error = "MailItem not found." });
     }
 
@@ -143,10 +145,35 @@ public sealed class MailClassifyController : ControllerBase
         public string? By { get; set; }
     }
 
-    /// <summary>The taxonomy the classifier targets (for UI/inspection).</summary>
+    /// <summary>The effective taxonomy the classifier targets (static base + SP-confirmed leaves).</summary>
     [HttpGet("taxonomy")]
-    public IActionResult GetTaxonomy() =>
-        Ok(MailTaxonomy.Leaves.Select(l => new { l.Top, l.Sub, l.Path, l.Description }));
+    public async Task<IActionResult> GetTaxonomy(CancellationToken ct) =>
+        Ok((await _taxonomy.GetLeavesAsync(ct)).Select(l => new { l.Top, l.Sub, l.Path, l.Description }));
+
+    /// <summary>
+    /// Promote an "Other" suggestion to a real taxonomy leaf (dev): writes an SP hint so the
+    /// classifier targets it on the next call (no deploy), then re-files the source item onto it.
+    /// </summary>
+    [HttpPost("confirm-leaf/{mailItemId}")]
+    public async Task<IActionResult> ConfirmLeaf(string mailItemId, [FromBody] ConfirmLeafRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.CategoryPath))
+            return BadRequest(new { error = "categoryPath is required." });
+        try { return Ok(await _workbench.ConfirmLeafAsync(mailItemId, req.CategoryPath.Trim(), req.Hint, ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public sealed class ConfirmLeafRequest
+    {
+        public string CategoryPath { get; set; } = "";
+        public string? Hint { get; set; }
+    }
+
+    /// <summary>The operator-confirmed hints currently shaping the classifier prompt (dev inspection).</summary>
+    [HttpGet("hints")]
+    public async Task<IActionResult> Hints(CancellationToken ct) =>
+        Ok(await _taxonomy.GetHintsAsync(ct));
+
 
     /// <summary>
     /// Classify a message without persisting. Provide either { upn?, id } to pull a cached mirror

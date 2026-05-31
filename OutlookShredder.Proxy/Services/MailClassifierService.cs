@@ -19,6 +19,7 @@ public class MailClassifierService
     private readonly IConfiguration _config;
     private readonly ILogger<MailClassifierService> _log;
     private readonly AiRateLimitTracker _rateLimits;
+    private readonly MailTaxonomyService _taxonomy;
     private readonly HttpClient _claudeHttp;
     private readonly HttpClient _geminiHttp;
 
@@ -28,8 +29,10 @@ public class MailClassifierService
 
     private const int BodyCharCap = 6000;
 
-    private static readonly string SystemPromptText =
-        $$"""
+    // The taxonomy block is injected at runtime (static base + SP-backed learned hints) so confirmed
+    // leaves take effect with no deploy. Prefix/suffix bracket the dynamic block.
+    private const string SystemPromptPrefix =
+        """
         You are an email classifier for Metal Supermarkets Hackensack, a metals distribution company.
 
         Classify the email into EXACTLY ONE category from this taxonomy. Pick the single best-fitting
@@ -37,7 +40,12 @@ public class MailClassifierService
         emergent category.
 
         TAXONOMY (category path -> meaning):
-        {{MailTaxonomy.RenderForPrompt()}}
+
+        """;
+
+    private const string SystemPromptSuffix =
+        """
+
         Strong signals: a purchase-order number like HSK-PO0001234 indicates "Supplier/Order
         Confirmations"; a sales-order reference like HSK-SO0001234 indicates "Customer/Orders".
 
@@ -45,6 +53,9 @@ public class MailClassifierService
         or customer name, reference numbers) to support full-text search, and extract poNumber,
         soNumber, and amount when present. Respond ONLY by calling the classify_email tool.
         """;
+
+    private async Task<string> BuildSystemPromptAsync(CancellationToken ct) =>
+        SystemPromptPrefix + await _taxonomy.RenderForPromptAsync(ct) + SystemPromptSuffix;
 
     private static readonly (int MinMs, int MaxMs)[] RetryDelays =
     [
@@ -59,11 +70,13 @@ public class MailClassifierService
         IConfiguration config,
         ILogger<MailClassifierService> log,
         AiRateLimitTracker rateLimits,
+        MailTaxonomyService taxonomy,
         ILogger<AiRateLimitHandler> handlerLog)
     {
         _config     = config;
         _log        = log;
         _rateLimits = rateLimits;
+        _taxonomy   = taxonomy;
 
         var timeoutSeconds = int.TryParse(_config["Claude:TimeoutSeconds"], out var t) ? t : 60;
         var handler = new AiRateLimitHandler("Claude", rateLimits, handlerLog) { InnerHandler = new HttpClientHandler() };
@@ -97,9 +110,9 @@ public class MailClassifierService
             """;
     }
 
-    private object BuildToolDefinition()
+    private async Task<object> BuildToolDefinitionAsync(CancellationToken ct)
     {
-        var categories = MailTaxonomy.Leaves.Select(l => l.Path).ToArray();
+        var categories = (await _taxonomy.GetLeavesAsync(ct)).Select(l => l.Path).ToArray();
         return new
         {
             name = "classify_email",
@@ -135,12 +148,13 @@ public class MailClassifierService
         var maxRetries = int.TryParse(_config["Claude:MaxRetries"], out var mr) ? mr : 3;
         var model      = _config["MailClassifier:ClaudeModel"] ?? "claude-haiku-4-5-20251001";
 
+        var systemText = await BuildSystemPromptAsync(ct);
         var body = new
         {
             model,
             max_tokens  = maxTokens,
-            system      = new object[] { new { type = "text", text = SystemPromptText, cache_control = new { type = "ephemeral" } } },
-            tools       = new[] { BuildToolDefinition() },
+            system      = new object[] { new { type = "text", text = systemText, cache_control = new { type = "ephemeral" } } },
+            tools       = new[] { await BuildToolDefinitionAsync(ct) },
             tool_choice = new { type = "tool", name = "classify_email" },
             messages    = new[] { new { role = "user", content = BuildUserText(input) } }
         };
@@ -202,7 +216,7 @@ public class MailClassifierService
 
         var model = _config["MailClassifier:GeminiModel"] ?? "gemini-2.5-flash";
         var url   = string.Format(GeminiApiUrlTemplate, model, apiKey);
-        var categories = MailTaxonomy.Leaves.Select(l => l.Path).ToArray();
+        var categories = (await _taxonomy.GetLeavesAsync(ct)).Select(l => l.Path).ToArray();
 
         var schema = new
         {
@@ -223,7 +237,7 @@ public class MailClassifierService
 
         var body = new
         {
-            systemInstruction = new { parts = new[] { new { text = SystemPromptText } } },
+            systemInstruction = new { parts = new[] { new { text = await BuildSystemPromptAsync(ct) } } },
             contents = new[] { new { role = "user", parts = new[] { new { text = BuildUserText(input) } } } },
             generationConfig = new { responseMimeType = "application/json", responseSchema = schema }
         };
@@ -273,7 +287,7 @@ public class MailClassifierService
         var raw = JsonSerializer.Deserialize<RawClassification>(json, _jsonOpts);
         if (raw is null) return null;
 
-        var category = MailTaxonomy.Coerce(raw.Category);
+        var category = _taxonomy.Coerce(raw.Category);
         var result = new MailClassificationResult
         {
             Category    = category,

@@ -79,6 +79,45 @@ public class RfqProcessedNotification
     /// Null when there is 0 or 1 match (legacy BpName/ContactName/PopupMessage fields cover those cases).
     /// </summary>
     public List<CrmBusMatchDto>? CrmMatches { get; set; }
+    /// <summary>Populated only when EventType = "Mail". Captured | Classified | Amended | Completed | Deleted.</summary>
+    public string? MailAction { get; set; }
+    /// <summary>Stable MailItemId of the affected mail-workbench item (EventType="Mail").</summary>
+    public string? MailItemId { get; set; }
+    /// <summary>
+    /// Full item snapshot for cross-proxy cache sync (EventType="Mail"); null on "Deleted".
+    /// Bus recipients apply this directly to their MailCache without an SP round-trip.
+    /// </summary>
+    public MailBusItem? MailItem { get; set; }
+}
+
+/// <summary>
+/// Compact mail-workbench item carried on EventType="Mail" bus messages: the immutable item fields
+/// merged with its current classification, sufficient to update a peer's MailCache and the Inbox grid
+/// without a proxy/SP round-trip.
+/// </summary>
+public sealed class MailBusItem
+{
+    public string  MailItemId      { get; set; } = "";
+    public string  SpId            { get; set; } = "";
+    public string  WrapperGraphId  { get; set; } = "";
+    public string  SourceType      { get; set; } = "email";
+    public string  SourceMailbox   { get; set; } = "";
+    public string  FromAddress     { get; set; } = "";
+    public string  FromName        { get; set; } = "";
+    public string  Subject         { get; set; } = "";
+    public string  ReceivedAt      { get; set; } = "";
+    public bool    HasAttachments  { get; set; }
+    public string  AttachmentsJson { get; set; } = "";
+    public bool    Completed       { get; set; }
+    public string? CompletedAt     { get; set; }
+    // current classification
+    public string  CategoryPath    { get; set; } = "Other";
+    public string? OtherLabel      { get; set; }
+    public double  Confidence      { get; set; }
+    public string  KeywordTags     { get; set; } = "";
+    public string? PoNumber        { get; set; }
+    public string? SoNumber        { get; set; }
+    public string? Amount          { get; set; }
 }
 
 /// <summary>One CRM company match carried on an IncomingCall bus event.</summary>

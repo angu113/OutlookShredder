@@ -15,6 +15,7 @@ public partial class SharePointService
 {
     private const string MailItemsList = "MailItems";
     private const string MailClassList = "MailClassifications";
+    private const string MailHintsList = "MailTaxonomyHints";
 
     // ── Provisioning ──────────────────────────────────────────────────────────────
 
@@ -44,7 +45,48 @@ public partial class SharePointService
         ]);
         await IndexListColumnsAsync(siteId, MailClassList, "MailItemId", "IsCurrent", "CategoryPath");
 
-        return new { mailItems = items, mailClassifications = cls };
+        var hints = await EnsureListColumnsAsync(siteId, MailHintsList,
+        [
+            ("CategoryPath", "text"), ("Hint", "note"), ("Source", "text"), ("CreatedAt", "dateTime"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailHintsList, "CategoryPath");
+
+        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints };
+    }
+
+    /// <summary>Reads the live taxonomy hints (custom leaves + classification guidance) from SP.</summary>
+    public async Task<List<TaxonomyHintRow>> ReadTaxonomyHintsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailHintsList, ["CategoryPath", "Hint", "Source", "CreatedAt"], null, ct);
+        return rows.Select(f => new TaxonomyHintRow
+        {
+            CategoryPath = GetStr(f, "CategoryPath") ?? "",
+            Hint         = GetStr(f, "Hint") ?? "",
+            Source       = GetStr(f, "Source") ?? "",
+            CreatedAt    = GetStr(f, "CreatedAt") ?? "",
+        }).Where(h => h.CategoryPath.Length > 0).ToList();
+    }
+
+    /// <summary>Appends a taxonomy hint (a confirmed leaf + optional guidance) to SP.</summary>
+    public async Task WriteTaxonomyHintAsync(string categoryPath, string? hint, string source, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailHintsList);
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]        = categoryPath,
+                    ["CategoryPath"] = categoryPath,
+                    ["Hint"]         = Trunc(hint, 8000),
+                    ["Source"]       = source,
+                    ["CreatedAt"]    = DateTimeOffset.UtcNow.ToString("o"),
+                }
+            }
+        }, cancellationToken: ct);
+        _log.LogInformation("[MailWB] taxonomy hint added: {Path} ({Source})", categoryPath, source);
     }
 
     private async Task IndexListColumnsAsync(string siteId, string listName, params string[] colNames)
@@ -388,6 +430,15 @@ public partial class SharePointService
 }
 
 // ── DTOs ────────────────────────────────────────────────────────────────────────
+
+/// <summary>A live taxonomy hint row (custom leaf + optional classification guidance).</summary>
+public sealed class TaxonomyHintRow
+{
+    public string CategoryPath { get; set; } = "";
+    public string Hint         { get; set; } = "";
+    public string Source       { get; set; } = "";
+    public string CreatedAt    { get; set; } = "";
+}
 
 /// <summary>Attachment manifest entry stored as AttachmentsJson on a MailItem.</summary>
 public sealed class MailAttManifest

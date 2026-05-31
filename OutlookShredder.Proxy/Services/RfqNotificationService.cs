@@ -34,6 +34,7 @@ public class RfqNotificationService
     private readonly ServiceBusClient?                           _sbClient;
     private readonly ServiceBusSender?                           _sbSender;
     private readonly SliCacheService                             _sliCache;
+    private readonly MailCacheService                            _mailCache;
     private readonly IConfiguration                              _config;
     private readonly ILogger<RfqNotificationService>             _log;
 
@@ -48,11 +49,13 @@ public class RfqNotificationService
     public RfqNotificationService(
         IConfiguration config,
         SliCacheService sliCache,
+        MailCacheService mailCache,
         ILogger<RfqNotificationService> log)
     {
-        _config   = config;
-        _sliCache = sliCache;
-        _log      = log;
+        _config    = config;
+        _sliCache  = sliCache;
+        _mailCache = mailCache;
+        _log       = log;
 
         var connStr   = config["ServiceBus:ConnectionString"];
         var topicName = config["ServiceBus:TopicName"] ?? "rfq-updates";
@@ -155,6 +158,17 @@ public class RfqNotificationService
                         msg.ProxyId, msg.RfqId);
                 }
             }
+
+            // Keep the local MailCache coherent with peer proxies' workbench writes.
+            if (msg is { EventType: "Mail" } && msg.ProxyId != ProxyId && !string.IsNullOrEmpty(msg.MailItemId))
+            {
+                if (string.Equals(msg.MailAction, "Deleted", StringComparison.OrdinalIgnoreCase))
+                    _mailCache.ApplyBusDelete(msg.MailItemId);
+                else if (msg.MailItem is not null)
+                    _mailCache.ApplyBusItem(msg.MailItem);
+                _log.LogDebug("[ServiceBus] Proxy received Mail '{Action}' from {PeerId} for {Id}",
+                    msg.MailAction, msg.ProxyId, msg.MailItemId);
+            }
         }
         catch (Exception ex)
         {
@@ -241,6 +255,20 @@ public class RfqNotificationService
         {
             EventType         = "MessageRead",
             MsgConversationId = conversationId,
+        });
+
+    /// <summary>
+    /// Publishes a "Mail" event so peer proxies sync their MailCache and Shredder Inbox views
+    /// refresh. <paramref name="action"/> is Captured | Classified | Amended | Completed | Deleted;
+    /// <paramref name="item"/> carries the full snapshot (null on Deleted).
+    /// </summary>
+    public void NotifyMailItem(string action, string mailItemId, Models.MailBusItem? item) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType  = "Mail",
+            MailAction = action,
+            MailItemId = mailItemId,
+            MailItem   = item,
         });
 
     /// <summary>

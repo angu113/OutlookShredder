@@ -16,14 +16,19 @@ public sealed class MailWorkbenchService
     private readonly SharePointService _sp;
     private readonly MailClassifierService _classifier;
     private readonly MailboxBridgeService _bridge;
+    private readonly MailTaxonomyService _taxonomy;
+    private readonly MailCacheService _cache;
+    private readonly RfqNotificationService _notify;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
     private readonly string _archiveRoot;
 
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
-        MailboxBridgeService bridge, IConfiguration config, ILogger<MailWorkbenchService> log)
+        MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
+        RfqNotificationService notify, IConfiguration config, ILogger<MailWorkbenchService> log)
     {
-        _sp = sp; _classifier = classifier; _bridge = bridge; _log = log;
+        _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
+        _cache = cache; _notify = notify; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -155,11 +160,56 @@ public sealed class MailWorkbenchService
         // Fully landed (item + classification + files) → mark the WRAPPER processed so no proxy reprocesses it.
         await _bridge.MarkProcessedAsync(watchedUpn, wrapperId, ct);
 
+        var row = new MailItemRow
+        {
+            MailItemId = mailItemId, WrapperGraphId = body.Id, SourceType = "email", SourceMailbox = watchedUpn,
+            FromAddress = body.FromAddress, FromName = body.FromName, Subject = body.Subject,
+            ReceivedAt = body.ReceivedAt, HasAttachments = manifest.Count > 0,
+            AttachmentsJson = JsonSerializer.Serialize(manifest), Completed = false,
+        };
+        var cls = result is not null ? ToClassRow(mailItemId, result, version) : null;
+        CacheAndPublish("Captured", row, cls);
+
         return new CaptureResult
         {
             MailItemId = mailItemId, IsNew = true, Classified = result is not null,
             Category = result?.Category, Confidence = result?.Confidence ?? 0, Version = version,
         };
+    }
+
+    // ── Cache + bus fan-out (keeps every machine's Inbox coherent without per-request SP reads) ──
+
+    private static MailClassRow ToClassRow(string mailItemId, MailClassificationResult r, int version) => new()
+    {
+        MailItemId = mailItemId, Version = version, IsCurrent = true, CategoryPath = r.Category,
+        OtherLabel = r.OtherLabel, Confidence = r.Confidence, KeywordTags = string.Join(", ", r.Keywords),
+        PoNumber = r.PoNumber, SoNumber = r.SoNumber, Amount = r.Amount,
+        AiProvider = r.AiProvider, AiModel = r.AiModel,
+    };
+
+    /// <summary>Upsert the item (+ its current classification) into the local cache and broadcast a "Mail" bus event.</summary>
+    private void CacheAndPublish(string action, MailItemRow row, MailClassRow? cls)
+    {
+        try
+        {
+            _cache.UpsertItem(row);
+            if (cls is not null) _cache.UpsertClass(cls);
+            _notify.NotifyMailItem(action, row.MailItemId, _cache.ToBusItem(row, cls));
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] cache/publish failed for {Id}", row.MailItemId); }
+    }
+
+    /// <summary>Update only the classification of an already-cached item, then broadcast.</summary>
+    private void CacheAndPublishClass(string action, string mailItemId, MailClassificationResult r, int version)
+    {
+        try
+        {
+            var cls = ToClassRow(mailItemId, r, version);
+            _cache.UpsertClass(cls);
+            _notify.NotifyMailItem(action, mailItemId,
+                _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, cls) : null);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] cache/publish (class) failed for {Id}", mailItemId); }
     }
 
     /// <summary>
@@ -314,6 +364,7 @@ public sealed class MailWorkbenchService
             ?? throw new InvalidOperationException("Both AI providers unavailable.");
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
         await MoveItemFilesAsync(mailItemId, priorCat ?? "", result.Category, ct);
+        CacheAndPublishClass("Classified", mailItemId, result, version);
         return new CaptureResult
         {
             MailItemId = mailItemId, IsNew = false, Classified = true,
@@ -334,8 +385,9 @@ public sealed class MailWorkbenchService
         var prior   = history.OrderByDescending(c => c.Version).FirstOrDefault();
         var input   = await _sp.GetClassifyInputAsync(mailItemId, ct);
 
-        var coerced  = MailTaxonomy.Coerce(correctedCategory);
-        var isKnown  = MailTaxonomy.ValidPaths.Contains(correctedCategory);
+        var leaves   = await _taxonomy.GetLeavesAsync(ct);
+        var isKnown  = leaves.Any(l => string.Equals(l.Path, correctedCategory, StringComparison.OrdinalIgnoreCase));
+        var coerced  = _taxonomy.Coerce(correctedCategory);
         var carried  = (prior?.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
 
         var result = new MailClassificationResult
@@ -351,6 +403,7 @@ public sealed class MailWorkbenchService
         };
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
         await MoveItemFilesAsync(mailItemId, prior?.CategoryPath ?? "", coerced, ct);
+        CacheAndPublishClass("Amended", mailItemId, result, version);
 
         AppendFeedback(new Dictionary<string, object?>
         {
@@ -369,6 +422,24 @@ public sealed class MailWorkbenchService
         _log.LogInformation("[MailWB] AMEND {Id}: {From} -> {To} (reason: {Reason})",
             mailItemId, prior?.CategoryPath, correctedCategory, reason);
         return new CaptureResult { MailItemId = mailItemId, Classified = true, Category = coerced, Confidence = 1.0, Version = version };
+    }
+
+    /// <summary>
+    /// Promote an emergent "Other" suggestion to a first-class taxonomy leaf: writes a SP hint
+    /// (custom leaf + optional guidance) so the classifier targets it from the next call onward —
+    /// no deploy — then re-files the originating item onto the new leaf. <paramref name="categoryPath"/>
+    /// is the confirmed full path (e.g. "Corporate/Insurance"); <paramref name="hint"/> is the
+    /// classifier guidance (defaults to the AI's proposed label/reasoning when omitted).
+    /// </summary>
+    public async Task<CaptureResult> ConfirmLeafAsync(string mailItemId, string categoryPath, string? hint, CancellationToken ct = default)
+    {
+        categoryPath = (categoryPath ?? "").Trim().Trim('/');
+        if (categoryPath.Length == 0) throw new ArgumentException("categoryPath is required.");
+        await _taxonomy.AddLeafHintAsync(categoryPath, hint, "confirm-leaf", ct);
+        Directory.CreateDirectory(Path.Combine(_archiveRoot, categoryPath.Replace('/', Path.DirectorySeparatorChar)));
+        _log.LogInformation("[MailWB] CONFIRM-LEAF {Path} (hint: {Hint}) from item {Id}", categoryPath, hint, mailItemId);
+        // Re-file the source item onto the now-valid leaf (reason records the promotion).
+        return await AmendAsync(mailItemId, categoryPath, $"Confirmed emergent leaf '{categoryPath}'" + (string.IsNullOrWhiteSpace(hint) ? "" : $": {hint}"), ct);
     }
 
     private static readonly object _feedbackLock = new();
@@ -405,11 +476,23 @@ public sealed class MailWorkbenchService
         return result;
     }
 
+    /// <summary>
+    /// Reads the item + current-classification snapshot. Served from the in-memory MailCache (no SP
+    /// roundtrip) once warmed; falls back to a direct SP read on a cold cache and kicks off a warm.
+    /// </summary>
+    private async Task<(List<MailItemRow> Items, List<MailClassRow> Currents)> GetSnapshotAsync(CancellationToken ct)
+    {
+        if (_cache.Warmed)
+            return (_cache.GetItems().ToList(), _cache.GetCurrents().ToList());
+        // Cold cache (no disk snapshot yet): one direct SP read, and warm in the background.
+        _ = Task.Run(() => _cache.ForceRefreshAsync(CancellationToken.None));
+        return (await _sp.ReadMailItemsAsync(ct), await _sp.ReadCurrentClassificationsAsync(ct));
+    }
+
     /// <summary>Classification tree: every taxonomy leaf with total/open/completed counts.</summary>
     public async Task<List<TreeTop>> GetTreeAsync(CancellationToken ct = default)
     {
-        var currents = await _sp.ReadCurrentClassificationsAsync(ct);
-        var items    = await _sp.ReadMailItemsAsync(ct);
+        var (items, currents) = await GetSnapshotAsync(ct);
         var completedById = items.ToDictionary(i => i.MailItemId, i => i.Completed, StringComparer.Ordinal);
 
         // count per CategoryPath
@@ -421,11 +504,12 @@ public sealed class MailWorkbenchService
             counts[c.CategoryPath] = (cur.Total + 1, cur.Completed + (done ? 1 : 0));
         }
 
+        var leaves = await _taxonomy.GetLeavesAsync(ct);
         var tops = new List<TreeTop>();
-        foreach (var top in MailTaxonomy.Leaves.Select(l => l.Top).Distinct())
+        foreach (var top in leaves.Select(l => l.Top).Distinct())
         {
             var node = new TreeTop { Name = top };
-            foreach (var leaf in MailTaxonomy.Leaves.Where(l => l.Top == top))
+            foreach (var leaf in leaves.Where(l => l.Top == top))
             {
                 counts.TryGetValue(leaf.Path, out var c);
                 node.Subs.Add(new TreeNode
@@ -445,10 +529,10 @@ public sealed class MailWorkbenchService
     /// <summary>Items currently classified under a taxonomy path.</summary>
     public async Task<List<WorkbenchItem>> GetItemsAsync(string category, bool includeCompleted, CancellationToken ct = default)
     {
-        var currents = (await _sp.ReadCurrentClassificationsAsync(ct))
+        var (items, allCurrents) = await GetSnapshotAsync(ct);
+        var currents = allCurrents
             .Where(c => string.Equals(c.CategoryPath, category, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(c => c.MailItemId, c => c, StringComparer.Ordinal);
-        var items = await _sp.ReadMailItemsAsync(ct);
 
         var list = new List<WorkbenchItem>();
         foreach (var i in items)
@@ -464,6 +548,18 @@ public sealed class MailWorkbenchService
             });
         }
         return list.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>Marks an item complete/incomplete in SP, updates the cache, and broadcasts a "Completed" bus event.</summary>
+    public async Task<bool> CompleteAsync(string mailItemId, bool completed, string? by, CancellationToken ct = default)
+    {
+        var ok = await _sp.SetMailCompletedAsync(mailItemId, completed, by, ct);
+        if (!ok) return false;
+        var nowIso = DateTimeOffset.UtcNow.ToString("o");
+        _cache.SetCompleted(mailItemId, completed, nowIso);
+        _notify.NotifyMailItem("Completed", mailItemId,
+            _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, _cache.GetClass(mailItemId)) : null);
+        return true;
     }
 
     // ── Bulk seed (capture+classify every surfaced message) ──────────────────────────
@@ -489,6 +585,8 @@ public sealed class MailWorkbenchService
                 {
                     await _sp.DeleteClassificationsForItemAsync(dup.MailItemId, ct);
                     await _sp.DeleteMailItemAsync(dup.SpId, ct);
+                    _cache.Remove(dup.MailItemId);
+                    _notify.NotifyMailItem("Deleted", dup.MailItemId, null);
                     removed++;
                 }
                 catch (Exception ex) { _log.LogWarning(ex, "[MailWB] dedup delete failed for {Id}", dup.MailItemId); }
@@ -512,6 +610,7 @@ public sealed class MailWorkbenchService
             catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge delete failed {Id}", i.MailItemId); }
         }
         var cleared = await _bridge.ResetClaimCategoriesAsync(watchedUpn, ct);
+        _cache.ClearAll();
 
         int dirs = 0;
         try
