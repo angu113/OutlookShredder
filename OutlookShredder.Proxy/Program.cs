@@ -125,6 +125,7 @@ try
     builder.Services.AddSingleton<FileWatcherService>();
     builder.Services.AddSingleton<TodoService>();
     builder.Services.AddSingleton<MailboxBridgeService>();
+    builder.Services.AddSingleton<MailClassifierService>();
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());
