@@ -2,6 +2,13 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <!-- WinExe (GUI subsystem) = no console window when the scheduled task launches the
+         proxy exe DIRECTLY. The direct launch (no powershell wrapper) is what lets
+         `schtasks /End` actually terminate the proxy: Task Scheduler only kills the
+         process it launches, not the tree, so a wrapper orphans the proxy on port 7000.
+         Logging is unaffected — the file sink captures everything; the console sink
+         no-ops with no console attached. -->
+    <OutputType>WinExe</OutputType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>OutlookShredder.Proxy</RootNamespace>

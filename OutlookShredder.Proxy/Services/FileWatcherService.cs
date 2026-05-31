@@ -130,21 +130,33 @@ public class FileWatcherService : BackgroundService
         // Drain channel — process up to 3 files concurrently so two simultaneous ERP
         // documents don't stall behind each other's AI calls.
         using var sem = new SemaphoreSlim(3);
-        await foreach (var path in _fileChannel.Reader.ReadAllAsync(ct))
+        try
         {
-            lock (_inQueueLock) _inQueue.Remove(path);
-            await sem.WaitAsync(ct);
-            _ = Task.Run(async () =>
+            await foreach (var path in _fileChannel.Reader.ReadAllAsync(ct))
             {
-                try
+                lock (_inQueueLock) _inQueue.Remove(path);
+                await sem.WaitAsync(ct);
+                _ = Task.Run(async () =>
                 {
-                    var wasErp = await ProcessFileAsync(path, ct);
-                    if (wasErp)
-                        _notify.NotifyRfqProcessed(new RfqProcessedNotification { EventType = "ErpDocument" });
-                }
-                catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
-                finally { sem.Release(); }
-            }, ct);
+                    try
+                    {
+                        var wasErp = await ProcessFileAsync(path, ct);
+                        if (wasErp)
+                            _notify.NotifyRfqProcessed(new RfqProcessedNotification { EventType = "ErpDocument" });
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* shutdown — drop in-flight work */ }
+                    catch (Exception ex) { _log.LogError(ex, "[FW] Unhandled error processing {File}", path); }
+                    finally { sem.Release(); }
+                }, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Normal shutdown: the host cancelled ct, so ReadAllAsync/WaitAsync throw.
+            // Swallow it so ExecuteAsync returns cleanly — an unhandled OCE here trips
+            // BackgroundServiceExceptionBehavior.StopHost and disrupts graceful shutdown,
+            // leaving the process orphaned on port 7000 after `schtasks /End`.
+            _log.LogInformation("[FW] Shutdown requested — file watcher stopped cleanly");
         }
     }
 
