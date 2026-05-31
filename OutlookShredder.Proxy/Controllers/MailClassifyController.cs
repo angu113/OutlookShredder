@@ -50,6 +50,15 @@ public sealed class MailClassifyController : ControllerBase
         return Ok(_workbench.StartCaptureAll(u));
     }
 
+    /// <summary>Backfill doc-library storage (attachments + raw .eml) for already-captured items missing it.</summary>
+    [HttpPost("store-attachments")]
+    public IActionResult StoreAttachments([FromQuery] string? upn)
+    {
+        var u = string.IsNullOrWhiteSpace(upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : upn;
+        if (string.IsNullOrWhiteSpace(u)) return BadRequest(new { error = "No watched mailbox configured." });
+        return Ok(_workbench.StartStoreAttachments(u));
+    }
+
     /// <summary>Full-folder backfill: capture+classify EVERY forward-as-attachment in the mirror folder (background).</summary>
     [HttpPost("backfill")]
     public IActionResult Backfill([FromQuery] string? upn)

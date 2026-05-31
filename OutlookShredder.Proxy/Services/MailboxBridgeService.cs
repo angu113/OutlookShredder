@@ -423,6 +423,20 @@ public sealed class MailboxBridgeService : BackgroundService
                 part.FileName ?? attachmentName);
     }
 
+    /// <summary>Returns the raw .eml bytes of the embedded original message (for archival).</summary>
+    public async Task<byte[]?> GetRawEmlAsync(string watchedUpn, string messageId, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return null;
+        await using var mime = await GetGraph().Users[s.Config.DestinationUpn].Messages[messageId].Content.GetAsync(cancellationToken: ct);
+        if (mime is null) return null;
+        var wrapperMsg = await MimeMessage.LoadAsync(mime, ct);
+        var src = FindEmbeddedMessage(wrapperMsg.Body);
+        if (src is null) return null;
+        using var ms = new MemoryStream();
+        await src.WriteToAsync(ms, ct);
+        return ms.ToArray();
+    }
+
     public async Task<bool> SetReadAsync(string watchedUpn, string messageId, bool read, CancellationToken ct)
     {
         if (!_states.TryGetValue(watchedUpn, out var s)) return false;

@@ -128,6 +128,7 @@ public partial class SharePointService
         {
             SpId           = GetStr(f, "__spId") ?? "",
             MailItemId     = GetStr(f, "MailItemId") ?? "",
+            WrapperGraphId = GetStr(f, "WrapperGraphId") ?? "",
             SourceType     = GetStr(f, "SourceType") ?? "email",
             SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
             FromAddress    = GetStr(f, "FromAddress") ?? "",
@@ -168,6 +169,17 @@ public partial class SharePointService
             req.QueryParameters.Filter = $"fields/MailItemId eq '{Esc(mailItemId)}'";
         }, ct);
         return (siteId, listId, res?.Value?.FirstOrDefault()?.Id);
+    }
+
+    /// <summary>Patches a MailItem's attachment manifest (now carrying file paths) + the raw-.eml pointer.</summary>
+    public async Task UpdateMailItemFilesAsync(string mailItemId, string attachmentsJson, string? rawEmlUrl, CancellationToken ct = default)
+    {
+        var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
+        if (spId is null) return;
+        var fields = new Dictionary<string, object?> { ["AttachmentsJson"] = Trunc(attachmentsJson, 100000) };
+        if (!string.IsNullOrEmpty(rawEmlUrl)) fields["RawEmlUrl"] = rawEmlUrl;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
     }
 
     /// <summary>Reads one captured item's classify-relevant text (for re-classification).</summary>
@@ -380,6 +392,7 @@ public sealed class MailItemRow
 {
     public string  SpId            { get; set; } = "";
     public string  MailItemId      { get; set; } = "";
+    public string  WrapperGraphId  { get; set; } = "";
     public string  SourceType      { get; set; } = "email";
     public string  SourceMailbox   { get; set; } = "";
     public string  FromAddress     { get; set; } = "";

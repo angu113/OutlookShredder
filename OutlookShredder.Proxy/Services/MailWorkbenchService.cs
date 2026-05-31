@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO;
 using System.Text.Json;
 using OutlookShredder.Proxy.Models;
 
@@ -17,12 +18,32 @@ public sealed class MailWorkbenchService
     private readonly MailboxBridgeService _bridge;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
+    private readonly string _archiveRoot;
 
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
-        MailboxBridgeService bridge, ILogger<MailWorkbenchService> log)
+        MailboxBridgeService bridge, IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _log = log;
+
+        // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
+        // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
+        // syncs them to the document library. Override with MailArchive:RootPath.
+        _archiveRoot = config["MailArchive:RootPath"] ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Mithril Metals Corp", "Metal Supermarkets Hackensack - Documents", "Shredder");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(_archiveRoot, "Inbox"));   // Phase-4 watched-dir drop point
+            foreach (var leaf in MailTaxonomy.Leaves)
+                Directory.CreateDirectory(Path.Combine(_archiveRoot, leaf.Path.Replace('/', Path.DirectorySeparatorChar)));
+            _log.LogInformation("[MailWB] archive root: {Root}", _archiveRoot);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not create archive folder tree at {Root}", _archiveRoot); }
     }
+
+    /// <summary>Local folder for an item's stored files: {root}\{category}\{mailItemId}\</summary>
+    private string ItemFolder(string category, string mailItemId) =>
+        Path.Combine(_archiveRoot, category.Replace('/', Path.DirectorySeparatorChar), mailItemId);
 
     /// <summary>Capture a cached bridge message → MailItems (dedup) → classify → MailClassifications.</summary>
     public async Task<CaptureResult> CaptureAndClassifyAsync(string watchedUpn, string wrapperId,
@@ -74,7 +95,12 @@ public sealed class MailWorkbenchService
             ToLine = body.ToLine, BodyText = body.BodyText,
             AttachmentNames = manifest.Select(a => a.Name).ToList(),
         };
-        var result = await _classifier.ClassifyAsync(input, ct);
+        var result   = await _classifier.ClassifyAsync(input, ct);
+        var category = result?.Category ?? "Unclassified";
+
+        if (body.Attachments.Count > 0)
+            await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
+
         if (result is null)
             return new CaptureResult { MailItemId = mailItemId, IsNew = true, Classified = false };
 
@@ -86,14 +112,153 @@ public sealed class MailWorkbenchService
         };
     }
 
+    /// <summary>
+    /// Uploads an item's attachments + the raw .eml to the SP document library under
+    /// MailArchive/{category}/{yyyy-MM}/{mailItemId}/, then patches the item's manifest with the
+    /// resulting webUrls + the .eml pointer. Best-effort per file. (Reclassify does NOT relocate
+    /// already-stored files; the webUrl pointer stays valid regardless of the folder.)
+    /// </summary>
+    private async Task StoreFilesAsync(string watchedUpn, MailboxMessageBody body, string mailItemId,
+        string category, string receivedAtIso, CancellationToken ct)
+    {
+        var folder = ItemFolder(category, mailItemId);
+        Directory.CreateDirectory(folder);
+
+        var manifest = new List<MailAttManifest>();
+        foreach (var att in body.Attachments)
+        {
+            try
+            {
+                var dl = await _bridge.GetAttachmentAsync(watchedUpn, body.Id, att.Name, ct);
+                if (dl is null) { manifest.Add(new MailAttManifest { Name = att.Name, ContentType = att.ContentType, Size = att.Size }); continue; }
+                var path = Path.Combine(folder, Sanitize(att.Name));
+                await File.WriteAllBytesAsync(path, dl.Value.Bytes, ct);
+                manifest.Add(new MailAttManifest { Name = att.Name, ContentType = dl.Value.ContentType, Size = dl.Value.Bytes.Length, WebUrl = path });
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[MailWB] attachment write failed: {Name}", att.Name);
+                manifest.Add(new MailAttManifest { Name = att.Name, ContentType = att.ContentType, Size = att.Size });
+            }
+        }
+
+        string? emlPath = null;
+        try
+        {
+            var eml = await _bridge.GetRawEmlAsync(watchedUpn, body.Id, ct);
+            if (eml is not null) { emlPath = Path.Combine(folder, $"{mailItemId}.eml"); await File.WriteAllBytesAsync(emlPath, eml, ct); }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] eml write failed for {Id}", mailItemId); }
+
+        await _sp.UpdateMailItemFilesAsync(mailItemId, JsonSerializer.Serialize(manifest), emlPath, ct);
+        _log.LogInformation("[MailWB] stored {N} file(s) + eml for {Id} under {Folder}",
+            manifest.Count(m => m.WebUrl is not null), mailItemId, folder);
+    }
+
+    /// <summary>
+    /// Moves an item's stored files from its old taxonomy folder to the new one (on reclassify/amend)
+    /// and rewrites the manifest/eml paths. Best-effort — no-op if the source folder doesn't exist.
+    /// </summary>
+    private async Task MoveItemFilesAsync(string mailItemId, string oldCategory, string newCategory, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(oldCategory) || string.Equals(oldCategory, newCategory, StringComparison.OrdinalIgnoreCase)) return;
+        var src = ItemFolder(oldCategory, mailItemId);
+        var dst = ItemFolder(newCategory, mailItemId);
+        if (!Directory.Exists(src)) return;
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+            if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            Directory.Move(src, dst);
+
+            // Rewrite stored paths (old folder -> new folder) in the item's manifest + eml pointer.
+            var item = (await _sp.ReadMailItemsAsync(ct)).FirstOrDefault(i => i.MailItemId == mailItemId);
+            if (item is not null && !string.IsNullOrWhiteSpace(item.AttachmentsJson))
+            {
+                var manifest = JsonSerializer.Deserialize<List<MailAttManifest>>(item.AttachmentsJson) ?? [];
+                foreach (var m in manifest)
+                    if (!string.IsNullOrEmpty(m.WebUrl)) m.WebUrl = m.WebUrl.Replace(src, dst, StringComparison.OrdinalIgnoreCase);
+                var newEml = File.Exists(Path.Combine(dst, $"{mailItemId}.eml")) ? Path.Combine(dst, $"{mailItemId}.eml") : null;
+                await _sp.UpdateMailItemFilesAsync(mailItemId, JsonSerializer.Serialize(manifest), newEml, ct);
+            }
+            _log.LogInformation("[MailWB] moved files {Id}: {Old} -> {New}", mailItemId, oldCategory, newCategory);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not move files for {Id}", mailItemId); }
+    }
+
+    private static string Sanitize(string name)
+    {
+        foreach (var c in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+        return name.Replace('/', '_').Replace('\\', '_').Trim();
+    }
+
+    /// <summary>
+    /// Backfills doc-library storage for already-captured items that have attachments but no stored
+    /// webUrls yet (e.g. items captured before 1b-ii). Background; shares the seed-progress tracker.
+    /// </summary>
+    public SeedSnapshot StartStoreAttachments(string watchedUpn, int maxConcurrency = 3)
+    {
+        if (!_seed.TryBegin()) return _seed.SnapshotNow();
+        _log.LogInformation("[MailWB] store-attachments backfill started");
+
+        _ = Task.Run(async () =>
+        {
+            var items    = (await _sp.ReadMailItemsAsync()).Where(i => i.HasAttachments).ToList();
+            var todo     = items.Where(i => !ManifestHasUrls(i.AttachmentsJson)).ToList();
+            var currents = (await _sp.ReadCurrentClassificationsAsync())
+                .ToDictionary(c => c.MailItemId, c => c.CategoryPath, StringComparer.Ordinal);
+            _seed.SetTotal(todo.Count);
+
+            using var sem = new SemaphoreSlim(maxConcurrency);
+            var tasks = todo.Select(async i =>
+            {
+                await sem.WaitAsync();
+                try
+                {
+                    var manifest = JsonSerializer.Deserialize<List<MailAttManifest>>(i.AttachmentsJson) ?? [];
+                    var body = new MailboxMessageBody
+                    {
+                        Id          = i.WrapperGraphId,
+                        ReceivedAt  = i.ReceivedAt,
+                        Attachments = manifest.Select(m => new MailboxAttachmentMeta { Name = m.Name, ContentType = m.ContentType, Size = m.Size }).ToList(),
+                    };
+                    var cat = currents.TryGetValue(i.MailItemId, out var c) ? c : "Unclassified";
+                    await StoreFilesAsync(watchedUpn, body, i.MailItemId, cat, i.ReceivedAt, CancellationToken.None);
+                    _seed.RecordClassified(cat);
+                }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] store-attachments item failed"); }
+                finally { sem.Release(); }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+            _seed.End();
+            _log.LogInformation("[MailWB] store-attachments done: {S}", _seed.SnapshotNow().Summary());
+        });
+
+        return _seed.SnapshotNow();
+    }
+
+    private static bool ManifestHasUrls(string attachmentsJson)
+    {
+        try
+        {
+            var m = JsonSerializer.Deserialize<List<MailAttManifest>>(attachmentsJson);
+            return m is not null && m.Any(a => !string.IsNullOrEmpty(a.WebUrl));
+        }
+        catch { return false; }
+    }
+
     /// <summary>Re-run classification on a stored item — writes a NEW version, never mutates the email.</summary>
     public async Task<CaptureResult> ReclassifyAsync(string mailItemId, CancellationToken ct = default)
     {
         var input = await _sp.GetClassifyInputAsync(mailItemId, ct)
             ?? throw new InvalidOperationException($"MailItem '{mailItemId}' not found.");
+        var priorCat = (await _sp.ReadClassificationsForItemAsync(mailItemId, ct))
+            .OrderByDescending(c => c.Version).FirstOrDefault()?.CategoryPath;
         var result = await _classifier.ClassifyAsync(input, ct)
             ?? throw new InvalidOperationException("Both AI providers unavailable.");
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
+        await MoveItemFilesAsync(mailItemId, priorCat ?? "", result.Category, ct);
         return new CaptureResult
         {
             MailItemId = mailItemId, IsNew = false, Classified = true,
@@ -130,6 +295,7 @@ public sealed class MailWorkbenchService
             RawResponse = JsonSerializer.Serialize(new { correctedCategory, reason }),
         };
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
+        await MoveItemFilesAsync(mailItemId, prior?.CategoryPath ?? "", coerced, ct);
 
         AppendFeedback(new Dictionary<string, object?>
         {
