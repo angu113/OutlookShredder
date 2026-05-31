@@ -50,6 +50,15 @@ public sealed class MailClassifyController : ControllerBase
         return Ok(_workbench.StartCaptureAll(u));
     }
 
+    /// <summary>Full-folder backfill: capture+classify EVERY forward-as-attachment in the mirror folder (background).</summary>
+    [HttpPost("backfill")]
+    public IActionResult Backfill([FromQuery] string? upn)
+    {
+        var u = string.IsNullOrWhiteSpace(upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : upn;
+        if (string.IsNullOrWhiteSpace(u)) return BadRequest(new { error = "No watched mailbox configured." });
+        return Ok(_workbench.StartBackfill(u));
+    }
+
     /// <summary>Re-classify every stored MailItem with the current taxonomy (background; new version per item).</summary>
     [HttpPost("reclassify-all")]
     public IActionResult ReclassifyAll() => Ok(_workbench.StartReclassifyAll());
@@ -76,6 +85,26 @@ public sealed class MailClassifyController : ControllerBase
     {
         try { return Ok(await _workbench.ReclassifyAsync(mailItemId, ct)); }
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Human classification correction (dev): writes a corrected version + logs AI-vs-human feedback locally.</summary>
+    [HttpPost("amend/{mailItemId}")]
+    public async Task<IActionResult> Amend(string mailItemId, [FromBody] AmendRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.CorrectedCategory))
+            return BadRequest(new { error = "correctedCategory is required." });
+        try { return Ok(await _workbench.AmendAsync(mailItemId, req.CorrectedCategory.Trim(), req.Reason, ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Review the local classification-feedback log (dev analysis).</summary>
+    [HttpGet("feedback")]
+    public IActionResult Feedback() => Ok(_workbench.ReadFeedback());
+
+    public sealed class AmendRequest
+    {
+        public string CorrectedCategory { get; set; } = "";
+        public string? Reason { get; set; }
     }
 
     /// <summary>Mark a captured item complete/incomplete (configurable UI retention applies in the view).</summary>

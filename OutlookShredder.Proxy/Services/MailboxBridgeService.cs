@@ -355,6 +355,51 @@ public sealed class MailboxBridgeService : BackgroundService
         lock (s.Lock) return s.ById.TryGetValue(id, out var c) ? c.Body : null;
     }
 
+    /// <summary>
+    /// Paginates the ENTIRE mirror folder (not just the polled top-50 window) and returns the parsed
+    /// body of every forward-as-attachment message. Used by the workbench backfill to capture the
+    /// full history in one pass — the live poll only keeps the recent window in its cache. Fetches +
+    /// parses each message's MIME, so it's expensive; intended as an on-demand background sweep.
+    /// </summary>
+    public async Task<List<MailboxMessageBody>> EnumerateAllForwardedAsync(string watchedUpn, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var state)) return [];
+        var cfg = state.Config;
+        state.FolderId ??= await ResolveFolderIdAsync(cfg.DestinationUpn, cfg.DestinationFolderPath, ct);
+        if (state.FolderId is null) return [];
+
+        var result = new List<MailboxMessageBody>();
+        var page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"];
+                req.QueryParameters.Top     = 50;
+                req.QueryParameters.Orderby = ["receivedDateTime desc"];
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var m in page.Value)
+            {
+                if (m.Id is null || m.HasAttachments != true) continue;   // inline forwards skipped (no .eml)
+                try
+                {
+                    var parsed = await ParseMirrorMessageAsync(cfg.DestinationUpn, m, ct);
+                    if (parsed is not null) result.Add(parsed.Body);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex) { _log.LogWarning(ex, "[MailboxBridge] backfill parse failed for {Id}", m.Id); }
+            }
+            if (string.IsNullOrEmpty(page.OdataNextLink)) break;
+            page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[MailboxBridge] backfill enumerated {N} forward-as-attachment items in {Upn}",
+            result.Count, watchedUpn);
+        return result;
+    }
+
     /// <summary>Re-fetches the wrapper MIME and returns the named attachment bytes from the embedded original.</summary>
     public async Task<(string ContentType, byte[] Bytes, string FileName)?> GetAttachmentAsync(
         string watchedUpn, string messageId, string attachmentName, CancellationToken ct)

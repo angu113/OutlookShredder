@@ -30,7 +30,13 @@ public sealed class MailWorkbenchService
     {
         var body = _bridge.GetMessage(watchedUpn, wrapperId)
             ?? throw new InvalidOperationException("Message not in bridge cache (not polled yet).");
+        return await CaptureBodyAsync(watchedUpn, body, seen, ct);
+    }
 
+    /// <summary>Capture+classify a parsed message body directly — used by both the cache path and the full-folder backfill.</summary>
+    public async Task<CaptureResult> CaptureBodyAsync(string watchedUpn, MailboxMessageBody body,
+        ConcurrentDictionary<string, byte>? seen = null, CancellationToken ct = default)
+    {
         // Reliable in-memory dedup on the wrapper id (the SP eq-filter false-matches these long,
         // near-identical Graph ids). Single-call path loads the existing set; bulk passes a shared one.
         if (seen is null)
@@ -93,6 +99,89 @@ public sealed class MailWorkbenchService
             MailItemId = mailItemId, IsNew = false, Classified = true,
             Category = result.Category, Confidence = result.Confidence, Version = version,
         };
+    }
+
+    /// <summary>
+    /// Human classification correction (dev-only feature). Writes a corrected classification version
+    /// (AiProvider="human", non-destructive) so the item moves in the tree, AND appends an AI-vs-human
+    /// feedback record to a local JSONL for prompt-tuning analysis. correctedCategory may be a known
+    /// taxonomy path (selected) or free text (proposed new category) — free text is coerced to Other
+    /// with the raw label kept, while the feedback log preserves the verbatim correction.
+    /// </summary>
+    public async Task<CaptureResult> AmendAsync(string mailItemId, string correctedCategory, string? reason, CancellationToken ct = default)
+    {
+        var history = await _sp.ReadClassificationsForItemAsync(mailItemId, ct);
+        var prior   = history.OrderByDescending(c => c.Version).FirstOrDefault();
+        var input   = await _sp.GetClassifyInputAsync(mailItemId, ct);
+
+        var coerced  = MailTaxonomy.Coerce(correctedCategory);
+        var isKnown  = MailTaxonomy.ValidPaths.Contains(correctedCategory);
+        var carried  = (prior?.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
+
+        var result = new MailClassificationResult
+        {
+            Category    = coerced,
+            OtherLabel  = (!isKnown && !string.Equals(correctedCategory, "Other", StringComparison.OrdinalIgnoreCase)) ? correctedCategory.Trim() : null,
+            Confidence  = 1.0,
+            Keywords    = carried,
+            Reasoning   = reason,
+            AiProvider  = "human",
+            AiModel     = "manual-amend",
+            RawResponse = JsonSerializer.Serialize(new { correctedCategory, reason }),
+        };
+        var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
+
+        AppendFeedback(new Dictionary<string, object?>
+        {
+            ["ts"]                 = DateTimeOffset.UtcNow.ToString("o"),
+            ["mailItemId"]         = mailItemId,
+            ["subject"]            = input?.Subject,
+            ["from"]               = input?.FromAddress,
+            ["aiCategory"]         = prior?.CategoryPath,
+            ["aiConfidence"]       = prior?.Confidence,
+            ["aiModel"]            = prior?.AiModel,
+            ["correctedCategory"]  = correctedCategory,
+            ["storedCategory"]     = coerced,
+            ["reason"]             = reason,
+        });
+
+        _log.LogInformation("[MailWB] AMEND {Id}: {From} -> {To} (reason: {Reason})",
+            mailItemId, prior?.CategoryPath, correctedCategory, reason);
+        return new CaptureResult { MailItemId = mailItemId, Classified = true, Category = coerced, Confidence = 1.0, Version = version };
+    }
+
+    private static readonly object _feedbackLock = new();
+
+    /// <summary>Path to the local prompt-tuning feedback log (dev machine; survives reinstall).</summary>
+    public static string FeedbackPath => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ShredderData", "mail-classification-feedback.jsonl");
+
+    private void AppendFeedback(Dictionary<string, object?> entry)
+    {
+        try
+        {
+            var path = FeedbackPath;
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            var line = JsonSerializer.Serialize(entry) + Environment.NewLine;
+            lock (_feedbackLock) System.IO.File.AppendAllText(path, line);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not append classification feedback"); }
+    }
+
+    /// <summary>Reads the local feedback log (most-recent first) for review/analysis.</summary>
+    public List<Dictionary<string, JsonElement>> ReadFeedback(int max = 500)
+    {
+        var path = FeedbackPath;
+        if (!System.IO.File.Exists(path)) return [];
+        var lines = System.IO.File.ReadAllLines(path);
+        var result = new List<Dictionary<string, JsonElement>>();
+        foreach (var l in lines.Reverse().Take(max))
+        {
+            if (string.IsNullOrWhiteSpace(l)) continue;
+            try { var d = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(l); if (d is not null) result.Add(d); } catch { }
+        }
+        return result;
     }
 
     /// <summary>Classification tree: every taxonomy leaf with total/open/completed counts.</summary>
@@ -195,6 +284,49 @@ public sealed class MailWorkbenchService
             await Task.WhenAll(tasks);
             _seed.End();
             _log.LogInformation("[MailWB] capture-all done: {S}", _seed.SnapshotNow().Summary());
+        });
+
+        return _seed.SnapshotNow();
+    }
+
+    /// <summary>
+    /// Full-folder backfill: paginates the ENTIRE mirror folder (not just the polled top-50 window)
+    /// and captures+classifies every forward-as-attachment item. Idempotent (in-memory dedup).
+    /// Background; shares the seed-progress tracker. Use to ingest the complete dump history.
+    /// </summary>
+    public SeedSnapshot StartBackfill(string watchedUpn, int maxConcurrency = 4)
+    {
+        if (!_seed.TryBegin()) return _seed.SnapshotNow();
+        _log.LogInformation("[MailWB] backfill started for {Upn}", watchedUpn);
+
+        _ = Task.Run(async () =>
+        {
+            List<MailboxMessageBody> bodies;
+            try { bodies = await _bridge.EnumerateAllForwardedAsync(watchedUpn); }
+            catch (Exception ex) { _seed.RecordFailed(ex.Message); _seed.End(); _log.LogWarning(ex, "[MailWB] backfill enumerate failed"); return; }
+
+            _seed.SetTotal(bodies.Count);
+            var existingIds = await _sp.GetExistingWrapperIdsAsync();
+            var seen = new ConcurrentDictionary<string, byte>(
+                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+
+            using var sem = new SemaphoreSlim(maxConcurrency);
+            var tasks = bodies.Select(async b =>
+            {
+                await sem.WaitAsync();
+                try
+                {
+                    var r = await CaptureBodyAsync(watchedUpn, b, seen);
+                    if (!r.IsNew) _seed.RecordExisting();
+                    else if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
+                    else _seed.RecordFailed("classify returned null");
+                }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] backfill item failed"); }
+                finally { sem.Release(); }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+            _seed.End();
+            _log.LogInformation("[MailWB] backfill done: {S}", _seed.SnapshotNow().Summary());
         });
 
         return _seed.SnapshotNow();
