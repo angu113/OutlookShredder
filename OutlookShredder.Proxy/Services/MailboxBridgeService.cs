@@ -59,6 +59,13 @@ public sealed class MailboxBridgeService : BackgroundService
 
     private const int CacheCap = 250;
 
+    // Cross-proxy claim/dedup via categories on the mirror (wrapper) message — same pattern as the
+    // RFQ poller (RFQ-Claiming/RFQ-Processed). A proxy claims a message before capturing so other
+    // proxies skip it; marks it processed once fully landed. Distinct names from the RFQ poller (the
+    // Forwards folder is excluded from the RFQ scan, but distinct categories avoid any confusion).
+    private const string ClaimCategory = "Inbox-Claiming";
+    private const string DoneCategory  = "Inbox-Processed";
+
     // Overlap subtracted from the high-water mark on incremental polls — tolerates out-of-order
     // delivery / commit lag; re-fetched messages in the overlap window dedup cheaply against
     // the ById/Skipped caches.
@@ -150,7 +157,7 @@ public sealed class MailboxBridgeService : BackgroundService
             .GetAsync(req =>
             {
                 req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime", "isRead",
-                                               "hasAttachments", "bodyPreview"];
+                                               "hasAttachments", "bodyPreview", "categories"];
                 req.QueryParameters.Top     = 50;
                 req.QueryParameters.Orderby = ["receivedDateTime desc"];
 
@@ -171,6 +178,12 @@ public sealed class MailboxBridgeService : BackgroundService
         foreach (var m in msgs)
         {
             if (m.Id is null) continue;
+
+            // Cross-proxy dedup: skip messages any proxy has already claimed or processed.
+            if (m.Categories is not null &&
+                (m.Categories.Contains(DoneCategory, StringComparer.OrdinalIgnoreCase) ||
+                 m.Categories.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase)))
+                continue;
 
             bool known, skipped;
             lock (state.Lock) { known = state.ById.ContainsKey(m.Id); skipped = state.Skipped.Contains(m.Id); }
@@ -372,7 +385,7 @@ public sealed class MailboxBridgeService : BackgroundService
         var page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.FolderId].Messages
             .GetAsync(req =>
             {
-                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"];
+                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments", "categories"];
                 req.QueryParameters.Top     = 50;
                 req.QueryParameters.Orderby = ["receivedDateTime desc"];
             }, ct);
@@ -382,6 +395,10 @@ public sealed class MailboxBridgeService : BackgroundService
             foreach (var m in page.Value)
             {
                 if (m.Id is null || m.HasAttachments != true) continue;   // inline forwards skipped (no .eml)
+                if (m.Categories is not null &&
+                    (m.Categories.Contains(DoneCategory, StringComparer.OrdinalIgnoreCase) ||
+                     m.Categories.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase)))
+                    continue;   // already claimed/processed by some proxy
                 try
                 {
                     var parsed = await ParseMirrorMessageAsync(cfg.DestinationUpn, m, ct);
@@ -421,6 +438,36 @@ public sealed class MailboxBridgeService : BackgroundService
         await part.Content.DecodeToAsync(ms, ct);
         return (part.ContentType?.MimeType ?? "application/octet-stream", ms.ToArray(),
                 part.FileName ?? attachmentName);
+    }
+
+    /// <summary>
+    /// Atomically-ish claims the wrapper message for this proxy by adding the claim category.
+    /// Returns false if it is already processed or already claimed (another proxy has it). Same
+    /// caveat as the RFQ poller: Graph PATCH is not a true compare-and-set, so a narrow race remains
+    /// (caller keeps the in-memory wrapper-id dedup as a backstop; a periodic dedup is the safety net).
+    /// </summary>
+    public async Task<bool> TryClaimAsync(string watchedUpn, string messageId, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return false;
+        var dest = s.Config.DestinationUpn;
+        var msg  = await GetGraph().Users[dest].Messages[messageId].GetAsync(r => r.QueryParameters.Select = ["categories"], ct);
+        var cats = msg?.Categories?.ToList() ?? [];
+        if (cats.Contains(DoneCategory,  StringComparer.OrdinalIgnoreCase)) return false;  // already landed
+        if (cats.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase)) return false;  // already claimed
+        cats.Add(ClaimCategory);
+        await GetGraph().Users[dest].Messages[messageId].PatchAsync(new Message { Categories = cats }, cancellationToken: ct);
+        return true;
+    }
+
+    /// <summary>Marks the wrapper message processed (adds the done category, clears the claim).</summary>
+    public async Task MarkProcessedAsync(string watchedUpn, string messageId, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return;
+        var dest = s.Config.DestinationUpn;
+        var msg  = await GetGraph().Users[dest].Messages[messageId].GetAsync(r => r.QueryParameters.Select = ["categories"], ct);
+        var cats = (msg?.Categories ?? []).Where(c => !string.Equals(c, ClaimCategory, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!cats.Contains(DoneCategory, StringComparer.OrdinalIgnoreCase)) cats.Add(DoneCategory);
+        await GetGraph().Users[dest].Messages[messageId].PatchAsync(new Message { Categories = cats }, cancellationToken: ct);
     }
 
     /// <summary>Returns the raw .eml bytes of the embedded original message (for archival).</summary>

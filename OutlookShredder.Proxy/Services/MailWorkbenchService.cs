@@ -69,6 +69,10 @@ public sealed class MailWorkbenchService
         if (!seen.TryAdd(body.Id, 0))
             return new CaptureResult { MailItemId = "", IsNew = false };
 
+        // Cross-proxy claim on the wrapper message — skip if another proxy already claimed/landed it.
+        if (!await _bridge.TryClaimAsync(watchedUpn, body.Id, ct))
+            return new CaptureResult { MailItemId = "", IsNew = false };
+
         var manifest = body.Attachments
             .Select(a => new MailAttManifest { Name = a.Name, ContentType = a.ContentType, Size = a.Size })
             .ToList();
@@ -101,14 +105,15 @@ public sealed class MailWorkbenchService
         if (body.Attachments.Count > 0)
             await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
 
-        if (result is null)
-            return new CaptureResult { MailItemId = mailItemId, IsNew = true, Classified = false };
+        var version = result is not null ? await _sp.WriteClassificationAsync(mailItemId, result, ct) : 0;
 
-        var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
+        // Fully landed (item + classification + files) → mark the wrapper processed so no proxy reprocesses it.
+        await _bridge.MarkProcessedAsync(watchedUpn, body.Id, ct);
+
         return new CaptureResult
         {
-            MailItemId = mailItemId, IsNew = true, Classified = true,
-            Category = result.Category, Confidence = result.Confidence, Version = version,
+            MailItemId = mailItemId, IsNew = true, Classified = result is not null,
+            Category = result?.Category, Confidence = result?.Confidence ?? 0, Version = version,
         };
     }
 
