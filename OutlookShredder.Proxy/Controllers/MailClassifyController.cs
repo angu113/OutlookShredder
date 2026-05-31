@@ -50,7 +50,11 @@ public sealed class MailClassifyController : ControllerBase
         return Ok(_workbench.StartCaptureAll(u));
     }
 
-    /// <summary>Progress of the bulk capture+classify pass.</summary>
+    /// <summary>Re-classify every stored MailItem with the current taxonomy (background; new version per item).</summary>
+    [HttpPost("reclassify-all")]
+    public IActionResult ReclassifyAll() => Ok(_workbench.StartReclassifyAll());
+
+    /// <summary>Progress of the bulk capture / reclassify pass (shared tracker).</summary>
     [HttpGet("seed-status")]
     public IActionResult SeedStatus() => Ok(_workbench.GetSeedStatus());
 

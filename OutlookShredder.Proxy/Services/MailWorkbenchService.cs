@@ -187,6 +187,44 @@ public sealed class MailWorkbenchService
         return _seed.SnapshotNow();
     }
 
+    /// <summary>
+    /// Re-runs classification over EVERY stored MailItem with the current taxonomy (each writes a
+    /// new version, non-destructive). Use after a taxonomy change so existing items resweep into new
+    /// leaves. Background; shares the seed-progress tracker. No-op if a pass is already running.
+    /// </summary>
+    public SeedSnapshot StartReclassifyAll(int maxConcurrency = 4)
+    {
+        if (!_seed.TryBegin()) return _seed.SnapshotNow();
+        _log.LogInformation("[MailWB] reclassify-all started");
+
+        _ = Task.Run(async () =>
+        {
+            List<MailItemRow> items;
+            try { items = await _sp.ReadMailItemsAsync(); }
+            catch (Exception ex) { _seed.RecordFailed(ex.Message); _seed.End(); _log.LogWarning(ex, "[MailWB] reclassify-all: read items failed"); return; }
+
+            _seed.SetTotal(items.Count);
+            using var sem = new SemaphoreSlim(maxConcurrency);
+            var tasks = items.Select(async it =>
+            {
+                await sem.WaitAsync();
+                try
+                {
+                    var r = await ReclassifyAsync(it.MailItemId);
+                    if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
+                    else _seed.RecordFailed("classify returned null");
+                }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] reclassify-all item failed"); }
+                finally { sem.Release(); }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+            _seed.End();
+            _log.LogInformation("[MailWB] reclassify-all done: {S}", _seed.SnapshotNow().Summary());
+        });
+
+        return _seed.SnapshotNow();
+    }
+
     public sealed class SeedProgress
     {
         private readonly object _lock = new();
