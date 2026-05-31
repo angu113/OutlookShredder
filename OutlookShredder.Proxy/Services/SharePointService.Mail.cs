@@ -67,27 +67,15 @@ public partial class SharePointService
     // ── MailItems write/read ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Captures a mail item if not already present (dedup by WrapperGraphId). Returns the stable
-    /// MailItemId and whether it was newly created.
+    /// Writes a new MailItem and returns its stable MailItemId. Does NOT dedup — the caller
+    /// (MailWorkbenchService) dedups in memory via <see cref="GetExistingWrapperIdsAsync"/>. The SP
+    /// `fields/WrapperGraphId eq` filter false-matches on these long, near-identical Graph ids (all
+    /// messages in a folder share a ~140-char prefix), so it can't be used for dedup.
     /// </summary>
-    public async Task<(string MailItemId, bool IsNew)> WriteMailItemAsync(MailItemInput input, CancellationToken ct = default)
+    public async Task<string> WriteMailItemAsync(MailItemInput input, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await ResolveListIdAsync(MailItemsList);
-
-        // Dedup on the mirror wrapper id (stable, indexed).
-        var dupe = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-        {
-            req.QueryParameters.Expand = ["fields($select=MailItemId)"];
-            req.QueryParameters.Top    = 1;
-            req.QueryParameters.Filter = $"fields/WrapperGraphId eq '{Esc(input.WrapperGraphId)}'";
-        }, ct);
-        if (dupe?.Value is { Count: > 0 })
-        {
-            var ad = dupe.Value[0].Fields?.AdditionalData;
-            var existingId = ad is not null && ad.TryGetValue("MailItemId", out var ev) ? ev?.ToString() : null;
-            if (!string.IsNullOrEmpty(existingId)) return (existingId, false);
-        }
 
         var mailItemId = Guid.NewGuid().ToString("N");
         await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
@@ -119,7 +107,16 @@ public partial class SharePointService
 
         _log.LogInformation("[MailWB] Captured MailItem {Id} from {From} subj='{Subj}'",
             mailItemId, input.FromAddress, Trunc(input.Subject, 60));
-        return (mailItemId, true);
+        return mailItemId;
+    }
+
+    /// <summary>All captured WrapperGraphIds (full stored values) for reliable in-memory dedup.</summary>
+    public async Task<HashSet<string>> GetExistingWrapperIdsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList, ["WrapperGraphId"], null, ct);
+        return rows.Select(f => GetStr(f, "WrapperGraphId") ?? "")
+                   .Where(s => s.Length > 0)
+                   .ToHashSet(StringComparer.Ordinal);
     }
 
     public async Task<List<MailItemRow>> ReadMailItemsAsync(CancellationToken ct = default)

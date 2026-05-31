@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using OutlookShredder.Proxy.Models;
 
@@ -24,16 +25,28 @@ public sealed class MailWorkbenchService
     }
 
     /// <summary>Capture a cached bridge message → MailItems (dedup) → classify → MailClassifications.</summary>
-    public async Task<CaptureResult> CaptureAndClassifyAsync(string watchedUpn, string wrapperId, CancellationToken ct = default)
+    public async Task<CaptureResult> CaptureAndClassifyAsync(string watchedUpn, string wrapperId,
+        ConcurrentDictionary<string, byte>? seen = null, CancellationToken ct = default)
     {
         var body = _bridge.GetMessage(watchedUpn, wrapperId)
             ?? throw new InvalidOperationException("Message not in bridge cache (not polled yet).");
+
+        // Reliable in-memory dedup on the wrapper id (the SP eq-filter false-matches these long,
+        // near-identical Graph ids). Single-call path loads the existing set; bulk passes a shared one.
+        if (seen is null)
+        {
+            var existingIds = await _sp.GetExistingWrapperIdsAsync(ct);
+            seen = new ConcurrentDictionary<string, byte>(
+                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+        }
+        if (!seen.TryAdd(body.Id, 0))
+            return new CaptureResult { MailItemId = "", IsNew = false };
 
         var manifest = body.Attachments
             .Select(a => new MailAttManifest { Name = a.Name, ContentType = a.ContentType, Size = a.Size })
             .ToList();
 
-        var (mailItemId, isNew) = await _sp.WriteMailItemAsync(new MailItemInput
+        var mailItemId = await _sp.WriteMailItemAsync(new MailItemInput
         {
             SourceType      = "email",
             SourceMailbox   = watchedUpn,
@@ -48,9 +61,6 @@ public sealed class MailWorkbenchService
             HasAttachments  = manifest.Count > 0,
             AttachmentsJson = JsonSerializer.Serialize(manifest),
         }, ct);
-
-        if (!isNew)
-            return new CaptureResult { MailItemId = mailItemId, IsNew = false };
 
         var input = new MailClassifyInput
         {
@@ -165,13 +175,16 @@ public sealed class MailWorkbenchService
 
         _ = Task.Run(async () =>
         {
+            var existingIds = await _sp.GetExistingWrapperIdsAsync();
+            var seen = new ConcurrentDictionary<string, byte>(
+                existingIds.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
             using var sem = new SemaphoreSlim(maxConcurrency);
             var tasks = headers.Select(async h =>
             {
                 await sem.WaitAsync();
                 try
                 {
-                    var r = await CaptureAndClassifyAsync(watchedUpn, h.Id);
+                    var r = await CaptureAndClassifyAsync(watchedUpn, h.Id, seen);
                     if (!r.IsNew) _seed.RecordExisting();
                     else if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
                     else _seed.RecordFailed("classify returned null");

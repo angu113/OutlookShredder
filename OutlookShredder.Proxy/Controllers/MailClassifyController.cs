@@ -37,7 +37,7 @@ public sealed class MailClassifyController : ControllerBase
         if (string.IsNullOrWhiteSpace(req.Id)) return BadRequest(new { error = "id is required." });
         var upn = string.IsNullOrWhiteSpace(req.Upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : req.Upn;
         if (string.IsNullOrWhiteSpace(upn)) return BadRequest(new { error = "No watched mailbox configured." });
-        try { return Ok(await _workbench.CaptureAndClassifyAsync(upn, req.Id, ct)); }
+        try { return Ok(await _workbench.CaptureAndClassifyAsync(upn, req.Id, ct: ct)); }
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
