@@ -187,6 +187,11 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
         }
     }
 
+    public void SetReceived(string mailItemId, string receivedIso)
+    {
+        if (_items.TryGetValue(mailItemId, out var row)) { row.ReceivedAt = receivedIso; _ = PersistAsync(); }
+    }
+
     public void SetClaim(string mailItemId, string? claimedBy, string? claimedAtIso)
     {
         if (_items.TryGetValue(mailItemId, out var row))

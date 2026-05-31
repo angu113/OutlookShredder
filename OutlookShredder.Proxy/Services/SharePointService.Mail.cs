@@ -237,6 +237,24 @@ public partial class SharePointService
         return true;
     }
 
+    /// <summary>Patches a MailItem's ReceivedAt (used by the original-received repair pass).</summary>
+    public async Task<bool> UpdateMailReceivedAsync(string mailItemId, string receivedIso, CancellationToken ct = default)
+    {
+        var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields.PatchAsync(
+            new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["ReceivedAt"] = receivedIso } }, cancellationToken: ct);
+        return true;
+    }
+
+    /// <summary>All items' (MailItemId, RawEmlUrl, ReceivedAt) — for the received-date repair pass.</summary>
+    public async Task<List<(string MailItemId, string RawEmlUrl, string ReceivedAt)>> ReadMailEmlPathsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList, ["MailItemId", "RawEmlUrl", "ReceivedAt"], null, ct);
+        return rows.Select(f => (GetStr(f, "MailItemId") ?? "", GetStr(f, "RawEmlUrl") ?? "", GetStr(f, "ReceivedAt") ?? ""))
+                   .Where(t => t.Item1.Length > 0).ToList();
+    }
+
     /// <summary>Reads one item with the body + .eml pointer + recipients (for the full viewer).</summary>
     public async Task<MailItemDetailRow?> ReadMailItemDetailAsync(string mailItemId, CancellationToken ct = default)
     {

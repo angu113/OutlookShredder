@@ -262,6 +262,26 @@ public sealed class MailboxBridgeService : BackgroundService
     /// there is exactly one, for backward-compatibility) and the embedded email's own Internet
     /// Message-ID (the global dedup key). Empty list ⇒ inline forward (ignored).
     /// </summary>
+    /// <summary>
+    /// The time the ORIGINAL email was received, as UTC ISO-8601. Prefers the topmost "Received:" header
+    /// (the recipient server's delivery stamp), then the "Date:" header, then the wrapper's arrival time
+    /// as a last resort. UTC-normalized so ISO string sorting equals chronological order.
+    /// </summary>
+    public static string ResolveOriginalReceivedIso(MimeMessage src, DateTimeOffset? wrapperReceived)
+    {
+        foreach (var h in src.Headers)
+        {
+            if (!h.Field.Equals("Received", StringComparison.OrdinalIgnoreCase)) continue;
+            var semi = h.Value.LastIndexOf(';');
+            if (semi >= 0 && semi < h.Value.Length - 1 &&
+                MimeKit.Utils.DateUtils.TryParse(h.Value[(semi + 1)..].Trim(), out var rdt))
+                return rdt.ToUniversalTime().ToString("o");
+            break; // only the topmost (most recent = delivery) Received header
+        }
+        if (src.Date.Year > 1971) return src.Date.ToUniversalTime().ToString("o");
+        return (wrapperReceived ?? src.Date).ToUniversalTime().ToString("o");
+    }
+
     private async Task<List<CachedMessage>> ParseMirrorMessagesAsync(string destUpn, Message wrapper, CancellationToken ct)
     {
         await using var mime = await GetGraph().Users[destUpn].Messages[wrapper.Id!].Content.GetAsync(cancellationToken: ct)
@@ -283,7 +303,9 @@ public sealed class MailboxBridgeService : BackgroundService
             var src    = embedded[i];
             var id     = embedded.Count == 1 ? wrapper.Id! : $"{wrapper.Id}#{i}";
             var fromMb = src.From?.Mailboxes?.FirstOrDefault();
-            var receivedIso = (wrapper.ReceivedDateTime ?? src.Date).ToString("o");
+            // Use the ORIGINAL email's delivery time (from its headers), NOT the wrapper's arrival in
+            // the mirror — otherwise backfilled/dumped mail all sorts as "just now" (forward time).
+            var receivedIso = ResolveOriginalReceivedIso(src, wrapper.ReceivedDateTime);
             var bodyText = ExtractPlainBody(src);
             var attachments = src.Attachments
                 .OfType<MimePart>()

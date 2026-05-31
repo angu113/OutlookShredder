@@ -74,6 +74,10 @@ public sealed class MailClassifyController : ControllerBase
     [HttpPost("reclassify-all")]
     public IActionResult ReclassifyAll() => Ok(_workbench.StartReclassifyAll());
 
+    /// <summary>Repair ReceivedAt on stored items from their archived .eml headers (original delivery time). Background.</summary>
+    [HttpPost("repair-received")]
+    public IActionResult RepairReceived() => Ok(_workbench.StartRepairReceived());
+
     /// <summary>Progress of the bulk capture / reclassify pass (shared tracker).</summary>
     [HttpGet("seed-status")]
     public IActionResult SeedStatus() => Ok(_workbench.GetSeedStatus());

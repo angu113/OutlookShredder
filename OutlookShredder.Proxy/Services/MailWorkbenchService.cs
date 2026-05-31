@@ -710,16 +710,12 @@ public sealed class MailWorkbenchService
     /// </summary>
     public async Task<object> CleanArchiveAsync(bool dryRun, CancellationToken ct = default)
     {
-        var items    = await _sp.ReadMailItemsAsync(ct);
-        var currents = (await _sp.ReadCurrentClassificationsAsync(ct))
-            .ToDictionary(c => c.MailItemId, c => c.CategoryPath, StringComparer.Ordinal);
-
-        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var i in items)
-        {
-            var cat = currents.TryGetValue(i.MailItemId, out var cp) && !string.IsNullOrEmpty(cp) ? cp : "Unclassified";
-            try { live.Add(Path.GetFullPath(ItemFolder(cat, i.ReceivedAt, i.Subject, i.MailItemId))); } catch { }
-        }
+        var items = await _sp.ReadMailItemsAsync(ct);
+        // Match folders by mailItemId, NOT by recomputed path — folder names embed the (now patchable)
+        // received date + subject, so a path match would false-orphan everything after a date repair.
+        // Readable folders end with "_{first8ofGuid}"; legacy folders are the full GUID.
+        var liveShort = new HashSet<string>(items.Select(i => i.MailItemId.Length >= 8 ? i.MailItemId[..8] : i.MailItemId), StringComparer.OrdinalIgnoreCase);
+        var liveFull  = new HashSet<string>(items.Select(i => i.MailItemId), StringComparer.OrdinalIgnoreCase);
 
         var orphans = new List<string>();
         var kept = 0;
@@ -733,7 +729,10 @@ public sealed class MailWorkbenchService
                 bool hasFiles;
                 try { hasFiles = Directory.EnumerateFiles(dir).Any(); } catch { continue; }
                 if (!hasFiles) continue;                       // category/empty dirs → handled by prune
-                if (live.Contains(full)) { kept++; continue; }
+                var name = Path.GetFileName(dir);
+                var us   = name.LastIndexOf('_');
+                var tail = us >= 0 ? name[(us + 1)..] : name;  // trailing short-id, or whole name (legacy)
+                if (liveShort.Contains(tail) || liveFull.Contains(name)) { kept++; continue; }
                 orphans.Add(dir);
                 if (!dryRun) RobustDeleteDirectory(dir);
             }
@@ -938,6 +937,46 @@ public sealed class MailWorkbenchService
             _log.LogInformation("[MailWB] backfill done: {S}", _seed.SnapshotNow().Summary());
             // Self-clean: a backfill re-assigns GUIDs, so any pre-backfill folders are now orphans.
             try { await CleanArchiveAsync(dryRun: false); } catch (Exception ex) { _log.LogWarning(ex, "[MailWB] post-backfill clean failed"); }
+        });
+
+        return _seed.SnapshotNow();
+    }
+
+    /// <summary>
+    /// Re-derives each item's ReceivedAt from its archived .eml headers (original delivery time, not the
+    /// forward/wrapper time) and patches SP + cache. One-time fix for records captured with the old logic.
+    /// Background; shares the seed-progress tracker.
+    /// </summary>
+    public SeedSnapshot StartRepairReceived()
+    {
+        if (!_seed.TryBegin()) return _seed.SnapshotNow();
+        _log.LogInformation("[MailWB] repair-received started");
+
+        _ = Task.Run(async () =>
+        {
+            var rows = await _sp.ReadMailEmlPathsAsync(CancellationToken.None);
+            _seed.SetTotal(rows.Count);
+            foreach (var (id, eml, oldReceived) in rows)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(eml)) { _seed.RecordExisting(); continue; }
+                    var path = ReRootToLocalArchive(eml);
+                    if (!File.Exists(path)) { _seed.RecordExisting(); continue; }
+                    var msg   = MimeKit.MimeMessage.Load(path);
+                    var newIso = MailboxBridgeService.ResolveOriginalReceivedIso(msg, null);
+                    if (!string.IsNullOrEmpty(newIso) && !string.Equals(newIso, oldReceived, StringComparison.Ordinal))
+                    {
+                        await _sp.UpdateMailReceivedAsync(id, newIso);
+                        _cache.SetReceived(id, newIso);
+                        _seed.RecordClassified("patched");
+                    }
+                    else _seed.RecordExisting();
+                }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] repair-received item {Id} failed", id); }
+            }
+            _seed.End();
+            _log.LogInformation("[MailWB] repair-received done: {S}", _seed.SnapshotNow().Summary());
         });
 
         return _seed.SnapshotNow();
