@@ -202,8 +202,17 @@ public sealed class MailboxBridgeService : BackgroundService
             }
         }
 
+        // Bound the Skipped set: drop ids no longer in the polled window. The poll only ever
+        // fetches the most-recent page (ordered receivedDateTime desc), so once an inline-forward
+        // ages out of that window it can never reappear — keeping it skipped is pointless and the
+        // set would otherwise grow unbounded as the mirror folder accumulates mail. Intersecting
+        // with the current page caps it at ≤ the page size; the worst case if a dropped id ever
+        // resurfaces is one redundant re-classification.
+        var pageIds = msgs.Where(m => m.Id is not null).Select(m => m.Id!).ToHashSet(StringComparer.Ordinal);
+
         lock (state.Lock)
         {
+            state.Skipped.IntersectWith(pageIds);
             state.Status.PollSucceeded = true;
             state.Status.LastError = null;
             state.Status.LastPollAt = DateTimeOffset.UtcNow;
