@@ -110,6 +110,12 @@ public sealed class MailBusItem
     public string  AttachmentsJson { get; set; } = "";
     public bool    Completed       { get; set; }
     public string? CompletedAt     { get; set; }
+    public string? CompletedBy     { get; set; }
+    public bool    IsRead          { get; set; }
+    public string? ReadAt          { get; set; }
+    public string? ReadBy          { get; set; }
+    public string? ClaimedBy       { get; set; }
+    public string? ClaimedAt       { get; set; }
     // current classification
     public string  CategoryPath    { get; set; } = "Other";
     public string? OtherLabel      { get; set; }

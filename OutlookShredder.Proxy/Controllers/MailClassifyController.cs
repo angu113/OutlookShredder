@@ -82,6 +82,33 @@ public sealed class MailClassifyController : ControllerBase
     [HttpGet("tree")]
     public async Task<IActionResult> Tree(CancellationToken ct) => Ok(await _workbench.GetTreeAsync(ct));
 
+    /// <summary>Full detail for the viewer: HTML body (from the archived .eml), headers, attachments, classification, state.</summary>
+    [HttpGet("item/{mailItemId}")]
+    public async Task<IActionResult> Item(string mailItemId, CancellationToken ct)
+    {
+        var d = await _workbench.GetItemDetailAsync(mailItemId, ct);
+        return d is null ? NotFound(new { error = "Item not found." }) : Ok(d);
+    }
+
+    /// <summary>Mark an item read/unread (global read-by-anyone). Updates cache + broadcasts a "Read" bus event.</summary>
+    [HttpPost("read/{mailItemId}")]
+    public async Task<IActionResult> Read(string mailItemId, [FromBody] ReadRequest req, CancellationToken ct)
+    {
+        var ok = await _workbench.MarkReadAsync(mailItemId, req?.Read ?? true, req?.By, ct);
+        return ok ? Ok(new { success = true }) : NotFound(new { error = "Item not found." });
+    }
+
+    public sealed class ReadRequest { public bool Read { get; set; } = true; public string? By { get; set; } }
+
+    /// <summary>Streams a stored attachment's bytes (re-rooted under this machine's OneDrive archive).</summary>
+    [HttpGet("attachment/{mailItemId}")]
+    public async Task<IActionResult> Attachment(string mailItemId, [FromQuery] string name, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { error = "name is required." });
+        var r = await _workbench.GetItemAttachmentAsync(mailItemId, name, ct);
+        return r is null ? NotFound() : File(r.Value.Bytes, r.Value.ContentType, r.Value.Name);
+    }
+
     /// <summary>Items currently classified under a taxonomy path.</summary>
     [HttpGet("items")]
     public async Task<IActionResult> Items([FromQuery] string category, [FromQuery] bool includeCompleted = false, CancellationToken ct = default)

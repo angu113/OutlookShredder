@@ -165,12 +165,34 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
         _ = PersistAsync();
     }
 
-    public void SetCompleted(string mailItemId, bool completed, string? completedAtIso)
+    public void SetCompleted(string mailItemId, bool completed, string? completedAtIso, string? by = null)
     {
         if (_items.TryGetValue(mailItemId, out var row))
         {
             row.Completed = completed;
             row.CompletedAt = completed ? (completedAtIso ?? DateTimeOffset.UtcNow.ToString("o")) : null;
+            row.CompletedBy = completed ? by : null;
+            _ = PersistAsync();
+        }
+    }
+
+    public void SetRead(string mailItemId, bool read, string? by, string? readAtIso = null)
+    {
+        if (_items.TryGetValue(mailItemId, out var row))
+        {
+            row.IsRead = read;
+            row.ReadAt = read ? (readAtIso ?? DateTimeOffset.UtcNow.ToString("o")) : null;
+            row.ReadBy = read ? by : null;
+            _ = PersistAsync();
+        }
+    }
+
+    public void SetClaim(string mailItemId, string? claimedBy, string? claimedAtIso)
+    {
+        if (_items.TryGetValue(mailItemId, out var row))
+        {
+            row.ClaimedBy = claimedBy;
+            row.ClaimedAt = string.IsNullOrEmpty(claimedBy) ? null : (claimedAtIso ?? DateTimeOffset.UtcNow.ToString("o"));
             _ = PersistAsync();
         }
     }
@@ -201,6 +223,8 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
             FromAddress = b.FromAddress, FromName = b.FromName, Subject = b.Subject,
             ReceivedAt = b.ReceivedAt, HasAttachments = b.HasAttachments,
             AttachmentsJson = b.AttachmentsJson, Completed = b.Completed, CompletedAt = b.CompletedAt,
+            CompletedBy = b.CompletedBy, IsRead = b.IsRead, ReadAt = b.ReadAt, ReadBy = b.ReadBy,
+            ClaimedBy = b.ClaimedBy, ClaimedAt = b.ClaimedAt,
         });
         UpsertClass(new MailClassRow
         {
@@ -223,6 +247,8 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
             FromAddress = row.FromAddress, FromName = row.FromName, Subject = row.Subject,
             ReceivedAt = row.ReceivedAt, HasAttachments = row.HasAttachments,
             AttachmentsJson = row.AttachmentsJson, Completed = row.Completed, CompletedAt = row.CompletedAt,
+            CompletedBy = row.CompletedBy, IsRead = row.IsRead, ReadAt = row.ReadAt, ReadBy = row.ReadBy,
+            ClaimedBy = row.ClaimedBy, ClaimedAt = row.ClaimedAt,
             CategoryPath = cls?.CategoryPath ?? "Other", OtherLabel = cls?.OtherLabel,
             Confidence = cls?.Confidence ?? 0, KeywordTags = cls?.KeywordTags ?? "",
             PoNumber = cls?.PoNumber, SoNumber = cls?.SoNumber, Amount = cls?.Amount,

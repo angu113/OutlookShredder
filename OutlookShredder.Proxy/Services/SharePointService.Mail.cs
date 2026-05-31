@@ -32,8 +32,10 @@ public partial class SharePointService
             ("BodyText","note"), ("HasAttachments","boolean"), ("AttachmentsJson","note"),
             ("RawEmlUrl","text"), ("CapturedAt","dateTime"),
             ("Completed","boolean"), ("CompletedAt","dateTime"), ("CompletedBy","text"),
+            ("IsRead","boolean"), ("ReadAt","dateTime"), ("ReadBy","text"),
+            ("ClaimedBy","text"), ("ClaimedAt","dateTime"),
         ]);
-        await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed");
+        await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed", "IsRead");
 
         var cls = await EnsureListColumnsAsync(siteId, MailClassList,
         [
@@ -174,24 +176,33 @@ public partial class SharePointService
     {
         var rows = await ReadAllListItemsAsync(MailItemsList,
             ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","FromAddress","FromName",
-             "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt"], null, ct);
-        return rows.Select(f => new MailItemRow
-        {
-            SpId           = GetStr(f, "__spId") ?? "",
-            MailItemId     = GetStr(f, "MailItemId") ?? "",
-            WrapperGraphId = GetStr(f, "WrapperGraphId") ?? "",
-            SourceType     = GetStr(f, "SourceType") ?? "email",
-            SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
-            FromAddress    = GetStr(f, "FromAddress") ?? "",
-            FromName       = GetStr(f, "FromName") ?? "",
-            Subject        = GetStr(f, "EmailSubject") ?? "",
-            ReceivedAt     = GetStr(f, "ReceivedAt") ?? "",
-            HasAttachments = GetBool(f, "HasAttachments"),
-            AttachmentsJson= GetStr(f, "AttachmentsJson") ?? "",
-            Completed      = GetBool(f, "Completed"),
-            CompletedAt    = GetStr(f, "CompletedAt"),
-        }).ToList();
+             "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt","CompletedBy",
+             "IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"], null, ct);
+        return rows.Select(MapItemRow).ToList();
     }
+
+    private static MailItemRow MapItemRow(Dictionary<string, object?> f) => new()
+    {
+        SpId           = GetStr(f, "__spId") ?? "",
+        MailItemId     = GetStr(f, "MailItemId") ?? "",
+        WrapperGraphId = GetStr(f, "WrapperGraphId") ?? "",
+        SourceType     = GetStr(f, "SourceType") ?? "email",
+        SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
+        FromAddress    = GetStr(f, "FromAddress") ?? "",
+        FromName       = GetStr(f, "FromName") ?? "",
+        Subject        = GetStr(f, "EmailSubject") ?? "",
+        ReceivedAt     = GetStr(f, "ReceivedAt") ?? "",
+        HasAttachments = GetBool(f, "HasAttachments"),
+        AttachmentsJson= GetStr(f, "AttachmentsJson") ?? "",
+        Completed      = GetBool(f, "Completed"),
+        CompletedAt    = GetStr(f, "CompletedAt"),
+        CompletedBy    = GetStr(f, "CompletedBy"),
+        IsRead         = GetBool(f, "IsRead"),
+        ReadAt         = GetStr(f, "ReadAt"),
+        ReadBy         = GetStr(f, "ReadBy"),
+        ClaimedBy      = GetStr(f, "ClaimedBy"),
+        ClaimedAt      = GetStr(f, "ClaimedAt"),
+    };
 
     public async Task<bool> SetMailCompletedAsync(string mailItemId, bool completed, string? by, CancellationToken ct = default)
     {
@@ -207,6 +218,48 @@ public partial class SharePointService
             }
         }, cancellationToken: ct);
         return true;
+    }
+
+    /// <summary>Sets the global read flag (read-by-anyone) on a MailItem.</summary>
+    public async Task<bool> SetMailReadAsync(string mailItemId, bool read, string? by, CancellationToken ct = default)
+    {
+        var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields.PatchAsync(new FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["IsRead"] = read,
+                ["ReadAt"] = read ? DateTimeOffset.UtcNow.ToString("o") : null,
+                ["ReadBy"] = read ? by : null,
+            }
+        }, cancellationToken: ct);
+        return true;
+    }
+
+    /// <summary>Reads one item with the body + .eml pointer + recipients (for the full viewer).</summary>
+    public async Task<MailItemDetailRow?> ReadMailItemDetailAsync(string mailItemId, CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailItemsList,
+            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","FromAddress","FromName","ToLine","CcLine",
+             "EmailSubject","ReceivedAt","BodyText","HasAttachments","AttachmentsJson","RawEmlUrl",
+             "Completed","CompletedAt","CompletedBy","IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"],
+            $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
+        var f = rows.FirstOrDefault();
+        if (f is null) return null;
+        var baseRow = MapItemRow(f);
+        return new MailItemDetailRow
+        {
+            SpId = baseRow.SpId, MailItemId = baseRow.MailItemId, WrapperGraphId = baseRow.WrapperGraphId,
+            SourceType = baseRow.SourceType, SourceMailbox = baseRow.SourceMailbox,
+            FromAddress = baseRow.FromAddress, FromName = baseRow.FromName, Subject = baseRow.Subject,
+            ReceivedAt = baseRow.ReceivedAt, HasAttachments = baseRow.HasAttachments, AttachmentsJson = baseRow.AttachmentsJson,
+            Completed = baseRow.Completed, CompletedAt = baseRow.CompletedAt, CompletedBy = baseRow.CompletedBy,
+            IsRead = baseRow.IsRead, ReadAt = baseRow.ReadAt, ReadBy = baseRow.ReadBy,
+            ClaimedBy = baseRow.ClaimedBy, ClaimedAt = baseRow.ClaimedAt,
+            ToLine = GetStr(f, "ToLine") ?? "", CcLine = GetStr(f, "CcLine") ?? "",
+            BodyText = GetStr(f, "BodyText") ?? "", RawEmlUrl = GetStr(f, "RawEmlUrl"),
+        };
     }
 
     private async Task<(string SiteId, string ListId, string? SpId)> ResolveMailItemSpIdAsync(string mailItemId, CancellationToken ct)
@@ -466,7 +519,7 @@ public sealed class MailItemInput
     public string AttachmentsJson   { get; set; } = "[]";
 }
 
-public sealed class MailItemRow
+public class MailItemRow
 {
     public string  SpId            { get; set; } = "";
     public string  MailItemId      { get; set; } = "";
@@ -481,6 +534,21 @@ public sealed class MailItemRow
     public string  AttachmentsJson { get; set; } = "";
     public bool    Completed       { get; set; }
     public string? CompletedAt     { get; set; }
+    public string? CompletedBy     { get; set; }
+    public bool    IsRead          { get; set; }
+    public string? ReadAt          { get; set; }
+    public string? ReadBy          { get; set; }
+    public string? ClaimedBy       { get; set; }
+    public string? ClaimedAt       { get; set; }
+}
+
+/// <summary>A MailItem row plus the heavy/extra fields the full viewer needs.</summary>
+public sealed class MailItemDetailRow : MailItemRow
+{
+    public string  ToLine    { get; set; } = "";
+    public string  CcLine    { get; set; } = "";
+    public string  BodyText  { get; set; } = "";
+    public string? RawEmlUrl { get; set; }
 }
 
 public sealed class MailClassRow

@@ -152,8 +152,9 @@ public sealed class MailWorkbenchService
         var result   = await _classifier.ClassifyAsync(input, ct);
         var category = result?.Category ?? "Unclassified";
 
-        if (body.Attachments.Count > 0)
-            await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
+        // Always archive (folder + raw .eml, plus any attachments) so the full HTML viewer can render
+        // from the .eml later — not just when attachments are present.
+        await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
 
         var version = result is not null ? await _sp.WriteClassificationAsync(mailItemId, result, ct) : 0;
 
@@ -601,6 +602,7 @@ public sealed class MailWorkbenchService
                 ReceivedAt = i.ReceivedAt, HasAttachments = i.HasAttachments, Completed = i.Completed,
                 CategoryPath = c.CategoryPath, OtherLabel = c.OtherLabel, Confidence = c.Confidence,
                 KeywordTags = c.KeywordTags, PoNumber = c.PoNumber, SoNumber = c.SoNumber, Version = c.Version,
+                IsRead = i.IsRead, ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, CompletedBy = i.CompletedBy,
             });
         }
         return list.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
@@ -612,10 +614,87 @@ public sealed class MailWorkbenchService
         var ok = await _sp.SetMailCompletedAsync(mailItemId, completed, by, ct);
         if (!ok) return false;
         var nowIso = DateTimeOffset.UtcNow.ToString("o");
-        _cache.SetCompleted(mailItemId, completed, nowIso);
+        _cache.SetCompleted(mailItemId, completed, nowIso, by);
         _notify.NotifyMailItem("Completed", mailItemId,
             _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, _cache.GetClass(mailItemId)) : null);
         return true;
+    }
+
+    /// <summary>Sets the global read flag (read-by-anyone), updates the cache, and broadcasts a "Read" bus event.</summary>
+    public async Task<bool> MarkReadAsync(string mailItemId, bool read, string? by, CancellationToken ct = default)
+    {
+        var ok = await _sp.SetMailReadAsync(mailItemId, read, by, ct);
+        if (!ok) return false;
+        _cache.SetRead(mailItemId, read, by);
+        _notify.NotifyMailItem("Read", mailItemId,
+            _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, _cache.GetClass(mailItemId)) : null);
+        return true;
+    }
+
+    /// <summary>Full item detail for the viewer: HTML body (from the archived .eml), headers, attachments, classification, state.</summary>
+    public async Task<MailItemDetail?> GetItemDetailAsync(string mailItemId, CancellationToken ct = default)
+    {
+        var d = await _sp.ReadMailItemDetailAsync(mailItemId, ct);
+        if (d is null) return null;
+
+        var manifest = ParseManifest(d.AttachmentsJson);
+        string? html = null; var isHtml = false; var text = d.BodyText;
+        if (!string.IsNullOrEmpty(d.RawEmlUrl) && File.Exists(d.RawEmlUrl))
+        {
+            try
+            {
+                var msg = MimeKit.MimeMessage.Load(d.RawEmlUrl);
+                if (!string.IsNullOrWhiteSpace(msg.HtmlBody)) { html = msg.HtmlBody; isHtml = true; }
+                else if (!string.IsNullOrWhiteSpace(msg.TextBody)) { text = msg.TextBody; }
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not parse .eml for {Id}", mailItemId); }
+        }
+
+        var cls = _cache.GetClass(mailItemId);
+        return new MailItemDetail
+        {
+            MailItemId = d.MailItemId, Subject = d.Subject, FromAddress = d.FromAddress, FromName = d.FromName,
+            ToLine = d.ToLine, CcLine = d.CcLine, ReceivedAt = d.ReceivedAt,
+            Html = html, IsHtml = isHtml, BodyText = text,
+            HasAttachments = d.HasAttachments, Completed = d.Completed, CompletedAt = d.CompletedAt, CompletedBy = d.CompletedBy,
+            IsRead = d.IsRead, ReadAt = d.ReadAt, ReadBy = d.ReadBy, ClaimedBy = d.ClaimedBy, ClaimedAt = d.ClaimedAt,
+            CategoryPath = cls?.CategoryPath ?? "Other", OtherLabel = cls?.OtherLabel, Confidence = cls?.Confidence ?? 0,
+            KeywordTags = cls?.KeywordTags ?? "", PoNumber = cls?.PoNumber, SoNumber = cls?.SoNumber,
+            Reasoning = null, AiProvider = cls?.AiProvider, AiModel = cls?.AiModel, Version = cls?.Version ?? 0,
+            Attachments = manifest.Select(m => new MailAttachmentInfo
+            {
+                Name = m.Name, ContentType = m.ContentType, Size = m.Size, Stored = !string.IsNullOrEmpty(m.WebUrl),
+            }).ToList(),
+        };
+    }
+
+    /// <summary>Returns a stored attachment's bytes, re-rooted under this machine's archive root (OneDrive-synced).</summary>
+    public async Task<(byte[] Bytes, string ContentType, string Name)?> GetItemAttachmentAsync(string mailItemId, string name, CancellationToken ct = default)
+    {
+        var d = await _sp.ReadMailItemDetailAsync(mailItemId, ct);
+        if (d is null) return null;
+        var m = ParseManifest(d.AttachmentsJson).FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (m is null || string.IsNullOrEmpty(m.WebUrl)) return null;
+        var path = ReRootToLocalArchive(m.WebUrl);
+        if (!File.Exists(path)) return null;
+        var bytes = await File.ReadAllBytesAsync(path, ct);
+        return (bytes, string.IsNullOrEmpty(m.ContentType) ? "application/octet-stream" : m.ContentType, m.Name);
+    }
+
+    private static List<MailAttManifest> ParseManifest(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try { return JsonSerializer.Deserialize<List<MailAttManifest>>(json) ?? []; } catch { return []; }
+    }
+
+    /// <summary>Re-roots a stored absolute path (possibly from another machine/user) under THIS machine's archive root.</summary>
+    private string ReRootToLocalArchive(string storedPath)
+    {
+        var marker = $"{Path.DirectorySeparatorChar}Shredder{Path.DirectorySeparatorChar}";
+        var idx = storedPath.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return storedPath;   // unknown shape — try as-is
+        var rel = storedPath[(idx + marker.Length)..];
+        return Path.Combine(_archiveRoot, rel);
     }
 
     // ── Bulk seed (capture+classify every surfaced message) ──────────────────────────
@@ -918,5 +997,51 @@ public sealed class MailWorkbenchService
         public string? PoNumber     { get; set; }
         public string? SoNumber     { get; set; }
         public int     Version      { get; set; }
+        public bool    IsRead       { get; set; }
+        public string? ClaimedBy    { get; set; }
+        public string? ClaimedAt    { get; set; }
+        public string? CompletedBy  { get; set; }
+    }
+
+    public sealed class MailItemDetail
+    {
+        public string  MailItemId  { get; set; } = "";
+        public string  Subject     { get; set; } = "";
+        public string  FromAddress { get; set; } = "";
+        public string  FromName    { get; set; } = "";
+        public string  ToLine      { get; set; } = "";
+        public string  CcLine      { get; set; } = "";
+        public string  ReceivedAt  { get; set; } = "";
+        public string? Html        { get; set; }
+        public bool    IsHtml      { get; set; }
+        public string  BodyText    { get; set; } = "";
+        public bool    HasAttachments { get; set; }
+        public bool    Completed   { get; set; }
+        public string? CompletedAt { get; set; }
+        public string? CompletedBy { get; set; }
+        public bool    IsRead      { get; set; }
+        public string? ReadAt      { get; set; }
+        public string? ReadBy      { get; set; }
+        public string? ClaimedBy   { get; set; }
+        public string? ClaimedAt   { get; set; }
+        public string  CategoryPath { get; set; } = "Other";
+        public string? OtherLabel  { get; set; }
+        public double  Confidence  { get; set; }
+        public string  KeywordTags { get; set; } = "";
+        public string? PoNumber    { get; set; }
+        public string? SoNumber    { get; set; }
+        public string? Reasoning   { get; set; }
+        public string? AiProvider  { get; set; }
+        public string? AiModel     { get; set; }
+        public int     Version     { get; set; }
+        public List<MailAttachmentInfo> Attachments { get; set; } = [];
+    }
+
+    public sealed class MailAttachmentInfo
+    {
+        public string Name        { get; set; } = "";
+        public string ContentType { get; set; } = "";
+        public long   Size        { get; set; }
+        public bool   Stored      { get; set; }
     }
 }
