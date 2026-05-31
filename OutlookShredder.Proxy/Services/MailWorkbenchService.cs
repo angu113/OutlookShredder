@@ -385,15 +385,33 @@ public sealed class MailWorkbenchService
         var prior   = history.OrderByDescending(c => c.Version).FirstOrDefault();
         var input   = await _sp.GetClassifyInputAsync(mailItemId, ct);
 
-        var leaves   = await _taxonomy.GetLeavesAsync(ct);
-        var isKnown  = leaves.Any(l => string.Equals(l.Path, correctedCategory, StringComparison.OrdinalIgnoreCase));
-        var coerced  = _taxonomy.Coerce(correctedCategory);
-        var carried  = (prior?.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
+        var requested = (correctedCategory ?? "").Trim().Trim('/');
+        var leaves    = await _taxonomy.GetLeavesAsync(ct);
+        var matched   = leaves.FirstOrDefault(l => string.Equals(l.Path, requested, StringComparison.OrdinalIgnoreCase));
+        var carried   = (prior?.KeywordTags ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
+
+        string category;
+        if (matched is not null)
+        {
+            category = matched.Path;                               // existing leaf (canonical casing)
+        }
+        else if (requested.Length == 0 || string.Equals(requested, "Other", StringComparison.OrdinalIgnoreCase))
+        {
+            category = "Other";
+        }
+        else
+        {
+            // A deliberately-typed NEW bucket → promote it to a real taxonomy leaf (SP hint, optimistic
+            // in-memory add) so it appears in the tree immediately, then file the item under it.
+            category = requested;
+            await _taxonomy.AddLeafHintAsync(category, reason, "amend", ct);
+            try { Directory.CreateDirectory(Path.Combine(_archiveRoot, category.Replace('/', Path.DirectorySeparatorChar))); } catch { }
+        }
 
         var result = new MailClassificationResult
         {
-            Category    = coerced,
-            OtherLabel  = (!isKnown && !string.Equals(correctedCategory, "Other", StringComparison.OrdinalIgnoreCase)) ? correctedCategory.Trim() : null,
+            Category    = category,
+            OtherLabel  = null,
             Confidence  = 1.0,
             Keywords    = carried,
             Reasoning   = reason,
@@ -402,7 +420,7 @@ public sealed class MailWorkbenchService
             RawResponse = JsonSerializer.Serialize(new { correctedCategory, reason }),
         };
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
-        await MoveItemFilesAsync(mailItemId, prior?.CategoryPath ?? "", coerced, ct);
+        await MoveItemFilesAsync(mailItemId, prior?.CategoryPath ?? "", category, ct);
         CacheAndPublishClass("Amended", mailItemId, result, version);
 
         AppendFeedback(new Dictionary<string, object?>
@@ -415,13 +433,13 @@ public sealed class MailWorkbenchService
             ["aiConfidence"]       = prior?.Confidence,
             ["aiModel"]            = prior?.AiModel,
             ["correctedCategory"]  = correctedCategory,
-            ["storedCategory"]     = coerced,
+            ["storedCategory"]     = category,
             ["reason"]             = reason,
         });
 
         _log.LogInformation("[MailWB] AMEND {Id}: {From} -> {To} (reason: {Reason})",
-            mailItemId, prior?.CategoryPath, correctedCategory, reason);
-        return new CaptureResult { MailItemId = mailItemId, Classified = true, Category = coerced, Confidence = 1.0, Version = version };
+            mailItemId, prior?.CategoryPath, category, reason);
+        return new CaptureResult { MailItemId = mailItemId, Classified = true, Category = category, Confidence = 1.0, Version = version };
     }
 
     /// <summary>
@@ -504,23 +522,55 @@ public sealed class MailWorkbenchService
             counts[c.CategoryPath] = (cur.Total + 1, cur.Completed + (done ? 1 : 0));
         }
 
+        // AI-suggested breakdown of the Other bucket, grouped by the emergent OtherLabel.
+        var suggestions = currents
+            .Where(c => string.Equals(c.CategoryPath, "Other", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.OtherLabel))
+            .GroupBy(c => c.OtherLabel!.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => (Label: g.Key,
+                          Total: g.Count(),
+                          Completed: g.Count(c => completedById.TryGetValue(c.MailItemId, out var d) && d)))
+            .ToList();
+
         var leaves = await _taxonomy.GetLeavesAsync(ct);
         var tops = new List<TreeTop>();
         foreach (var top in leaves.Select(l => l.Top).Distinct())
         {
             var node = new TreeTop { Name = top };
-            foreach (var leaf in leaves.Where(l => l.Top == top))
+
+            // A leaf with no sub means the top IS a bucket (e.g. "Other") — selectable, no redundant child.
+            var selfLeaf = leaves.FirstOrDefault(l => l.Top == top && string.IsNullOrEmpty(l.Sub));
+            if (selfLeaf is not null)
+            {
+                node.Path = selfLeaf.Path;
+                counts.TryGetValue(selfLeaf.Path, out var sc);
+                node.Total += sc.Total; node.Open += sc.Total - sc.Completed;
+            }
+
+            // Real sub-leaves (alphabetical).
+            foreach (var leaf in leaves.Where(l => l.Top == top && !string.IsNullOrEmpty(l.Sub))
+                                       .OrderBy(l => l.Sub, StringComparer.OrdinalIgnoreCase))
             {
                 counts.TryGetValue(leaf.Path, out var c);
-                node.Subs.Add(new TreeNode
-                {
-                    Name = string.IsNullOrEmpty(leaf.Sub) ? top : leaf.Sub,
-                    Path = leaf.Path,
-                    Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed,
-                });
+                node.Subs.Add(new TreeNode { Name = leaf.Sub, Path = leaf.Path, Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed });
+                node.Total += c.Total; node.Open += c.Total - c.Completed;
             }
-            node.Total     = node.Subs.Sum(s => s.Total);
-            node.Open      = node.Subs.Sum(s => s.Open);
+
+            // Virtual AI-suggested sub-leaves under Other (muted; subset of the Other bucket, so not added
+            // to node.Total). Skipped once a real "Other/<label>" leaf exists or the label has no items.
+            if (string.Equals(top, "Other", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var s in suggestions.OrderBy(s => s.Label, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (s.Total == 0) continue;
+                    if (leaves.Any(l => string.Equals(l.Path, $"Other/{s.Label}", StringComparison.OrdinalIgnoreCase))) continue;
+                    node.Subs.Add(new TreeNode
+                    {
+                        Name = s.Label, Path = $"Other:{s.Label}",
+                        Total = s.Total, Completed = s.Completed, Open = s.Total - s.Completed,
+                        Suggested = true,
+                    });
+                }
+            }
             tops.Add(node);
         }
         return tops;
@@ -530,8 +580,14 @@ public sealed class MailWorkbenchService
     public async Task<List<WorkbenchItem>> GetItemsAsync(string category, bool includeCompleted, CancellationToken ct = default)
     {
         var (items, allCurrents) = await GetSnapshotAsync(ct);
+
+        // Virtual suggested bucket "Other:<label>" → Other items whose emergent AI label matches.
+        var suggLabel = category.StartsWith("Other:", StringComparison.Ordinal) ? category["Other:".Length..] : null;
         var currents = allCurrents
-            .Where(c => string.Equals(c.CategoryPath, category, StringComparison.OrdinalIgnoreCase))
+            .Where(c => suggLabel is not null
+                ? string.Equals(c.CategoryPath, "Other", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(c.OtherLabel?.Trim(), suggLabel, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(c.CategoryPath, category, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(c => c.MailItemId, c => c, StringComparer.Ordinal);
 
         var list = new List<WorkbenchItem>();
@@ -828,6 +884,8 @@ public sealed class MailWorkbenchService
     public sealed class TreeTop
     {
         public string Name { get; set; } = "";
+        /// <summary>Set when the top is itself a selectable bucket (a leaf with no sub, e.g. "Other").</summary>
+        public string? Path { get; set; }
         public int Total { get; set; }
         public int Open  { get; set; }
         public List<TreeNode> Subs { get; set; } = [];
@@ -840,6 +898,8 @@ public sealed class MailWorkbenchService
         public int Total { get; set; }
         public int Open  { get; set; }
         public int Completed { get; set; }
+        /// <summary>AI-proposed Other sub-label not yet confirmed as a real leaf — rendered muted in the UI.</summary>
+        public bool Suggested { get; set; }
     }
 
     public sealed class WorkbenchItem

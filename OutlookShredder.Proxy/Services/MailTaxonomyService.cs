@@ -93,10 +93,29 @@ public sealed class MailTaxonomyService
         return sb.ToString();
     }
 
-    /// <summary>Records a confirmed leaf + optional guidance to SP and forces a refresh.</summary>
+    /// <summary>
+    /// Records a confirmed leaf + optional guidance to SP and adds it to the in-memory taxonomy
+    /// immediately. The optimistic in-memory add (not a forced SP reload) is deliberate: SP list-item
+    /// reads lag the write by seconds, so re-reading now could miss the new row and drop the leaf —
+    /// the next TTL refresh reconciles from SP once it's consistent.
+    /// </summary>
     public async Task AddLeafHintAsync(string categoryPath, string? hint, string source, CancellationToken ct = default)
     {
         await _sp.WriteTaxonomyHintAsync(categoryPath, hint, source, ct);
-        _loadedAt = DateTimeOffset.MinValue;   // next use reloads
+        AddLeafInMemory(categoryPath, hint);
+    }
+
+    /// <summary>Adds a leaf to the live in-memory set if not already present (case-insensitive).</summary>
+    public void AddLeafInMemory(string categoryPath, string? description)
+    {
+        var path = (categoryPath ?? "").Trim().Trim('/');
+        if (path.Length == 0 || _validPaths.Contains(path)) return;
+        var slash = path.IndexOf('/');
+        var top   = slash < 0 ? path : path[..slash];
+        var sub   = slash < 0 ? "" : path[(slash + 1)..];
+        var leaf  = new MailTaxonomy.Leaf(top, sub, string.IsNullOrWhiteSpace(description) ? "Operator-confirmed custom category." : description);
+        _leaves     = _leaves.Concat(new[] { leaf }).ToList();
+        _validPaths = _leaves.Select(l => l.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _log.LogInformation("[MailTaxonomy] leaf added in-memory: {Path}", path);
     }
 }
