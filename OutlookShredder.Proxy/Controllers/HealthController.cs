@@ -15,17 +15,20 @@ public class HealthController : ControllerBase
     private readonly ProductCatalogService _catalog;
     private readonly AiServiceFactory _aiFactory;
     private readonly FileWatcherService _fileWatcher;
+    private readonly MailboxBridgeService _mailboxBridge;
 
     public HealthController(
         IConfiguration config,
         ProductCatalogService catalog,
         AiServiceFactory aiFactory,
-        FileWatcherService fileWatcher)
+        FileWatcherService fileWatcher,
+        MailboxBridgeService mailboxBridge)
     {
         _config = config;
         _catalog = catalog;
         _aiFactory = aiFactory;
         _fileWatcher = fileWatcher;
+        _mailboxBridge = mailboxBridge;
     }
 
     [HttpGet]
@@ -40,6 +43,7 @@ public class HealthController : ControllerBase
             CheckGemini(),
             CheckAiRouting(),
             CheckFileWatcher(),
+            CheckMailboxBridge(),
         };
         return Ok(new HealthReport(services));
     }
@@ -141,6 +145,31 @@ public class HealthController : ControllerBase
         var dir = Path.GetFileName(fw.WatchPath?.TrimEnd(Path.DirectorySeparatorChar));
         return new("fileWatcher", "File Watcher", "ok",
             $"Watching {dir}  •  {fw.ProcessedCount} file{(fw.ProcessedCount == 1 ? "" : "s")} processed");
+    }
+
+    private ServiceHealth CheckMailboxBridge()
+    {
+        var statuses = _mailboxBridge.GetStatuses();
+        if (statuses.Count == 0)
+            return new("mailboxBridge", "Mailbox Bridge", "disabled", "No mailboxes configured");
+
+        var failed = statuses.Where(m => !m.PollSucceeded && m.LastError is not null).ToList();
+        if (failed.Count > 0)
+            return new("mailboxBridge", "Mailbox Bridge", "fail",
+                $"Poll failed: {string.Join(", ", failed.Select(m => $"{m.WatchedUpn} ({m.LastError})"))}");
+
+        var notYetPolled = statuses.Where(m => m.LastPollAt is null).ToList();
+        if (notYetPolled.Count == statuses.Count)
+            return new("mailboxBridge", "Mailbox Bridge", "degraded", "Initializing… no poll completed yet");
+
+        var stale = statuses.Where(m => m.LastPollAt is { } t && DateTime.UtcNow - t.UtcDateTime > TimeSpan.FromMinutes(5)).ToList();
+        if (stale.Count > 0)
+            return new("mailboxBridge", "Mailbox Bridge", "degraded",
+                $"Poll stale: {string.Join(", ", stale.Select(m => m.WatchedUpn))}");
+
+        var total = statuses.Sum(m => m.MessageCount);
+        return new("mailboxBridge", "Mailbox Bridge", "ok",
+            $"{statuses.Count} mailbox(es), {total} message(s) cached");
     }
 
     private static string FormatAge(TimeSpan age)
