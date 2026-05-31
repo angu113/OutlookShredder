@@ -127,6 +127,8 @@ try
     builder.Services.AddSingleton<MailboxBridgeService>();
     builder.Services.AddSingleton<MailClassifierService>();
     builder.Services.AddSingleton<MailWorkbenchService>();
+    builder.Services.AddSingleton<MailAutoCaptureService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MailAutoCaptureService>());
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());

@@ -182,6 +182,24 @@ public partial class SharePointService
             .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
     }
 
+    /// <summary>Deletes a MailItem list row by its SP item id.</summary>
+    public async Task DeleteMailItemAsync(string spId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailItemsList);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].DeleteAsync(cancellationToken: ct);
+    }
+
+    /// <summary>Deletes all MailClassification rows for a given MailItemId.</summary>
+    public async Task DeleteClassificationsForItemAsync(string mailItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailClassList);
+        foreach (var r in await ReadClassificationsForItemAsync(mailItemId, ct))
+            if (r.SpId.Length > 0)
+                await GetGraph().Sites[siteId].Lists[listId].Items[r.SpId].DeleteAsync(cancellationToken: ct);
+    }
+
     /// <summary>Reads one captured item's classify-relevant text (for re-classification).</summary>
     public async Task<MailClassifyInput?> GetClassifyInputAsync(string mailItemId, CancellationToken ct = default)
     {

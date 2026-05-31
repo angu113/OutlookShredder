@@ -421,6 +421,54 @@ public sealed class MailWorkbenchService
     public SeedSnapshot GetSeedStatus() => _seed.SnapshotNow();
 
     /// <summary>
+    /// Safety-net dedup sweep: removes MailItems that share a WrapperGraphId (rare cross-proxy claim
+    /// race), keeping the earliest, deleting the others + their classifications. Returns count removed.
+    /// </summary>
+    public async Task<int> DedupMailItemsAsync(CancellationToken ct = default)
+    {
+        var items   = await _sp.ReadMailItemsAsync(ct);
+        var removed = 0;
+        foreach (var grp in items.Where(i => !string.IsNullOrEmpty(i.WrapperGraphId))
+                                  .GroupBy(i => i.WrapperGraphId, StringComparer.Ordinal)
+                                  .Where(g => g.Count() > 1))
+        {
+            var keep = grp.OrderBy(i => int.TryParse(i.SpId, out var n) ? n : int.MaxValue).First();
+            foreach (var dup in grp.Where(i => i.SpId != keep.SpId))
+            {
+                try
+                {
+                    await _sp.DeleteClassificationsForItemAsync(dup.MailItemId, ct);
+                    await _sp.DeleteMailItemAsync(dup.SpId, ct);
+                    removed++;
+                }
+                catch (Exception ex) { _log.LogWarning(ex, "[MailWB] dedup delete failed for {Id}", dup.MailItemId); }
+            }
+        }
+        if (removed > 0) _log.LogInformation("[MailWB] dedup removed {N} duplicate MailItem(s)", removed);
+        return removed;
+    }
+
+    /// <summary>
+    /// One auto-capture pass (used by MailAutoCaptureService): capture+classify any new surfaced
+    /// message not yet in SP. Quiet (no seed-progress tracker); dedup via the in-memory wrapper-id
+    /// set + the cross-proxy claim.
+    /// </summary>
+    public async Task AutoCaptureCycleAsync(string watchedUpn, CancellationToken ct)
+    {
+        var headers = _bridge.GetMessages(watchedUpn, 250) ?? [];
+        if (headers.Count == 0) return;
+        var existing = await _sp.GetExistingWrapperIdsAsync(ct);
+        var seen = new ConcurrentDictionary<string, byte>(
+            existing.Select(id => new KeyValuePair<string, byte>(id, (byte)0)), StringComparer.Ordinal);
+        foreach (var h in headers)
+        {
+            if (ct.IsCancellationRequested) break;
+            try { await CaptureAndClassifyAsync(watchedUpn, h.Id, seen, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] auto-capture item failed"); }
+        }
+    }
+
+    /// <summary>
     /// Starts a background pass that captures+classifies every message currently surfaced by the
     /// bridge (idempotent — dedup skips already-captured items). Returns immediately; poll
     /// GetSeedStatus for progress. No-op if a pass is already running.

@@ -106,6 +106,10 @@ public sealed class MailClassifyController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
+    /// <summary>Safety-net dedup sweep: remove MailItems sharing a WrapperGraphId (cross-proxy claim race).</summary>
+    [HttpPost("dedup")]
+    public async Task<IActionResult> Dedup(CancellationToken ct) => Ok(new { removed = await _workbench.DedupMailItemsAsync(ct) });
+
     /// <summary>Review the local classification-feedback log (dev analysis).</summary>
     [HttpGet("feedback")]
     public IActionResult Feedback() => Ok(_workbench.ReadFeedback());
