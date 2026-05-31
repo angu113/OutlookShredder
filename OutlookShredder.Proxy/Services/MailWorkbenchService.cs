@@ -281,13 +281,15 @@ public sealed class MailWorkbenchService
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
-            if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            if (Directory.Exists(dst)) RobustDeleteDirectory(dst);
             Directory.Move(src, dst);
 
             foreach (var m in manifest)
                 if (!string.IsNullOrEmpty(m.WebUrl)) m.WebUrl = m.WebUrl!.Replace(src, dst, StringComparison.OrdinalIgnoreCase);
             var newEml = File.Exists(Path.Combine(dst, $"{mailItemId}.eml")) ? Path.Combine(dst, $"{mailItemId}.eml") : null;
             await _sp.UpdateMailItemFilesAsync(mailItemId, JsonSerializer.Serialize(manifest), newEml, ct);
+            // Prune the now-empty old category folder (and its empty parents) so reclassify doesn't leave shells.
+            try { var p = Path.GetDirectoryName(src); if (p is not null && Directory.Exists(p) && !Directory.EnumerateFileSystemEntries(p).Any()) Directory.Delete(p, false); } catch { }
             _log.LogInformation("[MailWB] moved files {Id}: {Old} -> {New}", mailItemId, oldCategory, newCategory);
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not move files for {Id}", mailItemId); }
@@ -698,6 +700,80 @@ public sealed class MailWorkbenchService
         return Path.Combine(_archiveRoot, rel);
     }
 
+    // ── Archive cleanup (orphaned OneDrive folders) ──────────────────────────────────
+
+    /// <summary>
+    /// Removes orphaned item folders from the OneDrive archive: any leaf folder (one that holds files)
+    /// that no current MailItem maps to, then prunes empty category dirs. Needed because purge+backfill
+    /// re-assigns GUIDs (old folders orphan) and reclassify/amend can leave empty parents. dryRun reports
+    /// without deleting. The "live" set is each current item's canonical folder for its CURRENT category.
+    /// </summary>
+    public async Task<object> CleanArchiveAsync(bool dryRun, CancellationToken ct = default)
+    {
+        var items    = await _sp.ReadMailItemsAsync(ct);
+        var currents = (await _sp.ReadCurrentClassificationsAsync(ct))
+            .ToDictionary(c => c.MailItemId, c => c.CategoryPath, StringComparer.Ordinal);
+
+        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var i in items)
+        {
+            var cat = currents.TryGetValue(i.MailItemId, out var cp) && !string.IsNullOrEmpty(cp) ? cp : "Unclassified";
+            try { live.Add(Path.GetFullPath(ItemFolder(cat, i.ReceivedAt, i.Subject, i.MailItemId))); } catch { }
+        }
+
+        var orphans = new List<string>();
+        var kept = 0;
+        if (Directory.Exists(_archiveRoot))
+        {
+            var inboxFull = Path.GetFullPath(Path.Combine(_archiveRoot, "Inbox"));
+            foreach (var dir in Directory.EnumerateDirectories(_archiveRoot, "*", SearchOption.AllDirectories))
+            {
+                var full = Path.GetFullPath(dir);
+                if (full.StartsWith(inboxFull, StringComparison.OrdinalIgnoreCase)) continue;
+                bool hasFiles;
+                try { hasFiles = Directory.EnumerateFiles(dir).Any(); } catch { continue; }
+                if (!hasFiles) continue;                       // category/empty dirs → handled by prune
+                if (live.Contains(full)) { kept++; continue; }
+                orphans.Add(dir);
+                if (!dryRun) RobustDeleteDirectory(dir);
+            }
+            if (!dryRun) PruneEmptyDirs(_archiveRoot, inboxFull);
+        }
+        _log.LogInformation("[MailWB] clean-archive: kept={Kept} orphans={N} dryRun={Dry}", kept, orphans.Count, dryRun);
+        return new { dryRun, kept, orphansDeleted = orphans.Count, examples = orphans.Take(25).Select(Path.GetFileName).ToList() };
+    }
+
+    private void PruneEmptyDirs(string root, string inboxFull)
+    {
+        // Deepest-first so emptying a child lets its parent be removed too.
+        foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories)
+                                     .OrderByDescending(d => d.Length))
+        {
+            var full = Path.GetFullPath(dir);
+            if (full.StartsWith(inboxFull, StringComparison.OrdinalIgnoreCase)) continue;
+            try { if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir, false); } catch { }
+        }
+    }
+
+    /// <summary>Deletes a directory tree, tolerating OneDrive read-only attrs + transient sync locks (the reason
+    /// a plain Directory.Delete silently fails on the synced archive).</summary>
+    private void RobustDeleteDirectory(string path)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                if (!Directory.Exists(path)) return;
+                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    try { var fi = new FileInfo(f); if (fi.IsReadOnly) fi.IsReadOnly = false; } catch { }
+                Directory.Delete(path, true);
+                return;
+            }
+            catch (Exception ex) when (attempt < 2) { _log.LogDebug(ex, "[MailWB] delete retry {A} {Path}", attempt + 1, path); System.Threading.Thread.Sleep(200); }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] could not delete {Path}", path); }
+        }
+    }
+
     // ── Bulk seed (capture+classify every surfaced message) ──────────────────────────
 
     public SeedSnapshot GetSeedStatus() => _seed.SnapshotNow();
@@ -755,7 +831,8 @@ public sealed class MailWorkbenchService
                 foreach (var dir in Directory.EnumerateDirectories(_archiveRoot))
                 {
                     if (Path.GetFileName(dir).Equals("Inbox", StringComparison.OrdinalIgnoreCase)) continue;
-                    try { Directory.Delete(dir, true); dirs++; } catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge folder delete failed {Dir}", dir); }
+                    RobustDeleteDirectory(dir);
+                    if (!Directory.Exists(dir)) dirs++;
                 }
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] purge folder enumerate failed"); }
@@ -859,6 +936,8 @@ public sealed class MailWorkbenchService
             await Task.WhenAll(tasks);
             _seed.End();
             _log.LogInformation("[MailWB] backfill done: {S}", _seed.SnapshotNow().Summary());
+            // Self-clean: a backfill re-assigns GUIDs, so any pre-backfill folders are now orphans.
+            try { await CleanArchiveAsync(dryRun: false); } catch (Exception ex) { _log.LogWarning(ex, "[MailWB] post-backfill clean failed"); }
         });
 
         return _seed.SnapshotNow();

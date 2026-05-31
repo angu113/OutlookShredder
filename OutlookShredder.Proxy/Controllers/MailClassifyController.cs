@@ -144,6 +144,14 @@ public sealed class MailClassifyController : ControllerBase
         return Ok(await _workbench.PurgeAsync(u, ct));
     }
 
+    /// <summary>
+    /// Clean orphaned OneDrive archive folders (left by purge+backfill GUID churn or reclassify moves):
+    /// deletes item folders no current item maps to + prunes empty dirs. dryRun=true reports only.
+    /// </summary>
+    [HttpPost("clean-archive")]
+    public async Task<IActionResult> CleanArchive([FromQuery] bool dryRun = true, CancellationToken ct = default)
+        => Ok(await _workbench.CleanArchiveAsync(dryRun, ct));
+
     /// <summary>Safety-net dedup sweep: remove MailItems sharing a WrapperGraphId (cross-proxy claim race).</summary>
     [HttpPost("dedup")]
     public async Task<IActionResult> Dedup(CancellationToken ct) => Ok(new { removed = await _workbench.DedupMailItemsAsync(ct) });
