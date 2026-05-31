@@ -41,6 +41,19 @@ public sealed class MailClassifyController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
+    /// <summary>Bulk capture+classify every message the bridge currently surfaces (background, idempotent).</summary>
+    [HttpPost("capture-all")]
+    public IActionResult CaptureAll([FromQuery] string? upn)
+    {
+        var u = string.IsNullOrWhiteSpace(upn) ? _bridge.GetStatuses().FirstOrDefault()?.WatchedUpn : upn;
+        if (string.IsNullOrWhiteSpace(u)) return BadRequest(new { error = "No watched mailbox configured." });
+        return Ok(_workbench.StartCaptureAll(u));
+    }
+
+    /// <summary>Progress of the bulk capture+classify pass.</summary>
+    [HttpGet("seed-status")]
+    public IActionResult SeedStatus() => Ok(_workbench.GetSeedStatus());
+
     /// <summary>The classification tree with per-leaf total/open/completed counts.</summary>
     [HttpGet("tree")]
     public async Task<IActionResult> Tree(CancellationToken ct) => Ok(await _workbench.GetTreeAsync(ct));

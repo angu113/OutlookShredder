@@ -15,6 +15,7 @@ public sealed class MailWorkbenchService
     private readonly MailClassifierService _classifier;
     private readonly MailboxBridgeService _bridge;
     private readonly ILogger<MailWorkbenchService> _log;
+    private readonly SeedProgress _seed = new();
 
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, ILogger<MailWorkbenchService> log)
@@ -143,6 +144,96 @@ public sealed class MailWorkbenchService
             });
         }
         return list.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
+    }
+
+    // ── Bulk seed (capture+classify every surfaced message) ──────────────────────────
+
+    public SeedSnapshot GetSeedStatus() => _seed.SnapshotNow();
+
+    /// <summary>
+    /// Starts a background pass that captures+classifies every message currently surfaced by the
+    /// bridge (idempotent — dedup skips already-captured items). Returns immediately; poll
+    /// GetSeedStatus for progress. No-op if a pass is already running.
+    /// </summary>
+    public SeedSnapshot StartCaptureAll(string watchedUpn, int maxConcurrency = 4)
+    {
+        if (!_seed.TryBegin()) return _seed.SnapshotNow();
+
+        var headers = _bridge.GetMessages(watchedUpn, 250) ?? [];
+        _seed.SetTotal(headers.Count);
+        _log.LogInformation("[MailWB] capture-all started: {N} surfaced messages", headers.Count);
+
+        _ = Task.Run(async () =>
+        {
+            using var sem = new SemaphoreSlim(maxConcurrency);
+            var tasks = headers.Select(async h =>
+            {
+                await sem.WaitAsync();
+                try
+                {
+                    var r = await CaptureAndClassifyAsync(watchedUpn, h.Id);
+                    if (!r.IsNew) _seed.RecordExisting();
+                    else if (r.Classified) _seed.RecordClassified(r.Category ?? "Other");
+                    else _seed.RecordFailed("classify returned null");
+                }
+                catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] seed item failed"); }
+                finally { sem.Release(); }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+            _seed.End();
+            _log.LogInformation("[MailWB] capture-all done: {S}", _seed.SnapshotNow().Summary());
+        });
+
+        return _seed.SnapshotNow();
+    }
+
+    public sealed class SeedProgress
+    {
+        private readonly object _lock = new();
+        private bool _running;
+        private int _total, _classified, _existing, _failed;
+        private readonly Dictionary<string, int> _byCat = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> _errors = new();
+
+        public bool TryBegin()
+        {
+            lock (_lock)
+            {
+                if (_running) return false;
+                _running = true; _total = _classified = _existing = _failed = 0;
+                _byCat.Clear(); _errors.Clear();
+                return true;
+            }
+        }
+        public void SetTotal(int t)            { lock (_lock) _total = t; }
+        public void RecordClassified(string c) { lock (_lock) { _classified++; _byCat[c] = _byCat.TryGetValue(c, out var v) ? v + 1 : 1; } }
+        public void RecordExisting()           { lock (_lock) _existing++; }
+        public void RecordFailed(string e)     { lock (_lock) { _failed++; if (_errors.Count < 10) _errors.Add(e); } }
+        public void End()                      { lock (_lock) _running = false; }
+
+        public SeedSnapshot SnapshotNow()
+        {
+            lock (_lock) return new SeedSnapshot
+            {
+                Running = _running, Total = _total, Classified = _classified,
+                Existing = _existing, Failed = _failed,
+                Processed = _classified + _existing + _failed,
+                ByCategory = new Dictionary<string, int>(_byCat), Errors = new List<string>(_errors),
+            };
+        }
+    }
+
+    public sealed class SeedSnapshot
+    {
+        public bool Running { get; set; }
+        public int  Total { get; set; }
+        public int  Processed { get; set; }
+        public int  Classified { get; set; }
+        public int  Existing { get; set; }
+        public int  Failed { get; set; }
+        public Dictionary<string, int> ByCategory { get; set; } = new();
+        public List<string> Errors { get; set; } = new();
+        public string Summary() => $"{Processed}/{Total} classified={Classified} existing={Existing} failed={Failed}";
     }
 
     public sealed class CaptureResult
