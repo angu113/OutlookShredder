@@ -47,6 +47,9 @@ public static class MailTaxonomy
         new("Corporate", "Payroll",
             "Payroll-related messages and reminders."),
 
+        new("Franchise", "Newsletters",
+            "Newsletters, bulletins, and corporate/franchisor marketing — e.g. \"The Pipeline\", \"Fundamentals That Matter to Every Fabricator\", and mail from emarketing@ / communications@Metalsupermarkets.com."),
+
         new("Other", "",
             "Everything else that does not fit the categories above. Propose a concise free-text sub-label naming the emergent category."),
     ];
