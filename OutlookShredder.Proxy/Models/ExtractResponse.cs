@@ -101,6 +101,7 @@ public sealed class MailBusItem
     public string  SpId            { get; set; } = "";
     public string  WrapperGraphId  { get; set; } = "";
     public string  ConversationId  { get; set; } = "";
+    public string  RefsJson        { get; set; } = "";
     public string  SourceType      { get; set; } = "email";
     public string  SourceMailbox   { get; set; } = "";
     public string  FromAddress     { get; set; } = "";

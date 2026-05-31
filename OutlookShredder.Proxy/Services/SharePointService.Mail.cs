@@ -16,6 +16,7 @@ public partial class SharePointService
     private const string MailItemsList = "MailItems";
     private const string MailClassList = "MailClassifications";
     private const string MailHintsList = "MailTaxonomyHints";
+    private const string MailProjectsList = "MailProjects";
 
     // ── Provisioning ──────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ public partial class SharePointService
             ("FromAddress","text"), ("FromName","text"), ("ToLine","note"), ("CcLine","note"),
             ("EmailSubject","text"), ("ReceivedAt","dateTime"),
             ("BodyText","note"), ("HasAttachments","boolean"), ("AttachmentsJson","note"),
-            ("RawEmlUrl","text"), ("CapturedAt","dateTime"),
+            ("RawEmlUrl","text"), ("CapturedAt","dateTime"), ("RefsJson","note"),
             ("Completed","boolean"), ("CompletedAt","dateTime"), ("CompletedBy","text"),
             ("IsRead","boolean"), ("ReadAt","dateTime"), ("ReadBy","text"),
             ("ClaimedBy","text"), ("ClaimedAt","dateTime"),
@@ -53,7 +54,83 @@ public partial class SharePointService
         ]);
         await IndexListColumnsAsync(siteId, MailHintsList, "CategoryPath");
 
-        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints };
+        var projects = await EnsureListColumnsAsync(siteId, MailProjectsList,
+        [
+            ("ProjectId","text"), ("Status","text"), ("RefsJson","note"), ("ConversationIdsJson","note"),
+            ("CreatedAt","dateTime"), ("CreatedBy","text"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailProjectsList, "ProjectId", "Status");
+
+        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints, mailProjects = projects };
+    }
+
+    // ── MailProjects (Layer 2: cross-conversation grouping) ──────────────────────────
+
+    public async Task<List<MailProjectRow>> ReadProjectsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailProjectsList,
+            ["Title","ProjectId","Status","RefsJson","ConversationIdsJson","CreatedAt","CreatedBy"], null, ct);
+        return rows.Select(f => new MailProjectRow
+        {
+            SpId            = GetStr(f, "__spId") ?? "",
+            ProjectId       = GetStr(f, "ProjectId") ?? "",
+            Name            = GetStr(f, "Title") ?? "",
+            Status          = GetStr(f, "Status") ?? "active",
+            Refs            = SafeList(GetStr(f, "RefsJson")),
+            ConversationIds = SafeList(GetStr(f, "ConversationIdsJson")),
+            CreatedAt       = GetStr(f, "CreatedAt") ?? "",
+            CreatedBy       = GetStr(f, "CreatedBy") ?? "",
+        }).Where(p => p.ProjectId.Length > 0).ToList();
+    }
+
+    public async Task<string> WriteProjectAsync(MailProjectRow p, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailProjectsList);
+        if (string.IsNullOrEmpty(p.ProjectId)) p.ProjectId = Guid.NewGuid().ToString("N");
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+            {
+                ["Title"]               = Trunc(p.Name, 250),
+                ["ProjectId"]           = p.ProjectId,
+                ["Status"]              = string.IsNullOrEmpty(p.Status) ? "active" : p.Status,
+                ["RefsJson"]            = JsonSerializer.Serialize(p.Refs),
+                ["ConversationIdsJson"] = JsonSerializer.Serialize(p.ConversationIds),
+                ["CreatedAt"]           = DateTimeOffset.UtcNow.ToString("o"),
+                ["CreatedBy"]           = p.CreatedBy,
+            } }
+        }, cancellationToken: ct);
+        return p.ProjectId;
+    }
+
+    /// <summary>Patches an existing project's name/status/conversation membership by ProjectId.</summary>
+    public async Task<bool> UpdateProjectAsync(string projectId, string? name, string? status, List<string>? conversationIds, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailProjectsList);
+        var res = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=ProjectId)"];
+            req.QueryParameters.Filter = $"fields/ProjectId eq '{Esc(projectId)}'";
+            req.QueryParameters.Top    = 1;
+        }, ct);
+        var spId = res?.Value?.FirstOrDefault()?.Id;
+        if (spId is null) return false;
+        var fields = new Dictionary<string, object?>();
+        if (name is not null)   fields["Title"]  = Trunc(name, 250);
+        if (status is not null) fields["Status"] = status;
+        if (conversationIds is not null) fields["ConversationIdsJson"] = JsonSerializer.Serialize(conversationIds);
+        if (fields.Count == 0) return true;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+        return true;
+    }
+
+    private static List<string> SafeList(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try { return JsonSerializer.Deserialize<List<string>>(json) ?? []; } catch { return []; }
     }
 
     /// <summary>Reads the live taxonomy hints (custom leaves + classification guidance) from SP.</summary>
@@ -135,6 +212,7 @@ public partial class SharePointService
                     ["InternetMessageId"] = input.InternetMessageId,
                     ["WrapperGraphId"]    = input.WrapperGraphId,
                     ["ConversationId"]    = input.ConversationId,
+                    ["RefsJson"]          = input.RefsJson,
                     ["FromAddress"]       = input.FromAddress,
                     ["FromName"]          = input.FromName,
                     ["ToLine"]            = Trunc(input.ToLine, 8000),
@@ -176,7 +254,7 @@ public partial class SharePointService
     public async Task<List<MailItemRow>> ReadMailItemsAsync(CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailItemsList,
-            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","FromAddress","FromName",
+            ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","RefsJson","FromAddress","FromName",
              "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt","CompletedBy",
              "IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"], null, ct);
         return rows.Select(MapItemRow).ToList();
@@ -188,6 +266,7 @@ public partial class SharePointService
         MailItemId     = GetStr(f, "MailItemId") ?? "",
         WrapperGraphId = GetStr(f, "WrapperGraphId") ?? "",
         ConversationId = GetStr(f, "ConversationId") ?? "",
+        RefsJson       = GetStr(f, "RefsJson") ?? "",
         SourceType     = GetStr(f, "SourceType") ?? "email",
         SourceMailbox  = GetStr(f, "SourceMailbox") ?? "",
         FromAddress    = GetStr(f, "FromAddress") ?? "",
@@ -239,8 +318,8 @@ public partial class SharePointService
         return true;
     }
 
-    /// <summary>Patches a MailItem's header-derived fields (ReceivedAt + ConversationId) from the repair pass.</summary>
-    public async Task<bool> UpdateMailDerivedAsync(string mailItemId, string receivedIso, string conversationId, CancellationToken ct = default)
+    /// <summary>Patches a MailItem's header-derived fields (ReceivedAt + ConversationId + RefsJson) from the repair pass.</summary>
+    public async Task<bool> UpdateMailDerivedAsync(string mailItemId, string receivedIso, string conversationId, string refsJson, CancellationToken ct = default)
     {
         var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
         if (spId is null) return false;
@@ -249,15 +328,16 @@ public partial class SharePointService
             {
                 ["ReceivedAt"]     = receivedIso,
                 ["ConversationId"] = conversationId,
+                ["RefsJson"]       = refsJson,
             } }, cancellationToken: ct);
         return true;
     }
 
-    /// <summary>All items' (MailItemId, RawEmlUrl, ReceivedAt, ConversationId) — for the header-repair pass.</summary>
-    public async Task<List<(string MailItemId, string RawEmlUrl, string ReceivedAt, string ConversationId)>> ReadMailEmlPathsAsync(CancellationToken ct = default)
+    /// <summary>All items' (MailItemId, RawEmlUrl, ReceivedAt) — for the header/refs repair pass.</summary>
+    public async Task<List<(string MailItemId, string RawEmlUrl, string ReceivedAt)>> ReadMailEmlPathsAsync(CancellationToken ct = default)
     {
-        var rows = await ReadAllListItemsAsync(MailItemsList, ["MailItemId", "RawEmlUrl", "ReceivedAt", "ConversationId"], null, ct);
-        return rows.Select(f => (GetStr(f, "MailItemId") ?? "", GetStr(f, "RawEmlUrl") ?? "", GetStr(f, "ReceivedAt") ?? "", GetStr(f, "ConversationId") ?? ""))
+        var rows = await ReadAllListItemsAsync(MailItemsList, ["MailItemId", "RawEmlUrl", "ReceivedAt"], null, ct);
+        return rows.Select(f => (GetStr(f, "MailItemId") ?? "", GetStr(f, "RawEmlUrl") ?? "", GetStr(f, "ReceivedAt") ?? ""))
                    .Where(t => t.Item1.Length > 0).ToList();
     }
 
@@ -509,6 +589,19 @@ public partial class SharePointService
 
 // ── DTOs ────────────────────────────────────────────────────────────────────────
 
+/// <summary>A cross-conversation project: a named cluster of conversations linked by shared business refs.</summary>
+public sealed class MailProjectRow
+{
+    public string SpId            { get; set; } = "";
+    public string ProjectId       { get; set; } = "";
+    public string Name            { get; set; } = "";
+    public string Status          { get; set; } = "active";   // active | archived
+    public List<string> Refs            { get; set; } = [];
+    public List<string> ConversationIds { get; set; } = [];
+    public string CreatedAt       { get; set; } = "";
+    public string CreatedBy       { get; set; } = "";
+}
+
 /// <summary>A live taxonomy hint row (custom leaf + optional classification guidance).</summary>
 public sealed class TaxonomyHintRow
 {
@@ -534,6 +627,7 @@ public sealed class MailItemInput
     public string InternetMessageId { get; set; } = "";
     public string WrapperGraphId    { get; set; } = "";
     public string ConversationId    { get; set; } = "";
+    public string RefsJson          { get; set; } = "[]";
     public string FromAddress       { get; set; } = "";
     public string FromName          { get; set; } = "";
     public string ToLine            { get; set; } = "";
@@ -551,6 +645,7 @@ public class MailItemRow
     public string  MailItemId      { get; set; } = "";
     public string  WrapperGraphId  { get; set; } = "";
     public string  ConversationId  { get; set; } = "";
+    public string  RefsJson        { get; set; } = "";
     public string  SourceType      { get; set; } = "email";
     public string  SourceMailbox   { get; set; } = "";
     public string  FromAddress     { get; set; } = "";

@@ -16,15 +16,17 @@ public sealed class MailClassifyController : ControllerBase
     private readonly MailClassifierService _classifier;
     private readonly MailWorkbenchService _workbench;
     private readonly MailTaxonomyService _taxonomy;
+    private readonly MailProjectService _projects;
     private readonly SharePointService _sp;
 
     public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier,
-        MailWorkbenchService workbench, MailTaxonomyService taxonomy, SharePointService sp)
+        MailWorkbenchService workbench, MailTaxonomyService taxonomy, MailProjectService projects, SharePointService sp)
     {
         _bridge     = bridge;
         _classifier = classifier;
         _workbench  = workbench;
         _taxonomy   = taxonomy;
+        _projects   = projects;
         _sp         = sp;
     }
 
@@ -81,6 +83,51 @@ public sealed class MailClassifyController : ControllerBase
     /// <summary>Progress of the bulk capture / reclassify pass (shared tracker).</summary>
     [HttpGet("seed-status")]
     public IActionResult SeedStatus() => Ok(_workbench.GetSeedStatus());
+
+    // ── Projects (Layer 2: cross-conversation grouping) ──────────────────────────────
+
+    /// <summary>Auto-detected project suggestions: conversations sharing a business ref, not yet grouped.</summary>
+    [HttpGet("project-suggestions")]
+    public async Task<IActionResult> ProjectSuggestions(CancellationToken ct) => Ok(await _projects.SuggestAsync(ct));
+
+    /// <summary>Active projects (cross-conversation clusters).</summary>
+    [HttpGet("projects")]
+    public async Task<IActionResult> Projects([FromQuery] bool includeArchived = false, CancellationToken ct = default)
+        => Ok(await _projects.GetProjectsAsync(activeOnly: !includeArchived, ct));
+
+    /// <summary>Create/confirm a project from a set of conversations (+ the refs that linked them).</summary>
+    [HttpPost("projects")]
+    public async Task<IActionResult> CreateProject([FromBody] CreateProjectRequest req, CancellationToken ct)
+    {
+        if (req is null || req.ConversationIds is not { Count: > 0 })
+            return BadRequest(new { error = "conversationIds are required." });
+        var p = await _projects.CreateAsync(req.Name ?? "Untitled project", req.ConversationIds, req.Refs ?? [], req.By, ct);
+        return Ok(p);
+    }
+
+    /// <summary>Rename or change a project's conversation membership.</summary>
+    [HttpPatch("projects/{projectId}")]
+    public async Task<IActionResult> UpdateProject(string projectId, [FromBody] UpdateProjectRequest req, CancellationToken ct)
+        => await _projects.UpdateAsync(projectId, req?.Name, req?.ConversationIds, ct)
+            ? Ok(new { success = true }) : NotFound(new { error = "Project not found." });
+
+    /// <summary>Archive (hide) a project.</summary>
+    [HttpPost("projects/{projectId}/archive")]
+    public async Task<IActionResult> ArchiveProject(string projectId, CancellationToken ct)
+        => await _projects.ArchiveAsync(projectId, ct) ? Ok(new { success = true }) : NotFound(new { error = "Project not found." });
+
+    public sealed class CreateProjectRequest
+    {
+        public string? Name { get; set; }
+        public List<string>? ConversationIds { get; set; }
+        public List<string>? Refs { get; set; }
+        public string? By { get; set; }
+    }
+    public sealed class UpdateProjectRequest
+    {
+        public string? Name { get; set; }
+        public List<string>? ConversationIds { get; set; }
+    }
 
     /// <summary>The classification tree with per-leaf total/open/completed counts.</summary>
     [HttpGet("tree")]

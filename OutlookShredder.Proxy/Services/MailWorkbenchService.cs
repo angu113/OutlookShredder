@@ -20,16 +20,18 @@ public sealed class MailWorkbenchService
     private readonly MailCacheService _cache;
     private readonly RfqNotificationService _notify;
     private readonly SupplierCacheService _suppliers;
+    private readonly MailProjectService _projects;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
     private readonly string _archiveRoot;
 
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
-        RfqNotificationService notify, SupplierCacheService suppliers, IConfiguration config, ILogger<MailWorkbenchService> log)
+        RfqNotificationService notify, SupplierCacheService suppliers, MailProjectService projects,
+        IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
-        _cache = cache; _notify = notify; _suppliers = suppliers; _log = log;
+        _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -127,6 +129,7 @@ public sealed class MailWorkbenchService
             .Select(a => new MailAttManifest { Name = a.Name, ContentType = a.ContentType, Size = a.Size })
             .ToList();
 
+        var refsJson = JsonSerializer.Serialize(MailReferenceExtractor.Extract(body.Subject, body.BodyText));
         var mailItemId = await _sp.WriteMailItemAsync(new MailItemInput
         {
             SourceType        = "email",
@@ -134,6 +137,7 @@ public sealed class MailWorkbenchService
             WrapperGraphId    = body.Id,
             InternetMessageId = body.InternetMessageId,
             ConversationId    = body.ConversationId,
+            RefsJson          = refsJson,
             FromAddress       = body.FromAddress,
             FromName        = body.FromName,
             ToLine          = body.ToLine,
@@ -168,7 +172,7 @@ public sealed class MailWorkbenchService
 
         var row = new MailItemRow
         {
-            MailItemId = mailItemId, WrapperGraphId = body.Id, ConversationId = body.ConversationId,
+            MailItemId = mailItemId, WrapperGraphId = body.Id, ConversationId = body.ConversationId, RefsJson = refsJson,
             SourceType = "email", SourceMailbox = string.IsNullOrWhiteSpace(body.SourceMailbox) ? watchedUpn : body.SourceMailbox,
             FromAddress = body.FromAddress, FromName = body.FromName, Subject = body.Subject,
             ReceivedAt = body.ReceivedAt, HasAttachments = manifest.Count > 0,
@@ -603,6 +607,30 @@ public sealed class MailWorkbenchService
             }
             tops.Add(node);
         }
+
+        // Cross-cutting "Projects" top: each active project gathers its conversations' mail across leaves.
+        var projects = await _projects.GetProjectsAsync(activeOnly: true, ct);
+        if (projects.Count > 0)
+        {
+            var convCount = new Dictionary<string, (int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var i in items)
+            {
+                var conv = string.IsNullOrEmpty(i.ConversationId) ? "id:" + i.MailItemId : i.ConversationId;
+                convCount.TryGetValue(conv, out var c);
+                convCount[conv] = (c.Total + 1, c.Completed + (i.Completed ? 1 : 0));
+            }
+            var projTop = new TreeTop { Name = "Projects" };
+            foreach (var p in projects.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                int total = 0, completed = 0;
+                foreach (var conv in p.ConversationIds)
+                    if (convCount.TryGetValue(conv, out var c)) { total += c.Total; completed += c.Completed; }
+                projTop.Subs.Add(new TreeNode { Name = p.Name, Path = $"project:{p.ProjectId}", Total = total, Completed = completed, Open = total - completed });
+            }
+            projTop.Total = projTop.Subs.Sum(s => s.Total);
+            projTop.Open  = projTop.Subs.Sum(s => s.Open);
+            tops.Add(projTop);
+        }
         return tops;
     }
 
@@ -670,6 +698,31 @@ public sealed class MailWorkbenchService
     public async Task<List<WorkbenchItem>> GetItemsAsync(string category, bool includeCompleted, CancellationToken ct = default)
     {
         var (items, allCurrents) = await GetSnapshotAsync(ct);
+
+        // Project bucket "project:{id}" → every item whose conversation belongs to the project (cross-leaf).
+        if (category.StartsWith("project:", StringComparison.Ordinal))
+        {
+            var convSet = await _projects.ConversationIdsForAsync(category["project:".Length..], ct);
+            var pcur = allCurrents.ToDictionary(c => c.MailItemId, c => c, StringComparer.Ordinal);
+            var plist = new List<WorkbenchItem>();
+            foreach (var i in items)
+            {
+                var conv = string.IsNullOrEmpty(i.ConversationId) ? "id:" + i.MailItemId : i.ConversationId;
+                if (!convSet.Contains(conv)) continue;
+                if (!includeCompleted && i.Completed) continue;
+                pcur.TryGetValue(i.MailItemId, out var pc);
+                plist.Add(new WorkbenchItem
+                {
+                    MailItemId = i.MailItemId, Subject = i.Subject, FromAddress = i.FromAddress, FromName = i.FromName,
+                    ReceivedAt = i.ReceivedAt, HasAttachments = i.HasAttachments, Completed = i.Completed,
+                    CategoryPath = pc?.CategoryPath ?? "", OtherLabel = pc?.OtherLabel, Confidence = pc?.Confidence ?? 0,
+                    KeywordTags = pc?.KeywordTags ?? "", PoNumber = pc?.PoNumber, SoNumber = pc?.SoNumber, Version = pc?.Version ?? 0,
+                    IsRead = i.IsRead, ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, CompletedBy = i.CompletedBy,
+                    ConversationId = i.ConversationId,
+                });
+            }
+            return plist.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
+        }
 
         // Virtual supplier bucket "{category}|sup:{domain}" → that leaf's items from the given sender domain.
         string? supDomain = null;
@@ -1050,25 +1103,22 @@ public sealed class MailWorkbenchService
         {
             var rows = await _sp.ReadMailEmlPathsAsync(CancellationToken.None);
             _seed.SetTotal(rows.Count);
-            foreach (var (id, eml, oldReceived, oldConv) in rows)
+            foreach (var (id, eml, oldReceived) in rows)
             {
                 try
                 {
                     if (string.IsNullOrEmpty(eml)) { _seed.RecordExisting(); continue; }
                     var path = ReRootToLocalArchive(eml);
                     if (!File.Exists(path)) { _seed.RecordExisting(); continue; }
-                    var msg     = MimeKit.MimeMessage.Load(path);
-                    var newIso  = MailboxBridgeService.ResolveOriginalReceivedIso(msg, null);
-                    var newConv = MailboxBridgeService.ResolveConversationId(msg);
-                    if ((!string.IsNullOrEmpty(newIso)  && !string.Equals(newIso, oldReceived, StringComparison.Ordinal)) ||
-                        (!string.IsNullOrEmpty(newConv) && !string.Equals(newConv, oldConv, StringComparison.Ordinal)))
-                    {
-                        await _sp.UpdateMailDerivedAsync(id, string.IsNullOrEmpty(newIso) ? oldReceived : newIso, newConv);
-                        if (!string.IsNullOrEmpty(newIso)) _cache.SetReceived(id, newIso);
-                        _cache.SetConversation(id, newConv);
-                        _seed.RecordClassified("patched");
-                    }
-                    else _seed.RecordExisting();
+                    var msg      = MimeKit.MimeMessage.Load(path);
+                    var newIso   = MailboxBridgeService.ResolveOriginalReceivedIso(msg, null);
+                    var newConv  = MailboxBridgeService.ResolveConversationId(msg);
+                    var refsJson = JsonSerializer.Serialize(MailReferenceExtractor.Extract(msg.Subject, msg.TextBody ?? msg.HtmlBody));
+                    await _sp.UpdateMailDerivedAsync(id, string.IsNullOrEmpty(newIso) ? oldReceived : newIso, newConv, refsJson);
+                    if (!string.IsNullOrEmpty(newIso)) _cache.SetReceived(id, newIso);
+                    _cache.SetConversation(id, newConv);
+                    _cache.SetRefs(id, refsJson);
+                    _seed.RecordClassified("patched");
                 }
                 catch (Exception ex) { _seed.RecordFailed(ex.Message); _log.LogWarning(ex, "[MailWB] repair item {Id} failed", id); }
             }

@@ -197,6 +197,11 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
         if (_items.TryGetValue(mailItemId, out var row)) { row.ConversationId = conversationId; _ = PersistAsync(); }
     }
 
+    public void SetRefs(string mailItemId, string refsJson)
+    {
+        if (_items.TryGetValue(mailItemId, out var row)) { row.RefsJson = refsJson; _ = PersistAsync(); }
+    }
+
     public void SetClaim(string mailItemId, string? claimedBy, string? claimedAtIso)
     {
         if (_items.TryGetValue(mailItemId, out var row))
@@ -229,7 +234,7 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
         UpsertItem(new MailItemRow
         {
             SpId = b.SpId, MailItemId = b.MailItemId, WrapperGraphId = b.WrapperGraphId, ConversationId = b.ConversationId,
-            SourceType = b.SourceType, SourceMailbox = b.SourceMailbox,
+            RefsJson = b.RefsJson, SourceType = b.SourceType, SourceMailbox = b.SourceMailbox,
             FromAddress = b.FromAddress, FromName = b.FromName, Subject = b.Subject,
             ReceivedAt = b.ReceivedAt, HasAttachments = b.HasAttachments,
             AttachmentsJson = b.AttachmentsJson, Completed = b.Completed, CompletedAt = b.CompletedAt,
@@ -253,7 +258,7 @@ public sealed class MailCacheService : IHostedService, ICacheStatusProvider
         return new MailBusItem
         {
             MailItemId = row.MailItemId, SpId = row.SpId, WrapperGraphId = row.WrapperGraphId, ConversationId = row.ConversationId,
-            SourceType = row.SourceType, SourceMailbox = row.SourceMailbox,
+            RefsJson = row.RefsJson, SourceType = row.SourceType, SourceMailbox = row.SourceMailbox,
             FromAddress = row.FromAddress, FromName = row.FromName, Subject = row.Subject,
             ReceivedAt = row.ReceivedAt, HasAttachments = row.HasAttachments,
             AttachmentsJson = row.AttachmentsJson, Completed = row.Completed, CompletedAt = row.CompletedAt,
