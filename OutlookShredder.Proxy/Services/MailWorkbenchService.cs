@@ -1030,11 +1030,15 @@ public sealed class MailWorkbenchService
 
         var manifest = ParseManifest(d.AttachmentsJson);
         string? html = null; var isHtml = false; var text = d.BodyText;
-        if (!string.IsNullOrEmpty(d.RawEmlUrl) && File.Exists(d.RawEmlUrl))
+        // RawEmlUrl is an absolute path stored by whichever machine captured the item; on every OTHER
+        // machine that path won't resolve, so the HTML body silently dropped to plain text. Re-root it
+        // under THIS machine's archive (same treatment as stored attachments in GetItemAttachmentAsync).
+        var emlPath = string.IsNullOrEmpty(d.RawEmlUrl) ? null : ReRootToLocalArchive(d.RawEmlUrl);
+        if (!string.IsNullOrEmpty(emlPath) && File.Exists(emlPath))
         {
             try
             {
-                var msg = MimeKit.MimeMessage.Load(d.RawEmlUrl);
+                var msg = MimeKit.MimeMessage.Load(emlPath);
                 if (!string.IsNullOrWhiteSpace(msg.HtmlBody)) { html = msg.HtmlBody; isHtml = true; }
                 else if (!string.IsNullOrWhiteSpace(msg.TextBody)) { text = msg.TextBody; }
             }
