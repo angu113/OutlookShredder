@@ -362,6 +362,23 @@ public partial class SharePointService
                    .Where(t => t.Item1.Length > 0).ToList();
     }
 
+    /// <summary>Sets/clears the claim (owner) on a MailItem. Empty claimedBy releases the claim.</summary>
+    public async Task<bool> SetMailClaimAsync(string mailItemId, string? claimedBy, string? claimedAtIso, CancellationToken ct = default)
+    {
+        var (siteId, listId, spId) = await ResolveMailItemSpIdAsync(mailItemId, ct);
+        if (spId is null) return false;
+        var claimed = !string.IsNullOrWhiteSpace(claimedBy);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields.PatchAsync(new FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["ClaimedBy"] = claimed ? claimedBy : null,
+                ["ClaimedAt"] = claimed ? (claimedAtIso ?? DateTimeOffset.UtcNow.ToString("o")) : null,
+            }
+        }, cancellationToken: ct);
+        return true;
+    }
+
     /// <summary>Reads one item with the body + .eml pointer + recipients (for the full viewer).</summary>
     public async Task<MailItemDetailRow?> ReadMailItemDetailAsync(string mailItemId, CancellationToken ct = default)
     {

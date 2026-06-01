@@ -874,6 +874,63 @@ public sealed class MailWorkbenchService
         return true;
     }
 
+    /// <summary>
+    /// Claim an item for <paramref name="by"/>. If it's already claimed by someone else and steal=false,
+    /// returns a conflict (the UI then offers to steal). Stealing reassigns + broadcasts a "Stolen" event
+    /// so others are notified; a fresh claim broadcasts "Claimed".
+    /// </summary>
+    public async Task<object> ClaimAsync(string mailItemId, string by, bool steal, CancellationToken ct = default)
+    {
+        by = (by ?? "").Trim();
+        if (by.Length == 0) throw new ArgumentException("claimant is required.");
+        _cache.TryGetItem(mailItemId, out var existing);
+        var current = existing?.ClaimedBy;
+        var heldByOther = !string.IsNullOrWhiteSpace(current) && !string.Equals(current, by, StringComparison.OrdinalIgnoreCase);
+        if (heldByOther && !steal)
+            return new { success = false, conflict = true, claimedBy = current };
+
+        var nowIso = DateTimeOffset.UtcNow.ToString("o");
+        if (!await _sp.SetMailClaimAsync(mailItemId, by, nowIso, ct)) return new { success = false, error = "not found" };
+        _cache.SetClaim(mailItemId, by, nowIso);
+        _notify.NotifyMailItem(heldByOther ? "Stolen" : "Claimed", mailItemId,
+            _cache.TryGetItem(mailItemId, out var r) ? _cache.ToBusItem(r, _cache.GetClass(mailItemId)) : null);
+        _log.LogInformation("[MailWB] {Verb} {Id} by {By}{From}", heldByOther ? "STOLEN" : "CLAIMED", mailItemId, by, heldByOther ? $" (from {current})" : "");
+        return new { success = true, claimedBy = by, stolenFrom = heldByOther ? current : null };
+    }
+
+    /// <summary>Release a claim (clear owner), update cache + broadcast "Released".</summary>
+    public async Task<bool> ReleaseAsync(string mailItemId, CancellationToken ct = default)
+    {
+        if (!await _sp.SetMailClaimAsync(mailItemId, null, null, ct)) return false;
+        _cache.SetClaim(mailItemId, null, null);
+        _notify.NotifyMailItem("Released", mailItemId,
+            _cache.TryGetItem(mailItemId, out var r) ? _cache.ToBusItem(r, _cache.GetClass(mailItemId)) : null);
+        return true;
+    }
+
+    /// <summary>Ownership overview: claimed, not-yet-completed items (across all categories) with their owner.</summary>
+    public async Task<List<WorkbenchItem>> GetClaimsAsync(CancellationToken ct = default)
+    {
+        var (items, currents) = await GetSnapshotAsync(ct);
+        var catById = currents.ToDictionary(c => c.MailItemId, c => c, StringComparer.Ordinal);
+        return items
+            .Where(i => !string.IsNullOrWhiteSpace(i.ClaimedBy) && !i.Completed)
+            .Select(i =>
+            {
+                catById.TryGetValue(i.MailItemId, out var c);
+                return new WorkbenchItem
+                {
+                    MailItemId = i.MailItemId, Subject = i.Subject, FromAddress = i.FromAddress, FromName = i.FromName,
+                    ReceivedAt = i.ReceivedAt, HasAttachments = i.HasAttachments, Completed = i.Completed,
+                    CategoryPath = c?.CategoryPath ?? "", IsRead = i.IsRead,
+                    ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, ConversationId = i.ConversationId,
+                };
+            })
+            .OrderBy(x => x.ClaimedBy, StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(x => x.ReceivedAt, StringComparer.Ordinal)
+            .ToList();
+    }
+
     /// <summary>Sets the global read flag (read-by-anyone), updates the cache, and broadcasts a "Read" bus event.</summary>
     public async Task<bool> MarkReadAsync(string mailItemId, bool read, string? by, CancellationToken ct = default)
     {

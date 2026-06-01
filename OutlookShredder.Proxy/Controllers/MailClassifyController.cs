@@ -231,6 +231,26 @@ public sealed class MailClassifyController : ControllerBase
         public string? By { get; set; }
     }
 
+    /// <summary>Claim an item (set owner). If already held by someone else and steal=false, returns conflict.</summary>
+    [HttpPost("claim/{mailItemId}")]
+    public async Task<IActionResult> Claim(string mailItemId, [FromBody] ClaimRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.By)) return BadRequest(new { error = "by is required." });
+        try { return Ok(await _workbench.ClaimAsync(mailItemId, req.By.Trim(), req.Steal, ct)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Release an item's claim.</summary>
+    [HttpPost("release/{mailItemId}")]
+    public async Task<IActionResult> Release(string mailItemId, CancellationToken ct)
+        => await _workbench.ReleaseAsync(mailItemId, ct) ? Ok(new { success = true }) : NotFound(new { error = "MailItem not found." });
+
+    /// <summary>Ownership overview — claimed, not-yet-completed items and who holds each.</summary>
+    [HttpGet("claims")]
+    public async Task<IActionResult> Claims(CancellationToken ct) => Ok(await _workbench.GetClaimsAsync(ct));
+
+    public sealed class ClaimRequest { public string? By { get; set; } public bool Steal { get; set; } }
+
     /// <summary>The effective taxonomy the classifier targets (static base + SP-confirmed leaves).</summary>
     [HttpGet("taxonomy")]
     public async Task<IActionResult> GetTaxonomy(CancellationToken ct) =>
