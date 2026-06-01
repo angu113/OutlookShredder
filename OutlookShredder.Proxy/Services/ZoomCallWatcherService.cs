@@ -338,6 +338,23 @@ public class ZoomCallWatcherService : BackgroundService
 
         _ = Task.Run(async () =>
         {
+            // Cross-proxy dedup: in all-sources mode multiple proxies detect the same call and would
+            // each write a call-log row. If another source already logged this caller within the last
+            // 2 seconds, skip (write + notify). A genuine quick re-call is >2 s apart, so it still logs.
+            if (!string.IsNullOrWhiteSpace(callerPhone))
+            {
+                try
+                {
+                    var recent = await _sp.ReadPhoneCallLogAsync(DateTimeOffset.UtcNow.AddSeconds(-2), CancellationToken.None);
+                    if (recent.Any(r => SamePhone(r.CallerPhone, callerPhone)))
+                    {
+                        _log.LogInformation("[Zoom] Duplicate call within 2s for '{Phone}' — another source already logged it; skipping", callerPhone);
+                        return;
+                    }
+                }
+                catch (Exception ex) { _log.LogWarning(ex, "[Zoom] dedup check failed — proceeding with write"); }
+            }
+
             // CRM lookup
             var allCrm = !string.IsNullOrWhiteSpace(callerPhone)
                 ? _crmCache.LookupAllByPhone(callerPhone)
@@ -484,6 +501,14 @@ public class ZoomCallWatcherService : BackgroundService
             }
         }
         catch { /* element became stale mid-walk */ }
+    }
+
+    /// <summary>True when two phone strings share the same digits (format-insensitive, ≥7 digits).</summary>
+    private static bool SamePhone(string? a, string? b)
+    {
+        static string Digits(string? s) => new string((s ?? "").Where(char.IsDigit).ToArray());
+        var da = Digits(a);
+        return da.Length >= 7 && da == Digits(b);
     }
 
     private static string? TryGet(Func<string> fn)
