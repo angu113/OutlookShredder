@@ -26,6 +26,8 @@ public class PhoneSearchController : ControllerBase
     private static string? _pending;
     private static string? _pendingCustomer;
     private static string? _pendingDocument;
+    private static string? _pendingPoDocument;
+    private static string? _pendingNewPo;
 
     [HttpOptions]
     [HttpOptions("pending")]
@@ -36,6 +38,12 @@ public class PhoneSearchController : ControllerBase
     [HttpOptions("document")]
     [HttpOptions("pending-document")]
     [HttpOptions("consume-document")]
+    [HttpOptions("po-document")]
+    [HttpOptions("pending-po-document")]
+    [HttpOptions("consume-po-document")]
+    [HttpOptions("new-po")]
+    [HttpOptions("pending-new-po")]
+    [HttpOptions("consume-new-po")]
     [HttpOptions("scan")]
     [HttpOptions("scan-result")]
     public IActionResult Preflight() => NoContent();
@@ -115,6 +123,59 @@ public class PhoneSearchController : ControllerBase
         return Ok(new { ok = true });
     }
 
+    // ── PO Document # (Purchase Order Doc # filter) ────────────────────────────
+    // Same as the Sales Order document flow, but the extension opens the Purchase
+    // Order window (windowId 181) instead of Sales Order. Used by HSK-PO clicks.
+
+    [HttpPost("po-document")]
+    public IActionResult SetPoDocument([FromBody] DocumentSearchRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.DocumentNo))
+            return BadRequest(new { error = "documentNo is required" });
+        Volatile.Write(ref _pendingPoDocument, req.DocumentNo);
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("pending-po-document")]
+    public IActionResult GetPendingPoDocument()
+    {
+        var documentNo = Volatile.Read(ref _pendingPoDocument);
+        return Ok(new { documentNo });
+    }
+
+    [HttpPost("consume-po-document")]
+    public IActionResult ConsumePoDocument()
+    {
+        Volatile.Write(ref _pendingPoDocument, null);
+        return Ok(new { ok = true });
+    }
+
+    // ── New Purchase Order (open the PO window in new-record mode) ──────────────
+    // No filter fill — the extension opens a fresh blank PO form. Supplier is
+    // carried for future pre-fill; presence of a value is the trigger.
+
+    [HttpPost("new-po")]
+    public IActionResult SetNewPo([FromBody] NewPoRequest? req)
+    {
+        // Supplier is optional; use a sentinel so an empty body still triggers a new PO.
+        Volatile.Write(ref _pendingNewPo, string.IsNullOrWhiteSpace(req?.Supplier) ? "1" : req!.Supplier);
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("pending-new-po")]
+    public IActionResult GetPendingNewPo()
+    {
+        var newPo = Volatile.Read(ref _pendingNewPo);
+        return Ok(new { newPo });
+    }
+
+    [HttpPost("consume-new-po")]
+    public IActionResult ConsumeNewPo()
+    {
+        Volatile.Write(ref _pendingNewPo, null);
+        return Ok(new { ok = true });
+    }
+
     // ── Page scanner (dev tool) ───────────────────────────────────────────────
     // Shredder POSTs to /scan to request a scan; the extension GETs /scan,
     // runs scanPage(), and POSTs the JSON back to /scan-result.
@@ -152,4 +213,5 @@ public class PhoneSearchController : ControllerBase
     public record PhoneSearchRequest(string Phone);
     public record CustomerSearchRequest(string CustomerName);
     public record DocumentSearchRequest(string DocumentNo);
+    public record NewPoRequest(string? Supplier);
 }
