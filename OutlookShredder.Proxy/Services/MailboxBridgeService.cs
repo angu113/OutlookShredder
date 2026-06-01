@@ -853,6 +853,10 @@ public sealed class MailboxBridgeService : BackgroundService
         return (id[..h], int.TryParse(id[(h + 1)..], out var n) ? n : 0);
     }
 
+    // Removes <script>/<style> blocks INCLUDING their contents. Must run before _htmlTag, which only
+    // strips tags — leaving the CSS inside <style> behind as a wall of @font-face/@import/rules text.
+    private static readonly Regex _htmlNonContent = new(
+        @"<(script|style)\b[^>]*>.*?</\1>", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
     private static readonly Regex _htmlTag = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex _ws      = new(@"[ \t]{2,}", RegexOptions.Compiled);
 
@@ -861,7 +865,10 @@ public sealed class MailboxBridgeService : BackgroundService
         if (!string.IsNullOrWhiteSpace(msg.TextBody)) return msg.TextBody.Trim();
         if (!string.IsNullOrWhiteSpace(msg.HtmlBody))
         {
-            var text = _htmlTag.Replace(msg.HtmlBody, " ");
+            // Strip <script>/<style> (content and all) first; otherwise HTML-only mail with no
+            // text/plain alternative (e.g. Asgardeo OTP) leaks its CSS into the body text.
+            var text = _htmlNonContent.Replace(msg.HtmlBody, " ");
+            text = _htmlTag.Replace(text, " ");
             text = System.Net.WebUtility.HtmlDecode(text);
             return _ws.Replace(text, " ").Trim();
         }
