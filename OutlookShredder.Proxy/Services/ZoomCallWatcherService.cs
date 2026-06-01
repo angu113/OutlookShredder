@@ -92,7 +92,6 @@ public class ZoomCallWatcherService : BackgroundService
     private readonly RfqNotificationService          _notify;
     private readonly SharePointService               _sp;
     private readonly CustomerCacheService            _crmCache;
-    private readonly ProxyLeaseService               _lease;
     // Held as a field so the GC never collects the delegate while the hook is live
     private WinEventProc? _winEventCallback;
 
@@ -101,15 +100,13 @@ public class ZoomCallWatcherService : BackgroundService
         IConfiguration config,
         RfqNotificationService notify,
         SharePointService sp,
-        CustomerCacheService crmCache,
-        ProxyLeaseService lease)
+        CustomerCacheService crmCache)
     {
         _log      = log;
         _config   = config;
         _crmCache = crmCache;
         _notify   = notify;
         _sp       = sp;
-        _lease    = lease;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -120,42 +117,23 @@ public class ZoomCallWatcherService : BackgroundService
             return;
         }
 
-        // Steal the lease on startup — the most-recently-started proxy always wins.
-        // The previous holder stops its hook within ~15 s when its renewal detects loss.
-        // During that brief overlap both hooks may fire; the client deduplicates by phone+30s.
-        await _lease.StealLeaseAsync(ct);
-
+        // No lease/steal: every proxy that can see Zoom runs its own hook and publishes on each
+        // detected call. Duplicate publishes from multiple sources are de-duplicated on the client
+        // (by caller phone within 2 s). Restart the hook if it ever exits unexpectedly.
         while (!ct.IsCancellationRequested)
         {
-            if (!_lease.IsLeaseHolder)
-            {
-                _log.LogInformation("[Zoom] Waiting for lease (another proxy is active)");
-                try { await Task.Delay(TimeSpan.FromSeconds(15), ct); } catch (OperationCanceledException) { return; }
-                continue;
-            }
-
-            _log.LogInformation("[Zoom] Lease held — starting WinEvent hook");
-
-            // Run the hook; returns when lease is lost or ct is cancelled.
+            _log.LogInformation("[Zoom] Starting WinEvent hook (all-sources mode, no lease)");
             await RunHookAsync(ct);
-
-            if (!ct.IsCancellationRequested)
-            {
-                _log.LogInformation("[Zoom] Hook stopped (lease lost) — will re-check in 15 s");
-                try { await Task.Delay(TimeSpan.FromSeconds(15), ct); } catch (OperationCanceledException) { return; }
-            }
+            if (ct.IsCancellationRequested) break;
+            _log.LogWarning("[Zoom] Hook exited unexpectedly — restarting in 15 s");
+            try { await Task.Delay(TimeSpan.FromSeconds(15), ct); } catch (OperationCanceledException) { return; }
         }
     }
 
     private async Task RunHookAsync(CancellationToken ct)
     {
-        // Combine the host ct with a lease-loss cancellation so we can stop the
-        // STA thread either when the app shuts down OR when we lose the lease.
-        // NOTE: must be async + await tcs.Task so the using block stays alive
-        // until the STA thread exits. A non-async Task return disposes leaseCts
-        // immediately on return, before the STA thread reaches Token.Register.
-        using var leaseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
+        // Await tcs.Task so this method stays alive until the STA thread exits
+        // (the hook runs until the host ct is cancelled on shutdown).
         var tcs = new TaskCompletionSource();
 
         var thread = new Thread(() =>
@@ -193,8 +171,8 @@ public class ZoomCallWatcherService : BackgroundService
 
                 _log.LogInformation("[Zoom] WinEvent hook active (threadId={ThreadId})", threadId);
 
-                // Quit the message loop on app shutdown OR lease loss.
-                leaseCts.Token.Register(() =>
+                // Quit the message loop on app shutdown.
+                ct.Register(() =>
                     PostThreadMessage(threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero));
 
                 while (GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
@@ -219,23 +197,6 @@ public class ZoomCallWatcherService : BackgroundService
         thread.IsBackground = true;
         thread.Name         = "ZoomWinEventWatcher";
         thread.Start();
-
-        // Monitor lease on a background thread while the STA message loop runs.
-        _ = Task.Run(async () =>
-        {
-            while (!leaseCts.Token.IsCancellationRequested)
-            {
-                try { await Task.Delay(TimeSpan.FromSeconds(15), leaseCts.Token); }
-                catch (OperationCanceledException) { return; }
-
-                if (!_lease.IsLeaseHolder)
-                {
-                    _log.LogInformation("[Zoom] Lease no longer held — stopping hook");
-                    leaseCts.Cancel();
-                    return;
-                }
-            }
-        }, leaseCts.Token);
 
         await tcs.Task;
     }
