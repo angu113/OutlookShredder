@@ -363,6 +363,22 @@ public class SupplierCacheService : BackgroundService, ICacheStatusProvider
             .FirstOrDefault();
     }
 
+    /// <summary>
+    /// True when <paramref name="name"/> is a supplier in our catalog/sourcing list — an exact
+    /// (case-insensitive) match on a canonical name, or a token-subset match (all of a catalog name's
+    /// tokens appear in the given name). Used to decide whether an AI-resolved supplier name is a real
+    /// catalog supplier (and so eligible for highlighting), vs. a one-off/inferred name.
+    /// </summary>
+    public bool IsKnownSupplierName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        var n = name.Trim();
+        if (_cache.Any(e => string.Equals(e.Name, n, StringComparison.OrdinalIgnoreCase))) return true;
+        var tokens = Tokenize(n);
+        if (tokens.Count == 0) return false;
+        return _cache.Any(e => e.Tokens.Count > 0 && e.Tokens.All(t => tokens.Contains(t)));
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static readonly char[] _delimiters = [' ', ',', '.', '-', '/', '&', '(', ')', '_'];

@@ -845,7 +845,9 @@ public sealed class MailWorkbenchService
         foreach (var (key, g) in groups)
         {
             string display; bool resolved;
-            if (g.AiName is not null) { display = g.AiName; resolved = true; }   // AI/hint-resolved real supplier
+            // AI/hint-resolved name → highlight only if it's actually a catalog supplier (not a one-off
+            // inferred name); domain paths resolve against the catalog DomainMap / substring match.
+            if (g.AiName is not null) { display = g.AiName; resolved = _suppliers.IsKnownSupplierName(g.AiName); }
             else (display, resolved) = ResolveSupplierDisplay(key["dom:".Length..], g.Names);
             result.Add(new TreeNode
             {
@@ -1007,7 +1009,13 @@ public sealed class MailWorkbenchService
     public async Task<bool> MarkReadAsync(string mailItemId, bool read, string? by, CancellationToken ct = default)
     {
         var ok = await _sp.SetMailReadAsync(mailItemId, read, by, ct);
-        if (!ok) return false;
+        if (!ok)
+        {
+            // The SP row for this MailItemId couldn't be resolved — the item stays unread (the row that
+            // "refuses to mark read"). Log it so we can find the divergent item (cache vs SP).
+            _log.LogWarning("[MailWB] MarkRead failed: SP item not found for MailItemId={Id} (read={Read}, by={By})", mailItemId, read, by);
+            return false;
+        }
         _cache.SetRead(mailItemId, read, by);
         _notify.NotifyMailItem("Read", mailItemId,
             _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, _cache.GetClass(mailItemId)) : null);
