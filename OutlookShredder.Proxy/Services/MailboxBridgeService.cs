@@ -314,17 +314,22 @@ public sealed class MailboxBridgeService : BackgroundService
                 (m.Categories.Contains(DoneCategory, StringComparer.OrdinalIgnoreCase) ||
                  m.Categories.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase)))
                 continue;
-            bool known; lock (state.Lock) known = state.OutboundParsed.Contains(m.Id);
-            if (known) continue;
+            // Shared-folder mode (OutboundFolderPath == DestinationFolderPath): the inbound poll runs
+            // first and records forward-as-attachment wrappers in ParsedWrappers — skip those here so we
+            // don't re-fetch their MIME. OutboundParsed = "the outbound poll has already examined this id"
+            // (whether or not it turned out to be outbound), so non-outbound messages aren't re-fetched.
+            bool skip;
+            lock (state.Lock) skip = state.OutboundParsed.Contains(m.Id) || state.ParsedWrappers.Contains(m.Id);
+            if (skip) continue;
 
             try
             {
-                var parsed = await ParseDirectMessageAsync(cfg.DestinationUpn, m, ct);
+                // null ⇒ not an outbound copy (an inbound wrapper, or an internal/forwarded message) — examined, ignored.
+                var parsed = await ParseDirectMessageAsync(cfg.DestinationUpn, m, cfg, ct);
                 lock (state.Lock)
                 {
                     state.OutboundParsed.Add(m.Id);
-                    state.OutboundById[parsed.Header.Id] = parsed;
-                    PruneOutbound(state);
+                    if (parsed is not null) { state.OutboundById[parsed.Header.Id] = parsed; PruneOutbound(state); }
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -341,12 +346,21 @@ public sealed class MailboxBridgeService : BackgroundService
         }
     }
 
-    /// <summary>Parses a direct (non-wrapped) message into an outbound CachedMessage.</summary>
-    private async Task<CachedMessage> ParseDirectMessageAsync(string destUpn, Message m, CancellationToken ct)
+    /// <summary>
+    /// Parses a direct (non-wrapped) message into an outbound CachedMessage, or returns null when the
+    /// message is NOT an outbound copy. In shared-folder mode the outbound folder also holds the inbound
+    /// forward-as-attachment wrappers, so we reject: (a) anything carrying an embedded message/rfc822
+    /// (that's an inbound wrapper — the inbound poll owns it), and (b) anything with no external
+    /// recipient (an internal/forwarded message, not a supplier-bound send).
+    /// </summary>
+    private async Task<CachedMessage?> ParseDirectMessageAsync(string destUpn, Message m, MailboxConfig cfg, CancellationToken ct)
     {
         await using var mime = await GetGraph().Users[destUpn].Messages[m.Id!].Content.GetAsync(cancellationToken: ct)
             ?? throw new InvalidOperationException("Graph returned no MIME content");
         var src = await MimeMessage.LoadAsync(mime, ct);
+
+        if (FindAllEmbeddedMessages(src.Body).Count > 0) return null;   // inbound forward-as-attachment wrapper
+        if (!HasExternalRecipient(src, cfg)) return null;               // internal/forwarded — not a supplier-bound send
 
         var fromMb      = src.From?.Mailboxes?.FirstOrDefault();
         var receivedIso = ResolveOriginalReceivedIso(src, m.ReceivedDateTime);
@@ -797,6 +811,22 @@ public sealed class MailboxBridgeService : BackgroundService
             }, ct));
 
         return page?.Value?.FirstOrDefault()?.Id;
+    }
+
+    /// <summary>
+    /// True when the message has at least one To/Cc recipient outside our own mailboxes — i.e. it was
+    /// sent OUT to a supplier, not an internal/forwarded message. Our addresses: anything @mithrilmetals.com,
+    /// the destination + watched mailboxes, and the awathen@ franchise alias.
+    /// </summary>
+    private static bool HasExternalRecipient(MimeMessage src, MailboxConfig cfg)
+    {
+        bool Owned(string a) =>
+            string.IsNullOrWhiteSpace(a) ||
+            a.EndsWith("@mithrilmetals.com", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals(cfg.DestinationUpn, StringComparison.OrdinalIgnoreCase) ||
+            a.Equals(cfg.WatchedUpn,     StringComparison.OrdinalIgnoreCase) ||
+            a.Equals("awathen@metalsupermarkets.com", StringComparison.OrdinalIgnoreCase);
+        return src.To.Mailboxes.Concat(src.Cc.Mailboxes).Any(mb => !Owned(mb.Address));
     }
 
     /// <summary>Depth-first collection of ALL embedded message/rfc822 parts (forwarded originals).</summary>
