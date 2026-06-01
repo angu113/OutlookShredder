@@ -35,6 +35,7 @@ public partial class SharePointService
             ("Completed","boolean"), ("CompletedAt","dateTime"), ("CompletedBy","text"),
             ("IsRead","boolean"), ("ReadAt","dateTime"), ("ReadBy","text"),
             ("ClaimedBy","text"), ("ClaimedAt","dateTime"),
+            ("Direction","text"),   // "in" (default) | "out" — outbound = workbench-composed self-BCC copies
         ]);
         await IndexListColumnsAsync(siteId, MailItemsList, "MailItemId", "WrapperGraphId", "ReceivedAt", "Completed", "IsRead", "ConversationId");
 
@@ -245,6 +246,7 @@ public partial class SharePointService
                     ["AttachmentsJson"]   = input.AttachmentsJson,
                     ["CapturedAt"]        = DateTimeOffset.UtcNow.ToString("o"),
                     ["Completed"]         = false,
+                    ["Direction"]         = string.IsNullOrWhiteSpace(input.Direction) ? "in" : input.Direction,
                 }
             }
         }, cancellationToken: ct);
@@ -277,7 +279,7 @@ public partial class SharePointService
         var rows = await ReadAllListItemsAsync(MailItemsList,
             ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","RefsJson","FromAddress","FromName",
              "EmailSubject","ReceivedAt","HasAttachments","AttachmentsJson","Completed","CompletedAt","CompletedBy",
-             "IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"], null, ct);
+             "IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt","Direction"], null, ct);
         return rows.Select(MapItemRow).ToList();
     }
 
@@ -304,6 +306,7 @@ public partial class SharePointService
         ReadBy         = GetStr(f, "ReadBy"),
         ClaimedBy      = GetStr(f, "ClaimedBy"),
         ClaimedAt      = GetStr(f, "ClaimedAt"),
+        Direction      = GetStr(f, "Direction") ?? "in",
     };
 
     public async Task<bool> SetMailCompletedAsync(string mailItemId, bool completed, string? by, CancellationToken ct = default)
@@ -385,7 +388,7 @@ public partial class SharePointService
         var rows = await ReadAllListItemsAsync(MailItemsList,
             ["MailItemId","SourceType","SourceMailbox","WrapperGraphId","ConversationId","FromAddress","FromName","ToLine","CcLine",
              "EmailSubject","ReceivedAt","BodyText","HasAttachments","AttachmentsJson","RawEmlUrl",
-             "Completed","CompletedAt","CompletedBy","IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt"],
+             "Completed","CompletedAt","CompletedBy","IsRead","ReadAt","ReadBy","ClaimedBy","ClaimedAt","Direction"],
             $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
         var f = rows.FirstOrDefault();
         if (f is null) return null;
@@ -399,7 +402,7 @@ public partial class SharePointService
             ReceivedAt = baseRow.ReceivedAt, HasAttachments = baseRow.HasAttachments, AttachmentsJson = baseRow.AttachmentsJson,
             Completed = baseRow.Completed, CompletedAt = baseRow.CompletedAt, CompletedBy = baseRow.CompletedBy,
             IsRead = baseRow.IsRead, ReadAt = baseRow.ReadAt, ReadBy = baseRow.ReadBy,
-            ClaimedBy = baseRow.ClaimedBy, ClaimedAt = baseRow.ClaimedAt,
+            ClaimedBy = baseRow.ClaimedBy, ClaimedAt = baseRow.ClaimedAt, Direction = baseRow.Direction,
             ToLine = GetStr(f, "ToLine") ?? "", CcLine = GetStr(f, "CcLine") ?? "",
             BodyText = GetStr(f, "BodyText") ?? "", RawEmlUrl = GetStr(f, "RawEmlUrl"),
         };
@@ -677,6 +680,7 @@ public sealed class MailItemInput
     public string BodyText          { get; set; } = "";
     public bool   HasAttachments    { get; set; }
     public string AttachmentsJson   { get; set; } = "[]";
+    public string Direction         { get; set; } = "in";   // "in" | "out"
 }
 
 public class MailItemRow
@@ -702,6 +706,7 @@ public class MailItemRow
     public string? ReadBy          { get; set; }
     public string? ClaimedBy       { get; set; }
     public string? ClaimedAt       { get; set; }
+    public string  Direction       { get; set; } = "in";   // "in" | "out" (workbench-sent)
 }
 
 /// <summary>A MailItem row plus the heavy/extra fields the full viewer needs.</summary>

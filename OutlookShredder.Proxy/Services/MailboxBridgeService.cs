@@ -52,6 +52,15 @@ public sealed class MailboxBridgeService : BackgroundService
         // Newest receivedDateTime processed — drives incremental polling (fetch only mail at/after
         // this minus an overlap). Null until the first seed poll has run.
         public DateTimeOffset? HighWater;
+
+        // ── Outbound source (self-BCC'd workbench sends, filed to OutboundFolderPath) ──
+        // These are DIRECT messages (the outbound email itself), parsed directly — not the embedded
+        // message/rfc822 path used for the inbound mirror. Keyed by the message's own Graph id.
+        public string? OutboundFolderId;
+        public bool OutboundFolderMissingLogged;
+        public readonly Dictionary<string, CachedMessage> OutboundById = new(StringComparer.Ordinal);
+        public readonly HashSet<string> OutboundParsed = new(StringComparer.Ordinal);
+        public DateTimeOffset? OutboundHighWater;
     }
 
     private sealed class CachedMessage
@@ -253,6 +262,121 @@ public sealed class MailboxBridgeService : BackgroundService
             state.Status.MessageCount = state.ById.Count;
             state.Status.UnreadCount = state.ById.Values.Count(c => !c.Header.IsRead);
         }
+
+        // Second source: the dedicated folder of self-BCC'd workbench sends (direct messages).
+        if (!string.IsNullOrWhiteSpace(cfg.OutboundFolderPath))
+        {
+            try { await PollOutboundAsync(state, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailboxBridge] outbound poll failed for {Upn}", cfg.WatchedUpn); }
+        }
+    }
+
+    /// <summary>
+    /// Polls the OutboundFolderPath for self-BCC'd workbench sends and parses each as a DIRECT
+    /// outbound message (the message itself is the email — no embedded message/rfc822). Threading
+    /// uses the same ResolveConversationId logic so an outbound reply keys to the thread it answers.
+    /// </summary>
+    private async Task PollOutboundAsync(MailboxState state, CancellationToken ct)
+    {
+        var cfg = state.Config;
+        state.OutboundFolderId ??= await ResolveFolderIdAsync(cfg.DestinationUpn, cfg.OutboundFolderPath, ct);
+        if (state.OutboundFolderId is null)
+        {
+            // Folder not created yet (Phase 0 mail rule pending) — skip quietly, log once.
+            if (!state.OutboundFolderMissingLogged)
+            {
+                _log.LogInformation("[MailboxBridge] outbound folder '{Path}' not found in {Upn} yet — skipping outbound poll until it exists",
+                    cfg.OutboundFolderPath, cfg.DestinationUpn);
+                state.OutboundFolderMissingLogged = true;
+            }
+            return;
+        }
+
+        DateTimeOffset? highWater;
+        lock (state.Lock) highWater = state.OutboundHighWater;
+
+        var page = await GetGraph().Users[cfg.DestinationUpn].MailFolders[state.OutboundFolderId].Messages
+            .GetAsync(req =>
+            {
+                req.QueryParameters.Select  = ["id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments", "categories"];
+                req.QueryParameters.Top     = 50;
+                req.QueryParameters.Orderby = ["receivedDateTime desc"];
+                if (highWater is { } hw)
+                    req.QueryParameters.Filter = $"receivedDateTime ge {hw.Subtract(IncrementalOverlap).UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}";
+            }, ct);
+
+        var msgs = page?.Value ?? [];
+        foreach (var m in msgs)
+        {
+            if (m.Id is null) continue;
+            if (m.Categories is not null &&
+                (m.Categories.Contains(DoneCategory, StringComparer.OrdinalIgnoreCase) ||
+                 m.Categories.Contains(ClaimCategory, StringComparer.OrdinalIgnoreCase)))
+                continue;
+            bool known; lock (state.Lock) known = state.OutboundParsed.Contains(m.Id);
+            if (known) continue;
+
+            try
+            {
+                var parsed = await ParseDirectMessageAsync(cfg.DestinationUpn, m, ct);
+                lock (state.Lock)
+                {
+                    state.OutboundParsed.Add(m.Id);
+                    state.OutboundById[parsed.Header.Id] = parsed;
+                    PruneOutbound(state);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailboxBridge] could not parse outbound message {Id}", m.Id); }
+        }
+
+        var pageIds = msgs.Where(m => m.Id is not null).Select(m => m.Id!).ToHashSet(StringComparer.Ordinal);
+        lock (state.Lock)
+        {
+            state.OutboundParsed.IntersectWith(pageIds);
+            foreach (var m in msgs)
+                if (m.ReceivedDateTime is { } r && (state.OutboundHighWater is null || r > state.OutboundHighWater))
+                    state.OutboundHighWater = r;
+        }
+    }
+
+    /// <summary>Parses a direct (non-wrapped) message into an outbound CachedMessage.</summary>
+    private async Task<CachedMessage> ParseDirectMessageAsync(string destUpn, Message m, CancellationToken ct)
+    {
+        await using var mime = await GetGraph().Users[destUpn].Messages[m.Id!].Content.GetAsync(cancellationToken: ct)
+            ?? throw new InvalidOperationException("Graph returned no MIME content");
+        var src = await MimeMessage.LoadAsync(mime, ct);
+
+        var fromMb      = src.From?.Mailboxes?.FirstOrDefault();
+        var receivedIso = ResolveOriginalReceivedIso(src, m.ReceivedDateTime);
+        var bodyText    = ExtractPlainBody(src);
+        var attachments = src.Attachments.OfType<MimePart>().Select(p => new MailboxAttachmentMeta
+        {
+            Name        = p.FileName ?? p.ContentType?.Name ?? "attachment",
+            ContentType = p.ContentType?.MimeType ?? "application/octet-stream",
+            Size        = p.ContentDisposition?.Size ?? 0,
+        }).ToList();
+        var subject = src.Subject ?? m.Subject ?? "(no subject)";
+
+        return new CachedMessage
+        {
+            Header = new MailboxMessageHeader
+            {
+                Id = m.Id!, Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
+                ReceivedAt = receivedIso, IsRead = true, HasAttachments = attachments.Count > 0,
+                Preview = Truncate(bodyText, 200), Direction = "out",
+            },
+            Body = new MailboxMessageBody
+            {
+                Id = m.Id!, InternetMessageId = src.MessageId ?? "",
+                Subject = subject, FromAddress = fromMb?.Address ?? "", FromName = fromMb?.Name ?? "",
+                ToLine = src.To?.ToString() ?? "", CcLine = src.Cc?.ToString() ?? "",
+                SourceMailbox = fromMb?.Address ?? destUpn, ConversationId = ResolveConversationId(src),
+                ReceivedAt = receivedIso, IsRead = true, BodyText = bodyText, Attachments = attachments,
+                Direction = "out",
+            },
+        };
     }
 
     /// <summary>
@@ -409,7 +533,26 @@ public sealed class MailboxBridgeService : BackgroundService
     public MailboxMessageBody? GetMessage(string watchedUpn, string id)
     {
         if (!_states.TryGetValue(watchedUpn, out var s)) return null;
-        lock (s.Lock) return s.ById.TryGetValue(id, out var c) ? c.Body : null;
+        lock (s.Lock)
+        {
+            if (s.ById.TryGetValue(id, out var c)) return c.Body;
+            if (s.OutboundById.TryGetValue(id, out var o)) return o.Body;
+            return null;
+        }
+    }
+
+    /// <summary>Outbound (self-BCC'd workbench send) message bodies, newest first.</summary>
+    public List<MailboxMessageBody> GetOutboundMessages(string watchedUpn, int top)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return [];
+        lock (s.Lock)
+        {
+            return s.OutboundById.Values
+                .Select(c => c.Body)
+                .OrderByDescending(b => b.ReceivedAt, StringComparer.Ordinal)
+                .Take(top)
+                .ToList();
+        }
     }
 
     /// <summary>
@@ -547,7 +690,11 @@ public sealed class MailboxBridgeService : BackgroundService
                 .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
         }
 
-        lock (state.Lock) { state.ById.Clear(); state.ParsedWrappers.Clear(); state.Skipped.Clear(); state.HighWater = null; }
+        lock (state.Lock)
+        {
+            state.ById.Clear(); state.ParsedWrappers.Clear(); state.Skipped.Clear(); state.HighWater = null;
+            state.OutboundById.Clear(); state.OutboundParsed.Clear(); state.OutboundHighWater = null;
+        }
         _log.LogInformation("[MailboxBridge] reset: cleared claim/processed categories on {N} message(s)", cleared);
         return cleared;
     }
@@ -565,6 +712,33 @@ public sealed class MailboxBridgeService : BackgroundService
         var src = embedded[index];
         using var ms = new MemoryStream();
         await src.WriteToAsync(ms, ct);
+        return ms.ToArray();
+    }
+
+    /// <summary>Attachment bytes from a DIRECT outbound message (the message itself, not an embedded original).</summary>
+    public async Task<(string ContentType, byte[] Bytes, string FileName)?> GetDirectAttachmentAsync(
+        string watchedUpn, string messageId, string attachmentName, CancellationToken ct)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return null;
+        await using var mime = await GetGraph().Users[s.Config.DestinationUpn].Messages[messageId].Content.GetAsync(cancellationToken: ct);
+        if (mime is null) return null;
+        var msg = await MimeMessage.LoadAsync(mime, ct);
+        var part = msg.Attachments.OfType<MimePart>()
+            .FirstOrDefault(p => string.Equals(p.FileName ?? p.ContentType?.Name, attachmentName, StringComparison.OrdinalIgnoreCase));
+        if (part is null) return null;
+        using var ms = new MemoryStream();
+        await part.Content.DecodeToAsync(ms, ct);
+        return (part.ContentType?.MimeType ?? "application/octet-stream", ms.ToArray(), part.FileName ?? attachmentName);
+    }
+
+    /// <summary>Raw .eml of a DIRECT outbound message (its own MIME).</summary>
+    public async Task<byte[]?> GetDirectRawEmlAsync(string watchedUpn, string messageId, CancellationToken ct = default)
+    {
+        if (!_states.TryGetValue(watchedUpn, out var s)) return null;
+        await using var mime = await GetGraph().Users[s.Config.DestinationUpn].Messages[messageId].Content.GetAsync(cancellationToken: ct);
+        if (mime is null) return null;
+        using var ms = new MemoryStream();
+        await mime.CopyToAsync(ms, ct);
         return ms.ToArray();
     }
 
@@ -676,6 +850,17 @@ public sealed class MailboxBridgeService : BackgroundService
             .Select(c => c.Header.Id)
             .ToList();
         foreach (var id in drop) state.ById.Remove(id);
+    }
+
+    private static void PruneOutbound(MailboxState state)
+    {
+        if (state.OutboundById.Count <= CacheCap) return;
+        var drop = state.OutboundById.Values
+            .OrderBy(c => c.Header.ReceivedAt, StringComparer.Ordinal)
+            .Take(state.OutboundById.Count - CacheCap)
+            .Select(c => c.Header.Id)
+            .ToList();
+        foreach (var id in drop) state.OutboundById.Remove(id);
     }
 
     private static MailboxStatus CloneStatus(MailboxStatus s) => new()

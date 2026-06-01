@@ -188,6 +188,63 @@ public sealed class MailWorkbenchService
         };
     }
 
+    /// <summary>
+    /// Captures a self-BCC'd workbench send (a direct outbound message) as an OUTBOUND mail item.
+    /// No AI classification — it's filed into the thread's existing category so it threads under the
+    /// same leaf as the message it answers (else "Other"). Marked read (it's ours). Idempotent.
+    /// </summary>
+    public async Task<CaptureResult> CaptureOutboundBodyAsync(string watchedUpn, MailboxMessageBody body,
+        ConcurrentDictionary<string, byte>? seen = null, CancellationToken ct = default)
+    {
+        seen ??= await BuildSeenAsync(ct);
+
+        var dedupKey = !string.IsNullOrEmpty(body.InternetMessageId) ? body.InternetMessageId : body.Id;
+        if (!seen.TryAdd(dedupKey, 0)) return new CaptureResult { MailItemId = "", IsNew = false };
+
+        // Claim the direct message (its own id is the claim key — there is no wrapper) so peers skip it.
+        if (!await _bridge.TryClaimAsync(watchedUpn, body.Id, ct))
+            return new CaptureResult { MailItemId = "", IsNew = false };
+
+        var manifest = body.Attachments
+            .Select(a => new MailAttManifest { Name = a.Name, ContentType = a.ContentType, Size = a.Size })
+            .ToList();
+        var refsJson = JsonSerializer.Serialize(MailReferenceExtractor.Extract(body.Subject, body.BodyText));
+        var sourceMb = string.IsNullOrWhiteSpace(body.SourceMailbox) ? watchedUpn : body.SourceMailbox;
+
+        var mailItemId = await _sp.WriteMailItemAsync(new MailItemInput
+        {
+            SourceType = "email", Direction = "out", SourceMailbox = sourceMb,
+            WrapperGraphId = body.Id, InternetMessageId = body.InternetMessageId, ConversationId = body.ConversationId,
+            RefsJson = refsJson, FromAddress = body.FromAddress, FromName = body.FromName,
+            ToLine = body.ToLine, CcLine = body.CcLine, Subject = body.Subject, ReceivedAtIso = body.ReceivedAt,
+            BodyText = body.BodyText, HasAttachments = manifest.Count > 0, AttachmentsJson = JsonSerializer.Serialize(manifest),
+        }, ct);
+
+        // No AI: file into the thread's existing category so it threads under the same leaf.
+        var category  = ThreadCategory(body.ConversationId) ?? "Other";
+        var synthetic = new MailClassificationResult { Category = category, Confidence = 1.0, AiProvider = "outbound", AiModel = "n/a" };
+
+        await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct, outbound: true);
+        var version = await _sp.WriteClassificationAsync(mailItemId, synthetic, ct);
+        await _sp.SetMailReadAsync(mailItemId, true, "system", ct);   // our own sends are inherently read
+        await _bridge.MarkProcessedAsync(watchedUpn, body.Id, ct);
+
+        var row = new MailItemRow
+        {
+            MailItemId = mailItemId, WrapperGraphId = body.Id, ConversationId = body.ConversationId, RefsJson = refsJson,
+            SourceType = "email", Direction = "out", SourceMailbox = sourceMb,
+            FromAddress = body.FromAddress, FromName = body.FromName, Subject = body.Subject,
+            ReceivedAt = body.ReceivedAt, HasAttachments = manifest.Count > 0,
+            AttachmentsJson = JsonSerializer.Serialize(manifest), Completed = false, IsRead = true,
+        };
+        CacheAndPublish("Captured", row, ToClassRow(mailItemId, synthetic, version));
+
+        return new CaptureResult
+        {
+            MailItemId = mailItemId, IsNew = true, Classified = true, Category = category, Confidence = 1.0, Version = version,
+        };
+    }
+
     /// <summary>The category a prior message in this same conversation already received (most common), or null.</summary>
     private string? ThreadCategory(string conversationId)
     {
@@ -243,7 +300,7 @@ public sealed class MailWorkbenchService
     /// already-stored files; the webUrl pointer stays valid regardless of the folder.)
     /// </summary>
     private async Task StoreFilesAsync(string watchedUpn, MailboxMessageBody body, string mailItemId,
-        string category, string receivedAtIso, CancellationToken ct)
+        string category, string receivedAtIso, CancellationToken ct, bool outbound = false)
     {
         var folder = ItemFolder(category, receivedAtIso, body.Subject, mailItemId);
         Directory.CreateDirectory(folder);
@@ -253,7 +310,10 @@ public sealed class MailWorkbenchService
         {
             try
             {
-                var dl = await _bridge.GetAttachmentAsync(watchedUpn, body.Id, att.Name, ct);
+                // Outbound items are direct messages — fetch from the message itself, not an embedded original.
+                var dl = outbound
+                    ? await _bridge.GetDirectAttachmentAsync(watchedUpn, body.Id, att.Name, ct)
+                    : await _bridge.GetAttachmentAsync(watchedUpn, body.Id, att.Name, ct);
                 if (dl is null) { manifest.Add(new MailAttManifest { Name = att.Name, ContentType = att.ContentType, Size = att.Size }); continue; }
                 var path = Path.Combine(folder, Sanitize(att.Name));
                 await File.WriteAllBytesAsync(path, dl.Value.Bytes, ct);
@@ -269,7 +329,9 @@ public sealed class MailWorkbenchService
         string? emlPath = null;
         try
         {
-            var eml = await _bridge.GetRawEmlAsync(watchedUpn, body.Id, ct);
+            var eml = outbound
+                ? await _bridge.GetDirectRawEmlAsync(watchedUpn, body.Id, ct)
+                : await _bridge.GetRawEmlAsync(watchedUpn, body.Id, ct);
             if (eml is not null) { emlPath = Path.Combine(folder, $"{mailItemId}.eml"); await File.WriteAllBytesAsync(emlPath, eml, ct); }
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] eml write failed for {Id}", mailItemId); }
@@ -827,7 +889,7 @@ public sealed class MailWorkbenchService
                     CategoryPath = pc?.CategoryPath ?? "", OtherLabel = pc?.OtherLabel, Confidence = pc?.Confidence ?? 0,
                     KeywordTags = pc?.KeywordTags ?? "", PoNumber = pc?.PoNumber, SoNumber = pc?.SoNumber, Version = pc?.Version ?? 0,
                     IsRead = i.IsRead, ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, CompletedBy = i.CompletedBy,
-                    ConversationId = i.ConversationId,
+                    ConversationId = i.ConversationId, Direction = i.Direction,
                 });
             }
             return plist.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
@@ -866,7 +928,7 @@ public sealed class MailWorkbenchService
                 CategoryPath = c.CategoryPath, OtherLabel = c.OtherLabel, Confidence = c.Confidence,
                 KeywordTags = c.KeywordTags, PoNumber = c.PoNumber, SoNumber = c.SoNumber, Version = c.Version,
                 IsRead = i.IsRead, ClaimedBy = i.ClaimedBy, ClaimedAt = i.ClaimedAt, CompletedBy = i.CompletedBy,
-                ConversationId = i.ConversationId,
+                ConversationId = i.ConversationId, Direction = i.Direction,
             });
         }
         return list.OrderByDescending(x => x.ReceivedAt, StringComparer.Ordinal).ToList();
@@ -1168,7 +1230,8 @@ public sealed class MailWorkbenchService
     public async Task AutoCaptureCycleAsync(string watchedUpn, CancellationToken ct)
     {
         var headers = _bridge.GetMessages(watchedUpn, 250) ?? [];
-        if (headers.Count == 0) return;
+        var outbound = _bridge.GetOutboundMessages(watchedUpn, 250);
+        if (headers.Count == 0 && outbound.Count == 0) return;
         var seen   = await BuildSeenAsync(ct);
         var claims = new ConcurrentDictionary<string, Lazy<Task<bool>>>(StringComparer.Ordinal);
         foreach (var h in headers)
@@ -1176,6 +1239,12 @@ public sealed class MailWorkbenchService
             if (ct.IsCancellationRequested) break;
             try { await CaptureAndClassifyAsync(watchedUpn, h.Id, seen, claims, ct); }
             catch (Exception ex) { _log.LogWarning(ex, "[MailWB] auto-capture item failed"); }
+        }
+        foreach (var b in outbound)
+        {
+            if (ct.IsCancellationRequested) break;
+            try { await CaptureOutboundBodyAsync(watchedUpn, b, seen, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[MailWB] auto-capture outbound failed"); }
         }
     }
 
@@ -1447,6 +1516,7 @@ public sealed class MailWorkbenchService
         public string? ClaimedAt    { get; set; }
         public string? CompletedBy  { get; set; }
         public string  ConversationId { get; set; } = "";
+        public string  Direction    { get; set; } = "in";
     }
 
     public sealed class MailItemDetail
@@ -1460,6 +1530,7 @@ public sealed class MailWorkbenchService
         public string  ConversationId { get; set; } = "";
         public string  SourceType  { get; set; } = "email";   // email | sms | file
         public string  SourceMailbox { get; set; } = "";       // originating franchise mailbox (email)
+        public string  Direction   { get; set; } = "in";       // in | out (workbench-sent)
         public string  ReceivedAt  { get; set; } = "";
         public string? Html        { get; set; }
         public bool    IsHtml      { get; set; }

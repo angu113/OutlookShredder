@@ -30,6 +30,11 @@ public sealed class MailboxConfig
     /// <summary>Folder path inside the destination mailbox the mirror rule routes to (e.g. "Inbox/Hackensack-Mirror").</summary>
     public string DestinationFolderPath { get; set; } = "";
 
+    /// <summary>Folder (in the destination mailbox) where a rule files self-BCC'd workbench sends
+    /// (From hackensack@/awathen@ → "Workbench-Sent"). These are DIRECT outbound messages, parsed as
+    /// outbound conversation items. Empty ⇒ outbound linking disabled. See wip/mail-outbound-linking.md.</summary>
+    public string OutboundFolderPath { get; set; } = "";
+
     /// <summary>Mailbox the outbound relay envelope is sent FROM (Phase 1.1; e.g. store@mithrilmetals.com).</summary>
     public string RelaySenderUpn { get; set; } = "";
 
@@ -71,6 +76,7 @@ public sealed class MailboxMessageHeader
     public bool   IsRead         { get; set; }
     public bool   HasAttachments { get; set; }
     public string Preview        { get; set; } = "";
+    public string Direction      { get; set; } = "in";   // "in" | "out" (workbench-sent copy)
 }
 
 /// <summary>Full message detail — original headers + plain-text body + attachment metadata.</summary>
@@ -94,6 +100,8 @@ public sealed class MailboxMessageBody
     public bool   IsRead      { get; set; }
     public string BodyText    { get; set; } = "";
     public List<MailboxAttachmentMeta> Attachments { get; set; } = [];
+    /// <summary>"in" (inbound mirror) | "out" (a self-BCC'd workbench send). Outbound skips AI classification.</summary>
+    public string Direction   { get; set; } = "in";
 }
 
 /// <summary>Metadata for one attachment on the original (embedded) message.</summary>
