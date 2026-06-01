@@ -621,13 +621,19 @@ public sealed class MailWorkbenchService
         var currentsByCat = currents.GroupBy(c => c.CategoryPath, StringComparer.OrdinalIgnoreCase)
                                      .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
-        // count per CategoryPath
+        // count per CategoryPath (+ unread = item present and not yet read by anyone)
         var counts = new Dictionary<string, (int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+        var unreadByCat = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in currents)
         {
             completedById.TryGetValue(c.MailItemId, out var done);
             counts.TryGetValue(c.CategoryPath, out var cur);
             counts[c.CategoryPath] = (cur.Total + 1, cur.Completed + (done ? 1 : 0));
+            if (itemsById.TryGetValue(c.MailItemId, out var it) && !it.IsRead)
+            {
+                unreadByCat.TryGetValue(c.CategoryPath, out var u);
+                unreadByCat[c.CategoryPath] = u + 1;
+            }
         }
 
         // AI-suggested breakdown of the Other bucket, grouped by the emergent OtherLabel.
@@ -636,7 +642,8 @@ public sealed class MailWorkbenchService
             .GroupBy(c => c.OtherLabel!.Trim(), StringComparer.OrdinalIgnoreCase)
             .Select(g => (Label: g.Key,
                           Total: g.Count(),
-                          Completed: g.Count(c => completedById.TryGetValue(c.MailItemId, out var d) && d)))
+                          Completed: g.Count(c => completedById.TryGetValue(c.MailItemId, out var d) && d),
+                          Unread: g.Count(c => itemsById.TryGetValue(c.MailItemId, out var it) && !it.IsRead)))
             .ToList();
 
         var leaves = await _taxonomy.GetLeavesAsync(ct);
@@ -652,6 +659,7 @@ public sealed class MailWorkbenchService
                 node.Path = selfLeaf.Path;
                 counts.TryGetValue(selfLeaf.Path, out var sc);
                 node.Total += sc.Total; node.Open += sc.Total - sc.Completed;
+                node.Unread += unreadByCat.GetValueOrDefault(selfLeaf.Path);
             }
 
             // Real sub-leaves (alphabetical).
@@ -660,12 +668,13 @@ public sealed class MailWorkbenchService
                                        .OrderBy(l => l.Sub, StringComparer.OrdinalIgnoreCase))
             {
                 counts.TryGetValue(leaf.Path, out var c);
-                var child = new TreeNode { Name = leaf.Sub, Path = leaf.Path, Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed };
+                var leafUnread = unreadByCat.GetValueOrDefault(leaf.Path);
+                var child = new TreeNode { Name = leaf.Sub, Path = leaf.Path, Total = c.Total, Completed = c.Completed, Open = c.Total - c.Completed, Unread = leafUnread };
                 // Third level: group a Supplier leaf's mail by sender (catalog name, else sender name / domain).
                 if (isSupplier && c.Total > 0 && currentsByCat.TryGetValue(leaf.Path, out var leafCurrents))
                     child.Children = BuildSupplierChildren(leaf.Path, leafCurrents, itemsById, completedById);
                 node.Subs.Add(child);
-                node.Total += c.Total; node.Open += c.Total - c.Completed;
+                node.Total += c.Total; node.Open += c.Total - c.Completed; node.Unread += leafUnread;
             }
 
             // Virtual AI-suggested sub-leaves under Other (muted; subset of the Other bucket, so not added
@@ -679,7 +688,7 @@ public sealed class MailWorkbenchService
                     node.Subs.Add(new TreeNode
                     {
                         Name = s.Label, Path = $"Other:{s.Label}",
-                        Total = s.Total, Completed = s.Completed, Open = s.Total - s.Completed,
+                        Total = s.Total, Completed = s.Completed, Open = s.Total - s.Completed, Unread = s.Unread,
                         Suggested = true,
                     });
                 }
@@ -691,23 +700,24 @@ public sealed class MailWorkbenchService
         var projects = await _projects.GetProjectsAsync(activeOnly: true, ct);
         if (projects.Count > 0)
         {
-            var convCount = new Dictionary<string, (int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+            var convCount = new Dictionary<string, (int Total, int Completed, int Unread)>(StringComparer.OrdinalIgnoreCase);
             foreach (var i in items)
             {
                 var conv = string.IsNullOrEmpty(i.ConversationId) ? "id:" + i.MailItemId : i.ConversationId;
                 convCount.TryGetValue(conv, out var c);
-                convCount[conv] = (c.Total + 1, c.Completed + (i.Completed ? 1 : 0));
+                convCount[conv] = (c.Total + 1, c.Completed + (i.Completed ? 1 : 0), c.Unread + (i.IsRead ? 0 : 1));
             }
             var projTop = new TreeTop { Name = "Projects" };
             foreach (var p in projects.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase))
             {
-                int total = 0, completed = 0;
+                int total = 0, completed = 0, unread = 0;
                 foreach (var conv in p.ConversationIds)
-                    if (convCount.TryGetValue(conv, out var c)) { total += c.Total; completed += c.Completed; }
-                projTop.Subs.Add(new TreeNode { Name = p.Name, Path = $"project:{p.ProjectId}", Total = total, Completed = completed, Open = total - completed });
+                    if (convCount.TryGetValue(conv, out var c)) { total += c.Total; completed += c.Completed; unread += c.Unread; }
+                projTop.Subs.Add(new TreeNode { Name = p.Name, Path = $"project:{p.ProjectId}", Total = total, Completed = completed, Open = total - completed, Unread = unread });
             }
-            projTop.Total = projTop.Subs.Sum(s => s.Total);
-            projTop.Open  = projTop.Subs.Sum(s => s.Open);
+            projTop.Total  = projTop.Subs.Sum(s => s.Total);
+            projTop.Open   = projTop.Subs.Sum(s => s.Open);
+            projTop.Unread = projTop.Subs.Sum(s => s.Unread);
             tops.Add(projTop);
         }
         // Alphabetical top order, but "Other" is always pinned last.
@@ -756,16 +766,16 @@ public sealed class MailWorkbenchService
     {
         // Group key = the AI-resolved supplier name ("name:…", e.g. read from a payment-processor bill's
         // body) when present, else the sender domain ("dom:…"). The |sup: path carries this key verbatim.
-        var groups = new Dictionary<string, (List<string> Names, string? AiName, int Total, int Completed)>(StringComparer.OrdinalIgnoreCase);
+        var groups = new Dictionary<string, (List<string> Names, string? AiName, int Total, int Completed, int Unread)>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in leafCurrents)
         {
             if (!itemsById.TryGetValue(c.MailItemId, out var it)) continue;
             completedById.TryGetValue(c.MailItemId, out var done);
             var fromAi = !string.IsNullOrWhiteSpace(c.SupplierName);
             var key    = fromAi ? "name:" + c.SupplierName!.Trim().ToLowerInvariant() : "dom:" + SupplierDomain(it.FromAddress);
-            if (!groups.TryGetValue(key, out var g)) g = (new List<string>(), fromAi ? c.SupplierName!.Trim() : null, 0, 0);
+            if (!groups.TryGetValue(key, out var g)) g = (new List<string>(), fromAi ? c.SupplierName!.Trim() : null, 0, 0, 0);
             if (!string.IsNullOrWhiteSpace(it.FromName)) g.Names.Add(it.FromName);
-            g.Total++; if (done) g.Completed++;
+            g.Total++; if (done) g.Completed++; if (!it.IsRead) g.Unread++;
             groups[key] = g;
         }
 
@@ -778,7 +788,7 @@ public sealed class MailWorkbenchService
             result.Add(new TreeNode
             {
                 Name = display, Path = $"{leafPath}|sup:{key}",
-                Total = g.Total, Completed = g.Completed, Open = g.Total - g.Completed,
+                Total = g.Total, Completed = g.Completed, Open = g.Total - g.Completed, Unread = g.Unread,
                 Resolved = resolved,
             });
         }
@@ -1396,6 +1406,7 @@ public sealed class MailWorkbenchService
         public string? Path { get; set; }
         public int Total { get; set; }
         public int Open  { get; set; }
+        public int Unread { get; set; }
         public List<TreeNode> Subs { get; set; } = [];
     }
 
@@ -1406,6 +1417,7 @@ public sealed class MailWorkbenchService
         public int Total { get; set; }
         public int Open  { get; set; }
         public int Completed { get; set; }
+        public int Unread { get; set; }
         /// <summary>AI-proposed Other sub-label not yet confirmed as a real leaf — rendered muted in the UI.</summary>
         public bool Suggested { get; set; }
         /// <summary>True when this supplier node maps to a catalog supplier; false = uncatalogued (call-out candidate).</summary>
