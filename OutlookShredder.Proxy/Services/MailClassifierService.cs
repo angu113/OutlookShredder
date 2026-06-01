@@ -49,6 +49,20 @@ public class MailClassifierService
         Strong signals: a purchase-order number like HSK-PO0001234 indicates "Supplier/Order
         Confirmations"; a sales-order reference like HSK-SO0001234 indicates "Customer/Orders".
 
+        Disambiguation rules (apply BEFORE defaulting to a Supplier/* category):
+        - Supplier/* categories are ONLY for mail a supplier sends US. If the sender is asking US to
+          quote, to supply material, or to send THEM their account statement, it is a Customer/* item:
+          Customer/Inquiries for a request to quote/supply, Customer/Statements for a statement request
+          — NOT Supplier/RFQ Responses or Supplier/Statements.
+        - Mail from another Metal Supermarkets franchise location (an @metalsupermarkets.com store/branch
+          address, not corporate/franchisor marketing) placing or following up on an order is treated like
+          any customer: Customer/Orders. Franchise/* is reserved for franchisor corporate communications
+          (Franchise/Newsletters) and prospective-franchisee inquiries (Franchise/Inquiries).
+        - A support ticket or notification from ecommhelp@metalsupermarkets.com, or any mail whose subject
+          carries an EC###### reference, relates to a customer web order: Customer/Web Orders.
+        - A payment confirmation/receipt for money WE pay a supplier or service provider is Supplier/Receipts
+          (even when sent via QuickBooks/Intuit or another billing processor), not Corporate/Receipts.
+
         Also produce 5-15 lowercase search keywords (entities, document type, product/metal, supplier
         or customer name, reference numbers) to support full-text search, and extract poNumber,
         soNumber, and amount when present. Respond ONLY by calling the classify_email tool.

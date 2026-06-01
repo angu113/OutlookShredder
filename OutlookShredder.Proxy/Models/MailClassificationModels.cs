@@ -28,6 +28,8 @@ public static class MailTaxonomy
             "Invoices sent after we receive goods (often metal) or for services we pay for (power, water, security, etc.)."),
         new("Supplier", "Statements",
             "Statements of account from suppliers and providers."),
+        new("Supplier", "Receipts",
+            "Payment confirmations and receipts for money WE pay a supplier or service provider (e.g. powder coating, processing, utilities) — including when sent via a billing processor such as QuickBooks/Intuit (identify the real supplier from the body). Distinct from Corporate/Receipts (our own corporate/admin purchases and subscriptions)."),
 
         new("Customer", "Inquiries",
             "General requests for metal or fabrication."),
@@ -37,6 +39,8 @@ public static class MailTaxonomy
             "Follow-ups on orders in progress; usually carry the sales order reference HSK-SOxxxxxxx in the subject; includes customer POs sent to us."),
         new("Customer", "Web Orders",
             "Orders booked from the franchise website, notified by email with an attached invoice/order to process."),
+        new("Customer", "Statements",
+            "A customer (or someone acting for one) requesting their open-invoice / account statement from us. Distinct from Supplier/Statements, which is a statement a supplier sends to us."),
 
         new("Corporate", "Tax",
             "Items specifically related to tax — sales tax, corporation tax."),
@@ -46,10 +50,18 @@ public static class MailTaxonomy
             "Email receipts (and placeholders for receipt PDFs/scans)."),
         new("Corporate", "Payroll",
             "Payroll-related messages and reminders."),
+        new("Corporate", "Training",
+            "Training reports, course reminders, and follow-ups — e.g. Metal Supermarkets University (MSU) / smarteru.com supervisor and completion reports."),
 
         new("Franchise", "Newsletters",
             "Newsletters, bulletins, and corporate/franchisor marketing — e.g. \"The Pipeline\", \"Fundamentals That Matter to Every Fabricator\", and mail from emarketing@ / communications@Metalsupermarkets.com."),
+        new("Franchise", "Inquiries",
+            "Prospective franchisees contacting us for information about owning a Metal Supermarkets franchise."),
 
+        new("Other", "Login Codes",
+            "MFA / 2FA / one-time verification or login codes from any service."),
+        new("Other", "Junk",
+            "Unsolicited marketing, cold sales solicitations, and other low-value mail that can sit here until reviewed."),
         new("Other", "",
             "Everything else that does not fit the categories above. Propose a concise free-text sub-label naming the emergent category."),
     ];

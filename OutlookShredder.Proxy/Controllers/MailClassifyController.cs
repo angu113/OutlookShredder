@@ -287,6 +287,18 @@ public sealed class MailClassifyController : ControllerBase
 
     public sealed class RemoveLeafRequest { public string CategoryPath { get; set; } = ""; }
 
+    /// <summary>Delete a hint row / retire a custom leaf WITHOUT re-filing its items. Use when the leaf
+    /// has been promoted into the static taxonomy: the items stay put, and only the now-redundant SP hint
+    /// row is removed so it no longer lingers in the classifier prompt. Returns hint rows removed.</summary>
+    [HttpPost("delete-hint")]
+    public async Task<IActionResult> DeleteHint([FromBody] RemoveLeafRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.CategoryPath))
+            return BadRequest(new { error = "categoryPath is required." });
+        try { return Ok(new { removed = await _taxonomy.RemoveLeafAsync(req.CategoryPath.Trim(), ct) }); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
     /// <summary>Correct supplier attribution for an item: record a sender→supplier hint (for future
     /// payment-processor mail) and set this item's supplier now.</summary>
     [HttpPost("supplier-hint/{mailItemId}")]
