@@ -34,6 +34,7 @@ Also installs:
 | `HealthController` | `/api/health` | Aggregated service health for Shredder's Home dashboard |
 | `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
 | `SupplierConversationsController` | `/api` | Read supplier conversation threads + send follow-up inquiries (WIP) |
+| `RfqSummaryController` | `/api/rfq` | `POST /api/rfq/summarize` — turns a client-assembled RFQ text input into ≤3 AI bullet points (Claude); empty bullets on failure so the client falls back to its deterministic summary |
 | `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts, list contacts |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 
