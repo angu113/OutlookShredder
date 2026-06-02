@@ -4771,6 +4771,13 @@ public partial class SharePointService
                 ("MessageId",    "text"),
                 ("LineItems",    "note"),
                 ("PdfUrl",       "text"),
+                // Supplier-confirmation tracking (Fulfillment loop): Pending until a confirmation is
+                // matched (manual one-tap or AI email match). Pointers + thin state, ETA from the SOC.
+                ("ConfirmStatus", "text"),     // Pending | Confirmed
+                ("ConfirmedAt",   "dateTime"),
+                ("ConfirmedVia",  "text"),     // email | phone | payment | manual
+                ("ExpectedDate",  "dateTime"), // ETA from the confirmation, if known
+                ("ConfirmNote",   "note"),
             ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
@@ -7226,9 +7233,10 @@ public partial class SharePointService
             ["RFQ_ID"]       = rfqId,
             ["SupplierName"] = supplierName,
             ["PoNumber"]     = poNumber,
-            ["ReceivedAt"]   = receivedAt,
-            ["MessageId"]    = messageId,
-            ["LineItems"]    = lineItemsJson,
+            ["ReceivedAt"]    = receivedAt,
+            ["MessageId"]     = messageId,
+            ["LineItems"]     = lineItemsJson,
+            ["ConfirmStatus"] = "Pending",   // until a supplier confirmation is matched
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -7236,6 +7244,40 @@ public partial class SharePointService
 
         _log.LogInformation("[PO] Wrote PurchaseOrder to SP: [{RfqId}] {Supplier}", rfqId, supplierName);
         return item?.Id;
+    }
+
+    /// <summary>Sets/clears the supplier-confirmation state on a PurchaseOrders row.
+    /// <paramref name="confirmed"/>=true stamps Confirmed + via + (optional) ETA + note;
+    /// false reverts to Pending and clears the confirmation fields.</summary>
+    public async Task UpdatePurchaseOrderConfirmAsync(
+        string spItemId, bool confirmed, string? via, string? expectedDate, string? note)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+
+        var fields = confirmed
+            ? new Dictionary<string, object?>
+              {
+                  ["ConfirmStatus"] = "Confirmed",
+                  ["ConfirmedAt"]   = DateTimeOffset.UtcNow.ToString("o"),
+                  ["ConfirmedVia"]  = string.IsNullOrWhiteSpace(via) ? "manual" : via,
+                  ["ExpectedDate"]  = string.IsNullOrWhiteSpace(expectedDate) ? null : expectedDate,
+                  ["ConfirmNote"]   = note,
+              }
+            : new Dictionary<string, object?>
+              {
+                  ["ConfirmStatus"] = "Pending",
+                  ["ConfirmedAt"]   = null,
+                  ["ConfirmedVia"]  = null,
+                  ["ExpectedDate"]  = null,
+                  ["ConfirmNote"]   = null,
+              };
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields });
+
+        _log.LogInformation("[PO] Confirmation {State} for SpItemId={Id} via={Via}",
+            confirmed ? "set" : "cleared", spItemId, via ?? "manual");
     }
 
     /// <summary>
@@ -7275,7 +7317,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -7299,6 +7341,11 @@ public partial class SharePointService
                     MessageId    = GetStr(f, "MessageId"),
                     LineItems    = GetStr(f, "LineItems") ?? "[]",
                     PdfUrl       = GetStr(f, "PdfUrl"),
+                    ConfirmStatus = GetStr(f, "ConfirmStatus") ?? "Pending",
+                    ConfirmedAt   = GetStr(f, "ConfirmedAt"),
+                    ConfirmedVia  = GetStr(f, "ConfirmedVia"),
+                    ExpectedDate  = GetStr(f, "ExpectedDate"),
+                    ConfirmNote   = GetStr(f, "ConfirmNote"),
                 });
             }
 

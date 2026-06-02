@@ -1860,6 +1860,45 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/purchase-orders/{spItemId}/confirm ─────────────────────────
+    /// <summary>Marks a PO confirmed by the supplier (material genuinely inbound). Body:
+    /// { via, expectedDate?, note? } where via = email | phone | payment | manual. Manual is the
+    /// first-class baseline; expectedDate is the ETA from the confirmation, if known.</summary>
+    [HttpPatch("purchase-orders/{spItemId}/confirm")]
+    public async Task<IActionResult> ConfirmPurchaseOrder(string spItemId, [FromBody] PoConfirmRequest? req)
+    {
+        try
+        {
+            await _sp.UpdatePurchaseOrderConfirmAsync(spItemId, confirmed: true,
+                via: req?.Via, expectedDate: req?.ExpectedDate, note: req?.Note);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ConfirmPurchaseOrder failed for {Id}", spItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    // ── POST /api/purchase-orders/{spItemId}/unconfirm ────────────────────────
+    /// <summary>Reverts a PO to Pending (clears the supplier confirmation).</summary>
+    [HttpPost("purchase-orders/{spItemId}/unconfirm")]
+    public async Task<IActionResult> UnconfirmPurchaseOrder(string spItemId)
+    {
+        try
+        {
+            await _sp.UpdatePurchaseOrderConfirmAsync(spItemId, confirmed: false, via: null, expectedDate: null, note: null);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "UnconfirmPurchaseOrder failed for {Id}", spItemId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
+
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>
     /// Deletes all rows from the PurchaseOrders SharePoint list.

@@ -224,6 +224,16 @@ public class PurchaseOrderRecord
     public string  LineItems    { get; set; } = "[]";
     /// <summary>SharePoint web URL of the uploaded PO PDF attachment, if available.</summary>
     public string? PdfUrl       { get; set; }
+
+    // ── Supplier-confirmation tracking (Fulfillment loop) ────────────────────
+    /// <summary>"Pending" until a supplier confirmation is matched (manual or AI), then "Confirmed".</summary>
+    public string? ConfirmStatus { get; set; }
+    public string? ConfirmedAt   { get; set; }
+    /// <summary>How the confirmation arrived: email | phone | payment | manual.</summary>
+    public string? ConfirmedVia  { get; set; }
+    /// <summary>ETA from the confirmation, if known.</summary>
+    public string? ExpectedDate  { get; set; }
+    public string? ConfirmNote   { get; set; }
 }
 
 // ── RLI anchoring dry-run models ─────────────────────────────────────────────
