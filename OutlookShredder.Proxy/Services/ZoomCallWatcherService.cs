@@ -118,8 +118,8 @@ public class ZoomCallWatcherService : BackgroundService
         }
 
         // No lease/steal: every proxy that can see Zoom runs its own hook and publishes on each
-        // detected call. Duplicate publishes from multiple sources are de-duplicated on the client
-        // (by caller phone within 2 s). Restart the hook if it ever exits unexpectedly.
+        // detected call. Duplicate writes from multiple sources are de-duplicated at the writer
+        // (by caller phone within Zoom:DedupWindowSeconds). Restart the hook if it ever exits.
         while (!ct.IsCancellationRequested)
         {
             _log.LogInformation("[Zoom] Starting WinEvent hook (all-sources mode, no lease)");
@@ -339,16 +339,18 @@ public class ZoomCallWatcherService : BackgroundService
         _ = Task.Run(async () =>
         {
             // Cross-proxy dedup: in all-sources mode multiple proxies detect the same call and would
-            // each write a call-log row. If another source already logged this caller within the last
-            // 2 seconds, skip (write + notify). A genuine quick re-call is >2 s apart, so it still logs.
+            // each write a call-log row. If another source already logged this caller within the dedup
+            // window, skip (write + notify). A genuine re-call is further apart, so it still logs.
+            // Window is configurable via Zoom:DedupWindowSeconds (default 5).
+            var dedupSecs = _config.GetValue("Zoom:DedupWindowSeconds", 5);
             if (!string.IsNullOrWhiteSpace(callerPhone))
             {
                 try
                 {
-                    var recent = await _sp.ReadPhoneCallLogAsync(DateTimeOffset.UtcNow.AddSeconds(-2), CancellationToken.None);
+                    var recent = await _sp.ReadPhoneCallLogAsync(DateTimeOffset.UtcNow.AddSeconds(-dedupSecs), CancellationToken.None);
                     if (recent.Any(r => SamePhone(r.CallerPhone, callerPhone)))
                     {
-                        _log.LogInformation("[Zoom] Duplicate call within 2s for '{Phone}' — another source already logged it; skipping", callerPhone);
+                        _log.LogInformation("[Zoom] Duplicate call within {Secs}s for '{Phone}' — another source already logged it; skipping", dedupSecs, callerPhone);
                         return;
                     }
                 }
