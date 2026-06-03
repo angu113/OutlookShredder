@@ -63,6 +63,11 @@ public class MailClassifierService
           carries an EC###### reference, relates to a customer web order: Customer/Web Orders.
         - A payment confirmation/receipt for money WE pay a supplier or service provider is Supplier/Receipts
           (even when sent via QuickBooks/Intuit or another billing processor), not Corporate/Receipts.
+        - PAID vs UNPAID is decisive for supplier financial mail: a "Purchase Receipt", a credit-card
+          authorization/approval, "transaction approved/charged", or "payment received / thank you for
+          your payment" means the charge ALREADY happened — that is Supplier/Receipts, NEVER
+          Supplier/Invoices and Bills, even if an amount is shown. "Supplier/Invoices and Bills" is ONLY
+          an UNPAID request to pay (amount due / please remit / pay-now link).
 
         For "Supplier/Invoices and Bills" and "Supplier/Receipts" (supplier bills, invoices, and
         payment receipts — including those sent via a billing processor such as Enmark,
@@ -116,10 +121,37 @@ public class MailClassifierService
             _log.LogWarning("[MailClassify] Claude unavailable or failed — trying Gemini fallback");
             result = await TryGeminiAsync(input, ct);
         }
-        // Deterministic pay-link capture (no AI) — payment-processor bills carry the URL in the body.
-        if (result is not null) result.PayLink ??= ExtractPayLink(input.BodyText);
+        if (result is not null)
+        {
+            // Deterministic pay-link capture (no AI) — payment-processor bills carry the URL in the body.
+            result.PayLink ??= ExtractPayLink(input.BodyText);
+
+            // Deterministic backstop to the sharpened prompt: a clear auth/receipt (the charge already
+            // happened) must never sit under "Supplier/Invoices and Bills" (an unpaid request to pay).
+            // Re-route it to Supplier/Receipts so the bill->PO matcher never treats it as a payable bill.
+            if (string.Equals(result.Category, "Supplier/Invoices and Bills", StringComparison.OrdinalIgnoreCase)
+                && LooksLikeAuthOrReceipt(input.Subject, input.FromAddress))
+            {
+                _log.LogInformation("[MailClassify] re-routed auth/receipt to Supplier/Receipts: \"{Subj}\"",
+                    input.Subject.Length > 80 ? input.Subject[..80] : input.Subject);
+                result.Category = "Supplier/Receipts";
+            }
+        }
         return result;
     }
+
+    // Auth/receipt fingerprints — the charge already happened (Supplier/Receipts, not Invoices and Bills).
+    private static readonly Regex AuthReceiptSubjectRx = new(
+        @"\b(receipt|payment\s+received|payment\s+confirmation|thank\s+you\s+for\s+your\s+payment|authoriz|auth\s*code|approved|charged|paid\s+in\s+full|transaction\s+approved)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AuthReceiptSenderRx = new(
+        @"(creditcardauth|slimcd\.com)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>True when subject/sender clearly indicate a payment already happened (a receipt or a
+    /// credit-card authorization), so it belongs under Supplier/Receipts rather than Invoices and Bills.</summary>
+    internal static bool LooksLikeAuthOrReceipt(string? subject, string? from)
+        => (!string.IsNullOrWhiteSpace(subject) && AuthReceiptSubjectRx.IsMatch(subject))
+        || (!string.IsNullOrWhiteSpace(from)    && AuthReceiptSenderRx.IsMatch(from));
 
     private static readonly Regex UrlRx =
         new(@"https?://[^\s<>""')]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);

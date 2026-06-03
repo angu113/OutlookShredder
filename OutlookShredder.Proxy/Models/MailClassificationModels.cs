@@ -25,11 +25,11 @@ public static class MailTaxonomy
         new("Supplier", "MTRs",
             "Mill Certificates, Material Test Reports, Certificates of Compliance, and other standards/cert emails suppliers send us."),
         new("Supplier", "Invoices and Bills",
-            "Invoices sent after we receive goods (often metal) or for services we pay for (power, water, security, etc.)."),
+            "An UNPAID request to pay money we still OWE a supplier or service provider: an invoice or bill with an amount DUE (after we receive goods/metal, or for services like power, water, security), typically carrying 'amount due', 'please remit', or a 'pay now' link. NOT a confirmation that a payment already happened — a receipt/authorization is Supplier/Receipts."),
         new("Supplier", "Statements",
             "Statements of account from suppliers and providers."),
         new("Supplier", "Receipts",
-            "Payment confirmations and receipts for money WE pay a supplier or service provider (e.g. powder coating, processing, utilities) — including when sent via a billing processor such as QuickBooks/Intuit (identify the real supplier from the body). Distinct from Corporate/Receipts (our own corporate/admin purchases and subscriptions)."),
+            "Confirmation that a payment we made to a supplier or service provider has ALREADY been made or charged: payment receipts, credit-card authorizations/approvals, 'Purchase Receipt', 'transaction approved/charged', 'payment received', 'thank you for your payment' — even when it shows an amount, and even when sent via a billing processor (QuickBooks/Intuit, Enmark, SlimCD, etc.; identify the real supplier from the body). The test is do we still OWE it (Invoices and Bills) or has it already been PAID (Receipts). Distinct from Corporate/Receipts (our own corporate/admin purchases and subscriptions)."),
 
         new("Customer", "Inquiries",
             "General requests for metal or fabrication."),
