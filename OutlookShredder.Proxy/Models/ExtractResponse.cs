@@ -261,6 +261,16 @@ public class PurchaseOrderRecord
     /// <summary>Pay-to-release risk: green | amber | red. Only PaymentStatus="Required" is scored.</summary>
     public string? PayLevel                    { get; set; }
     public int?    MinutesSincePaymentRequired { get; set; }
+
+    // ── Waiting board (Fulfillment loop) — POs appear on the Transfer/Waiting board until received ───
+    /// <summary>Editable free-text note shown on the waiting card + its ghosts.</summary>
+    public string? WaitingNotes { get; set; }
+    /// <summary>Manual reschedule override (date) when delivery moves; wins over ExpectedDate for board
+    /// placement. Preserves the supplier's original ack ETA in ExpectedDate.</summary>
+    public string? BoardDate    { get; set; }
+    /// <summary>Set when a user marks the material received in the UI — archives the card + its ghosts.
+    /// Distinct from ReceivedAt (which is when the PO email was booked).</summary>
+    public string? MaterialReceivedAt { get; set; }
 }
 
 // ── RLI anchoring dry-run models ─────────────────────────────────────────────

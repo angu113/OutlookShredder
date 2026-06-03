@@ -4790,6 +4790,11 @@ public partial class SharePointService
                 ("BillAmount",      "text"),
                 ("BillSupplierRef", "text"),
                 ("BillMatchedAt",   "dateTime"),
+                // Waiting board (Fulfillment loop): a PO appears on the Transfer/Waiting board until
+                // material is marked received. Notes + a reschedule override (preserves the ack ETA).
+                ("WaitingNotes",       "note"),
+                ("BoardDate",          "dateTime"),
+                ("MaterialReceivedAt", "dateTime"),
             ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
@@ -7352,6 +7357,39 @@ public partial class SharePointService
             spItemId, billMailItemId, billAmount);
     }
 
+    /// <summary>Waiting-board edits on a PurchaseOrders row: the editable note and/or the reschedule
+    /// override date (board placement; preserves the supplier ack ETA in ExpectedDate). Pass null to
+    /// leave a field unchanged; pass "" to clear it.</summary>
+    public async Task UpdatePurchaseOrderWaitingAsync(string spItemId, string? notes, string? boardDate)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+        var fields = new Dictionary<string, object?>();
+        if (notes     is not null) fields["WaitingNotes"] = notes.Length == 0 ? null : notes;
+        if (boardDate is not null) fields["BoardDate"]    = boardDate.Length == 0 ? null : boardDate;
+        if (fields.Count == 0) return;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields });
+        _log.LogInformation("[PO] Waiting edit SpItemId={Id} notes={N} boardDate={D}",
+            spItemId, notes is null ? "(unchanged)" : "set", boardDate ?? "(unchanged)");
+    }
+
+    /// <summary>Marks a PO's material received (or clears it). Setting MaterialReceivedAt archives the
+    /// PO from the waiting board + its ghosts; clearing (received=false) returns it to the board.</summary>
+    public async Task UpdatePurchaseOrderReceivedAsync(string spItemId, bool received)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+        var fields = new Dictionary<string, object?>
+        {
+            ["MaterialReceivedAt"] = received ? DateTimeOffset.UtcNow.ToString("o") : null,
+        };
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields });
+        _log.LogInformation("[PO] Material {State} for SpItemId={Id}", received ? "received" : "un-received", spItemId);
+    }
+
     /// <summary>
     /// Patches the LineItems JSON field on an existing PurchaseOrders row.
     /// </summary>
@@ -7389,7 +7427,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,WaitingNotes,BoardDate,MaterialReceivedAt)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -7426,6 +7464,9 @@ public partial class SharePointService
                     BillAmount        = GetStr(f, "BillAmount"),
                     BillSupplierRef   = GetStr(f, "BillSupplierRef"),
                     BillMatchedAt     = GetStr(f, "BillMatchedAt"),
+                    WaitingNotes       = GetStr(f, "WaitingNotes"),
+                    BoardDate          = GetStr(f, "BoardDate"),
+                    MaterialReceivedAt = GetStr(f, "MaterialReceivedAt"),
                 });
             }
 

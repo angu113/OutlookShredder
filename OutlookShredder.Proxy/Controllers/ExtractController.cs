@@ -1934,6 +1934,129 @@ public class ExtractController : ControllerBase
     public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
     public record PoPaymentRequest(string? Note);
 
+    // ── GET /api/purchase-orders/waiting-cards ────────────────────────────────
+    /// <summary>Projection of active, not-yet-received POs as Transfer/Waiting board cards. Scope is
+    /// "active/recent": unreceived AND (booked within WaitingBoard:LookbackDays OR confirmed OR has a
+    /// future ETA/board date) — the stale historical backlog is excluded. Placement date = BoardDate
+    /// override, else the supplier ack ETA (ExpectedDate), else unscheduled. Colour state mirrors the
+    /// RFQ PO badge: pay | confirmed | red | amber | awaiting | stale.</summary>
+    [HttpGet("purchase-orders/waiting-cards")]
+    public async Task<IActionResult> GetWaitingCards()
+    {
+        try
+        {
+            var records = await _sp.ReadPurchaseOrdersAsync();
+            var monitorOpts = _config.GetSection("PoMonitor").Get<PoConfirmationMonitor.Options>()
+                              ?? new PoConfirmationMonitor.Options();
+            var nowUtc = DateTimeOffset.UtcNow;
+            PoConfirmationMonitor.EnrichAck(records, monitorOpts, nowUtc);
+            PoConfirmationMonitor.EnrichPay(records, monitorOpts, nowUtc);
+
+            int lookbackDays = _config.GetValue("WaitingBoard:LookbackDays", 45);
+            var cutoff = nowUtc.AddDays(-lookbackDays);
+            var today  = nowUtc.Date;
+
+            var cards = new List<PoWaitingCard>();
+            foreach (var r in records)
+            {
+                if (string.IsNullOrWhiteSpace(r.PoNumber)) continue;              // need a PO# to show
+                if (!string.IsNullOrWhiteSpace(r.MaterialReceivedAt)) continue;   // received -> archived
+
+                bool confirmed = string.Equals(r.ConfirmStatus, "Confirmed", StringComparison.OrdinalIgnoreCase);
+                var placeStr   = !string.IsNullOrWhiteSpace(r.BoardDate)    ? r.BoardDate
+                               : !string.IsNullOrWhiteSpace(r.ExpectedDate) ? r.ExpectedDate : null;
+                DateTimeOffset? placeDate = DateTimeOffset.TryParse(placeStr, out var pd) ? pd : null;
+                bool futureDate = placeDate.HasValue && placeDate.Value.Date >= today;
+                bool recent     = DateTimeOffset.TryParse(r.ReceivedAt, out var booked) && booked >= cutoff;
+
+                if (!(recent || confirmed || futureDate)) continue;              // exclude stale backlog
+
+                var state =
+                    string.Equals(r.PaymentStatus, "Required", StringComparison.OrdinalIgnoreCase) ? "pay" :
+                    confirmed ? "confirmed" :
+                    (r.AckLevel ?? "").ToLowerInvariant() switch
+                        { "red" => "red", "amber" => "amber", "stale" => "stale", _ => "awaiting" };
+
+                // "active/recent only": drop the historical backlog (unconfirmed beyond the ack window).
+                // A confirmed PO is always kept regardless of age (material genuinely inbound).
+                if (state == "stale") continue;
+
+                cards.Add(new PoWaitingCard(
+                    SpItemId: r.SpItemId, PoNumber: r.PoNumber!, Supplier: r.SupplierName, RfqId: r.RfqId,
+                    AssignedDate: placeDate?.ToString("yyyy-MM-dd"),
+                    EtaDate: string.IsNullOrWhiteSpace(r.ExpectedDate) ? null : r.ExpectedDate,
+                    Rescheduled: !string.IsNullOrWhiteSpace(r.BoardDate),
+                    CardState: state, ConfirmStatus: r.ConfirmStatus ?? "Pending",
+                    PaymentStatus: r.PaymentStatus ?? "None", AckLevel: r.AckLevel, PayLevel: r.PayLevel,
+                    Notes: r.WaitingNotes, Products: SummarizeProducts(r.LineItems, out var n), LineItemCount: n));
+            }
+
+            // Dedup duplicate PO rows (same PoNumber): keep the most-progressed card.
+            static int Rank(string s) => s switch
+                { "confirmed" => 0, "pay" => 1, "red" => 2, "amber" => 3, "awaiting" => 4, _ => 5 };
+            var deduped = cards
+                .GroupBy(c => c.PoNumber, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.OrderBy(c => Rank(c.CardState)).First())
+                .ToList();
+            return Ok(deduped);
+        }
+        catch (Exception ex) { _log.LogError(ex, "GetWaitingCards failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Builds a human "- product (xqty)" summary (newline-joined) from a PO LineItems JSON
+    /// array for the card's products tooltip; also returns the line count.</summary>
+    private static string SummarizeProducts(string? lineItemsJson, out int count)
+    {
+        count = 0;
+        if (string.IsNullOrWhiteSpace(lineItemsJson)) return "";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(lineItemsJson);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) return "";
+            var lines = new List<string>();
+            foreach (var el in doc.RootElement.EnumerateArray())
+            {
+                var prod = el.TryGetProperty("product", out var p) ? p.GetString() : null;
+                if (string.IsNullOrWhiteSpace(prod)) prod = el.TryGetProperty("mspc", out var m) ? m.GetString() : null;
+                if (string.IsNullOrWhiteSpace(prod)) continue;
+                var qty = el.TryGetProperty("quantity", out var q)
+                    ? (q.ValueKind == System.Text.Json.JsonValueKind.Number ? q.GetRawText() : q.GetString() ?? "")
+                    : "";
+                lines.Add(string.IsNullOrWhiteSpace(qty) ? $"- {prod}" : $"- {prod} (x{qty})");
+            }
+            count = lines.Count;
+            return string.Join("\n", lines);
+        }
+        catch { return ""; }
+    }
+
+    // ── PATCH /api/purchase-orders/{spItemId}/waiting ─────────────────────────
+    /// <summary>Edits a PO's waiting-board note and/or reschedule (board-date) override. A null field is
+    /// left unchanged; "" clears it. Body: { notes?, boardDate? } (boardDate as yyyy-MM-dd).</summary>
+    [HttpPatch("purchase-orders/{spItemId}/waiting")]
+    public async Task<IActionResult> PatchWaiting(string spItemId, [FromBody] PoWaitingRequest? req)
+    {
+        try { await _sp.UpdatePurchaseOrderWaitingAsync(spItemId, req?.Notes, req?.BoardDate); return Ok(new { ok = true }); }
+        catch (Exception ex) { _log.LogError(ex, "PatchWaiting failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── PATCH /api/purchase-orders/{spItemId}/received ────────────────────────
+    /// <summary>Marks the PO's material received (archives it from the waiting board + its ghosts). Body:
+    /// { received? } default true; received=false returns it to the board.</summary>
+    [HttpPatch("purchase-orders/{spItemId}/received")]
+    public async Task<IActionResult> PatchReceived(string spItemId, [FromBody] PoReceivedRequest? req)
+    {
+        try { await _sp.UpdatePurchaseOrderReceivedAsync(spItemId, req?.Received ?? true); return Ok(new { ok = true }); }
+        catch (Exception ex) { _log.LogError(ex, "PatchReceived failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record PoWaitingRequest(string? Notes, string? BoardDate);
+    public record PoReceivedRequest(bool? Received);
+    public record PoWaitingCard(string SpItemId, string PoNumber, string Supplier, string RfqId,
+        string? AssignedDate, string? EtaDate, bool Rescheduled, string CardState,
+        string ConfirmStatus, string PaymentStatus, string? AckLevel, string? PayLevel,
+        string? Notes, string Products, int LineItemCount);
+
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>
     /// Deletes all rows from the PurchaseOrders SharePoint list.
