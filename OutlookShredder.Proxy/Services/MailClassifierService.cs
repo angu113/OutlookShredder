@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -63,6 +64,14 @@ public class MailClassifierService
         - A payment confirmation/receipt for money WE pay a supplier or service provider is Supplier/Receipts
           (even when sent via QuickBooks/Intuit or another billing processor), not Corporate/Receipts.
 
+        For "Supplier/Invoices and Bills" and "Supplier/Receipts" (supplier bills, invoices, and
+        payment receipts — including those sent via a billing processor such as Enmark,
+        QuickBooks/Intuit, Bill.com or Melio): ALWAYS set supplierName to the REAL supplier (read it
+        from the subject, body, or sender domain even when the sender is the processor), and set
+        supplierReference to the supplier's OWN reference printed on the document — their invoice
+        number, sales-order, or quote/order reference (e.g. "Invoice# 3060256", "Order #2808273") —
+        NOT our HSK-PO/HSK-SO. Set poNumber only when OUR HSK-PO number is printed.
+
         Also produce 5-15 lowercase search keywords (entities, document type, product/metal, supplier
         or customer name, reference numbers) to support full-text search, and extract poNumber,
         soNumber, and amount when present. Respond ONLY by calling the classify_email tool.
@@ -102,10 +111,50 @@ public class MailClassifierService
     public async Task<MailClassificationResult?> ClassifyAsync(MailClassifyInput input, CancellationToken ct = default)
     {
         var result = await TryClaudeAsync(input, ct);
-        if (result is not null) return result;
+        if (result is null)
+        {
+            _log.LogWarning("[MailClassify] Claude unavailable or failed — trying Gemini fallback");
+            result = await TryGeminiAsync(input, ct);
+        }
+        // Deterministic pay-link capture (no AI) — payment-processor bills carry the URL in the body.
+        if (result is not null) result.PayLink ??= ExtractPayLink(input.BodyText);
+        return result;
+    }
 
-        _log.LogWarning("[MailClassify] Claude unavailable or failed — trying Gemini fallback");
-        return await TryGeminiAsync(input, ct);
+    private static readonly Regex UrlRx =
+        new(@"https?://[^\s<>""')]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Known payment-processor / pay-page fingerprints (matched against the URL, decoding any
+    // link-protect wrapper that carries the real target URL-encoded in its query string).
+    private static readonly Regex PayDomainRx =
+        new(@"payments?\.enmarksystems\.com|enmarkpay|bill\.com|meliopayments|melio\.me|intuit\.com|quickbooks|paypal\.com/(invoice|pay)|stripe\.com|squareup\.com|/pay(now)?\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex PayCueRx =
+        new(@"pay\s*(now|online|invoice|your\s+\w+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Best-effort extraction of a "pay now" URL from the body. Prefers a URL that targets a
+    /// known processor (even when wrapped by a link-protect redirector); falls back to the first URL
+    /// following a "pay now/online/invoice" cue. Returns null when nothing looks like a pay link.</summary>
+    internal static string? ExtractPayLink(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        static string Clean(string u) => u.TrimEnd('.', ',', ')', '>', '"', '\'', ']');
+
+        var urls = UrlRx.Matches(body).Select(m => Clean(m.Value)).ToList();
+        if (urls.Count == 0) return null;
+
+        foreach (var u in urls)
+        {
+            string decoded; try { decoded = Uri.UnescapeDataString(u); } catch { decoded = u; }
+            if (PayDomainRx.IsMatch(decoded)) return u;
+        }
+
+        var cue = PayCueRx.Match(body);
+        if (cue.Success)
+        {
+            var after = UrlRx.Match(body, cue.Index);
+            if (after.Success) return Clean(after.Value);
+        }
+        return null;
     }
 
     private string BuildUserText(MailClassifyInput m)
@@ -149,6 +198,7 @@ public class MailClassifierService
                     ["poNumber"]   = new { type = new[] { "string", "null" }, description = "Our PO number if present, e.g. HSK-PO0001234." },
                     ["soNumber"]   = new { type = new[] { "string", "null" }, description = "Our sales-order ref if present, e.g. HSK-SO0001234." },
                     ["amount"]     = new { type = new[] { "string", "null" }, description = "Monetary total as a plain numeric string if financial, else null." },
+                    ["supplierReference"] = new { type = new[] { "string", "null" }, description = "On a supplier bill/invoice/receipt: the SUPPLIER's OWN reference printed on it - their invoice number, sales-order, or quote/order reference (e.g. 'Invoice# 3060256', 'Order #2808273', 'Quote ABC123'). This is the supplier's number, NOT our HSK-PO/HSK-SO. Null if not a supplier financial document or none printed." },
                     ["reasoning"]  = new { type = "string", description = "One or two sentences justifying the category." },
                 }
             }
@@ -256,6 +306,7 @@ public class MailClassifierService
                 ["poNumber"]   = new { type = "string", nullable = true },
                 ["soNumber"]   = new { type = "string", nullable = true },
                 ["amount"]     = new { type = "string", nullable = true },
+                ["supplierReference"] = new { type = "string", nullable = true },
                 ["reasoning"]  = new { type = "string", nullable = true },
             }
         };
@@ -323,6 +374,7 @@ public class MailClassifierService
             PoNumber    = string.IsNullOrWhiteSpace(raw.PoNumber) ? null : raw.PoNumber.Trim(),
             SoNumber    = string.IsNullOrWhiteSpace(raw.SoNumber) ? null : raw.SoNumber.Trim(),
             Amount      = string.IsNullOrWhiteSpace(raw.Amount) ? null : raw.Amount.Trim(),
+            SupplierReference = string.IsNullOrWhiteSpace(raw.SupplierReference) ? null : raw.SupplierReference.Trim(),
             Reasoning   = raw.Reasoning?.Trim(),
             AiProvider  = provider,
             AiModel     = model,
@@ -349,6 +401,7 @@ public class MailClassifierService
         public string? PoNumber   { get; set; }
         public string? SoNumber   { get; set; }
         public string? Amount     { get; set; }
+        public string? SupplierReference { get; set; }
         public string? Reasoning  { get; set; }
     }
 }

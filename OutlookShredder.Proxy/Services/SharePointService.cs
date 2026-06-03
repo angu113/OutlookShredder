@@ -7299,6 +7299,7 @@ public partial class SharePointService
             fields["PaymentRequiredAt"] = nowIso;
         else if (string.Equals(status, "Paid", StringComparison.OrdinalIgnoreCase))
             fields["PaidAt"] = nowIso;
+        else { fields["PaymentRequiredAt"] = null; fields["PaidAt"] = null; }   // None: clear the clocks
         if (note is not null) fields["PaymentNote"] = note;
 
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields

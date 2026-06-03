@@ -128,6 +128,13 @@ public sealed class MailClassificationResult
     public string? PoNumber       { get; set; }
     public string? SoNumber       { get; set; }
     public string? Amount         { get; set; }
+    /// <summary>The SUPPLIER's own reference printed on a bill/invoice/receipt - their invoice #,
+    /// sales-order, or quote reference (consistent with the supplier quote ref we captured). The key
+    /// the bill -> PO matcher compares to our `QuoteReference`. Distinct from our PoNumber/SoNumber.</summary>
+    public string? SupplierReference { get; set; }
+    /// <summary>A "pay now" URL extracted from the body (payment-processor bills). Lets the surface
+    /// deep-link to payment. Deterministic regex, not AI.</summary>
+    public string? PayLink        { get; set; }
     public string? Reasoning      { get; set; }
     public string  AiProvider     { get; set; } = "";
     public string  AiModel        { get; set; } = "";

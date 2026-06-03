@@ -1922,6 +1922,15 @@ public class ExtractController : ControllerBase
         catch (Exception ex) { _log.LogError(ex, "PaymentPaid failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── PATCH /api/purchase-orders/{spItemId}/payment-clear ───────────────────
+    /// <summary>Clears pay-to-release state back to None (correct a mistaken/test flag).</summary>
+    [HttpPatch("purchase-orders/{spItemId}/payment-clear")]
+    public async Task<IActionResult> PaymentClear(string spItemId, [FromBody] PoPaymentRequest? req)
+    {
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "None", req?.Note); return Ok(new { ok = true }); }
+        catch (Exception ex) { _log.LogError(ex, "PaymentClear failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
     public record PoPaymentRequest(string? Note);
 

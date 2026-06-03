@@ -265,6 +265,7 @@ public sealed class MailWorkbenchService
         MailItemId = mailItemId, Version = version, IsCurrent = true, CategoryPath = r.Category,
         OtherLabel = r.OtherLabel, SupplierName = r.SupplierName, Confidence = r.Confidence, KeywordTags = string.Join(", ", r.Keywords),
         PoNumber = r.PoNumber, SoNumber = r.SoNumber, Amount = r.Amount,
+        SupplierReference = r.SupplierReference, PayLink = r.PayLink,
         AiProvider = r.AiProvider, AiModel = r.AiModel,
     };
 

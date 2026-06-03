@@ -44,6 +44,7 @@ public partial class SharePointService
             ("MailItemId","text"), ("Version","number"), ("IsCurrent","boolean"),
             ("CategoryPath","text"), ("OtherLabel","text"), ("SupplierName","text"), ("Confidence","number"),
             ("KeywordTags","note"), ("PoNumber","text"), ("SoNumber","text"), ("Amount","text"),
+            ("SupplierReference","text"), ("PayLink","note"),
             ("Reasoning","note"), ("AiProvider","text"), ("AiModel","text"),
             ("RawAiResponse","note"), ("ClassifiedAt","dateTime"),
         ]);
@@ -514,6 +515,8 @@ public partial class SharePointService
                     ["PoNumber"]     = r.PoNumber,
                     ["SoNumber"]     = r.SoNumber,
                     ["Amount"]       = r.Amount,
+                    ["SupplierReference"] = r.SupplierReference,
+                    ["PayLink"]      = r.PayLink,
                     ["Reasoning"]    = Trunc(r.Reasoning, 8000),
                     ["AiProvider"]   = r.AiProvider,
                     ["AiModel"]      = r.AiModel,
@@ -530,8 +533,8 @@ public partial class SharePointService
     public async Task<List<MailClassRow>> ReadClassificationsForItemAsync(string mailItemId, CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailClassList,
-            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","Confidence","KeywordTags",
-             "PoNumber","SoNumber","Amount","Reasoning","AiProvider","AiModel","ClassifiedAt"],
+            ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","SupplierName","Confidence","KeywordTags",
+             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","Reasoning","AiProvider","AiModel","ClassifiedAt"],
             $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
         return rows.Select(MapClassRow).OrderByDescending(c => c.Version).ToList();
     }
@@ -545,7 +548,7 @@ public partial class SharePointService
         // row per item as the highest Version in memory — always correct and lag-free.
         var rows = await ReadAllListItemsAsync(MailClassList,
             ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","SupplierName","Confidence","KeywordTags",
-             "PoNumber","SoNumber","Amount","AiProvider","AiModel","ClassifiedAt"],
+             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","AiProvider","AiModel","ClassifiedAt"],
             null, ct);
         return rows.Select(MapClassRow)
             .GroupBy(c => c.MailItemId, StringComparer.Ordinal)
@@ -567,6 +570,8 @@ public partial class SharePointService
         PoNumber     = GetStr(f, "PoNumber"),
         SoNumber     = GetStr(f, "SoNumber"),
         Amount       = GetStr(f, "Amount"),
+        SupplierReference = GetStr(f, "SupplierReference"),
+        PayLink      = GetStr(f, "PayLink"),
         AiProvider   = GetStr(f, "AiProvider") ?? "",
         AiModel      = GetStr(f, "AiModel") ?? "",
         ClassifiedAt = GetStr(f, "ClassifiedAt") ?? "",
@@ -732,6 +737,8 @@ public sealed class MailClassRow
     public string? PoNumber     { get; set; }
     public string? SoNumber     { get; set; }
     public string? Amount       { get; set; }
+    public string? SupplierReference { get; set; }
+    public string? PayLink      { get; set; }
     public string  AiProvider   { get; set; } = "";
     public string  AiModel      { get; set; } = "";
     public string  ClassifiedAt { get; set; } = "";
