@@ -129,6 +129,7 @@ try
     builder.Services.AddSingleton<MailCacheService>();
     builder.Services.AddSingleton<MailProjectService>();
     builder.Services.AddSingleton<MailClassifierService>();
+    builder.Services.AddSingleton<BillExtractionService>();
     builder.Services.AddSingleton<MailWorkbenchService>();
     builder.Services.AddSingleton<MailAutoCaptureService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailCacheService>());

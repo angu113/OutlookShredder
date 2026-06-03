@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -21,6 +22,8 @@ public sealed class MailWorkbenchService
     private readonly RfqNotificationService _notify;
     private readonly SupplierCacheService _suppliers;
     private readonly MailProjectService _projects;
+    private readonly BillExtractionService _bill;
+    private readonly IConfiguration _config;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
     private readonly string _archiveRoot;
@@ -28,10 +31,11 @@ public sealed class MailWorkbenchService
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
         RfqNotificationService notify, SupplierCacheService suppliers, MailProjectService projects,
-        IConfiguration config, ILogger<MailWorkbenchService> log)
+        BillExtractionService bill, IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
-        _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects; _log = log;
+        _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects;
+        _bill = bill; _config = config; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -165,6 +169,12 @@ public sealed class MailWorkbenchService
         // from the .eml later — not just when attachments are present.
         await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
 
+        // Two-pass: a financial-leaf email with a PDF gets a targeted bill extraction to fill the
+        // amount / supplier-reference / our-PO# that live in the PDF, not the email text. Runs after
+        // StoreFilesAsync so the archived PDF is on disk; merged result is persisted in one write below.
+        if (result is not null)
+            await EnrichFromBillPdfAsync(mailItemId, result, manifest.Select(a => a.Name), ct);
+
         var version = result is not null ? await _sp.WriteClassificationAsync(mailItemId, result, ct) : 0;
 
         // Fully landed (item + classification + files) → mark the WRAPPER processed so no proxy reprocesses it.
@@ -268,6 +278,47 @@ public sealed class MailWorkbenchService
         SupplierReference = r.SupplierReference, PayLink = r.PayLink,
         AiProvider = r.AiProvider, AiModel = r.AiModel,
     };
+
+    // Financial leaves whose PDF attachment is worth a second extraction pass (the amount + supplier
+    // reference typically live in the PDF, not the email text).
+    private static readonly HashSet<string> FinancialLeaves = new(StringComparer.OrdinalIgnoreCase)
+        { "Supplier/Invoices and Bills", "Supplier/Receipts", "Supplier/Statements" };
+
+    /// <summary>
+    /// Two-pass enrichment: when the text classifier routed an email into a financial leaf and it has a
+    /// PDF, read the archived PDF and fill any gaps (amount, supplier reference, our PO#) the text pass
+    /// left blank. Pure extraction — does NOT re-route the category. Gated to the financial subset + an
+    /// enabled flag + a remaining gap, so cost stays targeted. Best-effort; never throws.
+    /// </summary>
+    private async Task EnrichFromBillPdfAsync(string mailItemId, MailClassificationResult result,
+        IEnumerable<string> attachmentNames, CancellationToken ct)
+    {
+        try
+        {
+            if (!_config.GetValue("BillExtraction:Enabled", true)) return;
+            if (!FinancialLeaves.Contains(result.Category)) return;
+            // Only spend an AI call when the text pass left a gap the PDF can fill.
+            if (!string.IsNullOrWhiteSpace(result.Amount) && !string.IsNullOrWhiteSpace(result.SupplierReference)) return;
+
+            var pdfName = attachmentNames?.FirstOrDefault(n => n.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrEmpty(pdfName)) return;
+
+            var att = await GetItemAttachmentAsync(mailItemId, pdfName, ct);
+            if (att is null) { _log.LogDebug("[MailWB] bill-PDF enrich: '{Pdf}' not archived for {Id}", pdfName, mailItemId); return; }
+
+            var bill = await _bill.ExtractBillAsync(Convert.ToBase64String(att.Value.Bytes), pdfName, ct);
+            if (bill is null || !bill.IsBill) return;
+
+            if (string.IsNullOrWhiteSpace(result.Amount)            && !string.IsNullOrWhiteSpace(bill.Amount))            result.Amount            = bill.Amount.Trim();
+            if (string.IsNullOrWhiteSpace(result.SupplierReference) && !string.IsNullOrWhiteSpace(bill.SupplierReference)) result.SupplierReference = bill.SupplierReference.Trim();
+            if (string.IsNullOrWhiteSpace(result.PoNumber)          && !string.IsNullOrWhiteSpace(bill.OurPoNumber))       result.PoNumber          = bill.OurPoNumber.Trim();
+            if (string.IsNullOrWhiteSpace(result.SupplierName)      && !string.IsNullOrWhiteSpace(bill.SupplierName))      result.SupplierName      = bill.SupplierName.Trim();
+
+            _log.LogInformation("[MailWB] bill-PDF enrich {Id}: amount={A} supplierRef={R} po={P}",
+                mailItemId, result.Amount, result.SupplierReference, result.PoNumber);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] bill-PDF enrich failed for {Id}", mailItemId); }
+    }
 
     /// <summary>Upsert the item (+ its current classification) into the local cache and broadcast a "Mail" bus event.</summary>
     private void CacheAndPublish(string action, MailItemRow row, MailClassRow? cls)
@@ -451,6 +502,7 @@ public sealed class MailWorkbenchService
             .OrderByDescending(c => c.Version).FirstOrDefault()?.CategoryPath;
         var result = await _classifier.ClassifyAsync(input, ct)
             ?? throw new InvalidOperationException("Both AI providers unavailable.");
+        await EnrichFromBillPdfAsync(mailItemId, result, input.AttachmentNames, ct);
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
         await MoveItemFilesAsync(mailItemId, priorCat ?? "", result.Category, ct);
         CacheAndPublishClass("Classified", mailItemId, result, version);

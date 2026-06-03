@@ -18,9 +18,11 @@ public sealed class MailClassifyController : ControllerBase
     private readonly MailTaxonomyService _taxonomy;
     private readonly MailProjectService _projects;
     private readonly SharePointService _sp;
+    private readonly BillExtractionService _bill;
 
     public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier,
-        MailWorkbenchService workbench, MailTaxonomyService taxonomy, MailProjectService projects, SharePointService sp)
+        MailWorkbenchService workbench, MailTaxonomyService taxonomy, MailProjectService projects,
+        SharePointService sp, BillExtractionService bill)
     {
         _bridge     = bridge;
         _classifier = classifier;
@@ -28,6 +30,24 @@ public sealed class MailClassifyController : ControllerBase
         _taxonomy   = taxonomy;
         _projects   = projects;
         _sp         = sp;
+        _bill       = bill;
+    }
+
+    /// <summary>Diagnostic: run the bill PDF extraction (second pass) directly on a base64 PDF and
+    /// return the raw BillExtraction. Lets us verify extraction quality on a real bill without the
+    /// capture/archive round-trip.</summary>
+    [HttpPost("bill-extract-test")]
+    public async Task<IActionResult> BillExtractTest([FromBody] BillExtractTestRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Base64Pdf)) return BadRequest(new { error = "base64Pdf is required." });
+        var r = await _bill.ExtractBillAsync(req.Base64Pdf, string.IsNullOrWhiteSpace(req.FileName) ? "test.pdf" : req.FileName, ct);
+        return r is null ? StatusCode(503, new { error = "Bill extraction unavailable (both providers failed)." }) : Ok(r);
+    }
+
+    public sealed class BillExtractTestRequest
+    {
+        public string? Base64Pdf { get; set; }
+        public string? FileName  { get; set; }
     }
 
     /// <summary>Idempotently provision the MailItems + MailClassifications SP lists (Phase 1b setup).</summary>
