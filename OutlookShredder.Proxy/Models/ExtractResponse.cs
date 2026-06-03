@@ -234,6 +234,14 @@ public class PurchaseOrderRecord
     /// <summary>ETA from the confirmation, if known.</summary>
     public string? ExpectedDate  { get; set; }
     public string? ConfirmNote   { get; set; }
+
+    // ── Derived at-risk (computed on read by PoConfirmationMonitor; NOT stored in SP) ────────
+    /// <summary>Supplier-acknowledgment risk: green | amber | red. Only "Pending" POs are scored.</summary>
+    public string? AckLevel           { get; set; }
+    /// <summary>Minutes since the PO was booked (ReceivedAt) - for "waiting N min" display.</summary>
+    public int?    MinutesSincePlaced { get; set; }
+    /// <summary>True if the supplier-ack EST cutoff has passed (won't be processed today).</summary>
+    public bool    AckCutoffPassed    { get; set; }
 }
 
 // ── RLI anchoring dry-run models ─────────────────────────────────────────────

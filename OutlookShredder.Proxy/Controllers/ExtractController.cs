@@ -1851,6 +1851,10 @@ public class ExtractController : ControllerBase
         try
         {
             var records = await _sp.ReadPurchaseOrdersAsync();
+            // Enrich with supplier-acknowledgment at-risk levels (Fulfillment monitor).
+            var monitorOpts = _config.GetSection("PoMonitor").Get<PoConfirmationMonitor.Options>()
+                              ?? new PoConfirmationMonitor.Options();
+            PoConfirmationMonitor.EnrichAck(records, monitorOpts, DateTimeOffset.UtcNow);
             return Ok(records);
         }
         catch (Exception ex)
