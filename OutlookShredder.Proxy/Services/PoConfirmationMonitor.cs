@@ -78,6 +78,36 @@ public static class PoConfirmationMonitor
         return (LevelName(level), minutes, cutoffPassed);
     }
 
+    /// <summary>Enriches each PO with its pay-to-release at-risk level (sets PayLevel /
+    /// MinutesSincePaymentRequired). Only PaymentStatus="Required" POs are scored.</summary>
+    public static void EnrichPay(IEnumerable<PurchaseOrderRecord> pos, Options opts, DateTimeOffset utcNow)
+    {
+        foreach (var po in pos)
+        {
+            var (level, minutes) = ComputePay(po, opts, utcNow);
+            po.PayLevel = level;
+            po.MinutesSincePaymentRequired = minutes;
+        }
+    }
+
+    /// <summary>(level, minutesSinceRequired) for the pay-to-release clock. Only POs whose
+    /// PaymentStatus is "Required" (we owe the payment) are scored; others return null.</summary>
+    public static (string? Level, int? Minutes) ComputePay(
+        PurchaseOrderRecord po, Options opts, DateTimeOffset utcNow)
+    {
+        if (!string.Equals(po.PaymentStatus, "Required", StringComparison.OrdinalIgnoreCase))
+            return (null, null);
+        if (!DateTimeOffset.TryParse(po.PaymentRequiredAt, out var since))
+            return ("amber", null);   // required but no timestamp -> treat as aging
+
+        var minutes = (int)Math.Max(0, (utcNow - since).TotalMinutes);
+        var elapsed = minutes >= opts.PayRedMinutes   ? 2
+                    : minutes >= opts.PayAmberMinutes ? 1
+                    : 0;
+        var level = Math.Max(elapsed, CutoffPassed(opts.PayRedCutoffEst, utcNow) ? 2 : 0);
+        return (LevelName(level), minutes);
+    }
+
     /// <summary>True once the EST wall-clock is at/after the given HH:mm cutoff (same supplier-day
     /// urgency: past the cutoff, the order won't be processed today, so treat as red).</summary>
     public static bool CutoffPassed(string hhmmEst, DateTimeOffset utcNow)

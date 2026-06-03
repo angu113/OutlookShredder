@@ -1851,10 +1851,12 @@ public class ExtractController : ControllerBase
         try
         {
             var records = await _sp.ReadPurchaseOrdersAsync();
-            // Enrich with supplier-acknowledgment at-risk levels (Fulfillment monitor).
+            // Enrich with at-risk levels (Fulfillment monitor): supplier-ack + pay-to-release clocks.
             var monitorOpts = _config.GetSection("PoMonitor").Get<PoConfirmationMonitor.Options>()
                               ?? new PoConfirmationMonitor.Options();
-            PoConfirmationMonitor.EnrichAck(records, monitorOpts, DateTimeOffset.UtcNow);
+            var nowUtc = DateTimeOffset.UtcNow;
+            PoConfirmationMonitor.EnrichAck(records, monitorOpts, nowUtc);
+            PoConfirmationMonitor.EnrichPay(records, monitorOpts, nowUtc);
             return Ok(records);
         }
         catch (Exception ex)
@@ -1901,7 +1903,27 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── PATCH /api/purchase-orders/{spItemId}/payment-required ────────────────
+    /// <summary>Flags a PO as needing a manual payment to release (pay-to-release). Starts the
+    /// payment clock. Body: { note? }.</summary>
+    [HttpPatch("purchase-orders/{spItemId}/payment-required")]
+    public async Task<IActionResult> PaymentRequired(string spItemId, [FromBody] PoPaymentRequest? req)
+    {
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Required", req?.Note); return Ok(new { ok = true }); }
+        catch (Exception ex) { _log.LogError(ex, "PaymentRequired failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── PATCH /api/purchase-orders/{spItemId}/paid ────────────────────────────
+    /// <summary>Marks a PO's pay-to-release payment as made (clears the payment clock). Body: { note? }.</summary>
+    [HttpPatch("purchase-orders/{spItemId}/paid")]
+    public async Task<IActionResult> PaymentPaid(string spItemId, [FromBody] PoPaymentRequest? req)
+    {
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Paid", req?.Note); return Ok(new { ok = true }); }
+        catch (Exception ex) { _log.LogError(ex, "PaymentPaid failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
+    public record PoPaymentRequest(string? Note);
 
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>

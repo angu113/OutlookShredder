@@ -4778,6 +4778,12 @@ public partial class SharePointService
                 ("ConfirmedVia",  "text"),     // email | phone | payment | manual
                 ("ExpectedDate",  "dateTime"), // ETA from the confirmation, if known
                 ("ConfirmNote",   "note"),
+                // Pay-to-release tracking (Fulfillment loop): a ball WE drop. Distinct from confirm,
+                // own clock (PoMonitor pay thresholds + 15:15 EST cutoff). Paid set by receipt match.
+                ("PaymentStatus",     "text"),     // None | Required | Paid
+                ("PaymentRequiredAt", "dateTime"),
+                ("PaidAt",            "dateTime"),
+                ("PaymentNote",       "note"),
             ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
@@ -7280,6 +7286,27 @@ public partial class SharePointService
             confirmed ? "set" : "cleared", spItemId, via ?? "manual");
     }
 
+    /// <summary>Sets the pay-to-release state on a PurchaseOrders row. status = "Required" | "Paid" |
+    /// "None"; stamps PaymentRequiredAt / PaidAt accordingly (Fulfillment loop).</summary>
+    public async Task UpdatePurchaseOrderPaymentAsync(string spItemId, string status, string? note)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+        var nowIso = DateTimeOffset.UtcNow.ToString("o");
+
+        var fields = new Dictionary<string, object?> { ["PaymentStatus"] = status };
+        if (string.Equals(status, "Required", StringComparison.OrdinalIgnoreCase))
+            fields["PaymentRequiredAt"] = nowIso;
+        else if (string.Equals(status, "Paid", StringComparison.OrdinalIgnoreCase))
+            fields["PaidAt"] = nowIso;
+        if (note is not null) fields["PaymentNote"] = note;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields });
+
+        _log.LogInformation("[PO] Payment {Status} for SpItemId={Id}", status, spItemId);
+    }
+
     /// <summary>
     /// Patches the LineItems JSON field on an existing PurchaseOrders row.
     /// </summary>
@@ -7317,7 +7344,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -7346,6 +7373,10 @@ public partial class SharePointService
                     ConfirmedVia  = GetStr(f, "ConfirmedVia"),
                     ExpectedDate  = GetStr(f, "ExpectedDate"),
                     ConfirmNote   = GetStr(f, "ConfirmNote"),
+                    PaymentStatus     = GetStr(f, "PaymentStatus") ?? "None",
+                    PaymentRequiredAt = GetStr(f, "PaymentRequiredAt"),
+                    PaidAt            = GetStr(f, "PaidAt"),
+                    PaymentNote       = GetStr(f, "PaymentNote"),
                 });
             }
 

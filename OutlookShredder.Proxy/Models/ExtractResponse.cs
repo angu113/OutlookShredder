@@ -235,6 +235,13 @@ public class PurchaseOrderRecord
     public string? ExpectedDate  { get; set; }
     public string? ConfirmNote   { get; set; }
 
+    // ── Pay-to-release tracking (Fulfillment loop) ───────────────────────────
+    /// <summary>None | Required | Paid. "Required" = a payment-to-release ball WE must clear.</summary>
+    public string? PaymentStatus     { get; set; }
+    public string? PaymentRequiredAt { get; set; }
+    public string? PaidAt            { get; set; }
+    public string? PaymentNote       { get; set; }
+
     // ── Derived at-risk (computed on read by PoConfirmationMonitor; NOT stored in SP) ────────
     /// <summary>Supplier-acknowledgment risk: green | amber | red. Only "Pending" POs are scored.</summary>
     public string? AckLevel           { get; set; }
@@ -242,6 +249,9 @@ public class PurchaseOrderRecord
     public int?    MinutesSincePlaced { get; set; }
     /// <summary>True if the supplier-ack EST cutoff has passed (won't be processed today).</summary>
     public bool    AckCutoffPassed    { get; set; }
+    /// <summary>Pay-to-release risk: green | amber | red. Only PaymentStatus="Required" is scored.</summary>
+    public string? PayLevel                    { get; set; }
+    public int?    MinutesSincePaymentRequired { get; set; }
 }
 
 // ── RLI anchoring dry-run models ─────────────────────────────────────────────

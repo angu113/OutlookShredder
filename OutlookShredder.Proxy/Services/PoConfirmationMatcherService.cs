@@ -103,6 +103,8 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
                     {
                         await _sp.UpdatePurchaseOrderConfirmAsync(po.SpItemId, confirmed: true, via: via,
                                                                   expectedDate: null, note: note);
+                        if (via == "payment")   // a receipt means we paid -> clear the pay-to-release clock
+                            await _sp.UpdatePurchaseOrderPaymentAsync(po.SpItemId, "Paid", note);
                         confirmed++;
                         details.Add($"{po.PoNumber} <- {via} (\"{subj}\")");
                     }
