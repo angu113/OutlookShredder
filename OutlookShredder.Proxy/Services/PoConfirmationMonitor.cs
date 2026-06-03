@@ -18,6 +18,7 @@ public static class PoConfirmationMonitor
         public int    AckAmberMinutes { get; set; } = 60;       // amber once unconfirmed this long
         public int    AckRedMinutes   { get; set; } = 120;      // red after this long...
         public string AckRedCutoffEst { get; set; } = "15:30";  // ...or once past this EST wall-clock
+        public int    MonitorWindowBusinessDays { get; set; } = 3; // older Pending POs -> "stale", not red
 
         // Pay-to-release clock (our action; used by the payment track increment).
         public int    PayAmberMinutes { get; set; } = 30;
@@ -63,6 +64,10 @@ public static class PoConfirmationMonitor
 
         var minutes = (int)Math.Max(0, (utcNow - booked).TotalMinutes);
 
+        // Beyond the active window the PO is historical, not actionable -> "stale" (neutral).
+        if (IsStale(booked, utcNow, opts.MonitorWindowBusinessDays))
+            return ("stale", minutes, false);
+
         var elapsed = minutes >= opts.AckRedMinutes   ? 2
                     : minutes >= opts.AckAmberMinutes ? 1
                     : 0;
@@ -80,6 +85,20 @@ public static class PoConfirmationMonitor
         if (!TryParseHhmm(hhmmEst, out var cutoff)) return false;
         var estNow = TimeZoneInfo.ConvertTime(utcNow, Eastern);
         return estNow.TimeOfDay >= cutoff;
+    }
+
+    /// <summary>True when more than <paramref name="windowBusinessDays"/> business days (Mon-Fri, EST)
+    /// have elapsed since the PO was booked - i.e. it is historical, not actively monitored ("stale").</summary>
+    public static bool IsStale(DateTimeOffset bookedUtc, DateTimeOffset utcNow, int windowBusinessDays)
+    {
+        var bookedEst = TimeZoneInfo.ConvertTime(bookedUtc, Eastern).Date;
+        var nowEst    = TimeZoneInfo.ConvertTime(utcNow, Eastern).Date;
+        // Quick reject: N business days span at most N+2 calendar days (a weekend in between).
+        if ((nowEst - bookedEst).TotalDays > windowBusinessDays + 4) return true;
+        var bd = 0;
+        for (var d = bookedEst.AddDays(1); d <= nowEst; d = d.AddDays(1))
+            if (d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)) bd++;
+        return bd > windowBusinessDays;
     }
 
     private static string LevelName(int level) => level >= 2 ? "red" : level == 1 ? "amber" : "green";
