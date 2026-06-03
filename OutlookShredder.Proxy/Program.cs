@@ -133,6 +133,8 @@ try
     builder.Services.AddSingleton<MailAutoCaptureService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailCacheService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailAutoCaptureService>());
+    builder.Services.AddSingleton<PoConfirmationMatcherService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<PoConfirmationMatcherService>());
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());
