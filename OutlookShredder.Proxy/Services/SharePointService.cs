@@ -4784,6 +4784,12 @@ public partial class SharePointService
                 ("PaymentRequiredAt", "dateTime"),
                 ("PaidAt",            "dateTime"),
                 ("PaymentNote",       "note"),
+                // Matched bill (the payment-processor bill that drove PaymentStatus=Required): a pointer
+                // to the bill email so the surface can open it + its pay link, plus audit fields.
+                ("BillMailItemId",  "text"),
+                ("BillAmount",      "text"),
+                ("BillSupplierRef", "text"),
+                ("BillMatchedAt",   "dateTime"),
             ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
@@ -7308,6 +7314,34 @@ public partial class SharePointService
         _log.LogInformation("[PO] Payment {Status} for SpItemId={Id}", status, spItemId);
     }
 
+    /// <summary>Records a matched payment-processor bill on a PurchaseOrders row: flips PaymentStatus to
+    /// "Required" (stamping PaymentRequiredAt) and stores the bill pointer (MailItemId) + audit fields so
+    /// the surface can open the bill email + its pay link. Idempotent re-write of these fields.</summary>
+    public async Task UpdatePurchaseOrderBillMatchAsync(string spItemId, string billMailItemId,
+        string? billAmount, string? billSupplierRef, string? note)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+        var nowIso = DateTimeOffset.UtcNow.ToString("o");
+
+        var fields = new Dictionary<string, object?>
+        {
+            ["PaymentStatus"]     = "Required",
+            ["PaymentRequiredAt"] = nowIso,
+            ["BillMailItemId"]    = billMailItemId,
+            ["BillAmount"]        = billAmount,
+            ["BillSupplierRef"]   = billSupplierRef,
+            ["BillMatchedAt"]     = nowIso,
+        };
+        if (note is not null) fields["PaymentNote"] = note;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields });
+
+        _log.LogInformation("[PO] Bill matched -> Required for SpItemId={Id} (bill={Bill} amount={Amt})",
+            spItemId, billMailItemId, billAmount);
+    }
+
     /// <summary>
     /// Patches the LineItems JSON field on an existing PurchaseOrders row.
     /// </summary>
@@ -7345,7 +7379,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -7378,6 +7412,10 @@ public partial class SharePointService
                     PaymentRequiredAt = GetStr(f, "PaymentRequiredAt"),
                     PaidAt            = GetStr(f, "PaidAt"),
                     PaymentNote       = GetStr(f, "PaymentNote"),
+                    BillMailItemId    = GetStr(f, "BillMailItemId"),
+                    BillAmount        = GetStr(f, "BillAmount"),
+                    BillSupplierRef   = GetStr(f, "BillSupplierRef"),
+                    BillMatchedAt     = GetStr(f, "BillMatchedAt"),
                 });
             }
 

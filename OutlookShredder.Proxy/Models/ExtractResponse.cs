@@ -242,6 +242,15 @@ public class PurchaseOrderRecord
     public string? PaidAt            { get; set; }
     public string? PaymentNote       { get; set; }
 
+    // ── Matched bill (the payment-processor bill that set PaymentStatus=Required) ─────────────
+    /// <summary>MailItemId of the bill email matched to this PO — lets the surface open the bill +
+    /// its pay link when the user clicks a payment-due PO.</summary>
+    public string? BillMailItemId { get; set; }
+    /// <summary>Bill total + supplier reference captured at match time (audit / display).</summary>
+    public string? BillAmount      { get; set; }
+    public string? BillSupplierRef { get; set; }
+    public string? BillMatchedAt   { get; set; }
+
     // ── Derived at-risk (computed on read by PoConfirmationMonitor; NOT stored in SP) ────────
     /// <summary>Supplier-acknowledgment risk: green | amber | red. Only "Pending" POs are scored.</summary>
     public string? AckLevel           { get; set; }

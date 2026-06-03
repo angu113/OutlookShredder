@@ -136,6 +136,8 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailAutoCaptureService>());
     builder.Services.AddSingleton<PoConfirmationMatcherService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<PoConfirmationMatcherService>());
+    builder.Services.AddSingleton<BillToPoMatcherService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<BillToPoMatcherService>());
 
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MailPollerService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkflowCardService>());
