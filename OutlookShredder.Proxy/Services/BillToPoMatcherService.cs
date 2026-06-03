@@ -32,6 +32,21 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
     private static readonly Regex HskPoRx = new(@"\bHSK-PO\d+\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex NonAlnum = new(@"[^A-Za-z0-9]", RegexOptions.Compiled);
 
+    // Guard: a payment-processor AUTH/RECEIPT (the card was already charged) sometimes lands under
+    // "Supplier/Invoices and Bills" instead of "Supplier/Receipts". It must NOT flag PaymentStatus=
+    // Required — the payment already happened. Skip it by subject markers ("Receipt", "approved",
+    // "thank you for your payment", "authoriz…", "charged") or a known auth/processor sender.
+    private static readonly Regex AuthReceiptSubjectRx = new(
+        @"\b(receipt|payment\s+received|payment\s+confirmation|thank\s+you\s+for\s+your\s+payment|authoriz|auth\s*code|approved|charged|paid\s+in\s+full|transaction\s+approved)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AuthReceiptSenderRx = new(
+        @"(creditcardauth|slimcd\.com)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool LooksLikeAuthOrReceipt(string? subject, string? from)
+        => (!string.IsNullOrWhiteSpace(subject) && AuthReceiptSubjectRx.IsMatch(subject))
+        || (!string.IsNullOrWhiteSpace(from)    && AuthReceiptSenderRx.IsMatch(from));
+
     private readonly SharePointService   _sp;
     private readonly MailCacheService    _mail;
     private readonly SliCacheService     _sli;
@@ -67,7 +82,7 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
 
     public record BillMatch(string MailItemId, string Subject, string? BillSupplier, string? Amount,
         string? SupplierRef, string? BillPoNumber, string MatchedPo, string MatchedPoSpItemId, string Via, bool Applied);
-    public record BillMatchResult(int Scanned, int Matched, int Applied, bool Auto,
+    public record BillMatchResult(int Scanned, int Matched, int Applied, int SkippedReceipts, bool Auto,
         List<BillMatch> Matches, List<string> Ambiguous);
 
     /// <summary>One matching pass. apply=false → suggest only (no writes). apply=true → write
@@ -106,7 +121,7 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
             }
         }
 
-        int scanned = 0, matched = 0, applied = 0;
+        int scanned = 0, matched = 0, applied = 0, skippedReceipts = 0;
         var matches   = new List<BillMatch>();
         var ambiguous = new List<string>();
 
@@ -117,6 +132,16 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
             if (string.Equals(item.Direction, "out", StringComparison.OrdinalIgnoreCase)) continue;
             if (item.Completed) continue;
             scanned++;
+
+            // Skip auth/receipt confirmations misfiled under bills — the payment already happened, so
+            // they must not flag PaymentStatus=Required.
+            if (LooksLikeAuthOrReceipt(item.Subject, item.FromAddress))
+            {
+                skippedReceipts++;
+                _log.LogDebug("[BillMatcher] skipped auth/receipt \"{Subj}\" [{Id}]",
+                    item.Subject.Length > 80 ? item.Subject[..80] : item.Subject, c.MailItemId);
+                continue;
+            }
 
             var billSupplier = _suppliers.ResolveSupplierName(c.SupplierName) ?? c.SupplierName;
             var subj = item.Subject.Length > 80 ? item.Subject[..80] : item.Subject;
@@ -142,9 +167,9 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
                 c.PoNumber, po.PoNumber ?? "", po.SpItemId, via, apply));
         }
 
-        _log.LogInformation("[BillMatcher] pass: scanned={S} matched={M} applied={A} (auto={Auto})",
-            scanned, matched, applied, apply);
-        return new BillMatchResult(scanned, matched, applied, apply, matches, ambiguous);
+        _log.LogInformation("[BillMatcher] pass: scanned={S} matched={M} applied={A} skippedReceipts={R} (auto={Auto})",
+            scanned, matched, applied, skippedReceipts, apply);
+        return new BillMatchResult(scanned, matched, applied, skippedReceipts, apply, matches, ambiguous);
     }
 
     /// <summary>Returns the single best PO for a bill, or null with a reason when none/ambiguous.</summary>

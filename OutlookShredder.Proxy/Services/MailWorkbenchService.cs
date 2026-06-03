@@ -1110,6 +1110,7 @@ public sealed class MailWorkbenchService
             CategoryPath = cls?.CategoryPath ?? "Other", OtherLabel = cls?.OtherLabel, SupplierName = cls?.SupplierName,
             Confidence = cls?.Confidence ?? 0,
             KeywordTags = cls?.KeywordTags ?? "", PoNumber = cls?.PoNumber, SoNumber = cls?.SoNumber,
+            Amount = cls?.Amount, SupplierReference = cls?.SupplierReference, PayLink = cls?.PayLink,
             Reasoning = null, AiProvider = cls?.AiProvider, AiModel = cls?.AiModel, Version = cls?.Version ?? 0,
             Attachments = manifest.Select(m => new MailAttachmentInfo
             {
@@ -1616,6 +1617,11 @@ public sealed class MailWorkbenchService
         public string  KeywordTags { get; set; } = "";
         public string? PoNumber    { get; set; }
         public string? SoNumber    { get; set; }
+        // Financial-leaf fields (bill / receipt) — let the pay surface deep-link to the pay URL and
+        // show the matched amount / supplier reference without re-reading the email body.
+        public string? Amount            { get; set; }
+        public string? SupplierReference { get; set; }
+        public string? PayLink           { get; set; }
         public string? Reasoning   { get; set; }
         public string? AiProvider  { get; set; }
         public string? AiModel     { get; set; }

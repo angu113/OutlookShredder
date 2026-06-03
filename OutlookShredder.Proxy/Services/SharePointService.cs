@@ -7305,7 +7305,17 @@ public partial class SharePointService
             fields["PaymentRequiredAt"] = nowIso;
         else if (string.Equals(status, "Paid", StringComparison.OrdinalIgnoreCase))
             fields["PaidAt"] = nowIso;
-        else { fields["PaymentRequiredAt"] = null; fields["PaidAt"] = null; }   // None: clear the clocks
+        else
+        {
+            // None: clear the clocks AND the matched-bill pointer, so clearing a false-positive match
+            // (e.g. an auth/receipt that should never have flagged Required) leaves a fully clean row.
+            fields["PaymentRequiredAt"] = null;
+            fields["PaidAt"]            = null;
+            fields["BillMailItemId"]    = null;
+            fields["BillAmount"]        = null;
+            fields["BillSupplierRef"]   = null;
+            fields["BillMatchedAt"]     = null;
+        }
         if (note is not null) fields["PaymentNote"] = note;
 
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
