@@ -278,7 +278,11 @@ public static class FlatPattern
         c.Add((px, py, -hy, hx));
         for (int i = 0; i < segs.Length; i++)
         {
-            px += hx * segs[i]; py += hy * segs[i];
+            // The bend arc consumes ~rc of length at each adjacent bend; subtract it so segment
+            // ends land on their nominal coordinates (so section dimensions touch the real edges).
+            double cut = (i > 0 ? rc : 0) + (i < segs.Length - 1 ? rc : 0);
+            double straight = Math.Max(0.001, segs[i] - cut);
+            px += hx * straight; py += hy * straight;
             c.Add((px, py, -hy, hx));
             if (i < segs.Length - 1)
             {
