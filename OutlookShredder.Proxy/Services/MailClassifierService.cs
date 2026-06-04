@@ -61,8 +61,11 @@ public class MailClassifierService
           (Franchise/Newsletters) and prospective-franchisee inquiries (Franchise/Inquiries).
         - A support ticket or notification from ecommhelp@metalsupermarkets.com, or any mail whose subject
           carries an EC###### reference, relates to a customer web order: Customer/Web Orders.
-        - A payment confirmation/receipt for money WE pay a supplier or service provider is Supplier/Receipts
-          (even when sent via QuickBooks/Intuit or another billing processor), not Corporate/Receipts.
+        - Corporate/Receipts vs Supplier/Receipts is decided by WHAT was bought, NOT by who sent it. A
+          paid receipt is Supplier/Receipts when it pays a supplier for INVENTORY (metal we resell) or
+          SERVICES (powder coating, processing, freight on inventory), even via a billing processor
+          (QuickBooks/Intuit, Enmark). It is Corporate/Receipts when it is our own OPERATING EXPENSE /
+          overhead — shop and office supplies, fuel, postage, utilities, software subscriptions.
         - PAID vs UNPAID is decisive for supplier financial mail: a "Purchase Receipt", a credit-card
           authorization/approval, "transaction approved/charged", or "payment received / thank you for
           your payment" means the charge ALREADY happened — that is Supplier/Receipts, NEVER

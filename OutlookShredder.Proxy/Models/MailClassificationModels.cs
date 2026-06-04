@@ -29,7 +29,7 @@ public static class MailTaxonomy
         new("Supplier", "Statements",
             "Statements of account from suppliers and providers."),
         new("Supplier", "Receipts",
-            "Confirmation that a payment we made to a supplier or service provider has ALREADY been made or charged: payment receipts, credit-card authorizations/approvals, 'Purchase Receipt', 'transaction approved/charged', 'payment received', 'thank you for your payment' — even when it shows an amount, and even when sent via a billing processor (QuickBooks/Intuit, Enmark, SlimCD, etc.; identify the real supplier from the body). The test is do we still OWE it (Invoices and Bills) or has it already been PAID (Receipts). Distinct from Corporate/Receipts (our own corporate/admin purchases and subscriptions)."),
+            "Confirmation that a payment we made to a supplier or service provider has ALREADY been made or charged: payment receipts, credit-card authorizations/approvals, 'Purchase Receipt', 'transaction approved/charged', 'payment received', 'thank you for your payment' — even when it shows an amount, and even when sent via a billing processor (QuickBooks/Intuit, Enmark, SlimCD, etc.; identify the real supplier from the body). The test is do we still OWE it (Invoices and Bills) or has it already been PAID (Receipts). Supplier/Receipts cover payments to our SUPPLIERS for INVENTORY (the metal we resell) and SERVICES (e.g. powder coating, processing) - a separate accounting bucket from Corporate/Receipts, which is our own operating expenses (shop/office supplies, fuel, postage, subscriptions)."),
 
         new("Customer", "Inquiries",
             "General requests for metal or fabrication."),
@@ -47,7 +47,7 @@ public static class MailTaxonomy
         new("Corporate", "Accounting",
             "Messages from our accounting partner."),
         new("Corporate", "Receipts",
-            "Email receipts (and placeholders for receipt PDFs/scans)."),
+            "Receipts/confirmations for our own OPERATING EXPENSES and overhead incurred running the business: shop and office supplies, fuel, postage, utilities, software subscriptions, and similar. OpEx we pay for ourselves - NOT a payment to a supplier for inventory or services (that is Supplier/Receipts). A separate accounting bucket."),
         new("Corporate", "Payroll",
             "Payroll-related messages and reminders."),
         new("Corporate", "Training",
