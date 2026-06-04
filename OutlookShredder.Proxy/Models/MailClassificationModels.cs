@@ -36,7 +36,7 @@ public static class MailTaxonomy
         new("Customer", "Website Inquiries",
             "A request for material or fabrication submitted via a web form on the Franchisor website, notified to us by email. Same intent as a direct Customer/Inquiry, but because it arrives through the website the real customer CONTACT EMAIL is inside the message BODY, not the sender address (important when replying). Still an inquiry/quote request - NOT a booked order (that is Customer/Web Orders)."),
         new("Customer", "Orders",
-            "Follow-ups on orders in progress; usually carry the sales order reference HSK-SOxxxxxxx in the subject; includes customer POs sent to us."),
+            "Follow-ups on orders in progress, usually carrying OUR sales-order reference HSK-SOxxxxxxx; also a purchase order a CUSTOMER sends US to buy from us - the CUSTOMER's OWN PO number, NOT our HSK-PO (this includes another Metal Supermarkets franchise store ordering from us). NOT a supplier acknowledging our HSK-PO - that is Supplier/Order Confirmations."),
         new("Customer", "Web Orders",
             "An ACTUAL order placed through the Franchisor website (not just an inquiry), notified to us by email - typically with an attached invoice/order to process and often an EC###### reference. These are monitored and carry SLAs, so they are time-sensitive. Distinct from Customer/Website Inquiries, which is a request/quote with no order yet."),
         new("Customer", "Statements",

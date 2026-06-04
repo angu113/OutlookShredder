@@ -47,8 +47,14 @@ public class MailClassifierService
     private const string SystemPromptSuffix =
         """
 
-        Strong signals: a purchase-order number like HSK-PO0001234 indicates "Supplier/Order
-        Confirmations"; a sales-order reference like HSK-SO0001234 indicates "Customer/Orders".
+        Strong signals (HSK = our store; these OVERRIDE surface wording like the phrase "Purchase Order"):
+        - OUR HSK-PO number (e.g. HSK-PO0001234) is a purchase order WE placed with a SUPPLIER. ANY mail
+          referencing it — a supplier acknowledging/confirming it, "RE: Purchase Order #HSK-PO...", a
+          sales-order confirmation/SOC — is "Supplier/Order Confirmations", NEVER "Customer/Orders", even
+          though the subject literally says "Purchase Order".
+        - OUR HSK-SO number (e.g. HSK-SO0001234) is a sales order WE issued to a CUSTOMER -> "Customer/Orders".
+        - A purchase order a CUSTOMER sends US to buy from us (the customer's OWN PO number, NOT an HSK
+          number — including another Metal Supermarkets franchise store ordering from us) is "Customer/Orders".
 
         Disambiguation rules (apply BEFORE defaulting to a Supplier/* category):
         - Supplier/* categories are ONLY for mail a supplier sends US. If the sender is asking US to
