@@ -26,6 +26,11 @@ public class RfqSummaryService
         "NOT cheaper; only compare COMPLETE quotes apples-to-apples. Call out who quoted everything, the " +
         "cheapest complete option, any single-sourced item (only one supplier quoted it = no price " +
         "leverage), notable regrets/gaps, and anything the rep should act on. " +
+        "TIMING: supplier replies usually arrive within ~30 minutes and chasing is only warranted after " +
+        "~60 minutes. The input states how long ago the RFQ was sent. Do NOT suggest chasing, 'ask " +
+        "again', or treat slow or missing responses as a problem when it has been UNDER 60 minutes - with " +
+        "little time elapsed, few responses is normal and expected, not a concern. Only flag a " +
+        "non-responder as needing a chase once it is past 60 minutes since the RFQ was sent. " +
         "Output ONLY the bullets, each starting with '- '.";
 
     public RfqSummaryService(IHttpClientFactory http, IConfiguration config, ILogger<RfqSummaryService> log)
