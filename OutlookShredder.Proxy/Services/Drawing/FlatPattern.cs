@@ -18,11 +18,111 @@ public static class FlatPattern
 
     public static FlatPatternResult Develop(PartSpec spec) => spec.Type switch
     {
-        PartType.UChannel => DevelopChannel(spec, isZ: false),
-        PartType.ZChannel => DevelopChannel(spec, isZ: true),
-        PartType.LAngle   => DevelopLAngle(spec),
+        PartType.UChannel    => DevelopChannel(spec, isZ: false),
+        PartType.ZChannel    => DevelopChannel(spec, isZ: true),
+        PartType.LAngle      => DevelopLAngle(spec),
+        PartType.FlitchPlate => DevelopPlate(spec),
+        PartType.BasePlate   => DevelopPlate(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
+
+    // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
+    private static FlatPatternResult DevelopPlate(PartSpec spec)
+    {
+        double L = spec.Length, W = spec.Width;
+        var holes = ComputeHoles(spec, L, W);
+
+        var entities = new List<CutEntity>
+        {
+            CutEntity.Polyline(CutLayer, closed: true, new[]
+            {
+                new CutVertex(0, 0), new CutVertex(L, 0), new CutVertex(L, W), new CutVertex(0, W),
+            }),
+        };
+        foreach (var (hx, hy, dia) in holes)
+            entities.Add(CutEntity.Circle(CutLayer, hx, hy, dia / 2.0));
+
+        string slug = (spec.Type == PartType.FlitchPlate ? "flitch_" : "baseplate_") + $"{Trim(L)}x{Trim(W)}";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units,
+            Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = L, FlatHeight = W,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut,
+            Profile = new(),
+            IsPlate = true,
+            Holes = holes,
+            Summary = PlateSummary(spec, L, W, holes.Count),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static List<(double x, double y, double dia)> ComputeHoles(PartSpec spec, double L, double W)
+    {
+        var list = new List<(double x, double y, double dia)>();
+        var h = spec.Holes;
+        if (h is null || h.Diameter <= 0) return list;
+
+        if (h.Pattern == HolePattern.Corner)
+        {
+            double e = h.EdgeDistance > 0 ? h.EdgeDistance : 1.0;
+            int n = h.Count <= 0 ? 4 : h.Count;
+            var corners = new[] { (e, e), (L - e, e), (L - e, W - e), (e, W - e) };
+            for (int i = 0; i < Math.Min(n, 4); i++)
+                list.Add((corners[i].Item1, corners[i].Item2, h.Diameter));
+        }
+        else
+        {
+            // Flitch: two rows down the length at the requested spacing.
+            double sp = h.Spacing > 0 ? h.Spacing : 16;
+            double rowA = W * 0.25, rowB = W * 0.75;
+            int n = Math.Max(1, (int)Math.Floor(L / sp));
+            double span = (n - 1) * sp, start = (L - span) / 2.0;
+            for (int i = 0; i < n; i++)
+            {
+                double x = start + i * sp;
+                if (h.Pattern == HolePattern.Paired)
+                {
+                    list.Add((x, rowA, h.Diameter));
+                    list.Add((x, rowB, h.Diameter));
+                }
+                else
+                {
+                    list.Add((x, i % 2 == 0 ? rowA : rowB, h.Diameter));   // staggered
+                }
+            }
+        }
+        return list;
+    }
+
+    private static string PlateSummary(PartSpec s, double L, double W, int holeCount)
+    {
+        string shape = s.Type == PartType.FlitchPlate ? "Flitch plate" : "Base plate";
+        string u = s.Units;
+        var lines = new List<string>
+        {
+            $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",
+            $"Plate {F(L)}{u} x {F(W)}{u}",
+        };
+        if (s.Holes is { } h && holeCount > 0)
+        {
+            string pat = h.Pattern == HolePattern.Corner ? "corner" : h.Pattern.ToString().ToLowerInvariant();
+            string detail = h.Pattern == HolePattern.Corner
+                ? $"edge {F(h.EdgeDistance)}{u}"
+                : $"{pat} @ {F(h.Spacing)}{u}";
+            lines.Add($"Holes: {holeCount} x {F(h.Diameter)}{u} dia, {detail}");
+        }
+        return string.Join("\n", lines);
+    }
 
     // ── U-channel (2 bends same direction) / Z-channel (2 bends opposing) ────
     private static FlatPatternResult DevelopChannel(PartSpec spec, bool isZ)
@@ -203,6 +303,12 @@ public static class FlatPattern
     // ── Title / summary ──────────────────────────────────────────────────────
     private static string PlainTitle(PartSpec s)
     {
+        if (s.Type is PartType.FlitchPlate or PartType.BasePlate)
+        {
+            string plate = s.Type == PartType.FlitchPlate ? "Flitch Plate" : "Base Plate";
+            return $"{MaterialPlain(s.Material)} {plate} {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Thickness)}\"".Trim();
+        }
+
         string shape = s.Type switch
         {
             PartType.UChannel => "U Channel",
@@ -273,6 +379,10 @@ public sealed class FlatPatternResult
     public required CutGeometry Cut { get; init; }
     /// <summary>Radiused cross-section material loop (model coords) for the section + iso views.</summary>
     public List<(double x, double y)> Profile { get; init; } = new();
+    /// <summary>True for flat plates (Flitch / Base) — drawn as a single top view, not 3 panels.</summary>
+    public bool IsPlate { get; init; }
+    /// <summary>Plate bolt holes (centre x, y, diameter) in plate coords.</summary>
+    public List<(double x, double y, double dia)> Holes { get; init; } = new();
     public required string Summary { get; init; }
     public string Title { get; init; } = "";
 }

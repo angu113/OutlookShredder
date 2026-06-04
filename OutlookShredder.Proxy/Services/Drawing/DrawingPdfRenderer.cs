@@ -55,9 +55,16 @@ public static class DrawingPdfRenderer
             double footTop = ph - M - footH;
             double h = footTop - top - 8;
 
-            DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
-            DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h));
-            DrawIsometric(gfx, fp, new XRect(M + wFlat + wSect + 2 * gap, top, wIso, h));
+            if (fp.IsPlate)
+            {
+                DrawPlate(gfx, fp, new XRect(M, top, usable, h));
+            }
+            else
+            {
+                DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
+                DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h));
+                DrawIsometric(gfx, fp, new XRect(M + wFlat + wSect + 2 * gap, top, wIso, h));
+            }
             DrawFootnote(gfx, fp, new XRect(M, footTop, usable, footH));
 
             // Copyright line under the details box (current year).
@@ -181,8 +188,8 @@ public static class DrawingPdfRenderer
 
             case PartType.ZChannel:
                 // Walker frame: web centreline y=0 (x 0..webO), left flange up x=0 (y 0..flL),
-                // right flange down x=webO (y 0..-flR).
-                DimH(gfx, dimFont, P(0, -t2).X, P(webO, -t2).X, P(0, -t2).Y, sBottom + 22,
+                // right flange down x=webO (y 0..-flR). Web dim sits just below the web (short witness).
+                DimH(gfx, dimFont, P(0, -t2).X, P(webO, -t2).X, P(0, -t2).Y, P(0, -t2).Y + 24,
                      wIn ? $"{F(webO - 2 * t)} ID" : $"{F(webO)} OD", true);
                 DimV(gfx, dimFont, P(-t2, 0).X, sLeft - 24, P(-t2, 0).Y, P(-t2, flL).Y,
                      flIn ? $"{F(flL - t)} ID" : $"{F(flL)} OD", true);
@@ -255,6 +262,69 @@ public static class DrawingPdfRenderer
         gfx.DrawLine(dimPen, Ao, Bo);
         Arrow(gfx, Ao, -ux, -uy); Arrow(gfx, Bo, ux, uy);
         RotText(gfx, dimFont, $"L {F(len)}", new XPoint((Ao.X + Bo.X) / 2, (Ao.Y + Bo.Y) / 2), Math.Atan2(Bo.Y - Ao.Y, Bo.X - Ao.X));
+    }
+
+    // ── Flat plate: single dimensioned top view with bolt holes ──────────────
+    private static void DrawPlate(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var thin = new XPen(DimColor, 0.5);
+
+        gfx.DrawString("Plate — top view", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double L = fp.FlatWidth, W = fp.FlatHeight;
+        if (L <= 0 || W <= 0) return;
+        const double band = 50;
+        double availW = area.Width - band * 2, availH = area.Height - band * 2;
+        double scale = Math.Min(availW / L, availH / W);
+        double drawW = L * scale, drawH = W * scale;
+        double ox = area.X + (area.Width - drawW) / 2;
+        double oy = area.Y + (area.Height - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        gfx.DrawRectangle(cutPen, new XRect(ox, oy, drawW, drawH));
+        foreach (var (hx, hy, dia) in fp.Holes)
+        {
+            double r = dia / 2.0 * scale;
+            var c = P(hx, hy);
+            gfx.DrawEllipse(cutPen, c.X - r, c.Y - r, 2 * r, 2 * r);
+            gfx.DrawLine(thin, c.X - r - 2, c.Y, c.X + r + 2, c.Y);   // centre cross
+            gfx.DrawLine(thin, c.X, c.Y - r - 2, c.X, c.Y + r + 2);
+        }
+
+        DimH(gfx, dimFont, P(0, 0).X, P(L, 0).X, oy + drawH, oy + drawH + 22, F(L), true);
+        DimV(gfx, dimFont, ox, ox - 26, oy, oy + drawH, F(W), true);
+
+        if (fp.Holes.Count > 0)
+        {
+            var (hx, hy, dia) = fp.Holes[0];
+            var c = P(hx, hy);
+            double r = dia / 2.0 * scale;
+            var tip = new XPoint(c.X + r * 0.7, c.Y - r * 0.7);
+            var lp = new XPoint(c.X + 22, c.Y - 20);
+            gfx.DrawLine(new XPen(DimColor, 0.6), tip, lp);
+            gfx.DrawString($"{fp.Holes.Count} x {F(dia)} dia", dimFont, TextBrush,
+                new XRect(lp.X + 2, lp.Y - 5, 90, 11), XStringFormats.TopLeft);
+        }
+
+        if (fp.Spec.Holes is { } hs)
+        {
+            if (hs.Pattern != HolePattern.Corner)
+            {
+                var xs = fp.Holes.Select(h => h.x).Distinct().OrderBy(x => x).ToList();
+                if (xs.Count >= 2)
+                    DimH(gfx, dimFont, P(xs[0], 0).X, P(xs[1], 0).X, oy, oy - 16, F(xs[1] - xs[0]), false);
+            }
+            else if (fp.Holes.Count > 0)
+            {
+                double hx = fp.Holes[0].x;
+                DimH(gfx, dimFont, P(0, 0).X, P(hx, 0).X, oy, oy - 16, F(hx), false);
+            }
+        }
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────

@@ -46,6 +46,10 @@ public static class DrawingTextParser
         double angle = MatchNum(lower, $@"(?:\bangle\s*[:=]?\s*)?({Num})\s*(?:deg|degrees|°)") ?? 90.0;
         double? measuredBd = MatchNum(lower, $@"\b(?:bd|deduction)\s*[:=]?\s*({Num})");
 
+        // ── Flat plates (Flitch / Base) — different field set; parsed + returned here ──
+        if (type is PartType.FlitchPlate or PartType.BasePlate)
+            return ParsePlate(type, lower, thickness, materialLabel, ri, k);
+
         // ── Global basis (whole words only; id/od are reserved for per-dim) ──
         DimBasis globalBasis = Regex.IsMatch(lower, @"\binside\b") ? DimBasis.Inside : DimBasis.Outside;
 
@@ -144,8 +148,8 @@ public static class DrawingTextParser
         if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
         if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
-        if (Regex.IsMatch(lower, @"\bflitch\b"))      throw NotYet("Flitch plate");
-        if (Regex.IsMatch(lower, @"\bbase\s*plate\b")) throw NotYet("Base plate");
+        if (Regex.IsMatch(lower, @"\bflitch\b"))      return PartType.FlitchPlate;
+        if (Regex.IsMatch(lower, @"\bbase\s*plate\b")) return PartType.BasePlate;
         if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("Hat");
         if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) throw NotYet("Pan");
         throw new DrawingParseException(
@@ -154,6 +158,56 @@ public static class DrawingTextParser
 
     private static DrawingParseException NotYet(string what) =>
         new($"{what} is coming soon — U-channel, L-angle and Z-channel are available now.");
+
+    /// <summary>Parses a flat plate (Flitch / Base) — length x width, thickness, and bolt holes.</summary>
+    private static PartSpec ParsePlate(PartType type, string lower, double thickness, string material, double ri, double k)
+    {
+        if (thickness <= 0)
+            throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"0.25 steel\").");
+
+        double L, W;
+        HoleSpec? holes = null;
+
+        if (type == PartType.FlitchPlate)
+        {
+            var m = Regex.Match(lower, $@"\bflitch\b\s*({Num})\s*x\s*({Num})");
+            if (!m.Success) throw new DrawingParseException("Flitch needs length x width, e.g. \"Flitch 48 x 6, 0.25 steel\".");
+            L = NumOf(m.Groups[1].Value); W = NumOf(m.Groups[2].Value);
+
+            var hm = Regex.Match(lower, $@"holes?\s+({Num})\s*(staggered|paired)?\s*(?:@|at|spacing|spaced)?\s*({Num})?");
+            if (hm.Success)
+                holes = new HoleSpec
+                {
+                    Diameter = NumOf(hm.Groups[1].Value),
+                    Pattern = hm.Groups[2].Value == "paired" ? HolePattern.Paired : HolePattern.Staggered,
+                    Spacing = hm.Groups[3].Success && hm.Groups[3].Value.Length > 0 ? NumOf(hm.Groups[3].Value) : 16,
+                };
+        }
+        else // BasePlate
+        {
+            var m = Regex.Match(lower, $@"\bbase\s*plate\b\s*({Num})\s*x\s*({Num})");
+            if (!m.Success) throw new DrawingParseException("Base plate needs length x width, e.g. \"Base Plate 8 x 8, 0.5 steel\".");
+            L = NumOf(m.Groups[1].Value); W = NumOf(m.Groups[2].Value);
+
+            var hm = Regex.Match(lower, $@"({Num})\s*holes?\s+({Num})\s*(?:edge|ed)?\s*({Num})?");
+            if (hm.Success)
+                holes = new HoleSpec
+                {
+                    Pattern = HolePattern.Corner,
+                    Count = (int)Math.Round(NumOf(hm.Groups[1].Value)),
+                    Diameter = NumOf(hm.Groups[2].Value),
+                    EdgeDistance = hm.Groups[3].Success && hm.Groups[3].Value.Length > 0 ? NumOf(hm.Groups[3].Value) : 1.0,
+                };
+        }
+
+        if (L <= 0 || W <= 0) throw new DrawingParseException("Plate dimensions must be positive.");
+
+        return new PartSpec
+        {
+            Type = type, Length = L, Width = W, Thickness = thickness,
+            InsideRadius = ri, KFactor = k, Material = material, Holes = holes, Units = "in",
+        };
+    }
 
     private static (MaterialFamily, string) DetectMaterial(string lower)
     {
@@ -166,6 +220,7 @@ public static class DrawingTextParser
         if (Regex.IsMatch(lower, @"\b(stainless|ss)\b")) return (MaterialFamily.Stainless, "SS");
         if (Regex.IsMatch(lower, @"\bbrass\b")) return (MaterialFamily.Brass, "Brass");
         if (Regex.IsMatch(lower, @"\b(copper|cu)\b")) return (MaterialFamily.Copper, "Copper");
+        if (Regex.IsMatch(lower, @"\bsteel\b")) return (MaterialFamily.ColdRolled, "CRS");
         return (MaterialFamily.Unknown, "");
     }
 

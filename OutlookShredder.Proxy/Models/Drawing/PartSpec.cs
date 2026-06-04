@@ -8,7 +8,22 @@ public enum PartType
     ZChannel,
     Hat,
     Pan,
+    FlitchPlate,
+    BasePlate,
     Custom,
+}
+
+/// <summary>How holes are laid out on a flat plate.</summary>
+public enum HolePattern { Staggered, Paired, Corner }
+
+/// <summary>Bolt-hole specification for a flat plate.</summary>
+public sealed class HoleSpec
+{
+    public double Diameter { get; init; }
+    public HolePattern Pattern { get; init; }
+    public double Spacing { get; init; }       // flitch: hole spacing along the length
+    public int Count { get; init; }            // base: number of holes
+    public double EdgeDistance { get; init; }  // base: edge distance for corner holes
 }
 
 /// <summary>Whether a stated dimension is measured to the outside or the inside of the form.</summary>
@@ -44,6 +59,11 @@ public sealed class PartSpec
     public Dim FlangeRight { get; init; }
     /// <summary>The part run / depth. No inside/outside basis — it is the blank's other extent.</summary>
     public double Length { get; init; }
+
+    /// <summary>Plate width (for flat plates; Length is the plate length).</summary>
+    public double Width { get; init; }
+    /// <summary>Bolt holes for flat plates.</summary>
+    public HoleSpec? Holes { get; init; }
 
     // ── Material + bend parameters ──────────────────────────────────────────
     /// <summary>Resolved material thickness T, in the spec's units.</summary>
