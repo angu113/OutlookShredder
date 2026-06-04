@@ -76,6 +76,11 @@ public class MailClassifierService
           "Supplier/Invoices and Bills": a bill/invoice is a request to PAY for goods already supplied
           (amount DUE / please remit / pay-now link), whereas a sales-order acknowledgement confirms
           the order going forward (it commits to supplying it, often with a ship/delivery date).
+        - IT / security mail: an actual one-time CODE you would type (MFA / 2FA / OTP / verification
+          code) is Other/Login Codes. Everything ELSE IT- or security-related is Corporate/IT & Security,
+          NOT Login Codes: a "new sign-in" / suspicious-login ALERT, an email-gateway / spam-quarantine
+          notice, an account-verification or account-management message, or an IT help-desk /
+          support-ticket notification.
 
         For "Supplier/Invoices and Bills" and "Supplier/Receipts" (supplier bills, invoices, and
         payment receipts — including those sent via a billing processor such as Enmark,
@@ -94,7 +99,6 @@ public class MailClassifierService
         near-duplicate labels. When you set category = "Other", choose otherLabel by REUSING the closest
         of these canonical sub-labels (use the EXACT text) whenever it fits:
             - "Shipping/Delivery Notification" — carrier tracking, freight/logistics coordination, shipment/delivery notices
-            - "IT/Security Notification" — security alerts, account-verification, IT / support-ticket notices (NOT one-time login/MFA codes — those are Other/Login Codes)
             - "Zoning/Permit" — real-estate / zoning / permit-application mail
             - "Voicemail Notification" — voicemail / missed-call notifications
         Cold marketing, promotions, and unsolicited solicitations are Other/Junk (a real leaf), NOT a new

@@ -52,6 +52,8 @@ public static class MailTaxonomy
             "Payroll-related messages and reminders."),
         new("Corporate", "Training",
             "Training reports, course reminders, and follow-ups — e.g. Metal Supermarkets University (MSU) / smarteru.com supervisor and completion reports."),
+        new("Corporate", "IT & Security",
+            "IT and security NOTIFICATIONS (not one-time codes): security alerts, suspicious or new sign-in notices, email-gateway / spam-quarantine notices, account-verification and account-management messages, and IT help-desk / support-ticket notifications. A bare one-time login / MFA / verification CODE is Other/Login Codes, not here."),
 
         new("Franchise", "Newsletters",
             "Newsletters, bulletins, and corporate/franchisor marketing — e.g. \"The Pipeline\", \"Fundamentals That Matter to Every Fabricator\", and mail from emarketing@ / communications@Metalsupermarkets.com."),
