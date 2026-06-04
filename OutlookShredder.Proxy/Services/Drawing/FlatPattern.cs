@@ -41,47 +41,55 @@ public static class FlatPattern
         double ossb = BendMath.Ossb(ri, t, angle);
         double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
         double wallDev = Math.Max(0.1, Do - bd);   // flange flat length (keeps the total blank correct)
-        double relief = Math.Max(0.02, t);          // bend-root relief radius = 1× thickness
 
         // Base inner rectangle (between bend lines); each present wall extends the blank by wallDev.
         double bx0 = wL ? wallDev : 0, bx1 = bx0 + Lo, xMax = bx1 + (wR ? wallDev : 0);
         double by0 = wB ? wallDev : 0, by1 = by0 + Wo, yMax = by1 + (wT ? wallDev : 0);
 
-        // Outer cut outline: base + present-wall flanges with the corner squares NOTCHED OUT, so
-        // adjacent walls fold up without colliding. A corner is notched only where both walls exist.
+        // Outer cut outline: base + present-wall flanges with the corner squares notched out so adjacent
+        // walls fold without colliding. Each notched corner carries the DEVELOPED bend relief, cut into
+        // the outline itself: the two notch edges pull back along the bend lines by the bend radius and
+        // join with a scallop arc bulging into the base (cylinder cut at 45°, quartered + unrolled), so
+        // the relief follows the bend radius as both 90° bends form. Tessellated to render in PDF + DXF.
         bool blN = wB && wL, brN = wB && wR, trN = wT && wR, tlN = wT && wL;
-        var outline = new List<CutVertex> { new(blN ? bx0 : 0, 0), new(brN ? bx1 : xMax, 0) };
-        if (brN) { outline.Add(new(bx1, by0)); outline.Add(new(xMax, by0)); }
-        outline.Add(new(xMax, trN ? by1 : yMax));
-        if (trN) { outline.Add(new(bx1, by1)); outline.Add(new(bx1, yMax)); }
-        outline.Add(new(tlN ? bx0 : 0, yMax));
-        if (tlN) { outline.Add(new(bx0, by1)); outline.Add(new(0, by1)); }
-        outline.Add(new(0, blN ? by0 : 0));
-        if (blN) outline.Add(new(bx0, by0));
+        double R = Math.Min(Math.Max(ri, t), wallDev * 0.7);   // relief reach, kept within the flange
+        const double rt2 = 0.70710678;
 
-        var entities = new List<CutEntity> { CutEntity.Polyline(CutLayer, closed: true, outline) };
+        void Scallop(List<CutVertex> o, double x1, double y1, double x2, double y2, double bdx, double bdy)
+        {
+            double mx = (x1 + x2) / 2, my = (y1 + y2) / 2, dep = R;           // apex bulges into the base
+            double cx = mx + 2 * bdx * dep, cy = my + 2 * bdy * dep;          // quadratic control → apex at mid+bdir*dep
+            const int n = 10;
+            for (int s2 = 0; s2 <= n; s2++)
+            {
+                double u = (double)s2 / n, v = 1 - u;
+                o.Add(new CutVertex(v * v * x1 + 2 * v * u * cx + u * u * x2,
+                                    v * v * y1 + 2 * v * u * cy + u * u * y2));
+            }
+        }
 
-        // Bend lines (only where a wall is present), spanning the base edge.
+        var ol = new List<CutVertex> { new(blN ? bx0 : 0, 0), new(brN ? bx1 : xMax, 0) };
+        if (brN) { Scallop(ol, bx1, by0 - R, bx1 + R, by0, -rt2, rt2); ol.Add(new(xMax, by0)); }
+        ol.Add(new(xMax, trN ? by1 : yMax));
+        if (trN) { Scallop(ol, bx1 + R, by1, bx1, by1 + R, -rt2, -rt2); ol.Add(new(bx1, yMax)); }
+        ol.Add(new(tlN ? bx0 : 0, yMax));
+        if (tlN) { Scallop(ol, bx0, by1 + R, bx0 - R, by1, rt2, -rt2); ol.Add(new(0, by1)); }
+        ol.Add(new(0, blN ? by0 : 0));
+        if (blN) Scallop(ol, bx0 - R, by0, bx0, by0 - R, rt2, rt2);
+
+        var entities = new List<CutEntity> { CutEntity.Polyline(CutLayer, closed: true, ol) };
+
+        // Bend lines (only where a wall is present), spanning the base edge between the relieved corners.
         if (wB) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx1, by0));
         if (wT) entities.Add(CutEntity.Line(BendLayer, bx0, by1, bx1, by1));
         if (wL) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx0, by1));
         if (wR) entities.Add(CutEntity.Line(BendLayer, bx1, by0, bx1, by1));
 
-        // Bend relief at each notched corner: a small hole (radius = bend radius) whose perimeter
-        // touches the inside-bend-tangent intersection (the bend root) and bulges into the base.
-        // This is the standard double-bend corner relief — the arc follows the bend radius so the
-        // two 90° bends can form without tearing or piling up at the corner.
-        double rr = Math.Max(ri, t);
-        double d = rr / Math.Sqrt(2.0);   // centre offset along the 45° bisector → perimeter meets the root
-        if (blN) entities.Add(CutEntity.Circle(CutLayer, bx0 + d, by0 + d, rr));
-        if (brN) entities.Add(CutEntity.Circle(CutLayer, bx1 - d, by0 + d, rr));
-        if (trN) entities.Add(CutEntity.Circle(CutLayer, bx1 - d, by1 - d, rr));
-        if (tlN) entities.Add(CutEntity.Circle(CutLayer, bx0 + d, by1 - d, rr));
-
-        // Cross-section profiles (radiused U, thickness shown like the channels):
-        // side = across the width (left/right walls); end = across the length (bottom/top walls).
-        var sideProfile = BuildRadiusedU(Wo, wL ? Do : t, wR ? Do : t, t, ri);
-        var endProfile  = BuildRadiusedU(Lo, wB ? Do : t, wT ? Do : t, t, ri);
+        // Cross-section profiles (radiused U, thickness shown like the channels). The flanges of each
+        // section are the walls perpendicular to the cut: the width (side) section shows the long
+        // (bottom/top) walls; the length (end) section shows the short (left/right) walls.
+        var sideProfile = BuildRadiusedU(Wo, wB ? Do : t, wT ? Do : t, t, ri);
+        var endProfile  = BuildRadiusedU(Lo, wL ? Do : t, wR ? Do : t, t, ri);
 
         string slug = $"pan_{Trim(Lo)}x{Trim(Wo)}x{Trim(Do)}";
         var cut = new CutGeometry

@@ -312,6 +312,15 @@ public static class DrawingPdfRenderer
             gfx.DrawLine(faint, frontS[i], backS[i]);
         DrawLoop(gfx, pen, frontS);
 
+        // Section-cut indicator: the End-section profile is taken perpendicular to the length;
+        // show its cutting plane on the formed part in a distinct colour.
+        var secCol = XColor.FromArgb(0, 150, 70);
+        var secPen = new XPen(secCol, 1.2) { DashStyle = XDashStyle.Dash };
+        var midS = prof.Select(p => S(Iso(p.x, p.y, len / 2))).ToArray();
+        DrawLoop(gfx, secPen, midS);
+        gfx.DrawString("End section", new XFont("Arial", 7, XFontStyleEx.Bold), new XSolidBrush(secCol),
+            new XRect(midS.Min(p => p.X) - 2, midS.Min(p => p.Y) - 11, 70, 9), XStringFormats.TopLeft);
+
         // Length dimension on the front-most outer edge, ~1/4" off the part.
         double bMinX = frontS.Concat(backS).Min(p => p.X), bMaxX = frontS.Concat(backS).Max(p => p.X);
         double bMinY = frontS.Concat(backS).Min(p => p.Y), bMaxY = frontS.Concat(backS).Max(p => p.Y);
@@ -511,18 +520,37 @@ public static class DrawingPdfRenderer
         gfx.DrawPolygon(floorFill, floor, XFillMode.Winding);
         gfx.DrawPolygon(faint, floor);
 
-        // Walls (back walls first so front ones overlap them).
-        void Wall(bool present, (double x, double y) a, (double x, double y) b, bool front)
+        // Walls (back walls first so the front ones overlap them). Every wall edge — including the
+        // two vertical corner edges — is drawn so the folded corners read correctly.
+        void Wall(bool present, double ax, double ay, double bx, double by, bool front)
         {
             if (!present) return;
-            var q = new[] { S(a.x, a.y, 0), S(b.x, b.y, 0), S(b.x, b.y, Do), S(a.x, a.y, Do) };
-            gfx.DrawPolygon(wallFill, q, XFillMode.Winding);
-            gfx.DrawPolygon(front ? pen : faint, q);
+            var p0 = S(ax, ay, 0); var p1 = S(bx, by, 0); var p2 = S(bx, by, Do); var p3 = S(ax, ay, Do);
+            gfx.DrawPolygon(wallFill, new[] { p0, p1, p2, p3 }, XFillMode.Winding);
+            var wp = front ? pen : faint;
+            gfx.DrawLine(wp, p0, p1); gfx.DrawLine(wp, p1, p2); gfx.DrawLine(wp, p2, p3); gfx.DrawLine(wp, p3, p0);
         }
-        Wall(s.PanTop,    (Lo, Wo), (0, Wo), front: false);   // back-left
-        Wall(s.PanRight,  (Lo, 0),  (Lo, Wo), front: false);  // back-right
-        Wall(s.PanBottom, (0, 0),   (Lo, 0),  front: true);   // front
-        Wall(s.PanLeft,   (0, Wo),  (0, 0),   front: true);   // front
+        Wall(s.PanTop,    Lo, Wo, 0,  Wo, front: false);   // back
+        Wall(s.PanRight,  Lo, 0,  Lo, Wo, front: false);   // back
+        Wall(s.PanBottom, 0,  0,  Lo, 0,  front: true);    // front
+        Wall(s.PanLeft,   0,  Wo, 0,  0,  front: true);    // front
+
+        // Section-cut indicators (where the Side / End sections are taken), in a distinct colour.
+        var secCol = XColor.FromArgb(0, 150, 70);
+        var secPen = new XPen(secCol, 1.3) { DashStyle = XDashStyle.Dash };
+        var secBrush = new XSolidBrush(secCol);
+        var secFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        double xm = Lo / 2, ym = Wo / 2;
+        gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, Wo, 0));                      // side cut: plane across the width
+        if (s.PanBottom) gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, 0, Do));
+        if (s.PanTop) gfx.DrawLine(secPen, S(xm, Wo, 0), S(xm, Wo, Do));
+        var sl = S(xm, 0, Do);
+        gfx.DrawString("Side", secFont, secBrush, new XRect(sl.X - 22, sl.Y - 12, 24, 10), XStringFormats.TopRight);
+        gfx.DrawLine(secPen, S(0, ym, 0), S(Lo, ym, 0));                      // end cut: plane across the length
+        if (s.PanLeft) gfx.DrawLine(secPen, S(0, ym, 0), S(0, ym, Do));
+        if (s.PanRight) gfx.DrawLine(secPen, S(Lo, ym, 0), S(Lo, ym, Do));
+        var el = S(Lo, ym, Do);
+        gfx.DrawString("End", secFont, secBrush, new XRect(el.X + 2, el.Y - 12, 24, 10), XStringFormats.TopLeft);
 
         // Wall-height dim on the front-left vertical edge.
         var d0 = S(0, 0, 0); var d1 = S(0, 0, Do);
