@@ -55,39 +55,31 @@ public static class FlatPattern
         double R = Math.Min(Math.Max(ri, t), wallDev * 0.7);   // relief reach, kept within the flange
         const double rt2 = 0.70710678;
 
-        // Smooth circular arc through three points (p1 -> p2 -> p3), tessellated.
-        void ArcThrough(List<CutVertex> o, double x1, double y1, double x2, double y2, double x3, double y3)
+        // Relief: the developed bend-corner cut. The notch edges pull back along the bend lines and sweep
+        // INTO the base to a peak just past the bend root (the unrolled 45°-cut quarter cylinder), so the
+        // relief follows the bend radius. (rx,ry) = bend root; (bdx,bdy) = bisector into the base.
+        void Scallop(List<CutVertex> o, double x1, double y1, double x2, double y2, double rx, double ry, double bdx, double bdy)
         {
-            double dd = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
-            if (Math.Abs(dd) < 1e-9) { o.Add(new(x1, y1)); o.Add(new(x2, y2)); o.Add(new(x3, y3)); return; }
-            double s1 = x1 * x1 + y1 * y1, s2c = x2 * x2 + y2 * y2, s3 = x3 * x3 + y3 * y3;
-            double ux = (s1 * (y2 - y3) + s2c * (y3 - y1) + s3 * (y1 - y2)) / dd;
-            double uy = (s1 * (x3 - x2) + s2c * (x1 - x3) + s3 * (x2 - x1)) / dd;
-            double rad = Math.Sqrt((x1 - ux) * (x1 - ux) + (y1 - uy) * (y1 - uy));
-            double a1 = Math.Atan2(y1 - uy, x1 - ux), a2 = Math.Atan2(y2 - uy, x2 - ux), a3 = Math.Atan2(y3 - uy, x3 - ux);
-            double tp = 2 * Math.PI;
-            double d3 = ((a3 - a1) % tp + tp) % tp, d2 = ((a2 - a1) % tp + tp) % tp;
-            double sweep = d2 <= d3 ? d3 : d3 - tp;
+            double mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+            double apx = rx + bdx * 1.2 * R, apy = ry + bdy * 1.2 * R;    // peak past the bend root, into the base
+            double cx = 2 * apx - mx, cy = 2 * apy - my;                  // bezier control so the curve peaks at the apex
             const int n = 12;
-            for (int s2 = 0; s2 <= n; s2++) { double a = a1 + sweep * s2 / n; o.Add(new CutVertex(ux + rad * Math.Cos(a), uy + rad * Math.Sin(a))); }
-        }
-
-        // Relief: a concave fillet that rounds the re-entrant corner toward the bend root (radius = bend
-        // radius). bdx/bdy is the bisector toward the base; the arc apex sits between the chord and the root.
-        void Scallop(List<CutVertex> o, double x1, double y1, double x2, double y2, double bdx, double bdy)
-        {
-            double mx = (x1 + x2) / 2, my = (y1 + y2) / 2, dep = 0.45 * R;
-            ArcThrough(o, x1, y1, mx + bdx * dep, my + bdy * dep, x2, y2);
+            for (int s2 = 0; s2 <= n; s2++)
+            {
+                double u = (double)s2 / n, v = 1 - u;
+                o.Add(new CutVertex(v * v * x1 + 2 * v * u * cx + u * u * x2,
+                                    v * v * y1 + 2 * v * u * cy + u * u * y2));
+            }
         }
 
         var ol = new List<CutVertex> { new(blN ? bx0 : 0, 0), new(brN ? bx1 : xMax, 0) };
-        if (brN) { Scallop(ol, bx1, by0 - R, bx1 + R, by0, -rt2, rt2); ol.Add(new(xMax, by0)); }
+        if (brN) { Scallop(ol, bx1, by0 - R, bx1 + R, by0, bx1, by0, -rt2, rt2); ol.Add(new(xMax, by0)); }
         ol.Add(new(xMax, trN ? by1 : yMax));
-        if (trN) { Scallop(ol, bx1 + R, by1, bx1, by1 + R, -rt2, -rt2); ol.Add(new(bx1, yMax)); }
+        if (trN) { Scallop(ol, bx1 + R, by1, bx1, by1 + R, bx1, by1, -rt2, -rt2); ol.Add(new(bx1, yMax)); }
         ol.Add(new(tlN ? bx0 : 0, yMax));
-        if (tlN) { Scallop(ol, bx0, by1 + R, bx0 - R, by1, rt2, -rt2); ol.Add(new(0, by1)); }
+        if (tlN) { Scallop(ol, bx0, by1 + R, bx0 - R, by1, bx0, by1, rt2, -rt2); ol.Add(new(0, by1)); }
         ol.Add(new(0, blN ? by0 : 0));
-        if (blN) Scallop(ol, bx0 - R, by0, bx0, by0 - R, rt2, rt2);
+        if (blN) Scallop(ol, bx0 - R, by0, bx0, by0 - R, bx0, by0, rt2, rt2);
 
         var entities = new List<CutEntity> { CutEntity.Polyline(CutLayer, closed: true, ol) };
 

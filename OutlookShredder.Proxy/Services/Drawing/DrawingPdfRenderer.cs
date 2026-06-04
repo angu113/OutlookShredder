@@ -313,17 +313,10 @@ public static class DrawingPdfRenderer
             gfx.DrawLine(faint, frontS[i], backS[i]);
         DrawLoop(gfx, pen, frontS);
 
-        // Section-cut indicator: the End-section profile is taken perpendicular to the length;
-        // show its cutting plane on the formed part in a distinct colour.
-        var secCol = XColor.FromArgb(0, 150, 70);
-        var secPen = new XPen(secCol, 1.2) { DashStyle = XDashStyle.Dash };
+        // Section-cut plane (End section, dash-dot) on the formed part; keyed under the drawing.
+        var secPen = new XPen(XColor.FromArgb(0, 150, 70), 1.3) { DashStyle = XDashStyle.DashDot };
         var midS = prof.Select(p => S(Iso(p.x, p.y, len / 2))).ToArray();
         DrawLoop(gfx, secPen, midS);
-        // Section label outside the part (top of the panel), with a leader to the cut plane.
-        var secLbl = new XPoint(midS.Min(p => p.X), area.Y + 8);
-        gfx.DrawLine(secPen, new XPoint(midS.Min(p => p.X), midS.Min(p => p.Y)), secLbl);
-        gfx.DrawString("End section", new XFont("Arial", 7, XFontStyleEx.Bold), new XSolidBrush(secCol),
-            new XRect(secLbl.X - 34, secLbl.Y - 9, 68, 9), XStringFormats.TopCenter);
 
         // Length dimension on the front-most outer edge, ~1/4" off the part.
         double bMinX = frontS.Concat(backS).Min(p => p.X), bMaxX = frontS.Concat(backS).Max(p => p.X);
@@ -539,24 +532,17 @@ public static class DrawingPdfRenderer
         Wall(s.PanBottom, 0,  0,  Lo, 0,  front: true);    // front
         Wall(s.PanLeft,   0,  Wo, 0,  0,  front: true);    // front
 
-        // Section-cut indicators (where the Side / End sections are taken), in a distinct colour.
+        // Section-cut planes: Side = dashed, End = dash-dot (keyed under the drawing — no labels on the part).
         var secCol = XColor.FromArgb(0, 150, 70);
-        var secPen = new XPen(secCol, 1.3) { DashStyle = XDashStyle.Dash };
-        var secBrush = new XSolidBrush(secCol);
-        var secFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var sidePen = new XPen(secCol, 1.4) { DashStyle = XDashStyle.Dash };
+        var endPen = new XPen(secCol, 1.4) { DashStyle = XDashStyle.DashDot };
         double xm = Lo / 2, ym = Wo / 2;
-        gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, Wo, 0));                      // side cut: plane across the width
-        if (s.PanBottom) gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, 0, Do));
-        if (s.PanTop) gfx.DrawLine(secPen, S(xm, Wo, 0), S(xm, Wo, Do));
-        var st = S(xm, Wo, Do); var stp = new XPoint(st.X, oy - 2);           // label above the part
-        gfx.DrawLine(secPen, st, stp);
-        gfx.DrawString("Side", secFont, secBrush, new XRect(stp.X - 18, stp.Y - 9, 36, 10), XStringFormats.TopCenter);
-        gfx.DrawLine(secPen, S(0, ym, 0), S(Lo, ym, 0));                      // end cut: plane across the length
-        if (s.PanLeft) gfx.DrawLine(secPen, S(0, ym, 0), S(0, ym, Do));
-        if (s.PanRight) gfx.DrawLine(secPen, S(Lo, ym, 0), S(Lo, ym, Do));
-        var et = S(Lo, ym, Do); var etp = new XPoint(ox + gw * scale + 6, et.Y);   // label right of the part
-        gfx.DrawLine(secPen, et, etp);
-        gfx.DrawString("End", secFont, secBrush, new XRect(etp.X + 2, et.Y - 5, 28, 10), XStringFormats.TopLeft);
+        gfx.DrawLine(sidePen, S(xm, 0, 0), S(xm, Wo, 0));
+        if (s.PanBottom) gfx.DrawLine(sidePen, S(xm, 0, 0), S(xm, 0, Do));
+        if (s.PanTop) gfx.DrawLine(sidePen, S(xm, Wo, 0), S(xm, Wo, Do));
+        gfx.DrawLine(endPen, S(0, ym, 0), S(Lo, ym, 0));
+        if (s.PanLeft) gfx.DrawLine(endPen, S(0, ym, 0), S(0, ym, Do));
+        if (s.PanRight) gfx.DrawLine(endPen, S(Lo, ym, 0), S(Lo, ym, Do));
 
         // Wall-height dim on the front-left vertical edge.
         var d0 = S(0, 0, 0); var d1 = S(0, 0, Do);
@@ -622,6 +608,25 @@ public static class DrawingPdfRenderer
         gfx.DrawString(
             $"solid = cut  |  dashed = bend up  |  bold = as specified  |  inside radius Ri {F(fp.Spec.InsideRadius)}\"  |  all dimensions in decimal inches",
             font, DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
+
+        // Section-cut key (formed-part plane line styles), right side of the box.
+        if (!fp.IsPlate)
+        {
+            var secCol = XColor.FromArgb(0, 150, 70);
+            var kf = new XFont("Arial", 7, XFontStyleEx.Regular);
+            var kb = new XSolidBrush(secCol);
+            double kx = box.X + box.Width - 230, ky = box.Y + 8;
+            gfx.DrawString("Formed-part section cuts:", kf, kb, new XRect(kx, ky - 4, 110, 9), XStringFormats.TopLeft);
+            double lx = kx + 102;
+            if (fp.IsPan)
+            {
+                gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.Dash }, new XPoint(lx, ky), new XPoint(lx + 22, ky));
+                gfx.DrawString("Side", kf, kb, new XRect(lx + 25, ky - 4, 28, 9), XStringFormats.TopLeft);
+                lx += 54;
+            }
+            gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.DashDot }, new XPoint(lx, ky), new XPoint(lx + 22, ky));
+            gfx.DrawString("End", kf, kb, new XRect(lx + 25, ky - 4, 28, 9), XStringFormats.TopLeft);
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
