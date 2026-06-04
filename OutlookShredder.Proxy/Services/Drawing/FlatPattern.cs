@@ -60,15 +60,20 @@ public static class FlatPattern
         // relief follows the bend radius. (rx,ry) = bend root; (bdx,bdy) = bisector into the base.
         void Scallop(List<CutVertex> o, double x1, double y1, double x2, double y2, double rx, double ry, double bdx, double bdy)
         {
-            double mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
             double apx = rx + bdx * 1.2 * R, apy = ry + bdy * 1.2 * R;    // peak past the bend root, into the base
-            double cx = 2 * apx - mx, cy = 2 * apy - my;                  // bezier control so the curve peaks at the apex
-            const int n = 12;
-            for (int s2 = 0; s2 <= n; s2++)
+            const int n = 8;
+            // Two concave halves meeting at the peak, each bowed toward the bend root (the central axis).
+            for (int s2 = 0; s2 <= n; s2++)              // first notch edge -> peak (control = root)
             {
                 double u = (double)s2 / n, v = 1 - u;
-                o.Add(new CutVertex(v * v * x1 + 2 * v * u * cx + u * u * x2,
-                                    v * v * y1 + 2 * v * u * cy + u * u * y2));
+                o.Add(new CutVertex(v * v * x1 + 2 * v * u * rx + u * u * apx,
+                                    v * v * y1 + 2 * v * u * ry + u * u * apy));
+            }
+            for (int s2 = 1; s2 <= n; s2++)              // peak -> second notch edge (control = root)
+            {
+                double u = (double)s2 / n, v = 1 - u;
+                o.Add(new CutVertex(v * v * apx + 2 * v * u * rx + u * u * x2,
+                                    v * v * apy + 2 * v * u * ry + u * u * y2));
             }
         }
 
