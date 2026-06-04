@@ -34,6 +34,11 @@ public class FileWatcherService : BackgroundService
     // Drives auto-add into the Trigger Prioritize column (WorkflowCardService.AutoCreateFromPickingSlipAsync).
     private readonly IReadOnlyList<string> _processingKeywords;
 
+    // ── ErpFooter: stamps a configurable T&C footer on Sales Orders / Quotations ──
+    private readonly bool _footerEnabled;
+    private readonly HashSet<string> _footerDocTypes;
+    private readonly ErpDocumentFooterService.FooterOptions? _footerOptions;
+
     // Files waiting to be processed — Channel gives immediate wake-up vs. poll loop
     private readonly Channel<string> _fileChannel = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleWriter = false, SingleReader = true });
@@ -70,6 +75,27 @@ public class FileWatcherService : BackgroundService
 
         _processingKeywords = config.GetSection("Workflow:ProcessingKeywords").Get<string[]>()
                               ?? ["Laser Cutting", "Bending", "Welding", "Drilling", "Fabricating"];
+
+        // ErpFooter — build the footer options once from config. Disabled (null options) when
+        // the section is off or no text is configured, so stamping is skipped entirely.
+        _footerEnabled  = config.GetValue("ErpFooter:Enabled", false);
+        _footerDocTypes = new(
+            config.GetSection("ErpFooter:DocumentTypes").Get<string[]>() ?? ["SalesOrder", "Quotation"],
+            StringComparer.OrdinalIgnoreCase);
+        var footerText = config["ErpFooter:Text"];
+        _footerOptions = _footerEnabled && !string.IsNullOrWhiteSpace(footerText)
+            ? new ErpDocumentFooterService.FooterOptions
+            {
+                Text           = footerText,
+                FontSizePt     = config.GetValue("ErpFooter:FontSizePt",     7.0),
+                SideMarginPt   = config.GetValue("ErpFooter:SideMarginPt",   36.0),
+                BottomMarginPt = config.GetValue("ErpFooter:BottomMarginPt", 14.0),
+                BoxHeightPt    = config.GetValue("ErpFooter:BoxHeightPt",    30.0),
+                EveryPage      = config.GetValue("ErpFooter:EveryPage",      true),
+                TopRule        = config.GetValue("ErpFooter:TopRule",        true),
+                Center         = config.GetValue("ErpFooter:Center",         true),
+            }
+            : null;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -375,8 +401,9 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
-        // Payment and Quotation files are not needed — mark processed and skip
-        if (erpInfo.DocumentType is "Payment" or "Quotation")
+        // Payment files are not needed — mark processed and skip.
+        // (Quotations are now ingested so the T&C footer can be stamped on them — ErpFooter feature.)
+        if (erpInfo.DocumentType is "Payment")
         {
             _log.LogDebug("[FW] {File} — {Type} ignored; marked as processed", fileName, erpInfo.DocumentType);
             if (key is not null) MarkProcessed(key);
@@ -454,6 +481,27 @@ public class FileWatcherService : BackgroundService
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File}", fileName);
+            }
+        }
+
+        // Sales Orders / Quotations: stamp the configurable T&C footer (white box blocks the
+        // existing page-bottom boilerplate). Reuses the modified-bytes → temp-file → SP path below.
+        if (_footerOptions is not null && _footerDocTypes.Contains(extraction.DocumentType ?? ""))
+        {
+            try
+            {
+                var stamped = ErpDocumentFooterService.StampFooter(bytes, _footerOptions, _log);
+                if (!ReferenceEquals(stamped, bytes))
+                {
+                    bytes = stamped;
+                    bytesModified = true;
+                    _log.LogInformation("[FW] T&C footer stamped on {Type} {File}",
+                        extraction.DocumentType, fileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] T&C footer stamp failed for {File}", fileName);
             }
         }
 

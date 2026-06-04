@@ -25,7 +25,11 @@ internal static class PickingSlipEnricher
     private static readonly object _fontLock = new();
     private static bool _fontResolverSet;
 
-    private static void EnsureFontResolver()
+    /// <summary>
+    /// Sets the global Arial font resolver exactly once. Shared with
+    /// <see cref="ErpDocumentFooterService"/> so both PDF-write paths embed fonts identically.
+    /// </summary>
+    internal static void EnsureFontResolver()
     {
         if (_fontResolverSet) return;
         lock (_fontLock)

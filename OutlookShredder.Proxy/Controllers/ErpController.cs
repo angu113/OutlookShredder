@@ -205,6 +205,66 @@ public class ErpController : ControllerBase
         }
     }
 
+    public sealed class FooterPreviewRequest
+    {
+        /// <summary>Local file path or SharePoint HTTPS URL of the source PDF.</summary>
+        public string? Url { get; set; }
+        /// <summary>Override footer text. Falls back to config ErpFooter:Text when omitted.</summary>
+        public string? Text { get; set; }
+        public double? FontSizePt { get; set; }
+        public double? SideMarginPt { get; set; }
+        public double? BottomMarginPt { get; set; }
+        public double? BoxHeightPt { get; set; }
+        public bool? EveryPage { get; set; }
+        public int? OnlyPageIndex { get; set; }
+        public bool? TopRule { get; set; }
+        public bool? Center { get; set; }
+    }
+
+    /// <summary>
+    /// Stamps the T&amp;C footer onto a PDF and returns the stamped bytes — a visual-tuning
+    /// harness for the ErpFooter feature. Geometry params override config so the look can be
+    /// iterated without redeploying. url may be a local path or an SP HTTPS URL.
+    /// </summary>
+    [HttpPost("/api/erp/footer-preview")]
+    public async Task<IActionResult> FooterPreview([FromBody] FooterPreviewRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.Url))
+            return BadRequest(new { error = "url is required (local path or SP HTTPS URL)" });
+
+        var text = !string.IsNullOrWhiteSpace(req.Text) ? req.Text : _config["ErpFooter:Text"];
+        if (string.IsNullOrWhiteSpace(text))
+            return BadRequest(new { error = "no text supplied and ErpFooter:Text is not configured" });
+
+        try
+        {
+            var bytes = req.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? await _sp.DownloadSpFileAsync(req.Url, ct)
+                : await System.IO.File.ReadAllBytesAsync(req.Url, ct);
+
+            var opts = new ErpDocumentFooterService.FooterOptions
+            {
+                Text           = text,
+                FontSizePt     = req.FontSizePt     ?? _config.GetValue("ErpFooter:FontSizePt",     7.0),
+                SideMarginPt   = req.SideMarginPt   ?? _config.GetValue("ErpFooter:SideMarginPt",   36.0),
+                BottomMarginPt = req.BottomMarginPt ?? _config.GetValue("ErpFooter:BottomMarginPt", 14.0),
+                BoxHeightPt    = req.BoxHeightPt    ?? _config.GetValue("ErpFooter:BoxHeightPt",    30.0),
+                EveryPage      = req.EveryPage      ?? _config.GetValue("ErpFooter:EveryPage",      true),
+                OnlyPageIndex  = req.OnlyPageIndex,
+                TopRule        = req.TopRule        ?? _config.GetValue("ErpFooter:TopRule",        true),
+                Center         = req.Center         ?? _config.GetValue("ErpFooter:Center",         true),
+            };
+
+            var stamped = ErpDocumentFooterService.StampFooter(bytes, opts, _log);
+            return File(stamped, "application/pdf");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[ERP] footer-preview failed for {Url}", req.Url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Proxies a SharePoint PDF download using app-only credentials.
     /// Clients cannot fetch SharePoint WebUrls directly (no auth); this endpoint adds the Bearer token.
