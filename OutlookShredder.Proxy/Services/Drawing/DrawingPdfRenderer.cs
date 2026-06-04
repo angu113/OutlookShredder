@@ -64,7 +64,11 @@ public static class DrawingPdfRenderer
             double footTop = ph - M - footH;
             double h = footTop - top - 8;
 
-            if (fp.IsPlate)
+            if (fp.IsPan)
+            {
+                DrawPan(gfx, fp, new XRect(M, top, usable, h));
+            }
+            else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
             }
@@ -405,6 +409,58 @@ public static class DrawingPdfRenderer
                 DimH(gfx, dimFont, P(0, 0).X, P(hx, 0).X, oy, oy - 16, F(hx), false);
             }
         }
+    }
+
+    // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──
+    private static void DrawPan(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var bendPen = new XPen(BendColor, 0.9) { DashStyle = XDashStyle.Dash };
+
+        gfx.DrawString("Flat pattern  (solid = cut, dashed = bend up)", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double L = fp.FlatWidth, W = fp.FlatHeight;
+        if (L <= 0 || W <= 0) return;
+        const double band = 60;
+        double availW = area.Width - band * 2, availH = area.Height - band * 2;
+        double scale = Math.Min(availW / L, availH / W);
+        double drawW = L * scale, drawH = W * scale;
+        double ox = area.X + (area.Width - drawW) / 2;
+        double oy = area.Y + (area.Height - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        foreach (var e in fp.Cut.Entities)
+        {
+            var pen = e.Layer == FlatPattern.BendLayer ? bendPen : cutPen;
+            switch (e.Type)
+            {
+                case "polyline" when e.Vertices is { Count: > 1 }:
+                    var pts = e.Vertices.Select(v => P(v.X, v.Y)).ToArray();
+                    if (e.Closed) gfx.DrawPolygon(pen, pts); else gfx.DrawLines(pen, pts);
+                    break;
+                case "line":
+                    gfx.DrawLine(pen, P(e.X1, e.Y1), P(e.X2, e.Y2));
+                    break;
+                case "circle":
+                    double r = e.R * scale; var c = P(e.Cx, e.Cy);
+                    gfx.DrawEllipse(pen, c.X - r, c.Y - r, 2 * r, 2 * r);
+                    break;
+            }
+        }
+
+        // Dimensions: base length & width (between bend lines) + the fold inset (flange flat).
+        var s = fp.Spec;
+        double bx0 = fp.PanBaseX0, bx1 = fp.PanBaseX1, by0 = fp.PanBaseY0, by1 = fp.PanBaseY1;
+        DimH(gfx, dimFont, P(bx0, by0).X, P(bx1, by0).X, P(bx0, by0).Y, oy + drawH + 24, F(s.Length), true);
+        DimV(gfx, dimFont, P(bx0, by0).X, ox - 46, P(bx0, by0).Y, P(bx0, by1).Y, F(s.Width), true);
+        if (s.PanBottom && by0 > 0)
+            DimV(gfx, dimFont, P(bx1, 0).X, P(bx1, 0).X + 26, P(bx1, 0).Y, P(bx1, by0).Y, F(fp.PanWallDev), false);
+        else if (s.PanLeft && bx0 > 0)
+            DimH(gfx, dimFont, P(0, by0).X, P(bx0, by0).X, P(0, by0).Y, oy + drawH + 24, F(fp.PanWallDev), false);
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────

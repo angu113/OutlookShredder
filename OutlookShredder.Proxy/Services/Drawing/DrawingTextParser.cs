@@ -66,6 +66,10 @@ public static class DrawingTextParser
         if (type is PartType.FlitchPlate or PartType.BasePlate)
             return ParsePlate(type, lower, thickness, materialLabel, ri, k);
 
+        // ── Pan — L x W x D plus which walls are present; parsed + returned here ──
+        if (type == PartType.Pan)
+            return ParsePan(lower, thickness, materialLabel, ri, k, finish);
+
         // ── Global basis (whole words only; id/od are reserved for per-dim) ──
         DimBasis globalBasis = Regex.IsMatch(lower, @"\binside\b") ? DimBasis.Inside : DimBasis.Outside;
 
@@ -167,8 +171,8 @@ public static class DrawingTextParser
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
         if (Regex.IsMatch(lower, @"\bflitch\b"))      return PartType.FlitchPlate;
         if (Regex.IsMatch(lower, @"\bbase\s*plate\b")) return PartType.BasePlate;
+        if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) return PartType.Pan;
         if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("Hat");
-        if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) throw NotYet("Pan");
         throw new DrawingParseException(
             "Could not identify the part type. Start with U (U-channel), L (angle) or Z (Z-channel).");
     }
@@ -245,6 +249,32 @@ public static class DrawingTextParser
         {
             Type = type, Length = L, Width = W, Thickness = thickness,
             InsideRadius = ri, KFactor = k, Material = material, Holes = holes, Units = "in",
+        };
+    }
+
+    /// <summary>Parses a pan — "Pan L x W x D, {n} long {n} short, {material}".</summary>
+    private static PartSpec ParsePan(string lower, double thickness, string material, double ri, double k, FinishSide finish)
+    {
+        if (thickness <= 0)
+            throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"16ga\").");
+
+        var m = Regex.Match(lower, $@"\b(?:pan|tray)\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+        if (!m.Success)
+            throw new DrawingParseException("Pan needs length x width x depth, e.g. \"Pan 24 x 18 x 2, 2 long 2 short, 16ga\".");
+        double L = NumOf(m.Groups[1].Value), W = NumOf(m.Groups[2].Value), D = NumOf(m.Groups[3].Value);
+        if (L <= 0 || W <= 0 || D <= 0) throw new DrawingParseException("Pan dimensions must be positive.");
+
+        int longN  = (int)Math.Round(MatchNum(lower, $@"({Num})\s*long")  ?? 2);
+        int shortN = (int)Math.Round(MatchNum(lower, $@"({Num})\s*short") ?? 2);
+
+        return new PartSpec
+        {
+            Type = PartType.Pan,
+            Length = L, Width = W, Depth = D,
+            Thickness = thickness, InsideRadius = ri, KFactor = k, AngleDeg = 90,
+            Material = material, Units = "in", Finish = finish,
+            PanBottom = longN >= 1, PanTop = longN >= 2,
+            PanLeft = shortN >= 1, PanRight = shortN >= 2,
         };
     }
 

@@ -23,8 +23,90 @@ public static class FlatPattern
         PartType.LAngle      => DevelopLAngle(spec),
         PartType.FlitchPlate => DevelopPlate(spec),
         PartType.BasePlate   => DevelopPlate(spec),
+        PartType.Pan         => DevelopPan(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
+
+    // ── Pan (base + up to 4 walls, 90° bends, mitered corners with bend-root relief) ──
+    private static FlatPatternResult DevelopPan(PartSpec spec)
+    {
+        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = 90;
+        double Lo = spec.Length, Wo = spec.Width, Do = spec.Depth;
+        bool wB = spec.PanBottom, wT = spec.PanTop, wL = spec.PanLeft, wR = spec.PanRight;
+
+        double ossb = BendMath.Ossb(ri, t, angle);
+        double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
+        double wallDev = Math.Max(0.1, Do - bd);   // flange flat length (keeps the total blank correct)
+        double relief = Math.Max(0.02, t);          // bend-root relief radius = 1× thickness
+
+        // Base inner rectangle (between bend lines); each present wall extends the blank by wallDev.
+        double bx0 = wL ? wallDev : 0, bx1 = bx0 + Lo, xMax = bx1 + (wR ? wallDev : 0);
+        double by0 = wB ? wallDev : 0, by1 = by0 + Wo, yMax = by1 + (wT ? wallDev : 0);
+
+        var entities = new List<CutEntity>
+        {
+            CutEntity.Polyline(CutLayer, closed: true, new[]
+            {
+                new CutVertex(0, 0), new CutVertex(xMax, 0), new CutVertex(xMax, yMax), new CutVertex(0, yMax),
+            }),
+        };
+
+        // Bend lines (only where a wall is present), spanning the base edge.
+        if (wB) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx1, by0));
+        if (wT) entities.Add(CutEntity.Line(BendLayer, bx0, by1, bx1, by1));
+        if (wL) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx0, by1));
+        if (wR) entities.Add(CutEntity.Line(BendLayer, bx1, by0, bx1, by1));
+
+        // Mitered corner where both adjoining walls exist: a slit from the outer corner to a
+        // relief hole at the bend-line intersection so the two flanges fold to a clean miter.
+        void Miter(bool present, double ocx, double ocy, double rcx, double rcy)
+        {
+            if (!present) return;
+            double dx = rcx - ocx, dy = rcy - ocy, l = Math.Sqrt(dx * dx + dy * dy);
+            if (l < 1e-6) return;
+            double ux = dx / l, uy = dy / l;
+            entities.Add(CutEntity.Line(CutLayer, ocx, ocy, rcx - ux * relief, rcy - uy * relief));
+            entities.Add(CutEntity.Circle(CutLayer, rcx, rcy, relief));
+        }
+        Miter(wB && wL, 0,    0,    bx0, by0);
+        Miter(wB && wR, xMax, 0,    bx1, by0);
+        Miter(wT && wR, xMax, yMax, bx1, by1);
+        Miter(wT && wL, 0,    yMax, bx0, by1);
+
+        string slug = $"pan_{Trim(Lo)}x{Trim(Wo)}x{Trim(Do)}";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec, Ossb = ossb, BendDeduction = bd,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = xMax, FlatHeight = yMax,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsPan = true,
+            PanBaseX0 = bx0, PanBaseX1 = bx1, PanBaseY0 = by0, PanBaseY1 = by1, PanWallDev = wallDev,
+            Summary = PanSummary(spec),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static string PanSummary(PartSpec s)
+    {
+        string u = s.Units;
+        int longN = (s.PanBottom ? 1 : 0) + (s.PanTop ? 1 : 0);
+        int shortN = (s.PanLeft ? 1 : 0) + (s.PanRight ? 1 : 0);
+        return string.Join("\n", new[]
+        {
+            $"Pan  {s.Material}  (T={F(s.Thickness)}{u})",
+            $"Base {F(s.Length)}{u} x {F(s.Width)}{u}, wall {F(s.Depth)}{u} deep",
+            $"Walls: {longN} long + {shortN} short; mitered corners, bend relief {F(s.Thickness)}{u}",
+        });
+    }
 
     // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
     private static FlatPatternResult DevelopPlate(PartSpec spec)
@@ -334,6 +416,9 @@ public static class FlatPattern
             return $"{MaterialPlain(s.Material)} {plate} {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Thickness)}\"".Trim();
         }
 
+        if (s.Type == PartType.Pan)
+            return $"{MaterialPlain(s.Material)} Pan {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Depth)}\" deep x {N(s.Thickness)}\"".Trim();
+
         string shape = s.Type switch
         {
             PartType.UChannel => "U Channel",
@@ -415,6 +500,14 @@ public sealed class FlatPatternResult
     public List<(double x, double y)> Profile { get; init; } = new();
     /// <summary>True for flat plates (Flitch / Base) — drawn as a single top view, not 3 panels.</summary>
     public bool IsPlate { get; init; }
+    /// <summary>True for pans — drawn as a single flat-pattern top view (cut + bend lines + reliefs).</summary>
+    public bool IsPan { get; init; }
+    // Pan base rectangle (between bend lines) + flange flat length, for dimensioning.
+    public double PanBaseX0 { get; init; }
+    public double PanBaseX1 { get; init; }
+    public double PanBaseY0 { get; init; }
+    public double PanBaseY1 { get; init; }
+    public double PanWallDev { get; init; }
     /// <summary>Plate bolt holes (centre x, y, diameter) in plate coords.</summary>
     public List<(double x, double y, double dia)> Holes { get; init; } = new();
     public required string Summary { get; init; }

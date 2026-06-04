@@ -70,8 +70,17 @@ public sealed class PartSpec
     /// <summary>The part run / depth. No inside/outside basis — it is the blank's other extent.</summary>
     public double Length { get; init; }
 
-    /// <summary>Plate width (for flat plates; Length is the plate length).</summary>
+    /// <summary>Plate width (for flat plates; Length is the plate length). Also the pan base width.</summary>
     public double Width { get; init; }
+
+    /// <summary>Pan wall height (outside).</summary>
+    public double Depth { get; init; }
+    // Which pan walls are present. Bottom/Top run along the Length ("long" sides);
+    // Left/Right run along the Width ("short" sides). A 3-sided pan omits one.
+    public bool PanBottom { get; init; } = true;
+    public bool PanTop { get; init; } = true;
+    public bool PanLeft { get; init; } = true;
+    public bool PanRight { get; init; } = true;
     /// <summary>Bolt holes for flat plates.</summary>
     public HoleSpec? Holes { get; init; }
 
