@@ -32,13 +32,13 @@ public static class MailTaxonomy
             "Confirmation that a payment we made to a supplier or service provider has ALREADY been made or charged: payment receipts, credit-card authorizations/approvals, 'Purchase Receipt', 'transaction approved/charged', 'payment received', 'thank you for your payment' — even when it shows an amount, and even when sent via a billing processor (QuickBooks/Intuit, Enmark, SlimCD, etc.; identify the real supplier from the body). The test is do we still OWE it (Invoices and Bills) or has it already been PAID (Receipts). Supplier/Receipts cover payments to our SUPPLIERS for INVENTORY (the metal we resell) and SERVICES (e.g. powder coating, processing) - a separate accounting bucket from Corporate/Receipts, which is our own operating expenses (shop/office supplies, fuel, postage, subscriptions)."),
 
         new("Customer", "Inquiries",
-            "General requests for metal or fabrication."),
+            "A customer's request for material or fabrication/services that they emailed us DIRECTLY - the customer is the sender. Same intent as Customer/Website Inquiries, but it came straight to us rather than via a website form. Not a booked order (that is Customer/Web Orders or Customer/Orders)."),
         new("Customer", "Website Inquiries",
-            "Requests for material or fabrication sent to us from the franchise website."),
+            "A request for material or fabrication submitted via a web form on the Franchisor website, notified to us by email. Same intent as a direct Customer/Inquiry, but because it arrives through the website the real customer CONTACT EMAIL is inside the message BODY, not the sender address (important when replying). Still an inquiry/quote request - NOT a booked order (that is Customer/Web Orders)."),
         new("Customer", "Orders",
             "Follow-ups on orders in progress; usually carry the sales order reference HSK-SOxxxxxxx in the subject; includes customer POs sent to us."),
         new("Customer", "Web Orders",
-            "Orders booked from the franchise website, notified by email with an attached invoice/order to process."),
+            "An ACTUAL order placed through the Franchisor website (not just an inquiry), notified to us by email - typically with an attached invoice/order to process and often an EC###### reference. These are monitored and carry SLAs, so they are time-sensitive. Distinct from Customer/Website Inquiries, which is a request/quote with no order yet."),
         new("Customer", "Statements",
             "A customer (or someone acting for one) requesting their open-invoice / account statement from us. Distinct from Supplier/Statements, which is a statement a supplier sends to us."),
 
