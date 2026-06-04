@@ -584,6 +584,17 @@ public sealed class MailWorkbenchService
         if (matched is not null)
         {
             category = matched.Path;                               // existing leaf (canonical casing)
+            // Close the feedback loop: a correction to an EXISTING leaf with a reason becomes a Learned
+            // Hint so the classifier stops repeating the mistake. The leaf already exists, so this adds
+            // guidance only (no duplicate leaf). Skip when an identical hint is already recorded.
+            if (!string.IsNullOrWhiteSpace(reason))
+            {
+                var trimmed  = reason.Trim();
+                var existing = await _taxonomy.GetHintsAsync(ct);
+                if (!existing.Any(h => string.Equals(h.CategoryPath, category, StringComparison.OrdinalIgnoreCase)
+                                       && string.Equals(h.Hint?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase)))
+                    await _taxonomy.AddLeafHintAsync(category, trimmed, "amend", ct);
+            }
         }
         else if (requested.Length == 0 || string.Equals(requested, "Other", StringComparison.OrdinalIgnoreCase))
         {

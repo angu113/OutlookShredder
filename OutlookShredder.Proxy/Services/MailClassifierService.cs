@@ -90,6 +90,18 @@ public class MailClassifierService
         for the order, set expectedDate to it in ISO YYYY-MM-DD. Only a concrete date — if just a lead
         time is given (e.g. "ships in 2 weeks") leave expectedDate null. Set poNumber to our HSK-PO.
 
+        Using "Other" (the escape hatch — only when NOTHING above fits). Do NOT let it fragment into
+        near-duplicate labels. When you set category = "Other", choose otherLabel by REUSING the closest
+        of these canonical sub-labels (use the EXACT text) whenever it fits:
+            - "Shipping/Delivery Notification" — carrier tracking, freight/logistics coordination, shipment/delivery notices
+            - "IT/Security Notification" — security alerts, account-verification, IT / support-ticket notices (NOT one-time login/MFA codes — those are Other/Login Codes)
+            - "Zoning/Permit" — real-estate / zoning / permit-application mail
+            - "Voicemail Notification" — voicemail / missed-call notifications
+        Cold marketing, promotions, and unsolicited solicitations are Other/Junk (a real leaf), NOT a new
+        Other label. Only invent a NEW otherLabel when the email fits none of the above; keep it short and
+        general (two or three words) and prefer an existing label over a synonym — never create variants
+        like "Internal IT Support Ticket" alongside "IT/Security Notification".
+
         Also produce 5-15 lowercase search keywords (entities, document type, product/metal, supplier
         or customer name, reference numbers) to support full-text search, and extract poNumber,
         soNumber, and amount when present. Respond ONLY by calling the classify_email tool.
