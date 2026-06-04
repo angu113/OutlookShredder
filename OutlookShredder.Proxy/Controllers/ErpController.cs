@@ -270,7 +270,7 @@ public class ErpController : ControllerBase
     /// Clients cannot fetch SharePoint WebUrls directly (no auth); this endpoint adds the Bearer token.
     /// </summary>
     [HttpGet("/api/erp/pdf")]
-    public async Task<IActionResult> GetPdf([FromQuery] string url, CancellationToken ct)
+    public async Task<IActionResult> GetPdf([FromQuery] string url, [FromQuery] bool appendFabs, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url))
             return BadRequest(new { error = "url query parameter is required" });
@@ -278,6 +278,11 @@ public class ErpController : ControllerBase
         try
         {
             var bytes = await _sp.DownloadSpFileAsync(url, ct);
+            if (appendFabs)
+            {
+                try { bytes = PickingSlipFabAppender.AppendFabDrawings(bytes, _log); }
+                catch (Exception ex) { _log.LogWarning(ex, "[ERP] FAB drawing append failed for {Url}", url); }
+            }
             return File(bytes, "application/pdf");
         }
         catch (Exception ex)

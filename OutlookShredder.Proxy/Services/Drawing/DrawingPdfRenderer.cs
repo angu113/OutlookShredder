@@ -208,25 +208,34 @@ public static class DrawingPdfRenderer
                 break;
         }
 
-        // ── "Finish" arrow: word + leader pointing at the finished face ──────────
-        var finishFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        // ── "Finish" callout: boxed, highlighted label + leader to the finished face ──
+        var finishFont = new XFont("Arial", 10, XFontStyleEx.Bold);
         void FinishCallout(double mx, double my, double sdx, double sdy)
         {
             var tip = P(mx, my);
             double l = Math.Sqrt(sdx * sdx + sdy * sdy); if (l < 1e-6) l = 1;
             double ux = sdx / l, uy = sdy / l;
-            var tail = new XPoint(tip.X + ux * 24, tip.Y + uy * 24);
-            gfx.DrawLine(new XPen(CutColor, 1.0), tail, tip);
-            // black arrowhead at the tip, pointing from tail toward tip
-            double dx = -ux, dy = -uy, px = -dy, py = dx;
-            var b1 = new XPoint(tip.X - dx * 5 + px * 1.9, tip.Y - dy * 5 + py * 1.9);
-            var b2 = new XPoint(tip.X - dx * 5 - px * 1.9, tip.Y - dy * 5 - py * 1.9);
-            gfx.DrawPolygon(XBrushes.Black, new[] { tip, b1, b2 }, XFillMode.Winding);
-            XRect lr; XStringFormat fmt;
-            if (ux > 0.3)       { lr = new XRect(tail.X + 3, tail.Y - 6, 64, 12);  fmt = XStringFormats.CenterLeft; }
-            else if (ux < -0.3) { lr = new XRect(tail.X - 67, tail.Y - 6, 64, 12); fmt = XStringFormats.CenterRight; }
-            else                { lr = new XRect(tail.X - 32, uy > 0 ? tail.Y + 2 : tail.Y - 14, 64, 12); fmt = XStringFormats.Center; }
-            gfx.DrawString("Finish", finishFont, XBrushes.Black, lr, fmt);
+
+            // Boxed label, offset clear of the part; clamp inside the panel so it never clips the border.
+            var sz = gfx.MeasureString("Finish", finishFont);
+            double bw = sz.Width + 9, bh = sz.Height + 5;
+            var anchor = new XPoint(tip.X + ux * 34, tip.Y + uy * 34);
+            double bx = Math.Max(area.X + 1, Math.Min(anchor.X - bw / 2, area.X + area.Width - bw - 1));
+            double by = Math.Max(area.Y + 1, Math.Min(anchor.Y - bh / 2, area.Y + area.Height - bh - 1));
+            var br = new XRect(bx, by, bw, bh);
+
+            // Leader from the box toward the surface; arrowhead on the surface (box drawn over the tail).
+            var bc = new XPoint(br.X + bw / 2, br.Y + bh / 2);
+            gfx.DrawLine(new XPen(CutColor, 1.0), bc, tip);
+            double ax = tip.X - bc.X, ay = tip.Y - bc.Y, al = Math.Sqrt(ax * ax + ay * ay); if (al < 1e-6) al = 1;
+            double dx = ax / al, dy = ay / al, px = -dy, py = dx;
+            var a1 = new XPoint(tip.X - dx * 5 + px * 1.9, tip.Y - dy * 5 + py * 1.9);
+            var a2 = new XPoint(tip.X - dx * 5 - px * 1.9, tip.Y - dy * 5 - py * 1.9);
+            gfx.DrawPolygon(XBrushes.Black, new[] { tip, a1, a2 }, XFillMode.Winding);
+
+            gfx.DrawRectangle(XBrushes.White, br);
+            gfx.DrawRectangle(new XPen(XColor.FromArgb(110, 110, 110), 0.9), br);
+            gfx.DrawString("Finish", finishFont, XBrushes.Black, br, XStringFormats.Center);
         }
 
         switch (fp.Spec.Finish)

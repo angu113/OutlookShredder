@@ -164,11 +164,6 @@ internal static class PickingSlipEnricher
 
         bool hasHeaderBounds = hdrPsTop.HasValue && hdrPsHeight is > 0;
 
-        var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var b in blocks)
-            foreach (var kw in b.Keywords)
-                keywords.Add(kw);
-
         // Processing-operation keyword scan over EVERY text line on every page.
         // Keywords (Laser Cutting / Bending / Welding / Drilling / Fabricating) typically appear
         // either as B: shop-comment lines OR as service-line-items like "FABRICATING SERVICES"
@@ -194,8 +189,8 @@ internal static class PickingSlipEnricher
 
         StampPageNumbersOnDoc(doc);
 
-        if (keywords.Count > 0)
-            AppendCalloutPageToDoc(doc, keywords);
+        // (The old keyword-based callout page is replaced by display-time FAB drawings — see
+        //  PickingSlipFabAppender, appended when Focus fetches the slip with appendFabs=true.)
 
         using var outMs = new MemoryStream();
         doc.Save(outMs);

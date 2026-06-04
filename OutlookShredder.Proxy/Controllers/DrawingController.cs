@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
+using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Drawing;
+using PdfSharp.Drawing;
+using PdfSharp.Pdf;
 
 namespace OutlookShredder.Proxy.Controllers;
 
@@ -123,5 +126,35 @@ public class DrawingController : ControllerBase
             _log.LogWarning(ex, "[Drawing] pdf failed for input: {Input}", req.Text);
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Self-test for the FAB-append pipeline: synthesizes a one-page "slip" carrying a FAB note,
+    /// runs <see cref="PickingSlipFabAppender"/>, and returns the combined PDF. The result should
+    /// have the slip page plus one appended drawing page.
+    /// </summary>
+    [HttpGet("/api/drawing/fab-selftest")]
+    public IActionResult FabSelfTest([FromQuery] string? text)
+    {
+        var desc = string.IsNullOrWhiteSpace(text) ? "U 4 x 2 x 36, 16ga CRS, finish outside" : text;
+        PickingSlipEnricher.EnsureFontResolver();
+
+        byte[] slip;
+        using (var doc = new PdfDocument())
+        {
+            var page = doc.AddPage();
+            using (var gfx = XGraphics.FromPdfPage(page))
+            {
+                var font = new XFont("Arial", 11);
+                gfx.DrawString("PICKING SLIP (FAB self-test)", font, XBrushes.Black, new XPoint(50, 60));
+                gfx.DrawString($"FAB: (2) {desc}", font, XBrushes.Black, new XPoint(50, 100));
+            }
+            using var ms = new MemoryStream();
+            doc.Save(ms);
+            slip = ms.ToArray();
+        }
+
+        var combined = PickingSlipFabAppender.AppendFabDrawings(slip, _log);
+        return File(combined, "application/pdf");
     }
 }
