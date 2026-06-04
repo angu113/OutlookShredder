@@ -184,9 +184,10 @@ public static class DrawingPdfRenderer
         {
             var a = P(mx, myA); var b = P(mx, myB);
             var lead = new XPen(DimColor, 0.6);
+            double tx = sRight + 16;   // carry the thickness label out past the part edge
             gfx.DrawLine(lead, a, b);
-            gfx.DrawLine(lead, b, new XPoint(b.X + 22, b.Y - 12));
-            gfx.DrawString($"T {F(t)}", dimFont, TextBrush, new XRect(b.X + 24, b.Y - 18, 60, 11), XStringFormats.TopLeft);
+            gfx.DrawLine(lead, b, new XPoint(tx, b.Y - 12));
+            gfx.DrawString($"T {F(t)}", dimFont, TextBrush, new XRect(tx + 2, b.Y - 18, 60, 11), XStringFormats.TopLeft);
         }
 
         switch (fp.Spec.Type)
@@ -318,8 +319,11 @@ public static class DrawingPdfRenderer
         var secPen = new XPen(secCol, 1.2) { DashStyle = XDashStyle.Dash };
         var midS = prof.Select(p => S(Iso(p.x, p.y, len / 2))).ToArray();
         DrawLoop(gfx, secPen, midS);
+        // Section label outside the part (top of the panel), with a leader to the cut plane.
+        var secLbl = new XPoint(midS.Min(p => p.X), area.Y + 8);
+        gfx.DrawLine(secPen, new XPoint(midS.Min(p => p.X), midS.Min(p => p.Y)), secLbl);
         gfx.DrawString("End section", new XFont("Arial", 7, XFontStyleEx.Bold), new XSolidBrush(secCol),
-            new XRect(midS.Min(p => p.X) - 2, midS.Min(p => p.Y) - 11, 70, 9), XStringFormats.TopLeft);
+            new XRect(secLbl.X - 34, secLbl.Y - 9, 68, 9), XStringFormats.TopCenter);
 
         // Length dimension on the front-most outer edge, ~1/4" off the part.
         double bMinX = frontS.Concat(backS).Min(p => p.X), bMaxX = frontS.Concat(backS).Max(p => p.X);
@@ -334,7 +338,7 @@ public static class DrawingPdfRenderer
         double ux = dx / l, uy = dy / l, px = -uy, py = ux;
         double mX = (A.X + B.X) / 2, mY = (A.Y + B.Y) / 2;
         if (px * (mX - cX) + py * (mY - cY) < 0) { px = -px; py = -py; }
-        const double off = 18;
+        const double off = 30;   // keep the length dim clear of the part (~1/4")
         XPoint Ao = new(A.X + px * off, A.Y + py * off), Bo = new(B.X + px * off, B.Y + py * off);
         var dimPen = new XPen(DimColor, 0.6);
         Ext(gfx, dimPen, A, Ao); Ext(gfx, dimPen, B, Bo);
@@ -544,13 +548,15 @@ public static class DrawingPdfRenderer
         gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, Wo, 0));                      // side cut: plane across the width
         if (s.PanBottom) gfx.DrawLine(secPen, S(xm, 0, 0), S(xm, 0, Do));
         if (s.PanTop) gfx.DrawLine(secPen, S(xm, Wo, 0), S(xm, Wo, Do));
-        var sl = S(xm, 0, Do);
-        gfx.DrawString("Side", secFont, secBrush, new XRect(sl.X - 22, sl.Y - 12, 24, 10), XStringFormats.TopRight);
+        var st = S(xm, Wo, Do); var stp = new XPoint(st.X, oy - 2);           // label above the part
+        gfx.DrawLine(secPen, st, stp);
+        gfx.DrawString("Side", secFont, secBrush, new XRect(stp.X - 18, stp.Y - 9, 36, 10), XStringFormats.TopCenter);
         gfx.DrawLine(secPen, S(0, ym, 0), S(Lo, ym, 0));                      // end cut: plane across the length
         if (s.PanLeft) gfx.DrawLine(secPen, S(0, ym, 0), S(0, ym, Do));
         if (s.PanRight) gfx.DrawLine(secPen, S(Lo, ym, 0), S(Lo, ym, Do));
-        var el = S(Lo, ym, Do);
-        gfx.DrawString("End", secFont, secBrush, new XRect(el.X + 2, el.Y - 12, 24, 10), XStringFormats.TopLeft);
+        var et = S(Lo, ym, Do); var etp = new XPoint(ox + gw * scale + 6, et.Y);   // label right of the part
+        gfx.DrawLine(secPen, et, etp);
+        gfx.DrawString("End", secFont, secBrush, new XRect(etp.X + 2, et.Y - 5, 28, 10), XStringFormats.TopLeft);
 
         // Wall-height dim on the front-left vertical edge.
         var d0 = S(0, 0, 0); var d1 = S(0, 0, Do);
@@ -593,12 +599,13 @@ public static class DrawingPdfRenderer
         DimH(gfx, dimFont, P(0, 0).X, P(webOD, 0).X, P(0, 0).Y, sBottom + 20, $"{F(webOD)} OD", true);
         DimV(gfx, dimFont, P(0, 0).X, sLeft - 22, P(0, 0).Y, P(0, wallOD).Y, $"{F(wallOD)} OD", true);
 
-        // Thickness leader off the web.
+        // Thickness leader off the web, label carried out past the part edge.
         var a = P(webOD * 0.5, 0); var b = P(webOD * 0.5, thickness);
         var lead = new XPen(DimColor, 0.6);
+        double tx = ox + drawW + 14;
         gfx.DrawLine(lead, a, b);
-        gfx.DrawLine(lead, b, new XPoint(b.X + 20, b.Y - 11));
-        gfx.DrawString($"T {F(thickness)}", dimFont, TextBrush, new XRect(b.X + 22, b.Y - 17, 52, 11), XStringFormats.TopLeft);
+        gfx.DrawLine(lead, b, new XPoint(tx, b.Y - 11));
+        gfx.DrawString($"T {F(thickness)}", dimFont, TextBrush, new XRect(tx + 2, b.Y - 17, 54, 11), XStringFormats.TopLeft);
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────
