@@ -19,10 +19,11 @@ public sealed class MailClassifyController : ControllerBase
     private readonly MailProjectService _projects;
     private readonly SharePointService _sp;
     private readonly BillExtractionService _bill;
+    private readonly ConfirmationExtractionService _confirm;
 
     public MailClassifyController(MailboxBridgeService bridge, MailClassifierService classifier,
         MailWorkbenchService workbench, MailTaxonomyService taxonomy, MailProjectService projects,
-        SharePointService sp, BillExtractionService bill)
+        SharePointService sp, BillExtractionService bill, ConfirmationExtractionService confirm)
     {
         _bridge     = bridge;
         _classifier = classifier;
@@ -31,6 +32,7 @@ public sealed class MailClassifyController : ControllerBase
         _projects   = projects;
         _sp         = sp;
         _bill       = bill;
+        _confirm    = confirm;
     }
 
     /// <summary>Diagnostic: run the bill PDF extraction (second pass) directly on a base64 PDF and
@@ -48,6 +50,17 @@ public sealed class MailClassifyController : ControllerBase
     {
         public string? Base64Pdf { get; set; }
         public string? FileName  { get; set; }
+    }
+
+    /// <summary>Diagnostic: run the order-confirmation PDF extraction (second pass) directly on a base64
+    /// PDF and return the raw ConfirmationExtraction. Lets us verify ship/delivery-date extraction on a
+    /// real supplier SOC without the capture/archive round-trip (and independent of classifier routing).</summary>
+    [HttpPost("confirmation-extract-test")]
+    public async Task<IActionResult> ConfirmationExtractTest([FromBody] BillExtractTestRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Base64Pdf)) return BadRequest(new { error = "base64Pdf is required." });
+        var r = await _confirm.ExtractConfirmationAsync(req.Base64Pdf, string.IsNullOrWhiteSpace(req.FileName) ? "test.pdf" : req.FileName, ct);
+        return r is null ? StatusCode(503, new { error = "Confirmation extraction unavailable (both providers failed)." }) : Ok(r);
     }
 
     /// <summary>Idempotently provision the MailItems + MailClassifications SP lists (Phase 1b setup).</summary>

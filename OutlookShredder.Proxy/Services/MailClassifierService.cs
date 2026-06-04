@@ -77,6 +77,11 @@ public class MailClassifierService
         number, sales-order, or quote/order reference (e.g. "Invoice# 3060256", "Order #2808273") —
         NOT our HSK-PO/HSK-SO. Set poNumber only when OUR HSK-PO number is printed.
 
+        For "Supplier/Order Confirmations" (a supplier acknowledging a PO we placed, usually carrying
+        our HSK-PO number): when the email body states an explicit promised SHIP or DELIVERY / due date
+        for the order, set expectedDate to it in ISO YYYY-MM-DD. Only a concrete date — if just a lead
+        time is given (e.g. "ships in 2 weeks") leave expectedDate null. Set poNumber to our HSK-PO.
+
         Also produce 5-15 lowercase search keywords (entities, document type, product/metal, supplier
         or customer name, reference numbers) to support full-text search, and extract poNumber,
         soNumber, and amount when present. Respond ONLY by calling the classify_email tool.
@@ -231,6 +236,7 @@ public class MailClassifierService
                     ["soNumber"]   = new { type = new[] { "string", "null" }, description = "Our sales-order ref if present, e.g. HSK-SO0001234." },
                     ["amount"]     = new { type = new[] { "string", "null" }, description = "Monetary total as a plain numeric string if financial, else null." },
                     ["supplierReference"] = new { type = new[] { "string", "null" }, description = "On a supplier bill/invoice/receipt: the SUPPLIER's OWN reference printed on it - their invoice number, sales-order, or quote/order reference (e.g. 'Invoice# 3060256', 'Order #2808273', 'Quote ABC123'). This is the supplier's number, NOT our HSK-PO/HSK-SO. Null if not a supplier financial document or none printed." },
+                    ["expectedDate"] = new { type = new[] { "string", "null" }, description = "On a Supplier/Order Confirmation: the promised SHIP or DELIVERY/due date for the order, as ISO YYYY-MM-DD. Only set when an explicit date is stated; null if only a lead time (e.g. 'ships in 2 weeks') or not an order confirmation." },
                     ["reasoning"]  = new { type = "string", description = "One or two sentences justifying the category." },
                 }
             }
@@ -339,6 +345,7 @@ public class MailClassifierService
                 ["soNumber"]   = new { type = "string", nullable = true },
                 ["amount"]     = new { type = "string", nullable = true },
                 ["supplierReference"] = new { type = "string", nullable = true },
+                ["expectedDate"] = new { type = "string", nullable = true },
                 ["reasoning"]  = new { type = "string", nullable = true },
             }
         };
@@ -407,6 +414,7 @@ public class MailClassifierService
             SoNumber    = string.IsNullOrWhiteSpace(raw.SoNumber) ? null : raw.SoNumber.Trim(),
             Amount      = string.IsNullOrWhiteSpace(raw.Amount) ? null : raw.Amount.Trim(),
             SupplierReference = string.IsNullOrWhiteSpace(raw.SupplierReference) ? null : raw.SupplierReference.Trim(),
+            ExpectedDate = string.IsNullOrWhiteSpace(raw.ExpectedDate) ? null : raw.ExpectedDate.Trim(),
             Reasoning   = raw.Reasoning?.Trim(),
             AiProvider  = provider,
             AiModel     = model,
@@ -434,6 +442,7 @@ public class MailClassifierService
         public string? SoNumber   { get; set; }
         public string? Amount     { get; set; }
         public string? SupplierReference { get; set; }
+        public string? ExpectedDate { get; set; }
         public string? Reasoning  { get; set; }
     }
 }

@@ -23,6 +23,7 @@ public sealed class MailWorkbenchService
     private readonly SupplierCacheService _suppliers;
     private readonly MailProjectService _projects;
     private readonly BillExtractionService _bill;
+    private readonly ConfirmationExtractionService _confirm;
     private readonly IConfiguration _config;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
@@ -31,11 +32,12 @@ public sealed class MailWorkbenchService
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
         RfqNotificationService notify, SupplierCacheService suppliers, MailProjectService projects,
-        BillExtractionService bill, IConfiguration config, ILogger<MailWorkbenchService> log)
+        BillExtractionService bill, ConfirmationExtractionService confirm,
+        IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
         _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects;
-        _bill = bill; _config = config; _log = log;
+        _bill = bill; _confirm = confirm; _config = config; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -170,10 +172,15 @@ public sealed class MailWorkbenchService
         await StoreFilesAsync(watchedUpn, body, mailItemId, category, body.ReceivedAt, ct);
 
         // Two-pass: a financial-leaf email with a PDF gets a targeted bill extraction to fill the
-        // amount / supplier-reference / our-PO# that live in the PDF, not the email text. Runs after
-        // StoreFilesAsync so the archived PDF is on disk; merged result is persisted in one write below.
+        // amount / supplier-reference / our-PO# that live in the PDF, not the email text; an
+        // order-confirmation email with a PDF gets a targeted pass to fill the promised ship/delivery
+        // (ETA) date that schedules the PO waiting card. Run after StoreFilesAsync so the archived PDF
+        // is on disk; merged result is persisted in one write below.
         if (result is not null)
+        {
             await EnrichFromBillPdfAsync(mailItemId, result, manifest.Select(a => a.Name), ct);
+            await EnrichFromConfirmationPdfAsync(mailItemId, result, manifest.Select(a => a.Name), ct);
+        }
 
         var version = result is not null ? await _sp.WriteClassificationAsync(mailItemId, result, ct) : 0;
 
@@ -275,7 +282,7 @@ public sealed class MailWorkbenchService
         MailItemId = mailItemId, Version = version, IsCurrent = true, CategoryPath = r.Category,
         OtherLabel = r.OtherLabel, SupplierName = r.SupplierName, Confidence = r.Confidence, KeywordTags = string.Join(", ", r.Keywords),
         PoNumber = r.PoNumber, SoNumber = r.SoNumber, Amount = r.Amount,
-        SupplierReference = r.SupplierReference, PayLink = r.PayLink,
+        SupplierReference = r.SupplierReference, PayLink = r.PayLink, ExpectedDate = r.ExpectedDate,
         AiProvider = r.AiProvider, AiModel = r.AiModel,
     };
 
@@ -318,6 +325,47 @@ public sealed class MailWorkbenchService
                 mailItemId, result.Amount, result.SupplierReference, result.PoNumber);
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] bill-PDF enrich failed for {Id}", mailItemId); }
+    }
+
+    // Leaf whose PDF attachment is worth a second extraction pass for the supplier's promised ship /
+    // delivery date — the date that schedules the PO waiting card out of the Prioritize bucket.
+    private static readonly HashSet<string> ConfirmationLeaves = new(StringComparer.OrdinalIgnoreCase)
+        { "Supplier/Order Confirmations" };
+
+    /// <summary>
+    /// Two-pass enrichment: when the text classifier routed an email into Supplier/Order Confirmations
+    /// and it has a PDF, read the archived PDF SOC and fill the expected ship/delivery (ETA) date the
+    /// text pass left blank — it usually lives in the PDF, not the email body. Pure extraction — does
+    /// NOT re-route the category. Gated to the confirmation leaf + an enabled flag + a missing date, so
+    /// cost stays targeted. Best-effort; never throws.
+    /// </summary>
+    private async Task EnrichFromConfirmationPdfAsync(string mailItemId, MailClassificationResult result,
+        IEnumerable<string>? attachmentNames, CancellationToken ct)
+    {
+        try
+        {
+            if (!_config.GetValue("ConfirmationExtraction:Enabled", true)) return;
+            if (!ConfirmationLeaves.Contains(result.Category)) return;
+            // Only spend an AI call when the text pass left the ETA blank.
+            if (!string.IsNullOrWhiteSpace(result.ExpectedDate)) return;
+
+            var pdfName = attachmentNames?.FirstOrDefault(n => n.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrEmpty(pdfName)) return;
+
+            var att = await GetItemAttachmentAsync(mailItemId, pdfName, ct);
+            if (att is null) { _log.LogDebug("[MailWB] confirm-PDF enrich: '{Pdf}' not archived for {Id}", pdfName, mailItemId); return; }
+
+            var conf = await _confirm.ExtractConfirmationAsync(Convert.ToBase64String(att.Value.Bytes), pdfName, ct);
+            if (conf is null || !conf.IsConfirmation) return;
+
+            if (string.IsNullOrWhiteSpace(result.ExpectedDate) && !string.IsNullOrWhiteSpace(conf.ExpectedDate)) result.ExpectedDate = conf.ExpectedDate.Trim();
+            if (string.IsNullOrWhiteSpace(result.PoNumber)     && !string.IsNullOrWhiteSpace(conf.OurPoNumber))  result.PoNumber     = conf.OurPoNumber.Trim();
+            if (string.IsNullOrWhiteSpace(result.SupplierName) && !string.IsNullOrWhiteSpace(conf.SupplierName)) result.SupplierName = conf.SupplierName.Trim();
+
+            _log.LogInformation("[MailWB] confirm-PDF enrich {Id}: expectedDate={D} po={P}",
+                mailItemId, result.ExpectedDate, result.PoNumber);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[MailWB] confirm-PDF enrich failed for {Id}", mailItemId); }
     }
 
     /// <summary>Upsert the item (+ its current classification) into the local cache and broadcast a "Mail" bus event.</summary>
@@ -503,6 +551,7 @@ public sealed class MailWorkbenchService
         var result = await _classifier.ClassifyAsync(input, ct)
             ?? throw new InvalidOperationException("Both AI providers unavailable.");
         await EnrichFromBillPdfAsync(mailItemId, result, input.AttachmentNames, ct);
+        await EnrichFromConfirmationPdfAsync(mailItemId, result, input.AttachmentNames, ct);
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
         await MoveItemFilesAsync(mailItemId, priorCat ?? "", result.Category, ct);
         CacheAndPublishClass("Classified", mailItemId, result, version);
@@ -1111,6 +1160,7 @@ public sealed class MailWorkbenchService
             Confidence = cls?.Confidence ?? 0,
             KeywordTags = cls?.KeywordTags ?? "", PoNumber = cls?.PoNumber, SoNumber = cls?.SoNumber,
             Amount = cls?.Amount, SupplierReference = cls?.SupplierReference, PayLink = cls?.PayLink,
+            ExpectedDate = cls?.ExpectedDate,
             Reasoning = null, AiProvider = cls?.AiProvider, AiModel = cls?.AiModel, Version = cls?.Version ?? 0,
             Attachments = manifest.Select(m => new MailAttachmentInfo
             {
@@ -1622,6 +1672,7 @@ public sealed class MailWorkbenchService
         public string? Amount            { get; set; }
         public string? SupplierReference { get; set; }
         public string? PayLink           { get; set; }
+        public string? ExpectedDate      { get; set; }
         public string? Reasoning   { get; set; }
         public string? AiProvider  { get; set; }
         public string? AiModel     { get; set; }

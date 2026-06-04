@@ -44,7 +44,7 @@ public partial class SharePointService
             ("MailItemId","text"), ("Version","number"), ("IsCurrent","boolean"),
             ("CategoryPath","text"), ("OtherLabel","text"), ("SupplierName","text"), ("Confidence","number"),
             ("KeywordTags","note"), ("PoNumber","text"), ("SoNumber","text"), ("Amount","text"),
-            ("SupplierReference","text"), ("PayLink","note"),
+            ("SupplierReference","text"), ("PayLink","note"), ("ExpectedDate","text"),
             ("Reasoning","note"), ("AiProvider","text"), ("AiModel","text"),
             ("RawAiResponse","note"), ("ClassifiedAt","dateTime"),
         ]);
@@ -517,6 +517,7 @@ public partial class SharePointService
                     ["Amount"]       = r.Amount,
                     ["SupplierReference"] = r.SupplierReference,
                     ["PayLink"]      = r.PayLink,
+                    ["ExpectedDate"] = r.ExpectedDate,
                     ["Reasoning"]    = Trunc(r.Reasoning, 8000),
                     ["AiProvider"]   = r.AiProvider,
                     ["AiModel"]      = r.AiModel,
@@ -534,7 +535,7 @@ public partial class SharePointService
     {
         var rows = await ReadAllListItemsAsync(MailClassList,
             ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","SupplierName","Confidence","KeywordTags",
-             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","Reasoning","AiProvider","AiModel","ClassifiedAt"],
+             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","ExpectedDate","Reasoning","AiProvider","AiModel","ClassifiedAt"],
             $"fields/MailItemId eq '{Esc(mailItemId)}'", ct);
         return rows.Select(MapClassRow).OrderByDescending(c => c.Version).ToList();
     }
@@ -548,7 +549,7 @@ public partial class SharePointService
         // row per item as the highest Version in memory — always correct and lag-free.
         var rows = await ReadAllListItemsAsync(MailClassList,
             ["MailItemId","Version","IsCurrent","CategoryPath","OtherLabel","SupplierName","Confidence","KeywordTags",
-             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","AiProvider","AiModel","ClassifiedAt"],
+             "PoNumber","SoNumber","Amount","SupplierReference","PayLink","ExpectedDate","AiProvider","AiModel","ClassifiedAt"],
             null, ct);
         return rows.Select(MapClassRow)
             .GroupBy(c => c.MailItemId, StringComparer.Ordinal)
@@ -572,6 +573,7 @@ public partial class SharePointService
         Amount       = GetStr(f, "Amount"),
         SupplierReference = GetStr(f, "SupplierReference"),
         PayLink      = GetStr(f, "PayLink"),
+        ExpectedDate = GetStr(f, "ExpectedDate"),
         AiProvider   = GetStr(f, "AiProvider") ?? "",
         AiModel      = GetStr(f, "AiModel") ?? "",
         ClassifiedAt = GetStr(f, "ClassifiedAt") ?? "",
@@ -739,6 +741,7 @@ public sealed class MailClassRow
     public string? Amount       { get; set; }
     public string? SupplierReference { get; set; }
     public string? PayLink      { get; set; }
+    public string? ExpectedDate { get; set; }
     public string  AiProvider   { get; set; } = "";
     public string  AiModel      { get; set; } = "";
     public string  ClassifiedAt { get; set; } = "";

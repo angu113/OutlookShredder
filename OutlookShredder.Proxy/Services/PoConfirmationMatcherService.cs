@@ -91,6 +91,9 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
 
             var via  = c.CategoryPath.Contains("Receipt", StringComparison.OrdinalIgnoreCase) ? "payment" : "email";
             var subj = item.Subject.Length > 80 ? item.Subject[..80] : item.Subject;
+            // ETA parsed from the confirmation (body text pass + the confirmation-PDF second pass) ->
+            // becomes the PO ExpectedDate so the waiting card schedules out of the Prioritize bucket.
+            var eta  = NormalizeDate(c.ExpectedDate);
 
             foreach (var poNum in CandidatePoNumbers(c, item))
             {
@@ -99,16 +102,17 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
                 var note = $"Auto-matched from {c.CategoryPath} email: \"{subj}\" [{c.MailItemId}]";
                 foreach (var po in list)
                 {
+                    var etaTag = eta is not null ? $" ETA {eta[..10]}" : "";
                     if (Auto)
                     {
                         await _sp.UpdatePurchaseOrderConfirmAsync(po.SpItemId, confirmed: true, via: via,
-                                                                  expectedDate: null, note: note);
+                                                                  expectedDate: eta, note: note);
                         if (via == "payment")   // a receipt means we paid -> clear the pay-to-release clock
                             await _sp.UpdatePurchaseOrderPaymentAsync(po.SpItemId, "Paid", note);
                         confirmed++;
-                        details.Add($"{po.PoNumber} <- {via} (\"{subj}\")");
+                        details.Add($"{po.PoNumber} <- {via}{etaTag} (\"{subj}\")");
                     }
-                    else details.Add($"SUGGEST {po.PoNumber} <- {via} (\"{subj}\")");
+                    else details.Add($"SUGGEST {po.PoNumber} <- {via}{etaTag} (\"{subj}\")");
                 }
                 list.Clear();   // don't re-confirm this PO again this pass
             }
@@ -117,6 +121,19 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
         _log.LogInformation("[PoMatcher] pass: scanned={Scanned} matched={Matched} confirmed={Confirmed} (auto={Auto})",
             scanned, matched, confirmed, Auto);
         return new MatchResult(scanned, matched, confirmed, Auto, details);
+    }
+
+    /// <summary>Parse a classifier/PDF-extracted ETA (ideally ISO yyyy-MM-dd, but tolerant of common
+    /// formats) into an ISO 8601 UTC datetime for the PurchaseOrders.ExpectedDate (dateTime) column,
+    /// at date granularity. Returns null when blank or unparseable — never guesses.</summary>
+    private static string? NormalizeDate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        if (DateTime.TryParse(raw.Trim(), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var dt))
+            return dt.ToString("yyyy-MM-ddT00:00:00'Z'", System.Globalization.CultureInfo.InvariantCulture);
+        return null;
     }
 
     /// <summary>Collect candidate HSK-PO numbers from the classification's PoNumber field and the

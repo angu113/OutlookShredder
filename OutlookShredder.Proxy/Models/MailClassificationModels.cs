@@ -135,6 +135,10 @@ public sealed class MailClassificationResult
     /// <summary>A "pay now" URL extracted from the body (payment-processor bills). Lets the surface
     /// deep-link to payment. Deterministic regex, not AI.</summary>
     public string? PayLink        { get; set; }
+    /// <summary>Supplier's promised ship/delivery (ETA) date from a sales order confirmation, as ISO
+    /// yyyy-MM-dd. Drives the PO ExpectedDate so the waiting card self-schedules out of Prioritize.
+    /// Set for Supplier/Order Confirmations (text pass + the confirmation-PDF second pass).</summary>
+    public string? ExpectedDate   { get; set; }
     public string? Reasoning      { get; set; }
     public string  AiProvider     { get; set; } = "";
     public string  AiModel        { get; set; } = "";
