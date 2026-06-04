@@ -70,13 +70,15 @@ public static class DrawingPdfRenderer
                 double topH = h * 0.56, botH = h - topH - 10;
                 double secY = top + topH + 10;
                 double wFlatP = (usable - gap) * 0.6, wIsoP = (usable - gap) * 0.4;
+                double isoX = M + wFlatP + gap;
                 DrawPan(gfx, fp, new XRect(M, top, wFlatP, topH));
-                DrawPanIso(gfx, fp, new XRect(M + wFlatP + gap, top, wIsoP, topH));
+                DrawPanIso(gfx, fp, new XRect(isoX, top, wIsoP, topH - 46));
+                DrawSectionKey(gfx, new XRect(isoX + (wIsoP - 176) / 2, top + topH - 36, 176, 30), isPan: true);
 
                 double wSec = (usable - gap) / 2;
-                DrawSection(gfx, new XRect(M, secY, wSec, botH), "Side section",
+                DrawSection(gfx, new XRect(M, secY, wSec, botH), "Side section", XDashStyle.Dash,
                     fp.PanSideProfile, fp.PanBaseY1 - fp.PanBaseY0, fp.PanDepth, fp.Spec.Thickness);
-                DrawSection(gfx, new XRect(M + wSec + gap, secY, wSec, botH), "End section",
+                DrawSection(gfx, new XRect(M + wSec + gap, secY, wSec, botH), "End section", XDashStyle.DashDot,
                     fp.PanEndProfile, fp.PanBaseX1 - fp.PanBaseX0, fp.PanDepth, fp.Spec.Thickness);
             }
             else if (fp.IsPlate)
@@ -87,7 +89,9 @@ public static class DrawingPdfRenderer
             {
                 DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
                 DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h));
-                DrawIsometric(gfx, fp, new XRect(M + wFlat + wSect + 2 * gap, top, wIso, h));
+                double isoX = M + wFlat + wSect + 2 * gap;
+                DrawIsometric(gfx, fp, new XRect(isoX, top, wIso, h - 46));
+                DrawSectionKey(gfx, new XRect(isoX + (wIso - 120) / 2, top + h - 36, 120, 30), isPan: false);
             }
             DrawFootnote(gfx, fp, new XRect(M, footTop, usable, footH));
 
@@ -151,8 +155,11 @@ public static class DrawingPdfRenderer
         var dimFont   = new XFont("Arial", 8, XFontStyleEx.Bold);
         var matPen    = new XPen(CutColor, 1.1);
 
-        gfx.DrawString("End section", titleFont, XBrushes.Black,
-            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var tsz = gfx.MeasureString("End section", titleFont);
+        double tStart = box.X + (box.Width - tsz.Width - 34) / 2;
+        gfx.DrawString("End section", titleFont, XBrushes.Black, new XRect(tStart, box.Y, tsz.Width + 2, 12), XStringFormats.TopLeft);
+        gfx.DrawLine(new XPen(XColor.FromArgb(0, 150, 70), 1.4) { DashStyle = XDashStyle.DashDot },
+            new XPoint(tStart + tsz.Width + 8, box.Y + 7), new XPoint(tStart + tsz.Width + 34, box.Y + 7));
         var area = new XRect(box.X, box.Y + 16, box.Width, box.Height - 16);
 
         var prof = fp.Profile;
@@ -184,10 +191,10 @@ public static class DrawingPdfRenderer
         {
             var a = P(mx, myA); var b = P(mx, myB);
             var lead = new XPen(DimColor, 0.6);
-            double tx = sRight + 16;   // carry the thickness label out past the part edge
+            var lp = new XPoint(b.X, Math.Max(area.Y + 9, b.Y - 16));   // up into the open section — never overflows
             gfx.DrawLine(lead, a, b);
-            gfx.DrawLine(lead, b, new XPoint(tx, b.Y - 12));
-            gfx.DrawString($"T {F(t)}", dimFont, TextBrush, new XRect(tx + 2, b.Y - 18, 60, 11), XStringFormats.TopLeft);
+            gfx.DrawLine(lead, b, lp);
+            gfx.DrawString($"T {F(t)}", dimFont, TextBrush, new XRect(lp.X - 28, lp.Y - 9, 56, 11), XStringFormats.TopCenter);
         }
 
         switch (fp.Spec.Type)
@@ -555,14 +562,19 @@ public static class DrawingPdfRenderer
     }
 
     // ── Generic radiused U cross-section (web + two walls), thickness shown like the channels ──
-    private static void DrawSection(XGraphics gfx, XRect box, string title,
+    private static void DrawSection(XGraphics gfx, XRect box, string title, XDashStyle dash,
         List<(double x, double y)> prof, double webOD, double wallOD, double thickness)
     {
         var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
         var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
         var matPen = new XPen(CutColor, 1.1);
 
-        gfx.DrawString(title, titleFont, XBrushes.Black, new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        // Title + a sample of this section's cut-plane dash style.
+        var tsz = gfx.MeasureString(title, titleFont);
+        double sampleW = 26, startX = box.X + (box.Width - tsz.Width - sampleW - 8) / 2;
+        gfx.DrawString(title, titleFont, XBrushes.Black, new XRect(startX, box.Y, tsz.Width + 2, 12), XStringFormats.TopLeft);
+        gfx.DrawLine(new XPen(XColor.FromArgb(0, 150, 70), 1.4) { DashStyle = dash },
+            new XPoint(startX + tsz.Width + 8, box.Y + 7), new XPoint(startX + tsz.Width + 8 + sampleW, box.Y + 7));
         var area = new XRect(box.X, box.Y + 14, box.Width, box.Height - 14);
         if (prof.Count < 3) return;
 
@@ -585,13 +597,13 @@ public static class DrawingPdfRenderer
         DimH(gfx, dimFont, P(0, 0).X, P(webOD, 0).X, P(0, 0).Y, sBottom + 20, $"{F(webOD)} OD", true);
         DimV(gfx, dimFont, P(0, 0).X, sLeft - 22, P(0, 0).Y, P(0, wallOD).Y, $"{F(wallOD)} OD", true);
 
-        // Thickness leader off the web, label carried out past the part edge.
+        // Thickness leader off the web, label placed up inside the open U (always clear of dims).
         var a = P(webOD * 0.5, 0); var b = P(webOD * 0.5, thickness);
         var lead = new XPen(DimColor, 0.6);
-        double tx = ox + drawW + 14;
+        var lp = P(webOD * 0.5, Math.Min(wallOD * 0.55, mh * 0.55));
         gfx.DrawLine(lead, a, b);
-        gfx.DrawLine(lead, b, new XPoint(tx, b.Y - 11));
-        gfx.DrawString($"T {F(thickness)}", dimFont, TextBrush, new XRect(tx + 2, b.Y - 17, 54, 11), XStringFormats.TopLeft);
+        gfx.DrawLine(lead, b, lp);
+        gfx.DrawString($"T {F(thickness)}", dimFont, TextBrush, new XRect(lp.X - 28, lp.Y - 5, 56, 11), XStringFormats.TopCenter);
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────
@@ -608,25 +620,26 @@ public static class DrawingPdfRenderer
         gfx.DrawString(
             $"solid = cut  |  dashed = bend up  |  bold = as specified  |  inside radius Ri {F(fp.Spec.InsideRadius)}\"  |  all dimensions in decimal inches",
             font, DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
+    }
 
-        // Section-cut key (formed-part plane line styles), right side of the box.
-        if (!fp.IsPlate)
+    // ── Key for the formed-part section-cut planes (Side = dashed, End = dash-dot) ──────────────
+    private static void DrawSectionKey(XGraphics gfx, XRect box, bool isPan)
+    {
+        var secCol = XColor.FromArgb(0, 150, 70);
+        var kf = new XFont("Arial", 7, XFontStyleEx.Regular);
+        var kb = new XSolidBrush(secCol);
+        gfx.DrawRectangle(new XPen(XColor.FromArgb(205, 205, 205), 0.8), box);
+        gfx.DrawString("Section cuts", new XFont("Arial", 7, XFontStyleEx.Bold), XBrushes.Black,
+            new XRect(box.X + 4, box.Y + 2, box.Width - 8, 9), XStringFormats.TopLeft);
+        double ly = box.Y + 19, x = box.X + 6;
+        if (isPan)
         {
-            var secCol = XColor.FromArgb(0, 150, 70);
-            var kf = new XFont("Arial", 7, XFontStyleEx.Regular);
-            var kb = new XSolidBrush(secCol);
-            double kx = box.X + box.Width - 230, ky = box.Y + 8;
-            gfx.DrawString("Formed-part section cuts:", kf, kb, new XRect(kx, ky - 4, 110, 9), XStringFormats.TopLeft);
-            double lx = kx + 102;
-            if (fp.IsPan)
-            {
-                gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.Dash }, new XPoint(lx, ky), new XPoint(lx + 22, ky));
-                gfx.DrawString("Side", kf, kb, new XRect(lx + 25, ky - 4, 28, 9), XStringFormats.TopLeft);
-                lx += 54;
-            }
-            gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.DashDot }, new XPoint(lx, ky), new XPoint(lx + 22, ky));
-            gfx.DrawString("End", kf, kb, new XRect(lx + 25, ky - 4, 28, 9), XStringFormats.TopLeft);
+            gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.Dash }, new XPoint(x, ly), new XPoint(x + 22, ly));
+            gfx.DrawString("Side", kf, kb, new XRect(x + 25, ly - 5, 30, 9), XStringFormats.TopLeft);
+            x += 78;
         }
+        gfx.DrawLine(new XPen(secCol, 1.4) { DashStyle = XDashStyle.DashDot }, new XPoint(x, ly), new XPoint(x + 22, ly));
+        gfx.DrawString("End", kf, kb, new XRect(x + 25, ly - 5, 30, 9), XStringFormats.TopLeft);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
