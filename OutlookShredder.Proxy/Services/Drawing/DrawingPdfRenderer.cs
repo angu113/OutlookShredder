@@ -59,6 +59,11 @@ public static class DrawingPdfRenderer
             DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h));
             DrawIsometric(gfx, fp, new XRect(M + wFlat + wSect + 2 * gap, top, wIso, h));
             DrawFootnote(gfx, fp, new XRect(M, footTop, usable, footH));
+
+            // Copyright line under the details box (current year).
+            var copyFont = new XFont("Arial", 7, XFontStyleEx.Regular);
+            gfx.DrawString($"© Mithril Metals Corp, {System.DateTime.Now.Year}", copyFont, DimBrush,
+                new XRect(M, footTop + footH + 2, usable, 10), XStringFormats.TopLeft);
         }
 
         using var ms = new MemoryStream();

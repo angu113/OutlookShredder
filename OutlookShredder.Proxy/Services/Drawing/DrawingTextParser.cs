@@ -144,14 +144,16 @@ public static class DrawingTextParser
         if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
         if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
-        if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("hat");
-        if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) throw NotYet("pan/tray");
+        if (Regex.IsMatch(lower, @"\bflitch\b"))      throw NotYet("Flitch plate");
+        if (Regex.IsMatch(lower, @"\bbase\s*plate\b")) throw NotYet("Base plate");
+        if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("Hat");
+        if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) throw NotYet("Pan");
         throw new DrawingParseException(
             "Could not identify the part type. Start with U (U-channel), L (angle) or Z (Z-channel).");
     }
 
     private static DrawingParseException NotYet(string what) =>
-        new($"{what} is not implemented yet — v1 supports the U-channel only.");
+        new($"{what} is coming soon — U-channel, L-angle and Z-channel are available now.");
 
     private static (MaterialFamily, string) DetectMaterial(string lower)
     {
@@ -197,16 +199,34 @@ public static class DrawingTextParser
         return new Dim(NumOf(m.Groups[1].Value), basis);
     }
 
-    /// <summary>Flange may be a single value or "F/F2" for unequal legs, with optional id/od.</summary>
+    /// <summary>
+    /// Resolves the two flanges/legs, each with its own inside/outside basis. Accepts:
+    ///   one value (equal), "F/F2" (unequal, shared basis), or two separate "flange …"
+    /// occurrences (unequal, independent basis — e.g. "flange 2 id flange 1.5 od" = J-channel).
+    /// </summary>
     private static (Dim, Dim)? MatchFlanges(string lower, DimBasis fallback)
     {
-        var m = Regex.Match(lower, $@"\b(?:flanges?|legs?|walls?|sides?)\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?\s*\(?\s*(id|od)?\s*\)?");
-        if (!m.Success) return null;
-        var basis = BasisFrom(m.Groups[3].Value, fallback);
-        var left = new Dim(NumOf(m.Groups[1].Value), basis);
-        var right = m.Groups[2].Success && m.Groups[2].Value.Length > 0
-            ? new Dim(NumOf(m.Groups[2].Value), basis)
-            : left;
+        var ms = Regex.Matches(lower, $@"\b(?:flanges?|legs?|walls?|sides?)\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?\s*\(?\s*(id|od)?\s*\)?");
+        if (ms.Count == 0) return null;
+
+        var m1 = ms[0];
+        var b1 = BasisFrom(m1.Groups[3].Value, fallback);
+        var left = new Dim(NumOf(m1.Groups[1].Value), b1);
+
+        Dim right;
+        if (ms.Count >= 2)
+        {
+            var m2 = ms[1];
+            right = new Dim(NumOf(m2.Groups[1].Value), BasisFrom(m2.Groups[3].Value, fallback));
+        }
+        else if (m1.Groups[2].Success && m1.Groups[2].Value.Length > 0)
+        {
+            right = new Dim(NumOf(m1.Groups[2].Value), b1);   // "F/F2" shared basis
+        }
+        else
+        {
+            right = left;
+        }
         return (left, right);
     }
 

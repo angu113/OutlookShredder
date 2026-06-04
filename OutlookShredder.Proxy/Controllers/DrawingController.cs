@@ -16,6 +16,30 @@ public class DrawingController : ControllerBase
         public string? Text { get; set; }
     }
 
+    // Material display name + the token the canonical text uses + its gauge-table family.
+    private static readonly (string Name, string Token, MaterialFamily Fam)[] Materials =
+    {
+        ("Cold Rolled Steel", "CRS",    MaterialFamily.ColdRolled),
+        ("Hot Rolled Steel",  "HRS",    MaterialFamily.HotRolled),
+        ("Galvanized Steel",  "galv",   MaterialFamily.Galvanized),
+        ("Stainless Steel",   "SS",     MaterialFamily.Stainless),
+        ("Aluminum",          "alum",   MaterialFamily.Aluminium),
+        ("Brass",             "brass",  MaterialFamily.Brass),
+        ("Copper",            "copper", MaterialFamily.Copper),
+    };
+
+    /// <summary>
+    /// Materials for the wizard: each with the canonical text token and its gauge list
+    /// (gauge number + decimal thickness in inches), so the thickness picker can show both.
+    /// </summary>
+    [HttpGet("/api/drawing/materials")]
+    public IActionResult MaterialList() => Ok(Materials.Select(m => new
+    {
+        name = m.Name,
+        token = m.Token,
+        gauges = GaugeTables.GaugesFor(m.Fam).Select(g => new { gauge = g.Gauge, thickness = g.Thickness }),
+    }));
+
     /// <summary>
     /// Parses a part description, develops the flat pattern, and returns the resolved spec,
     /// bend math, and cut geometry. (PDF/DXF bytes added in the next step.)

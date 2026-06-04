@@ -55,6 +55,10 @@ public static class GaugeTables
         return table.TryGetValue(gauge, out var v) ? v : null;
     }
 
+    /// <summary>Ordered (gauge, thickness) list for a material family — drives the thickness picker.</summary>
+    public static IReadOnlyList<(int Gauge, double Thickness)> GaugesFor(MaterialFamily family)
+        => TableFor(family).OrderBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value)).ToList();
+
     private static IReadOnlyDictionary<int, double> TableFor(MaterialFamily family) => family switch
     {
         MaterialFamily.Galvanized => Galv,
