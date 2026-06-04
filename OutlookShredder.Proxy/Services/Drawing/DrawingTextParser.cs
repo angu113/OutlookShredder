@@ -1,0 +1,249 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using OutlookShredder.Proxy.Models.Drawing;
+
+namespace OutlookShredder.Proxy.Services.Drawing;
+
+/// <summary>Thrown when a drawing description cannot be parsed; message is user-facing.</summary>
+public sealed class DrawingParseException : Exception
+{
+    public DrawingParseException(string message) : base(message) { }
+}
+
+/// <summary>
+/// Deterministic parser: plain-text part description → <see cref="PartSpec"/>. No AI.
+///
+/// Grammar (case-insensitive, commas optional, inches assumed):
+///   TYPE  shorthand "U w x f x len"  OR  keyworded "web W flange F length L"
+///   material: "18ga galv" | "16ga CRS" | "0.060 alum" (alum/ss need a decimal thickness)
+///   basis:   global word "inside" / "outside" (default outside);
+///            per-dimension "id" / "od" right after a value (e.g. "web 4 id")
+///   options: "Ri 1/16", "K 0.42", "90deg"
+///   numbers: integer, decimal, fraction "3/8", or mixed "1-3/8"
+/// </summary>
+public static class DrawingTextParser
+{
+    // A number: mixed fraction, simple fraction, decimal, or integer.
+    private const string Num = @"\d+-\d+/\d+|\d+/\d+|\d*\.\d+|\d+";
+
+    public static PartSpec Parse(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            throw new DrawingParseException("Enter a part description, e.g. \"U 4 x 2 x 36, 16ga CRS\".");
+
+        string text = input.Trim();
+        string lower = text.ToLowerInvariant();
+
+        var type = DetectType(lower);
+
+        // ── Material + thickness ────────────────────────────────────────────
+        var (family, materialLabel) = DetectMaterial(lower);
+        double thickness = ResolveThickness(lower, family, materialLabel);
+
+        // ── Bend params ─────────────────────────────────────────────────────
+        double ri = MatchNum(lower, $@"\b(?:ri|radius|rad)\s*[:=]?\s*({Num})") ?? thickness;
+        double k = MatchNum(lower, $@"\bk\s*[:=]?\s*({Num})") ?? BendMath.DefaultK(family);
+        double angle = MatchNum(lower, $@"(?:\bangle\s*[:=]?\s*)?({Num})\s*(?:deg|degrees|°)") ?? 90.0;
+        double? measuredBd = MatchNum(lower, $@"\b(?:bd|deduction)\s*[:=]?\s*({Num})");
+
+        // ── Global basis (whole words only; id/od are reserved for per-dim) ──
+        DimBasis globalBasis = Regex.IsMatch(lower, @"\binside\b") ? DimBasis.Inside : DimBasis.Outside;
+
+        // ── Dimensions (per part type) ──────────────────────────────────────
+        Dim web = new(0, globalBasis), flangeL, flangeR;
+        double length;
+        double? lenKw() => MatchNum(lower, $@"\b(?:length|len|run|long)\s*[:=]?\s*({Num})");
+
+        if (type == PartType.LAngle)
+        {
+            // L-angle: two legs + length.  Shorthand "L 2 x 3 x 36"; keyworded "legs 2/3, length 36".
+            var sh = Regex.Match(lower, $@"\bl(?:-?\s?angle)?\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+            if (sh.Success)
+            {
+                flangeL = new Dim(NumOf(sh.Groups[1].Value), globalBasis);
+                flangeR = new Dim(NumOf(sh.Groups[2].Value), globalBasis);
+                length  = NumOf(sh.Groups[3].Value);
+            }
+            else
+            {
+                var (la, lb) = MatchFlanges(lower, globalBasis)
+                    ?? throw new DrawingParseException("Missing leg dimensions. Try \"L 2 x 3 x 36\" or \"legs 2/3\".");
+                flangeL = la; flangeR = lb;
+                length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
+            }
+        }
+        else if (type == PartType.ZChannel)
+        {
+            // Z-channel: flange x web x flange + length.  Shorthand "Z 2 x 4 x 2 x 36".
+            var sh = Regex.Match(lower, $@"\bz(?:-?\s?channel)?\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+            if (sh.Success)
+            {
+                flangeL = new Dim(NumOf(sh.Groups[1].Value), globalBasis);
+                web     = new Dim(NumOf(sh.Groups[2].Value), globalBasis);
+                flangeR = new Dim(NumOf(sh.Groups[3].Value), globalBasis);
+                length  = NumOf(sh.Groups[4].Value);
+            }
+            else
+            {
+                web = MatchDim(lower, @"web|base|bottom", globalBasis)
+                    ?? throw new DrawingParseException("Missing web dimension. Try \"web 4\" or \"Z 2 x 4 x 2 x 36\".");
+                var (fl, fr) = MatchFlanges(lower, globalBasis)
+                    ?? throw new DrawingParseException("Missing flange dimension. Try \"flange 2\".");
+                flangeL = fl; flangeR = fr;
+                length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
+            }
+        }
+        else
+        {
+            // U-channel: web x flange + length.  Shorthand "U 4 x 2 x 36".
+            var sh = Regex.Match(lower, $@"\bu(?:-?\s?channel)?\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+            if (sh.Success)
+            {
+                web     = new Dim(NumOf(sh.Groups[1].Value), globalBasis);
+                flangeL = new Dim(NumOf(sh.Groups[2].Value), globalBasis);
+                flangeR = flangeL;
+                length  = NumOf(sh.Groups[3].Value);
+            }
+            else
+            {
+                web = MatchDim(lower, @"web|base|bottom", globalBasis)
+                    ?? throw new DrawingParseException("Missing web dimension. Try \"web 4\" or shorthand \"U 4 x 2 x 36\".");
+                var (fl, fr) = MatchFlanges(lower, globalBasis)
+                    ?? throw new DrawingParseException("Missing flange dimension. Try \"flange 2\" (or \"flange 2/1.5\" for unequal).");
+                flangeL = fl; flangeR = fr;
+                length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
+            }
+        }
+
+        bool needWeb = type != PartType.LAngle;
+        if ((needWeb && web.Value <= 0) || flangeL.Value <= 0 || flangeR.Value <= 0 || length <= 0)
+            throw new DrawingParseException("Dimensions must be positive numbers.");
+        if (thickness <= 0)
+            throw new DrawingParseException(
+                "Could not determine material thickness. Add a gauge (e.g. \"16ga CRS\") or a decimal thickness (e.g. \"0.060 alum\").");
+
+        return new PartSpec
+        {
+            Type = type,
+            Web = web,
+            FlangeLeft = flangeL,
+            FlangeRight = flangeR,
+            Length = length,
+            Thickness = thickness,
+            InsideRadius = ri,
+            KFactor = k,
+            AngleDeg = angle,
+            MeasuredBendDeduction = measuredBd,
+            Material = materialLabel,
+            Units = "in",
+        };
+    }
+
+    private static PartType DetectType(string lower)
+    {
+        if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
+        if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
+        if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
+        if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("hat");
+        if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) throw NotYet("pan/tray");
+        throw new DrawingParseException(
+            "Could not identify the part type. Start with U (U-channel), L (angle) or Z (Z-channel).");
+    }
+
+    private static DrawingParseException NotYet(string what) =>
+        new($"{what} is not implemented yet — v1 supports the U-channel only.");
+
+    private static (MaterialFamily, string) DetectMaterial(string lower)
+    {
+        if (Regex.IsMatch(lower, @"\bgalv(?:anized|anised)?\b")) return (MaterialFamily.Galvanized, "galv");
+        if (Regex.IsMatch(lower, @"\bhrpo\b") || Regex.IsMatch(lower, @"\bhot[\s-]?rolled\b"))
+            return (MaterialFamily.HotRolled, "HRPO");
+        if (Regex.IsMatch(lower, @"\b(crs|cr|cold[\s-]?rolled)\b")) return (MaterialFamily.ColdRolled, "CRS");
+        if (Regex.IsMatch(lower, @"\b(hrs|hr)\b")) return (MaterialFamily.HotRolled, "HRS");
+        if (Regex.IsMatch(lower, @"\b(alum(?:in(?:i?um)?)?|al)\b")) return (MaterialFamily.Aluminium, "alum");
+        if (Regex.IsMatch(lower, @"\b(stainless|ss)\b")) return (MaterialFamily.Stainless, "SS");
+        if (Regex.IsMatch(lower, @"\bbrass\b")) return (MaterialFamily.Brass, "Brass");
+        if (Regex.IsMatch(lower, @"\b(copper|cu)\b")) return (MaterialFamily.Copper, "Copper");
+        return (MaterialFamily.Unknown, "");
+    }
+
+    private static double ResolveThickness(string lower, MaterialFamily family, string materialLabel)
+    {
+        // Explicit thickness keyword always wins.
+        var explicitT = MatchNum(lower, $@"\b(?:t|thk|thickness)\s*[:=]?\s*({Num})");
+        if (explicitT is > 0) return explicitT.Value;
+
+        // Gauge table.
+        var gauge = MatchInt(lower, @"\b(\d{1,2})\s*ga(?:uge)?\b");
+        if (gauge is not null)
+        {
+            var fromGauge = GaugeTables.Thickness(family == MaterialFamily.Unknown ? MaterialFamily.ColdRolled : family, gauge.Value);
+            if (fromGauge is > 0) return fromGauge.Value;
+        }
+
+        // Decimal thickness for non-gauge materials (e.g. "0.060 alum"): a leading-dot/0.x number.
+        var dec = MatchNum(lower, @"\b(0?\.\d+)\s*(?:""|in|inch)?\b");
+        if (dec is > 0) return dec.Value;
+
+        return 0; // signalled as an error upstream
+    }
+
+    /// <summary>Matches "KEYWORD value [id|od]" and applies a per-dimension basis override.</summary>
+    private static Dim? MatchDim(string lower, string keywordAlternation, DimBasis fallback)
+    {
+        var m = Regex.Match(lower, $@"\b(?:{keywordAlternation})\s*[:=]?\s*({Num})\s*\(?\s*(id|od)?\s*\)?");
+        if (!m.Success) return null;
+        var basis = BasisFrom(m.Groups[2].Value, fallback);
+        return new Dim(NumOf(m.Groups[1].Value), basis);
+    }
+
+    /// <summary>Flange may be a single value or "F/F2" for unequal legs, with optional id/od.</summary>
+    private static (Dim, Dim)? MatchFlanges(string lower, DimBasis fallback)
+    {
+        var m = Regex.Match(lower, $@"\b(?:flanges?|legs?|walls?|sides?)\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?\s*\(?\s*(id|od)?\s*\)?");
+        if (!m.Success) return null;
+        var basis = BasisFrom(m.Groups[3].Value, fallback);
+        var left = new Dim(NumOf(m.Groups[1].Value), basis);
+        var right = m.Groups[2].Success && m.Groups[2].Value.Length > 0
+            ? new Dim(NumOf(m.Groups[2].Value), basis)
+            : left;
+        return (left, right);
+    }
+
+    private static DimBasis BasisFrom(string token, DimBasis fallback) => token switch
+    {
+        "id" => DimBasis.Inside,
+        "od" => DimBasis.Outside,
+        _ => fallback,
+    };
+
+    // ── number helpers ──────────────────────────────────────────────────────
+
+    private static double? MatchNum(string text, string pattern)
+    {
+        var m = Regex.Match(text, pattern);
+        return m.Success ? NumOf(m.Groups[1].Value) : null;
+    }
+
+    private static int? MatchInt(string text, string pattern)
+    {
+        var m = Regex.Match(text, pattern);
+        return m.Success && int.TryParse(m.Groups[1].Value, out var v) ? v : null;
+    }
+
+    /// <summary>Parses integer, decimal, simple fraction "3/8", or mixed fraction "1-3/8".</summary>
+    private static double NumOf(string s)
+    {
+        s = s.Trim();
+        var mixed = Regex.Match(s, @"^(\d+)-(\d+)/(\d+)$");
+        if (mixed.Success)
+            return int.Parse(mixed.Groups[1].Value) +
+                   double.Parse(mixed.Groups[2].Value) / double.Parse(mixed.Groups[3].Value);
+
+        var frac = Regex.Match(s, @"^(\d+)/(\d+)$");
+        if (frac.Success)
+            return double.Parse(frac.Groups[1].Value) / double.Parse(frac.Groups[2].Value);
+
+        return double.Parse(s, CultureInfo.InvariantCulture);
+    }
+}

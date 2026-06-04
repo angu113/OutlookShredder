@@ -1,0 +1,278 @@
+using System.Globalization;
+using OutlookShredder.Proxy.Models.Drawing;
+
+namespace OutlookShredder.Proxy.Services.Drawing;
+
+/// <summary>
+/// Develops a <see cref="PartSpec"/> into a flat pattern: resolves inside/outside dimensions,
+/// runs the bend math, and produces the cut geometry + a radiused cross-section profile.
+/// Implements U-channel (2 same-direction bends), Z-channel (2 opposing bends) and L-angle
+/// (1 bend). The flat blank is always a rectangle with one bend centreline per bend.
+/// </summary>
+public static class FlatPattern
+{
+    /// <summary>DXF layer for cut lines (the CNC's expected name).</summary>
+    public const string CutLayer = "Big Graph";
+    /// <summary>DXF layer for bend lines / sheet marking (the CNC's expected name).</summary>
+    public const string BendLayer = "Mid Graph";
+
+    public static FlatPatternResult Develop(PartSpec spec) => spec.Type switch
+    {
+        PartType.UChannel => DevelopChannel(spec, isZ: false),
+        PartType.ZChannel => DevelopChannel(spec, isZ: true),
+        PartType.LAngle   => DevelopLAngle(spec),
+        _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
+    };
+
+    // ── U-channel (2 bends same direction) / Z-channel (2 bends opposing) ────
+    private static FlatPatternResult DevelopChannel(PartSpec spec, bool isZ)
+    {
+        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = spec.AngleDeg;
+
+        // Inside → outside compensation: web spans both flanges (+2T); each flange runs to a free edge (+1T).
+        double webO = spec.Web.Basis == DimBasis.Inside ? spec.Web.Value + 2 * t : spec.Web.Value;
+        double flLO = spec.FlangeLeft.Basis == DimBasis.Inside ? spec.FlangeLeft.Value + t : spec.FlangeLeft.Value;
+        double flRO = spec.FlangeRight.Basis == DimBasis.Inside ? spec.FlangeRight.Value + t : spec.FlangeRight.Value;
+
+        double ossb = BendMath.Ossb(ri, t, angle);
+        double ba = BendMath.BendAllowance(ri, t, k, angle);
+        double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
+
+        double flatWidth = flLO + webO + flRO - 2 * bd;
+        double flatHeight = spec.Length;
+
+        double leftFlangeFlat = flLO - ossb;
+        double webFlat = webO - 2 * ossb;
+        double bend1X = leftFlangeFlat + ba / 2.0;
+        double bend2X = leftFlangeFlat + ba + webFlat + ba / 2.0;
+        var bends = new[] { bend1X, bend2X };
+
+        // Z folds its flanges in opposite directions; U folds them the same way.
+        var profile = isZ
+            ? BuildOffsetProfile(new[] { flLO, webO, flRO }, new[] { +1, -1 }, t, ri, 0, flLO, 0, -1)
+            : BuildRadiusedU(webO, flLO, flRO, t, ri);
+
+        string slug = (isZ ? "zchannel_" : "uchannel_") + $"{Trim(webO)}x{Trim(flLO)}x{Trim(flatHeight)}";
+        return Build(spec, ossb, ba, bd, webO, flLO, flRO, flatWidth, flatHeight, bends, profile, slug);
+    }
+
+    // ── L-angle (1 bend, two legs) ───────────────────────────────────────────
+    private static FlatPatternResult DevelopLAngle(PartSpec spec)
+    {
+        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = spec.AngleDeg;
+
+        // legA = FlangeLeft, legB = FlangeRight. Each leg runs to a free edge (+1T inside).
+        double legAo = spec.FlangeLeft.Basis == DimBasis.Inside ? spec.FlangeLeft.Value + t : spec.FlangeLeft.Value;
+        double legBo = spec.FlangeRight.Basis == DimBasis.Inside ? spec.FlangeRight.Value + t : spec.FlangeRight.Value;
+
+        double ossb = BendMath.Ossb(ri, t, angle);
+        double ba = BendMath.BendAllowance(ri, t, k, angle);
+        double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
+
+        double flatWidth = legAo + legBo - bd;
+        double flatHeight = spec.Length;
+        double bend1X = (legAo - ossb) + ba / 2.0;
+        var bends = new[] { bend1X };
+
+        // Centreline: (0,legBo) down to (0,0), bend, across to (legAo,0).
+        var profile = BuildOffsetProfile(new[] { legBo, legAo }, new[] { +1 }, t, ri, 0, legBo, 0, -1);
+
+        string slug = $"angle_{Trim(legAo)}x{Trim(legBo)}x{Trim(flatHeight)}";
+        // WebOutside unused for L; legA in FlangeLeftOutside, legB in FlangeRightOutside.
+        return Build(spec, ossb, ba, bd, 0, legAo, legBo, flatWidth, flatHeight, bends, profile, slug);
+    }
+
+    // ── Shared result assembly (cut geometry rectangle + N bend lines) ───────
+    private static FlatPatternResult Build(
+        PartSpec spec, double ossb, double ba, double bd,
+        double webO, double flLO, double flRO,
+        double flatWidth, double flatHeight, double[] bends,
+        List<(double x, double y)> profile, string slug)
+    {
+        var entities = new List<CutEntity>
+        {
+            CutEntity.Polyline(CutLayer, closed: true, new[]
+            {
+                new CutVertex(0, 0), new CutVertex(flatWidth, 0),
+                new CutVertex(flatWidth, flatHeight), new CutVertex(0, flatHeight),
+            }),
+        };
+        foreach (var bx in bends)
+            entities.Add(CutEntity.Line(BendLayer, bx, 0, bx, flatHeight));
+
+        var cut = new CutGeometry
+        {
+            Units = spec.Units,
+            Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            Ossb = ossb,
+            BendAllowance = ba,
+            BendDeduction = bd,
+            WebOutside = webO,
+            FlangeLeftOutside = flLO,
+            FlangeRightOutside = flRO,
+            FlatWidth = flatWidth,
+            FlatHeight = flatHeight,
+            BendLinesX = bends,
+            Cut = cut,
+            Profile = profile,
+            Summary = BuildSummary(spec, webO, flLO, flRO, bd, bends.Length),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    // ── Cross-section profiles ───────────────────────────────────────────────
+
+    private static double RoOf(double ri, double t, double a, double b, double c)
+    {
+        double maxR = Math.Min(Math.Min(b, c) * 0.9, Math.Max(a, 0.001) / 2.0 * 0.9);
+        return Math.Min(ri + t, Math.Max(t, maxR));
+    }
+
+    /// <summary>U-channel material loop (web at bottom, flanges up) with radiused bend corners.</summary>
+    private static List<(double x, double y)> BuildRadiusedU(double webO, double flL, double flR, double t, double ri)
+    {
+        double ro = RoOf(ri, t, webO, flL, flR);
+        double riA = Math.Max(0.0, ro - t);
+        const int seg = 8;
+        var pts = new List<(double x, double y)>();
+        void Arc(double cx, double cy, double r, double a0, double a1)
+        {
+            for (int i = 1; i <= seg; i++)
+            {
+                double a = (a0 + (a1 - a0) * i / seg) * Math.PI / 180.0;
+                pts.Add((cx + r * Math.Cos(a), cy + r * Math.Sin(a)));
+            }
+        }
+        pts.Add((0, flL)); pts.Add((0, ro));
+        Arc(ro, ro, ro, 180, 270);
+        pts.Add((webO - ro, 0));
+        Arc(webO - ro, ro, ro, 270, 360);
+        pts.Add((webO, flR)); pts.Add((webO - t, flR)); pts.Add((webO - t, t + riA));
+        Arc(webO - t - riA, t + riA, riA, 0, -90);
+        pts.Add((t + riA, t));
+        Arc(t + riA, t + riA, riA, 270, 180);
+        pts.Add((t, flL));
+        return pts;
+    }
+
+    /// <summary>
+    /// General radiused material loop for a segment chain. Walks the centreline (straight runs +
+    /// 90° arcs of radius Ri+T/2 at each bend, turning +1 = left / -1 = right), then offsets ±T/2
+    /// along the local normal to form the two faces. Handles same- and opposing-direction bends.
+    /// </summary>
+    private static List<(double x, double y)> BuildOffsetProfile(
+        double[] segs, int[] turns, double t, double ri, double sx, double sy, double hx, double hy)
+    {
+        double rc = ri + t / 2.0;
+        const int K = 6;
+        var c = new List<(double x, double y, double nx, double ny)>();
+        double px = sx, py = sy;
+        double hn = Math.Sqrt(hx * hx + hy * hy); hx /= hn; hy /= hn;
+        c.Add((px, py, -hy, hx));
+        for (int i = 0; i < segs.Length; i++)
+        {
+            px += hx * segs[i]; py += hy * segs[i];
+            c.Add((px, py, -hy, hx));
+            if (i < segs.Length - 1)
+            {
+                int d = turns[i];
+                double cx = px + d * (-hy) * rc, cy = py + d * hx * rc;
+                double a0 = Math.Atan2(py - cy, px - cx);
+                for (int kk = 1; kk <= K; kk++)
+                {
+                    double a = a0 + d * (Math.PI / 2.0) * (kk / (double)K);
+                    px = cx + rc * Math.Cos(a); py = cy + rc * Math.Sin(a);
+                    hx = -d * Math.Sin(a); hy = d * Math.Cos(a);
+                    c.Add((px, py, -hy, hx));
+                }
+            }
+        }
+        var loop = new List<(double x, double y)>();
+        foreach (var p in c) loop.Add((p.x + p.nx * t / 2, p.y + p.ny * t / 2));
+        for (int i = c.Count - 1; i >= 0; i--) loop.Add((c[i].x - c[i].nx * t / 2, c[i].y - c[i].ny * t / 2));
+        return loop;
+    }
+
+    // ── Title / summary ──────────────────────────────────────────────────────
+    private static string PlainTitle(PartSpec s)
+    {
+        string shape = s.Type switch
+        {
+            PartType.UChannel => "U Channel",
+            PartType.LAngle   => "Angle",
+            PartType.ZChannel => "Z Channel",
+            _ => s.Type.ToString(),
+        };
+        string profileDims = s.Type == PartType.LAngle
+            ? $"{N(s.FlangeLeft.Value)}\" x {N(s.FlangeRight.Value)}\""
+            : $"{N(s.Web.Value)}\" x {N(s.FlangeLeft.Value)}\"";
+        return $"{MaterialPlain(s.Material)} {shape} {profileDims} x {N(s.Thickness)}\" x {N(s.Length)}\"".Trim();
+    }
+
+    private static string MaterialPlain(string m) => m switch
+    {
+        "alum"   => "Aluminum",
+        "CRS"    => "Cold Rolled Steel",
+        "HRS"    => "Hot Rolled Steel",
+        "galv"   => "Galvanized Steel",
+        "HRPO"   => "HRPO Steel",
+        "SS"     => "Stainless Steel",
+        "Brass"  => "Brass",
+        "Copper" => "Copper",
+        _ => m,
+    };
+
+    private static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private static string BuildSummary(PartSpec s, double webO, double flLO, double flRO, double bd, int nBends)
+    {
+        string basis = (s.Web.Basis == s.FlangeLeft.Basis && s.FlangeLeft.Basis == s.FlangeRight.Basis)
+            ? s.Web.Basis.ToString().ToLowerInvariant() : "mixed";
+        string u = s.Units;
+        string shape = s.Type switch
+        {
+            PartType.UChannel => "U-channel", PartType.LAngle => "L-angle",
+            PartType.ZChannel => "Z-channel", _ => s.Type.ToString(),
+        };
+        string outside = s.Type == PartType.LAngle
+            ? $"legs {F(flLO)}{u} x {F(flRO)}{u}"
+            : $"web {F(webO)}{u}, flange {(Math.Abs(flLO - flRO) < 1e-6 ? F(flLO) : $"{F(flLO)}/{F(flRO)}")}{u}";
+        var lines = new[]
+        {
+            $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",
+            $"Basis: {basis}  ->  outside {outside}",
+            $"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {s.AngleDeg:0.#} deg,  BD {F(bd)}{u}/bend (x{nBends})",
+        };
+        return string.Join("\n", lines);
+    }
+
+    private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+    private static string Trim(double v) => v.ToString("0.##", CultureInfo.InvariantCulture);
+}
+
+/// <summary>Result of developing a part — drives the DXF, the PDF render, and the UI summary.</summary>
+public sealed class FlatPatternResult
+{
+    public required PartSpec Spec { get; init; }
+    public double Ossb { get; init; }
+    public double BendAllowance { get; init; }
+    public double BendDeduction { get; init; }
+    public double WebOutside { get; init; }
+    public double FlangeLeftOutside { get; init; }
+    public double FlangeRightOutside { get; init; }
+    public double FlatWidth { get; init; }
+    public double FlatHeight { get; init; }
+    public required double[] BendLinesX { get; init; }
+    public required CutGeometry Cut { get; init; }
+    /// <summary>Radiused cross-section material loop (model coords) for the section + iso views.</summary>
+    public List<(double x, double y)> Profile { get; init; } = new();
+    public required string Summary { get; init; }
+    public string Title { get; init; } = "";
+}
