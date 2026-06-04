@@ -258,10 +258,12 @@ public static class DrawingTextParser
         if (thickness <= 0)
             throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"16ga\").");
 
-        var m = Regex.Match(lower, $@"\b(?:pan|tray)\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+        // Each of L/W/D carries an optional id/od basis (default outside).
+        var m = Regex.Match(lower,
+            $@"\b(?:pan|tray)\b\s*({Num})\s*(id|od)?\s*x\s*({Num})\s*(id|od)?\s*x\s*({Num})\s*(id|od)?");
         if (!m.Success)
             throw new DrawingParseException("Pan needs length x width x depth, e.g. \"Pan 24 x 18 x 2, 2 long 2 short, 16ga\".");
-        double L = NumOf(m.Groups[1].Value), W = NumOf(m.Groups[2].Value), D = NumOf(m.Groups[3].Value);
+        double L = NumOf(m.Groups[1].Value), W = NumOf(m.Groups[3].Value), D = NumOf(m.Groups[5].Value);
         if (L <= 0 || W <= 0 || D <= 0) throw new DrawingParseException("Pan dimensions must be positive.");
 
         int longN  = (int)Math.Round(MatchNum(lower, $@"({Num})\s*long")  ?? 2);
@@ -271,6 +273,9 @@ public static class DrawingTextParser
         {
             Type = PartType.Pan,
             Length = L, Width = W, Depth = D,
+            LengthBasis = BasisFrom(m.Groups[2].Value, DimBasis.Outside),
+            WidthBasis = BasisFrom(m.Groups[4].Value, DimBasis.Outside),
+            DepthBasis = BasisFrom(m.Groups[6].Value, DimBasis.Outside),
             Thickness = thickness, InsideRadius = ri, KFactor = k, AngleDeg = 90,
             Material = material, Units = "in", Finish = finish,
             PanBottom = longN >= 1, PanTop = longN >= 2,

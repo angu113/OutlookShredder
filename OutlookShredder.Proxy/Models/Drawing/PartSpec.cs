@@ -73,8 +73,12 @@ public sealed class PartSpec
     /// <summary>Plate width (for flat plates; Length is the plate length). Also the pan base width.</summary>
     public double Width { get; init; }
 
-    /// <summary>Pan wall height (outside).</summary>
+    /// <summary>Pan wall height.</summary>
     public double Depth { get; init; }
+    // Inside/outside basis for the pan's base length, base width, and wall depth.
+    public DimBasis LengthBasis { get; init; } = DimBasis.Outside;
+    public DimBasis WidthBasis { get; init; } = DimBasis.Outside;
+    public DimBasis DepthBasis { get; init; } = DimBasis.Outside;
     // Which pan walls are present. Bottom/Top run along the Length ("long" sides);
     // Left/Right run along the Width ("short" sides). A 3-sided pan omits one.
     public bool PanBottom { get; init; } = true;

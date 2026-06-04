@@ -66,7 +66,10 @@ public static class DrawingPdfRenderer
 
             if (fp.IsPan)
             {
-                DrawPan(gfx, fp, new XRect(M, top, usable, h));
+                double wPanFlat = (usable - gap) * 0.58;
+                double wPanIso = (usable - gap) * 0.42;
+                DrawPan(gfx, fp, new XRect(M, top, wPanFlat, h));
+                DrawPanIso(gfx, fp, new XRect(M + wPanFlat + gap, top, wPanIso, h));
             }
             else if (fp.IsPlate)
             {
@@ -446,7 +449,7 @@ public static class DrawingPdfRenderer
                     gfx.DrawLine(pen, P(e.X1, e.Y1), P(e.X2, e.Y2));
                     break;
                 case "circle":
-                    double r = e.R * scale; var c = P(e.Cx, e.Cy);
+                    double r = Math.Max(2.2, e.R * scale); var c = P(e.Cx, e.Cy);   // keep reliefs visible
                     gfx.DrawEllipse(pen, c.X - r, c.Y - r, 2 * r, 2 * r);
                     break;
             }
@@ -455,12 +458,72 @@ public static class DrawingPdfRenderer
         // Dimensions: base length & width (between bend lines) + the fold inset (flange flat).
         var s = fp.Spec;
         double bx0 = fp.PanBaseX0, bx1 = fp.PanBaseX1, by0 = fp.PanBaseY0, by1 = fp.PanBaseY1;
-        DimH(gfx, dimFont, P(bx0, by0).X, P(bx1, by0).X, P(bx0, by0).Y, oy + drawH + 24, F(s.Length), true);
-        DimV(gfx, dimFont, P(bx0, by0).X, ox - 46, P(bx0, by0).Y, P(bx0, by1).Y, F(s.Width), true);
+        DimH(gfx, dimFont, P(bx0, by0).X, P(bx1, by0).X, P(bx0, by0).Y, oy + drawH + 24, $"{F(bx1 - bx0)} OD", true);
+        DimV(gfx, dimFont, P(bx0, by0).X, ox - 46, P(bx0, by0).Y, P(bx0, by1).Y, $"{F(by1 - by0)} OD", true);
         if (s.PanBottom && by0 > 0)
             DimV(gfx, dimFont, P(bx1, 0).X, P(bx1, 0).X + 26, P(bx1, 0).Y, P(bx1, by0).Y, F(fp.PanWallDev), false);
         else if (s.PanLeft && bx0 > 0)
             DimH(gfx, dimFont, P(0, by0).X, P(bx0, by0).X, P(0, by0).Y, oy + drawH + 24, F(fp.PanWallDev), false);
+    }
+
+    // ── Pan: formed-part isometric (the folded tray) ─────────────────────────
+    private static void DrawPanIso(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var pen = new XPen(CutColor, 0.9);
+        var faint = new XPen(XColor.FromArgb(150, 150, 150), 0.6);
+        var floorFill = new XSolidBrush(XColor.FromArgb(238, 241, 247));
+        var wallFill = new XSolidBrush(XColor.FromArgb(246, 248, 252));
+
+        gfx.DrawString("Formed part", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 16, box.Width, box.Height - 16);
+
+        var s = fp.Spec;
+        double Lo = fp.PanBaseX1 - fp.PanBaseX0, Wo = fp.PanBaseY1 - fp.PanBaseY0, Do = fp.PanDepth;
+        const double c30 = 0.8660254, s30 = 0.5;
+        (double u, double v) Iso(double x, double y, double z) => ((x - y) * c30, (x + y) * s30 - z);
+
+        var corners = new[]
+        {
+            (0.0, 0.0, 0.0), (Lo, 0.0, 0.0), (Lo, Wo, 0.0), (0.0, Wo, 0.0),
+            (0.0, 0.0, Do),  (Lo, 0.0, Do),  (Lo, Wo, Do),  (0.0, Wo, Do),
+        };
+        var pr = corners.Select(p => Iso(p.Item1, p.Item2, p.Item3)).ToList();
+        double minU = pr.Min(p => p.u), maxU = pr.Max(p => p.u), minV = pr.Min(p => p.v), maxV = pr.Max(p => p.v);
+        double gw = Math.Max(maxU - minU, 1e-6), gh = Math.Max(maxV - minV, 1e-6);
+        const double pad = 38;
+        double scale = Math.Min((area.Width - pad * 2) / gw, (area.Height - pad * 2) / gh);
+        double ox = area.X + (area.Width - gw * scale) / 2, oy = area.Y + (area.Height - gh * scale) / 2;
+        XPoint S(double x, double y, double z) { var (u, v) = Iso(x, y, z); return new XPoint(ox + (u - minU) * scale, oy + (v - minV) * scale); }
+
+        // Floor.
+        var floor = new[] { S(0, 0, 0), S(Lo, 0, 0), S(Lo, Wo, 0), S(0, Wo, 0) };
+        gfx.DrawPolygon(floorFill, floor, XFillMode.Winding);
+        gfx.DrawPolygon(faint, floor);
+
+        // Walls (back walls first so front ones overlap them).
+        void Wall(bool present, (double x, double y) a, (double x, double y) b, bool front)
+        {
+            if (!present) return;
+            var q = new[] { S(a.x, a.y, 0), S(b.x, b.y, 0), S(b.x, b.y, Do), S(a.x, a.y, Do) };
+            gfx.DrawPolygon(wallFill, q, XFillMode.Winding);
+            gfx.DrawPolygon(front ? pen : faint, q);
+        }
+        Wall(s.PanTop,    (Lo, Wo), (0, Wo), front: false);   // back-left
+        Wall(s.PanRight,  (Lo, 0),  (Lo, Wo), front: false);  // back-right
+        Wall(s.PanBottom, (0, 0),   (Lo, 0),  front: true);   // front
+        Wall(s.PanLeft,   (0, Wo),  (0, 0),   front: true);   // front
+
+        // Wall-height dim on the front-left vertical edge.
+        var d0 = S(0, 0, 0); var d1 = S(0, 0, Do);
+        var e0 = new XPoint(d0.X - 16, d0.Y); var e1 = new XPoint(d1.X - 16, d1.Y);
+        var dimPen = new XPen(DimColor, 0.6);
+        gfx.DrawLine(dimPen, d0, e0); gfx.DrawLine(dimPen, d1, e1);
+        gfx.DrawLine(dimPen, e0, e1);
+        Arrow(gfx, e0, 0, 1); Arrow(gfx, e1, 0, -1);
+        gfx.DrawString(F(Do), dimFont, TextBrush, new XRect(e1.X - 32, (e0.Y + e1.Y) / 2 - 6, 28, 11), XStringFormats.CenterRight);
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────

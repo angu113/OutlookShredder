@@ -31,8 +31,12 @@ public static class FlatPattern
     private static FlatPatternResult DevelopPan(PartSpec spec)
     {
         double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = 90;
-        double Lo = spec.Length, Wo = spec.Width, Do = spec.Depth;
         bool wB = spec.PanBottom, wT = spec.PanTop, wL = spec.PanLeft, wR = spec.PanRight;
+
+        // Inside → outside: each bounding wall adds T to that base dimension; an inside depth adds T (the base).
+        double Lo = spec.LengthBasis == DimBasis.Inside ? spec.Length + (wL ? t : 0) + (wR ? t : 0) : spec.Length;
+        double Wo = spec.WidthBasis  == DimBasis.Inside ? spec.Width  + (wB ? t : 0) + (wT ? t : 0) : spec.Width;
+        double Do = spec.DepthBasis  == DimBasis.Inside ? spec.Depth + t : spec.Depth;
 
         double ossb = BendMath.Ossb(ri, t, angle);
         double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
@@ -90,22 +94,30 @@ public static class FlatPattern
             Cut = cut, Profile = new(),
             IsPan = true,
             PanBaseX0 = bx0, PanBaseX1 = bx1, PanBaseY0 = by0, PanBaseY1 = by1, PanWallDev = wallDev,
-            Summary = PanSummary(spec),
+            PanDepth = Do,
+            Summary = PanSummary(spec, Lo, Wo, Do),
             Title = PlainTitle(spec),
         };
     }
 
-    private static string PanSummary(PartSpec s)
+    private static string PanSummary(PartSpec s, double Lo, double Wo, double Do)
     {
         string u = s.Units;
         int longN = (s.PanBottom ? 1 : 0) + (s.PanTop ? 1 : 0);
         int shortN = (s.PanLeft ? 1 : 0) + (s.PanRight ? 1 : 0);
-        return string.Join("\n", new[]
+        bool anyInside = s.LengthBasis == DimBasis.Inside || s.WidthBasis == DimBasis.Inside || s.DepthBasis == DimBasis.Inside;
+        var lines = new List<string>
         {
             $"Pan  {s.Material}  (T={F(s.Thickness)}{u})",
-            $"Base {F(s.Length)}{u} x {F(s.Width)}{u}, wall {F(s.Depth)}{u} deep",
+            $"Base {F(Lo)}{u} x {F(Wo)}{u} OD, wall {F(Do)}{u} deep OD",
             $"Walls: {longN} long + {shortN} short; mitered corners, bend relief {F(s.Thickness)}{u}",
-        });
+        };
+        if (anyInside)
+        {
+            string b(DimBasis db) => db == DimBasis.Inside ? "ID" : "OD";
+            lines.Add($"Given: L {F(s.Length)} {b(s.LengthBasis)}, W {F(s.Width)} {b(s.WidthBasis)}, D {F(s.Depth)} {b(s.DepthBasis)}");
+        }
+        return string.Join("\n", lines);
     }
 
     // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
@@ -508,6 +520,7 @@ public sealed class FlatPatternResult
     public double PanBaseY0 { get; init; }
     public double PanBaseY1 { get; init; }
     public double PanWallDev { get; init; }
+    public double PanDepth { get; init; }   // outside wall height
     /// <summary>Plate bolt holes (centre x, y, diameter) in plate coords.</summary>
     public List<(double x, double y, double dia)> Holes { get; init; } = new();
     public required string Summary { get; init; }
