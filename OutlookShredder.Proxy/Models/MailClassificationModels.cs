@@ -45,7 +45,7 @@ public static class MailTaxonomy
         new("Corporate", "Tax",
             "Items specifically related to tax — sales tax, corporation tax."),
         new("Corporate", "Accounting",
-            "Messages from our accounting partner."),
+            "Correspondence to and from our outside accountant / bookkeeper (our accounting partner): financial statements they prepare for us, bookkeeping and reconciliation questions, and similar. Specifically our accountant's own mail - NOT franchise reports (Franchise/Reports), NOT payment receipts (Corporate/Receipts or Supplier/Receipts), and NOT tax-specific items (Corporate/Tax)."),
         new("Corporate", "Receipts",
             "Receipts/confirmations for our own OPERATING EXPENSES and overhead incurred running the business: shop and office supplies, fuel, postage, utilities, software subscriptions, and similar. OpEx we pay for ourselves - NOT a payment to a supplier for inventory or services (that is Supplier/Receipts). A separate accounting bucket."),
         new("Corporate", "Payroll",
