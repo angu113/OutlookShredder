@@ -82,22 +82,30 @@ public static class FlatPattern
         }
         else
         {
-            // Flitch: two rows down the length at the requested spacing.
+            // Flitch: two rows; first/last positions are paired (two holes), the middle follows
+            // the pattern. Holes are evenly spaced between the captured end margins.
             double sp = h.Spacing > 0 ? h.Spacing : 16;
-            double rowA = W * 0.25, rowB = W * 0.75;
-            int n = Math.Max(1, (int)Math.Floor(L / sp));
-            double span = (n - 1) * sp, start = (L - span) / 2.0;
+            double endD = h.EndDistance > 0 ? h.EndDistance : sp / 2.0;
+            double topEdge = h.TopEdge > 0 ? h.TopEdge : W * 0.25;
+            double botEdge = h.BottomEdge > 0 ? h.BottomEdge : W * 0.25;
+            double rowTop = W - topEdge;   // top row, measured from the top edge
+            double rowBot = botEdge;        // bottom row, measured from the bottom edge
+
+            double usable = Math.Max(0, L - 2 * endD);
+            int n = Math.Max(2, (int)Math.Round(usable / sp) + 1);
+            double actualSp = n > 1 ? usable / (n - 1) : 0;
             for (int i = 0; i < n; i++)
             {
-                double x = start + i * sp;
-                if (h.Pattern == HolePattern.Paired)
+                double x = endD + i * actualSp;
+                bool ends = i == 0 || i == n - 1;
+                if (h.Pattern == HolePattern.Paired || ends)
                 {
-                    list.Add((x, rowA, h.Diameter));
-                    list.Add((x, rowB, h.Diameter));
+                    list.Add((x, rowTop, h.Diameter));
+                    list.Add((x, rowBot, h.Diameter));
                 }
                 else
                 {
-                    list.Add((x, i % 2 == 0 ? rowA : rowB, h.Diameter));   // staggered
+                    list.Add((x, i % 2 == 0 ? rowTop : rowBot, h.Diameter));   // staggered middle
                 }
             }
         }

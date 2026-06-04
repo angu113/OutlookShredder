@@ -24,6 +24,9 @@ public sealed class HoleSpec
     public double Spacing { get; init; }       // flitch: hole spacing along the length
     public int Count { get; init; }            // base: number of holes
     public double EdgeDistance { get; init; }  // base: edge distance for corner holes
+    public double EndDistance { get; init; }   // flitch: LHS->first hole / RHS->last hole (ends paired)
+    public double TopEdge { get; init; }       // flitch: top material edge -> top row
+    public double BottomEdge { get; init; }    // flitch: bottom material edge -> bottom row
 }
 
 /// <summary>Whether a stated dimension is measured to the outside or the inside of the form.</summary>

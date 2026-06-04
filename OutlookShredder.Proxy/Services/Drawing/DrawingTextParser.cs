@@ -176,12 +176,25 @@ public static class DrawingTextParser
 
             var hm = Regex.Match(lower, $@"holes?\s+({Num})\s*(staggered|paired)?\s*(?:@|at|spacing|spaced)?\s*({Num})?");
             if (hm.Success)
+            {
+                double endDist = MatchNum(lower, $@"\bend\s*[:=]?\s*({Num})") ?? 0;
+                double topEdge = 0, bottomEdge = 0;
+                var em = Regex.Match(lower, $@"\bedge\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?");
+                if (em.Success)
+                {
+                    topEdge = NumOf(em.Groups[1].Value);
+                    bottomEdge = em.Groups[2].Success && em.Groups[2].Value.Length > 0 ? NumOf(em.Groups[2].Value) : topEdge;
+                }
                 holes = new HoleSpec
                 {
                     Diameter = NumOf(hm.Groups[1].Value),
                     Pattern = hm.Groups[2].Value == "paired" ? HolePattern.Paired : HolePattern.Staggered,
                     Spacing = hm.Groups[3].Success && hm.Groups[3].Value.Length > 0 ? NumOf(hm.Groups[3].Value) : 16,
+                    EndDistance = endDist,
+                    TopEdge = topEdge,
+                    BottomEdge = bottomEdge,
                 };
+            }
         }
         else // BasePlate
         {
@@ -238,8 +251,8 @@ public static class DrawingTextParser
             if (fromGauge is > 0) return fromGauge.Value;
         }
 
-        // Decimal thickness for non-gauge materials (e.g. "0.060 alum"): a leading-dot/0.x number.
-        var dec = MatchNum(lower, @"\b(0?\.\d+)\s*(?:""|in|inch)?\b");
+        // Decimal thickness for non-gauge materials (e.g. "0.060 alum" or "1.000 steel").
+        var dec = MatchNum(lower, @"\b(\d*\.\d+)\s*(?:""|in|inch)?\b");
         if (dec is > 0) return dec.Value;
 
         return 0; // signalled as an error upstream

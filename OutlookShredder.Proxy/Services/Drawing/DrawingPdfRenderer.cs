@@ -304,7 +304,17 @@ public static class DrawingPdfRenderer
         }
 
         DimH(gfx, dimFont, P(0, 0).X, P(L, 0).X, oy + drawH, oy + drawH + 22, F(L), true);
-        DimV(gfx, dimFont, ox, ox - 26, oy, oy + drawH, F(W), true);
+        DimV(gfx, dimFont, ox, ox - 46, oy, oy + drawH, F(W), true);
+
+        // Flitch: edge-to-row distances (top edge -> top row, bottom edge -> bottom row).
+        if (fp.Spec.Holes is { } hsr && hsr.Pattern != HolePattern.Corner && fp.Holes.Count > 0)
+        {
+            double topEdge = hsr.TopEdge > 0 ? hsr.TopEdge : W * 0.25;
+            double botEdge = hsr.BottomEdge > 0 ? hsr.BottomEdge : W * 0.25;
+            double rowTop = W - topEdge, rowBot = botEdge;
+            DimV(gfx, dimFont, ox, ox - 22, P(0, W).Y, P(0, rowTop).Y, F(topEdge), false);
+            DimV(gfx, dimFont, ox, ox - 22, P(0, 0).Y, P(0, rowBot).Y, F(botEdge), false);
+        }
 
         if (fp.Holes.Count > 0)
         {
