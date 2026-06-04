@@ -67,7 +67,11 @@ internal static class PickingSlipFabAppender
                 using var dms = new MemoryStream(d);
                 using var dDoc = PdfReader.Open(dms, PdfDocumentOpenMode.Import);
                 for (int i = 0; i < dDoc.PageCount; i++)
-                    outDoc.AddPage(dDoc.Pages[i]);
+                {
+                    var added = outDoc.AddPage(dDoc.Pages[i]);
+                    // Drawings are landscape; rotate 90° so they fill the portrait picking-slip page.
+                    added.Rotate = (added.Rotate + 90) % 360;
+                }
             }
             using var outMs = new MemoryStream();
             outDoc.Save(outMs);
