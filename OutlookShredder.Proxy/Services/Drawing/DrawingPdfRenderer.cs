@@ -139,7 +139,7 @@ public static class DrawingPdfRenderer
         double mw = maxX - minX, mh = maxY - minY;
         if (mw <= 0 || mh <= 0) return;
 
-        double bandL = 56, bandB = 50, bandT = 14, bandR = 36;
+        double bandL = 58, bandB = 50, bandT = 14, bandR = 66;   // room for a right-side dim (Z)
         double availW = area.Width - bandL - bandR, availH = area.Height - bandB - bandT;
         double scale = Math.Min(availW / mw, availH / mh);
         double drawW = mw * scale, drawH = mh * scale;
@@ -188,8 +188,8 @@ public static class DrawingPdfRenderer
 
             case PartType.ZChannel:
                 // Walker frame: web centreline y=0 (x 0..webO), left flange up x=0 (y 0..flL),
-                // right flange down x=webO (y 0..-flR). Web dim sits just below the web (short witness).
-                DimH(gfx, dimFont, P(0, -t2).X, P(webO, -t2).X, P(0, -t2).Y, P(0, -t2).Y + 24,
+                // right flange down x=webO (y 0..-flR). Web dim below the whole part.
+                DimH(gfx, dimFont, P(0, -t2).X, P(webO, -t2).X, P(0, -t2).Y, sBottom + 22,
                      wIn ? $"{F(webO - 2 * t)} ID" : $"{F(webO)} OD", true);
                 DimV(gfx, dimFont, P(-t2, 0).X, sLeft - 24, P(-t2, 0).Y, P(-t2, flL).Y,
                      flIn ? $"{F(flL - t)} ID" : $"{F(flL)} OD", true);
