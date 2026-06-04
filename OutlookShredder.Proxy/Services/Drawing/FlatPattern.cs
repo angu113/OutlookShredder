@@ -91,13 +91,25 @@ public static class FlatPattern
             double rowTop = W - topEdge;   // top row, measured from the top edge
             double rowBot = botEdge;        // bottom row, measured from the bottom edge
 
-            double usable = Math.Max(0, L - 2 * endD);
-            int n = Math.Max(2, (int)Math.Round(usable / sp) + 1);
-            double actualSp = n > 1 ? usable / (n - 1) : 0;
-            for (int i = 0; i < n; i++)
+            // First hole at the end distance, then EXACT spacing, with the last hole at the
+            // RHS end distance (the final gap absorbs whatever remainder is left over).
+            double rhs = L - endD;
+            var xs = new List<double>();
+            if (rhs > endD + 1e-6)
             {
-                double x = endD + i * actualSp;
-                bool ends = i == 0 || i == n - 1;
+                for (double x = endD; x < rhs - 1e-6; x += sp) xs.Add(x);
+                if (xs.Count > 0 && Math.Abs(xs[^1] - rhs) < sp * 0.5) xs[^1] = rhs;
+                else xs.Add(rhs);
+            }
+            else
+            {
+                xs.Add(L / 2.0);   // plate too short for two end holes — one centred
+            }
+
+            for (int i = 0; i < xs.Count; i++)
+            {
+                double x = xs[i];
+                bool ends = i == 0 || i == xs.Count - 1;
                 if (h.Pattern == HolePattern.Paired || ends)
                 {
                     list.Add((x, rowTop, h.Diameter));
