@@ -58,7 +58,9 @@ public static class DrawingPdfRenderer
             double wSect = (usable - 2 * gap) * 0.32;
             double wIso  = (usable - 2 * gap) * 0.32;
 
-            double footH = 44;
+            // Box grows with the summary (+1 line for the "solid = cut …" legend).
+            int footLines = fp.Summary.Split('\n').Length + 1;
+            double footH = footLines * 10 + 6;
             double footTop = ph - M - footH;
             double h = footTop - top - 8;
 
@@ -204,6 +206,43 @@ public static class DrawingPdfRenderer
                      frIn ? $"{F(flR - t)} ID" : $"{F(flR)} OD", true);
                 TLeader(webO * 0.5, t2, -t2);
                 break;
+        }
+
+        // ── "Finish" arrow: word + leader pointing at the finished face ──────────
+        var finishFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        void FinishCallout(double mx, double my, double sdx, double sdy)
+        {
+            var tip = P(mx, my);
+            double l = Math.Sqrt(sdx * sdx + sdy * sdy); if (l < 1e-6) l = 1;
+            double ux = sdx / l, uy = sdy / l;
+            var tail = new XPoint(tip.X + ux * 24, tip.Y + uy * 24);
+            gfx.DrawLine(new XPen(CutColor, 1.0), tail, tip);
+            // black arrowhead at the tip, pointing from tail toward tip
+            double dx = -ux, dy = -uy, px = -dy, py = dx;
+            var b1 = new XPoint(tip.X - dx * 5 + px * 1.9, tip.Y - dy * 5 + py * 1.9);
+            var b2 = new XPoint(tip.X - dx * 5 - px * 1.9, tip.Y - dy * 5 - py * 1.9);
+            gfx.DrawPolygon(XBrushes.Black, new[] { tip, b1, b2 }, XFillMode.Winding);
+            XRect lr; XStringFormat fmt;
+            if (ux > 0.3)       { lr = new XRect(tail.X + 3, tail.Y - 6, 64, 12);  fmt = XStringFormats.CenterLeft; }
+            else if (ux < -0.3) { lr = new XRect(tail.X - 67, tail.Y - 6, 64, 12); fmt = XStringFormats.CenterRight; }
+            else                { lr = new XRect(tail.X - 32, uy > 0 ? tail.Y + 2 : tail.Y - 14, 64, 12); fmt = XStringFormats.Center; }
+            gfx.DrawString("Finish", finishFont, XBrushes.Black, lr, fmt);
+        }
+
+        switch (fp.Spec.Finish)
+        {
+            case FinishSide.Outside when fp.Spec.Type == PartType.UChannel:
+                FinishCallout(webO, flR * 0.5, 1, 0); break;            // right flange outer face
+            case FinishSide.Inside when fp.Spec.Type == PartType.UChannel:
+                FinishCallout(webO - t, flR * 0.5, -1, 0); break;       // right flange inner (cavity)
+            case FinishSide.Outside when fp.Spec.Type == PartType.LAngle:
+                FinishCallout(flL, -t2, 0.7, 0.7); break;               // convex (lower-right) corner
+            case FinishSide.Inside when fp.Spec.Type == PartType.LAngle:
+                FinishCallout(flL * 0.55, t2, 0, -1); break;            // concave interior angle
+            case FinishSide.Top:                                        // Z: first flange's top face
+                FinishCallout(webO * 0.62, t2, 0, -1); break;
+            case FinishSide.Bottom:                                     // Z: first flange's bottom face
+                FinishCallout(webO * 0.38, -t2, 0, 1); break;
         }
     }
 

@@ -16,6 +16,12 @@ public enum PartType
 /// <summary>How holes are laid out on a flat plate.</summary>
 public enum HolePattern { Staggered, Paired, Corner }
 
+/// <summary>
+/// Which face carries the finish (brushed stainless, paint, etc.). Inside/Outside for
+/// U / L / pan (relative to the bend direction); Top/Bottom for Z (relative to the first flange).
+/// </summary>
+public enum FinishSide { None, Inside, Outside, Top, Bottom }
+
 /// <summary>Bolt-hole specification for a flat plate.</summary>
 public sealed class HoleSpec
 {
@@ -84,4 +90,7 @@ public sealed class PartSpec
     public string Material { get; init; } = "";
     /// <summary>"in" or "mm".</summary>
     public string Units { get; init; } = "in";
+
+    /// <summary>Which face carries the finish (and gets the "Finish" arrow on the drawing).</summary>
+    public FinishSide Finish { get; init; } = FinishSide.None;
 }

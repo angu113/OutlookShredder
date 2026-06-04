@@ -374,12 +374,21 @@ public static class FlatPattern
         string outside = s.Type == PartType.LAngle
             ? $"legs {F(flLO)}{u} x {F(flRO)}{u}"
             : $"web {F(webO)}{u}, flange {(Math.Abs(flLO - flRO) < 1e-6 ? F(flLO) : $"{F(flLO)}/{F(flRO)}")}{u}";
-        var lines = new[]
+        var lines = new List<string>
         {
             $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",
             $"Basis: {basis}  ->  outside {outside}",
             $"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {s.AngleDeg:0.#} deg,  BD {F(bd)}{u}/bend (x{nBends})",
         };
+        string? finishNote = s.Finish switch
+        {
+            FinishSide.Inside  => "Finish on inside face",
+            FinishSide.Outside => "Finish on outside face",
+            FinishSide.Top     => "Finish on top face",
+            FinishSide.Bottom  => "Finish on bottom face",
+            _ => null,
+        };
+        if (finishNote != null) lines.Add(finishNote);
         return string.Join("\n", lines);
     }
 

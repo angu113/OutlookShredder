@@ -46,6 +46,22 @@ public static class DrawingTextParser
         double angle = MatchNum(lower, $@"(?:\bangle\s*[:=]?\s*)?({Num})\s*(?:deg|degrees|°)") ?? 90.0;
         double? measuredBd = MatchNum(lower, $@"\b(?:bd|deduction)\s*[:=]?\s*({Num})");
 
+        // ── Finish side — strip it so the 'inside'/'outside' words here don't trip the global basis ──
+        FinishSide finish = FinishSide.None;
+        var fm = Regex.Match(lower, @"\bfinish\s+(outside|inside|top|bottom)\b");
+        if (fm.Success)
+        {
+            finish = fm.Groups[1].Value switch
+            {
+                "outside" => FinishSide.Outside,
+                "inside"  => FinishSide.Inside,
+                "top"     => FinishSide.Top,
+                "bottom"  => FinishSide.Bottom,
+                _         => FinishSide.None,
+            };
+            lower = lower.Remove(fm.Index, fm.Length);
+        }
+
         // ── Flat plates (Flitch / Base) — different field set; parsed + returned here ──
         if (type is PartType.FlitchPlate or PartType.BasePlate)
             return ParsePlate(type, lower, thickness, materialLabel, ri, k);
@@ -140,6 +156,7 @@ public static class DrawingTextParser
             MeasuredBendDeduction = measuredBd,
             Material = materialLabel,
             Units = "in",
+            Finish = finish,
         };
     }
 
