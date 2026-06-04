@@ -68,6 +68,14 @@ public class MailClassifierService
           your payment" means the charge ALREADY happened — that is Supplier/Receipts, NEVER
           Supplier/Invoices and Bills, even if an amount is shown. "Supplier/Invoices and Bills" is ONLY
           an UNPAID request to pay (amount due / please remit / pay-now link).
+        - A supplier SALES ORDER / ORDER ACKNOWLEDGEMENT / ORDER CONFIRMATION (a document titled
+          "Sales Order", "Order Acknowledgement", "Order Confirmation", or a "Sales Order # ...
+          Transmission" from a supplier) acknowledges an order we PLACED and is
+          "Supplier/Order Confirmations" — EVEN WHEN it lists line prices and a total, and EVEN WHEN
+          our HSK-PO number appears only in the attached PDF rather than the subject. It is NOT
+          "Supplier/Invoices and Bills": a bill/invoice is a request to PAY for goods already supplied
+          (amount DUE / please remit / pay-now link), whereas a sales-order acknowledgement confirms
+          the order going forward (it commits to supplying it, often with a ship/delivery date).
 
         For "Supplier/Invoices and Bills" and "Supplier/Receipts" (supplier bills, invoices, and
         payment receipts — including those sent via a billing processor such as Enmark,
