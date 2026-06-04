@@ -66,10 +66,18 @@ public static class DrawingPdfRenderer
 
             if (fp.IsPan)
             {
-                double wPanFlat = (usable - gap) * 0.58;
-                double wPanIso = (usable - gap) * 0.42;
-                DrawPan(gfx, fp, new XRect(M, top, wPanFlat, h));
-                DrawPanIso(gfx, fp, new XRect(M + wPanFlat + gap, top, wPanIso, h));
+                // Top row: flat pattern + formed iso.  Bottom row: side section + end section.
+                double topH = h * 0.56, botH = h - topH - 10;
+                double secY = top + topH + 10;
+                double wFlatP = (usable - gap) * 0.6, wIsoP = (usable - gap) * 0.4;
+                DrawPan(gfx, fp, new XRect(M, top, wFlatP, topH));
+                DrawPanIso(gfx, fp, new XRect(M + wFlatP + gap, top, wIsoP, topH));
+
+                double wSec = (usable - gap) / 2;
+                DrawSection(gfx, new XRect(M, secY, wSec, botH), "Side section",
+                    fp.PanSideProfile, fp.PanBaseY1 - fp.PanBaseY0, fp.PanDepth, fp.Spec.Thickness);
+                DrawSection(gfx, new XRect(M + wSec + gap, secY, wSec, botH), "End section",
+                    fp.PanEndProfile, fp.PanBaseX1 - fp.PanBaseX0, fp.PanDepth, fp.Spec.Thickness);
             }
             else if (fp.IsPlate)
             {
@@ -524,6 +532,45 @@ public static class DrawingPdfRenderer
         gfx.DrawLine(dimPen, e0, e1);
         Arrow(gfx, e0, 0, 1); Arrow(gfx, e1, 0, -1);
         gfx.DrawString(F(Do), dimFont, TextBrush, new XRect(e1.X - 32, (e0.Y + e1.Y) / 2 - 6, 28, 11), XStringFormats.CenterRight);
+    }
+
+    // ── Generic radiused U cross-section (web + two walls), thickness shown like the channels ──
+    private static void DrawSection(XGraphics gfx, XRect box, string title,
+        List<(double x, double y)> prof, double webOD, double wallOD, double thickness)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var matPen = new XPen(CutColor, 1.1);
+
+        gfx.DrawString(title, titleFont, XBrushes.Black, new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 14, box.Width, box.Height - 14);
+        if (prof.Count < 3) return;
+
+        double minX = prof.Min(p => p.x), maxX = prof.Max(p => p.x);
+        double minY = prof.Min(p => p.y), maxY = prof.Max(p => p.y);
+        double mw = maxX - minX, mh = maxY - minY;
+        if (mw <= 0 || mh <= 0) return;
+
+        double bandL = 46, bandB = 42, bandT = 12, bandR = 18;
+        double availW = area.Width - bandL - bandR, availH = area.Height - bandB - bandT;
+        double scale = Math.Min(availW / mw, availH / mh);
+        double drawW = mw * scale, drawH = mh * scale;
+        double ox = area.X + bandL + (availW - drawW) / 2;
+        double oy = area.Y + bandT + (availH - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + (mx - minX) * scale, oy + drawH - (my - minY) * scale);
+
+        gfx.DrawPolygon(matPen, prof.Select(p => P(p.x, p.y)).ToArray());
+
+        double sBottom = oy + drawH, sLeft = ox;
+        DimH(gfx, dimFont, P(0, 0).X, P(webOD, 0).X, P(0, 0).Y, sBottom + 20, $"{F(webOD)} OD", true);
+        DimV(gfx, dimFont, P(0, 0).X, sLeft - 22, P(0, 0).Y, P(0, wallOD).Y, $"{F(wallOD)} OD", true);
+
+        // Thickness leader off the web.
+        var a = P(webOD * 0.5, 0); var b = P(webOD * 0.5, thickness);
+        var lead = new XPen(DimColor, 0.6);
+        gfx.DrawLine(lead, a, b);
+        gfx.DrawLine(lead, b, new XPoint(b.X + 20, b.Y - 11));
+        gfx.DrawString($"T {F(thickness)}", dimFont, TextBrush, new XRect(b.X + 22, b.Y - 17, 52, 11), XStringFormats.TopLeft);
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────

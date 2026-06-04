@@ -47,13 +47,19 @@ public static class FlatPattern
         double bx0 = wL ? wallDev : 0, bx1 = bx0 + Lo, xMax = bx1 + (wR ? wallDev : 0);
         double by0 = wB ? wallDev : 0, by1 = by0 + Wo, yMax = by1 + (wT ? wallDev : 0);
 
-        var entities = new List<CutEntity>
-        {
-            CutEntity.Polyline(CutLayer, closed: true, new[]
-            {
-                new CutVertex(0, 0), new CutVertex(xMax, 0), new CutVertex(xMax, yMax), new CutVertex(0, yMax),
-            }),
-        };
+        // Outer cut outline: base + present-wall flanges with the corner squares NOTCHED OUT, so
+        // adjacent walls fold up without colliding. A corner is notched only where both walls exist.
+        bool blN = wB && wL, brN = wB && wR, trN = wT && wR, tlN = wT && wL;
+        var outline = new List<CutVertex> { new(blN ? bx0 : 0, 0), new(brN ? bx1 : xMax, 0) };
+        if (brN) { outline.Add(new(bx1, by0)); outline.Add(new(xMax, by0)); }
+        outline.Add(new(xMax, trN ? by1 : yMax));
+        if (trN) { outline.Add(new(bx1, by1)); outline.Add(new(bx1, yMax)); }
+        outline.Add(new(tlN ? bx0 : 0, yMax));
+        if (tlN) { outline.Add(new(bx0, by1)); outline.Add(new(0, by1)); }
+        outline.Add(new(0, blN ? by0 : 0));
+        if (blN) outline.Add(new(bx0, by0));
+
+        var entities = new List<CutEntity> { CutEntity.Polyline(CutLayer, closed: true, outline) };
 
         // Bend lines (only where a wall is present), spanning the base edge.
         if (wB) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx1, by0));
@@ -61,21 +67,21 @@ public static class FlatPattern
         if (wL) entities.Add(CutEntity.Line(BendLayer, bx0, by0, bx0, by1));
         if (wR) entities.Add(CutEntity.Line(BendLayer, bx1, by0, bx1, by1));
 
-        // Mitered corner where both adjoining walls exist: a slit from the outer corner to a
-        // relief hole at the bend-line intersection so the two flanges fold to a clean miter.
-        void Miter(bool present, double ocx, double ocy, double rcx, double rcy)
-        {
-            if (!present) return;
-            double dx = rcx - ocx, dy = rcy - ocy, l = Math.Sqrt(dx * dx + dy * dy);
-            if (l < 1e-6) return;
-            double ux = dx / l, uy = dy / l;
-            entities.Add(CutEntity.Line(CutLayer, ocx, ocy, rcx - ux * relief, rcy - uy * relief));
-            entities.Add(CutEntity.Circle(CutLayer, rcx, rcy, relief));
-        }
-        Miter(wB && wL, 0,    0,    bx0, by0);
-        Miter(wB && wR, xMax, 0,    bx1, by0);
-        Miter(wT && wR, xMax, yMax, bx1, by1);
-        Miter(wT && wL, 0,    yMax, bx0, by1);
+        // Bend relief at each notched corner: a small hole (radius = bend radius) whose perimeter
+        // touches the inside-bend-tangent intersection (the bend root) and bulges into the base.
+        // This is the standard double-bend corner relief — the arc follows the bend radius so the
+        // two 90° bends can form without tearing or piling up at the corner.
+        double rr = Math.Max(ri, t);
+        double d = rr / Math.Sqrt(2.0);   // centre offset along the 45° bisector → perimeter meets the root
+        if (blN) entities.Add(CutEntity.Circle(CutLayer, bx0 + d, by0 + d, rr));
+        if (brN) entities.Add(CutEntity.Circle(CutLayer, bx1 - d, by0 + d, rr));
+        if (trN) entities.Add(CutEntity.Circle(CutLayer, bx1 - d, by1 - d, rr));
+        if (tlN) entities.Add(CutEntity.Circle(CutLayer, bx0 + d, by1 - d, rr));
+
+        // Cross-section profiles (radiused U, thickness shown like the channels):
+        // side = across the width (left/right walls); end = across the length (bottom/top walls).
+        var sideProfile = BuildRadiusedU(Wo, wL ? Do : t, wR ? Do : t, t, ri);
+        var endProfile  = BuildRadiusedU(Lo, wB ? Do : t, wT ? Do : t, t, ri);
 
         string slug = $"pan_{Trim(Lo)}x{Trim(Wo)}x{Trim(Do)}";
         var cut = new CutGeometry
@@ -95,6 +101,8 @@ public static class FlatPattern
             IsPan = true,
             PanBaseX0 = bx0, PanBaseX1 = bx1, PanBaseY0 = by0, PanBaseY1 = by1, PanWallDev = wallDev,
             PanDepth = Do,
+            PanSideProfile = sideProfile,
+            PanEndProfile = endProfile,
             Summary = PanSummary(spec, Lo, Wo, Do),
             Title = PlainTitle(spec),
         };
@@ -521,6 +529,8 @@ public sealed class FlatPatternResult
     public double PanBaseY1 { get; init; }
     public double PanWallDev { get; init; }
     public double PanDepth { get; init; }   // outside wall height
+    public List<(double x, double y)> PanSideProfile { get; init; } = new();   // U across the width
+    public List<(double x, double y)> PanEndProfile { get; init; } = new();    // U across the length
     /// <summary>Plate bolt holes (centre x, y, diameter) in plate coords.</summary>
     public List<(double x, double y, double dia)> Holes { get; init; } = new();
     public required string Summary { get; init; }
