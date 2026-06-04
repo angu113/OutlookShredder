@@ -45,6 +45,13 @@ public static class DrawingPdfRenderer
                 blankFont, XBrushes.Black, new XRect(M, M + 16, pw - 2 * M, 14), XStringFormats.TopLeft);
 
             double top = M + 38;
+            if (fp.IsPlate && fp.Spec.Holes is { } h0 && fp.Holes.Count > 0)
+            {
+                gfx.DrawString($"{fp.Holes.Count} holes,  {F(h0.Diameter)}\" dia",
+                    new XFont("Arial", 10, XFontStyleEx.Bold), XBrushes.Black,
+                    new XRect(M, M + 31, pw - 2 * M, 12), XStringFormats.TopLeft);
+                top = M + 48;
+            }
             double usable = pw - 2 * M;
             const double gap = 16;
             double wFlat = (usable - 2 * gap) * 0.36;
@@ -315,9 +322,17 @@ public static class DrawingPdfRenderer
         {
             if (hs.Pattern != HolePattern.Corner)
             {
+                // Dimension chain across the top: LHS -> first hole, each spacing, last hole -> RHS.
                 var xs = fp.Holes.Select(h => h.x).Distinct().OrderBy(x => x).ToList();
-                if (xs.Count >= 2)
-                    DimH(gfx, dimFont, P(xs[0], 0).X, P(xs[1], 0).X, oy, oy - 16, F(xs[1] - xs[0]), false);
+                if (xs.Count > 0)
+                {
+                    var chain = new List<double> { 0 };
+                    chain.AddRange(xs);
+                    chain.Add(L);
+                    for (int i = 0; i < chain.Count - 1; i++)
+                        DimH(gfx, dimFont, P(chain[i], 0).X, P(chain[i + 1], 0).X, oy, oy - 16,
+                             F(chain[i + 1] - chain[i]), false);
+                }
             }
             else if (fp.Holes.Count > 0)
             {
