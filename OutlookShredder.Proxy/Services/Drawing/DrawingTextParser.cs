@@ -194,7 +194,15 @@ public static class DrawingTextParser
             var hm = Regex.Match(lower, $@"holes?\s+({Num})\s*(staggered|paired)?\s*(?:@|at|spacing|spaced)?\s*({Num})?");
             if (hm.Success)
             {
-                double endDist = MatchNum(lower, $@"\bend\s*[:=]?\s*({Num})") ?? 0;
+                // End offsets: "end 2" sets both; "lhs 2 rhs 4" overrides each independently
+                // (a "/" separator can't be used here — "2/4" parses as the fraction 0.5).
+                double leftEnd = 0, rightEnd = 0;
+                var endm = Regex.Match(lower, $@"\bend\s*[:=]?\s*({Num})");
+                if (endm.Success) leftEnd = rightEnd = NumOf(endm.Groups[1].Value);
+                var lm = Regex.Match(lower, $@"\blhs\s*[:=]?\s*({Num})");
+                if (lm.Success) leftEnd = NumOf(lm.Groups[1].Value);
+                var rm = Regex.Match(lower, $@"\brhs\s*[:=]?\s*({Num})");
+                if (rm.Success) rightEnd = NumOf(rm.Groups[1].Value);
                 double topEdge = 0, bottomEdge = 0;
                 var em = Regex.Match(lower, $@"\bedge\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?");
                 if (em.Success)
@@ -207,7 +215,8 @@ public static class DrawingTextParser
                     Diameter = NumOf(hm.Groups[1].Value),
                     Pattern = hm.Groups[2].Value == "paired" ? HolePattern.Paired : HolePattern.Staggered,
                     Spacing = hm.Groups[3].Success && hm.Groups[3].Value.Length > 0 ? NumOf(hm.Groups[3].Value) : 16,
-                    EndDistance = endDist,
+                    LeftEndOffset = leftEnd,
+                    RightEndOffset = rightEnd,
                     TopEdge = topEdge,
                     BottomEdge = bottomEdge,
                 };

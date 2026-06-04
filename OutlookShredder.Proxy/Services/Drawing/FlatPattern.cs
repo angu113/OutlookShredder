@@ -85,21 +85,22 @@ public static class FlatPattern
             // Flitch: two rows; first/last positions are paired (two holes), the middle follows
             // the pattern. Holes are evenly spaced between the captured end margins.
             double sp = h.Spacing > 0 ? h.Spacing : 16;
-            double endD = h.EndDistance > 0 ? h.EndDistance : sp / 2.0;
+            double leftEnd  = h.LeftEndOffset  > 0 ? h.LeftEndOffset  : sp / 2.0;
+            double rightEnd = h.RightEndOffset > 0 ? h.RightEndOffset : sp / 2.0;
             double topEdge = h.TopEdge > 0 ? h.TopEdge : W * 0.25;
             double botEdge = h.BottomEdge > 0 ? h.BottomEdge : W * 0.25;
             double rowTop = W - topEdge;   // top row, measured from the top edge
             double rowBot = botEdge;        // bottom row, measured from the bottom edge
 
-            // First hole at the end distance, then EXACT spacing, with the last hole at the
-            // RHS end distance (the final gap absorbs whatever remainder is left over).
-            double rhs = L - endD;
+            // First hole at the LHS offset, then EXACT spacing, with the last hole at the
+            // RHS offset (L - rightEnd); the final gap absorbs whatever remainder is left over.
+            double first = leftEnd, last = L - rightEnd;
             var xs = new List<double>();
-            if (rhs > endD + 1e-6)
+            if (last > first + 1e-6)
             {
-                for (double x = endD; x < rhs - 1e-6; x += sp) xs.Add(x);
-                if (xs.Count > 0 && Math.Abs(xs[^1] - rhs) < sp * 0.5) xs[^1] = rhs;
-                else xs.Add(rhs);
+                for (double x = first; x < last - 1e-6; x += sp) xs.Add(x);
+                if (xs.Count > 0 && Math.Abs(xs[^1] - last) < sp * 0.5) xs[^1] = last;
+                else xs.Add(last);
             }
             else
             {

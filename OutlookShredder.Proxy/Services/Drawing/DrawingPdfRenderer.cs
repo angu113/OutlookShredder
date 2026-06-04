@@ -369,11 +369,18 @@ public static class DrawingPdfRenderer
             var (hx, hy, dia) = fp.Holes[0];
             var c = P(hx, hy);
             double r = dia / 2.0 * scale;
-            var tip = new XPoint(c.X + r * 0.7, c.Y - r * 0.7);
-            var lp = new XPoint(c.X + 22, c.Y - 20);
-            gfx.DrawLine(new XPen(DimColor, 0.6), tip, lp);
-            gfx.DrawString($"{fp.Holes.Count} x {F(dia)} dia", dimFont, TextBrush,
-                new XRect(lp.X + 2, lp.Y - 5, 90, 11), XStringFormats.TopLeft);
+            string label = $"{fp.Holes.Count} x {F(dia)} dia";
+            var sz = gfx.MeasureString(label, dimFont);
+            double bw = sz.Width + 9, bh = sz.Height + 5;
+            // White boxed callout in the clear band above the spacing chain — clear of the part edge.
+            double bx = Math.Max(area.X + 1, Math.Min(c.X - bw / 2, area.X + area.Width - bw - 1));
+            double by = Math.Max(area.Y + 1, oy - 38 - bh);
+            var br = new XRect(bx, by, bw, bh);
+            double leadX = Math.Max(br.X + 4, Math.Min(c.X, br.X + bw - 4));
+            gfx.DrawLine(new XPen(DimColor, 0.6), new XPoint(leadX, br.Y + bh), new XPoint(c.X, c.Y - r - 2));
+            gfx.DrawRectangle(XBrushes.White, br);
+            gfx.DrawRectangle(new XPen(XColor.FromArgb(110, 110, 110), 0.9), br);
+            gfx.DrawString(label, dimFont, TextBrush, br, XStringFormats.Center);
         }
 
         if (fp.Spec.Holes is { } hs)

@@ -30,7 +30,8 @@ public sealed class HoleSpec
     public double Spacing { get; init; }       // flitch: hole spacing along the length
     public int Count { get; init; }            // base: number of holes
     public double EdgeDistance { get; init; }  // base: edge distance for corner holes
-    public double EndDistance { get; init; }   // flitch: LHS->first hole / RHS->last hole (ends paired)
+    public double LeftEndOffset { get; init; }   // flitch: LHS edge -> first hole
+    public double RightEndOffset { get; init; }  // flitch: RHS edge -> last hole (may differ from left)
     public double TopEdge { get; init; }       // flitch: top material edge -> top row
     public double BottomEdge { get; init; }    // flitch: bottom material edge -> bottom row
 }
