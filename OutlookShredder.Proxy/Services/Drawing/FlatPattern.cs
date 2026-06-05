@@ -450,7 +450,8 @@ public static class FlatPattern
         if (s.Type is PartType.FlitchPlate or PartType.BasePlate)
         {
             string plate = s.Type == PartType.FlitchPlate ? "Flitch Plate" : "Base Plate";
-            return $"{MaterialPlain(s.Material)} {plate} {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Thickness)}\"".Trim();
+            // Product-standard order: [metal] [drawing of] [thickness] x [width] x [length].
+            return $"{MaterialPlain(s.Material)} {plate} {N(s.Thickness)}\" x {N(s.Width)}\" x {N(s.Length)}\"".Trim();
         }
 
         if (s.Type == PartType.Pan)
