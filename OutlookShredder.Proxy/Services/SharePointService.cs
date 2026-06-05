@@ -55,6 +55,13 @@ public partial class SharePointService
     // looked up for all subsequent rows in the same batch so all rows share one version number.
     private readonly ConcurrentDictionary<string, int> _nextSliVersionCache = new();
 
+    // Recently-uploaded ERP files, keyed by drive-relative path. SharePoint can serve stale or empty
+    // content for a few minutes after an upload/overwrite, which made the display-time FAB-drawing
+    // append (it re-downloads the slip from SP) intermittently miss the FAB note, so no drawing page
+    // was appended. Serving the just-uploaded bytes from here for a short window sidesteps that lag.
+    private readonly ConcurrentDictionary<string, (byte[] Bytes, DateTimeOffset At)> _recentUploads = new();
+    private static readonly TimeSpan RecentUploadTtl = TimeSpan.FromMinutes(15);
+
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
     // and concurrent startup requests. Write paths call InvalidateSrCache().
@@ -9089,6 +9096,7 @@ public partial class SharePointService
                 .PutAsync(new MemoryStream(pdfBytes), cancellationToken: ct);
 
             var url = driveItem?.WebUrl;
+            if (url is not null) RememberRecentUpload(url, pdfBytes);
             _log.LogInformation("[SP] Uploaded ERP PDF {Number}/{File} → {Url}", documentNumber, fileName, url);
             return url;
         }
@@ -9104,6 +9112,32 @@ public partial class SharePointService
     /// Direct HTTP with a SP-scoped Bearer token fails for OneDrive personal (/personal/...) URLs;
     /// going through Graph (graph.microsoft.com scope) works with Sites.FullControl.All.
     /// </summary>
+    // Drive-relative, decoded path key for a SharePoint/OneDrive WebUrl (mirrors DownloadSpFileAsync's parse).
+    private static string? SpRelativeKey(string? webUrl)
+    {
+        if (string.IsNullOrEmpty(webUrl)) return null;
+        try
+        {
+            var segments = new Uri(webUrl).AbsolutePath.Split('/');
+            if (segments.Length < 5) return null;
+            return Uri.UnescapeDataString(string.Join("/", segments.Skip(4)));
+        }
+        catch { return null; }
+    }
+
+    // Remember freshly-uploaded bytes so DownloadSpFileAsync can serve them before SharePoint
+    // propagation catches up. Opportunistically prunes expired entries to stay bounded.
+    private void RememberRecentUpload(string? webUrl, byte[] bytes)
+    {
+        var key = SpRelativeKey(webUrl);
+        if (key is null) return;
+        var now = DateTimeOffset.UtcNow;
+        _recentUploads[key] = (bytes, now);
+        foreach (var kv in _recentUploads)
+            if (now - kv.Value.At > RecentUploadTtl)
+                _recentUploads.TryRemove(kv.Key, out _);
+    }
+
     public async Task<byte[]> DownloadSpFileAsync(string webUrl, CancellationToken ct = default)
     {
         // Both OneDrive (/personal/user/Library/...) and SharePoint (/sites/site/Library/...)
@@ -9111,6 +9145,14 @@ public partial class SharePointService
         // Keep the original percent-encoding in AbsolutePath, then decode the relative path once
         // so that spaces/parens arrive as literal characters.  If we passed %20 directly as the
         // Graph item-key string the SDK would double-encode it to %2520 and Graph would return 404.
+        // Serve freshly-uploaded bytes directly while SharePoint propagation catches up (see _recentUploads).
+        var recentKey = SpRelativeKey(webUrl);
+        if (recentKey is not null && _recentUploads.TryGetValue(recentKey, out var recent))
+        {
+            if (DateTimeOffset.UtcNow - recent.At <= RecentUploadTtl) return recent.Bytes;
+            _recentUploads.TryRemove(recentKey, out _);
+        }
+
         var uri      = new Uri(webUrl);
         var segments = uri.AbsolutePath.Split('/');
         if (segments.Length < 5)
