@@ -275,14 +275,19 @@ public static class FlatPattern
             double rowTop = W - topEdge;   // top row, measured from the top edge
             double rowBot = botEdge;        // bottom row, measured from the bottom edge
 
-            // First hole at the LHS offset, then EXACT spacing, with the last hole at the
-            // RHS offset (L - rightEnd); the final gap absorbs whatever remainder is left over.
+            // First hole (LHS end pair) at the LHS offset, then EXACT `sp` spacing across the
+            // length; the RHS end pair sits at the RHS offset (L - rightEnd) regardless, so the
+            // final gap is just the leftover remainder. A hole still lands every `sp` even when
+            // that leaves the end pair only an inch or two past the last staggered hole; we only
+            // collapse the last interior hole into the end pair when the two would physically
+            // overlap (centres closer than one hole diameter), never merely to tidy the gap.
             double first = leftEnd, last = L - rightEnd;
             var xs = new List<double>();
             if (last > first + 1e-6)
             {
                 for (double x = first; x < last - 1e-6; x += sp) xs.Add(x);
-                if (xs.Count > 0 && Math.Abs(xs[^1] - last) < sp * 0.5) xs[^1] = last;
+                double mergeGap = h.Diameter > 0 ? h.Diameter : 1e-6;
+                if (xs.Count > 0 && Math.Abs(xs[^1] - last) < mergeGap) xs[^1] = last;
                 else xs.Add(last);
             }
             else
