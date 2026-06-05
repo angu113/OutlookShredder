@@ -53,7 +53,9 @@ public static class DrawingPdfRenderer
             // keep the 2D blank extent (cut width x cut length).
             string blankLabel = fp.IsPlate
                 ? $"Flat blank:  {F(fp.Spec.Thickness)}\" x {F(fp.FlatHeight)}\" x {F(fp.FlatWidth)}\""
-                : $"Flat blank:  {F(fp.FlatWidth)}\" x {F(fp.FlatHeight)}\"";
+                : fp.IsPaddle
+                    ? $"Spade:  {F(fp.Spec.PaddleOd)}\" OD disc,  handle {F(fp.Spec.PaddleHandleWidth)}\" wide,  {F(fp.Spec.PaddleCenterToEnd)}\" centre-to-end,  {F(fp.Spec.Thickness)}\" thk"
+                    : $"Flat blank:  {F(fp.FlatWidth)}\" x {F(fp.FlatHeight)}\"";
             gfx.DrawString(blankLabel,
                 blankFont, XBrushes.Black, new XRect(M, M + 16, pw - 2 * M, 14), XStringFormats.TopLeft);
 
@@ -104,6 +106,10 @@ public static class DrawingPdfRenderer
             else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
+            }
+            else if (fp.IsPaddle)
+            {
+                DrawPaddleBlind(gfx, fp, new XRect(M, top, usable, h));
             }
             else
             {
@@ -458,6 +464,50 @@ public static class DrawingPdfRenderer
         }
     }
 
+    // ── Paddle blind / spade: face view (solid disc + handle) with OD, handle, centre-to-end dims ──
+    private static void DrawPaddleBlind(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var centre = new XPen(DimColor, 0.5) { DashStyle = XDashStyle.DashDot };
+
+        gfx.DrawString("Spade — face view", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double mw = fp.FlatWidth, mh = fp.FlatHeight;     // [0..C+R] x [0..2R], disc centre at (R,R)
+        double R = fp.Spec.PaddleOd / 2.0, hw = fp.Spec.PaddleHandleWidth / 2.0, C = fp.Spec.PaddleCenterToEnd;
+        if (mw <= 0 || mh <= 0 || R <= 0) return;
+
+        // Generous side bands so the OD (left) and handle-width (right) labels never reach the page
+        // edge on the small, very wide sizes (long handle, small disc — width-limited fit).
+        const double bandL = 92, bandR = 78, bandT = 28, bandB = 52;
+        double availW = area.Width - bandL - bandR, availH = area.Height - bandT - bandB;
+        double scale = Math.Min(availW / mw, availH / mh);
+        double drawW = mw * scale, drawH = mh * scale;
+        double ox = area.X + bandL + (availW - drawW) / 2;
+        double oy = area.Y + bandT + (availH - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        // Cut outline (the disc-plus-handle polyline).
+        foreach (var e in fp.Cut.Entities)
+            if (e.Type == "polyline" && e.Vertices is { Count: > 1 })
+                gfx.DrawPolygon(cutPen, e.Vertices.Select(v => P(v.X, v.Y)).ToArray());
+
+        // Centre axis (through disc + handle) + a short cross tick at the disc centre.
+        gfx.DrawLine(centre, P(0, R), P(R + C, R));
+        gfx.DrawLine(centre, P(R, R - R * 0.22), P(R, R + R * 0.22));
+
+        // OD — vertical dim down the left of the disc (disc spans y 0..2R).
+        DimV(gfx, dimFont, P(0, 0).X, P(0, 0).X - 30, P(0, 0).Y, P(0, 2 * R).Y, $"{Fq(fp.Spec.PaddleOd)} dia", true);
+        // Centre-to-end — horizontal dim below the part, disc centre → handle tip.
+        DimH(gfx, dimFont, P(R, R).X, P(R + C, R).X, oy + drawH, oy + drawH + 24, $"{Fq(C)} to end", true);
+        // Handle width — vertical dim at the full-width handle station, just past the tip.
+        double xW = R + C - hw;
+        DimV(gfx, dimFont, P(xW, R).X, P(R + C, R).X + 12, P(xW, R - hw).Y, P(xW, R + hw).Y, Fq(fp.Spec.PaddleHandleWidth), false);
+    }
+
     // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──
     private static void DrawPan(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
@@ -633,9 +683,11 @@ public static class DrawingPdfRenderer
             gfx.DrawString(line, font, XBrushes.Black, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
             y += 10;
         }
-        gfx.DrawString(
-            $"solid = cut  |  dashed = bend up  |  bold = as specified  |  inside radius Ri {F(fp.Spec.InsideRadius)}\"  |  all dimensions in decimal inches",
-            font, DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
+        // Paddle blinds have no bends — drop the bend/Ri legend bits that don't apply.
+        string legend = fp.IsPaddle
+            ? "solid = cut  |  bold = as specified  |  all dimensions in decimal inches"
+            : $"solid = cut  |  dashed = bend up  |  bold = as specified  |  inside radius Ri {F(fp.Spec.InsideRadius)}\"  |  all dimensions in decimal inches";
+        gfx.DrawString(legend, font, DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
     }
 
     // ── Key for the formed-part section-cut planes (Side = dashed, End = dash-dot) ──────────────

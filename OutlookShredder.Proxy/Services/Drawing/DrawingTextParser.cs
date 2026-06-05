@@ -70,6 +70,10 @@ public static class DrawingTextParser
         if (type == PartType.Pan)
             return ParsePan(lower, thickness, materialLabel, ri, k, finish);
 
+        // ── Paddle blind / spade ("frying pan") — NPS + class lookup; parsed + returned here ──
+        if (type == PartType.PaddleBlind)
+            return ParsePaddleBlind(lower, thickness, materialLabel, ri);
+
         // ── Global basis (whole words only; id/od are reserved for per-dim) ──
         DimBasis globalBasis = Regex.IsMatch(lower, @"\binside\b") ? DimBasis.Inside : DimBasis.Outside;
 
@@ -171,6 +175,8 @@ public static class DrawingTextParser
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
         if (Regex.IsMatch(lower, @"\bflitch\b"))      return PartType.FlitchPlate;
         if (Regex.IsMatch(lower, @"\bbase\s*plate\b")) return PartType.BasePlate;
+        // Paddle blind ("frying pan") must come before the plain "pan" check.
+        if (Regex.IsMatch(lower, @"\b(frying\s*pan|paddle\s*(?:blind|blank)|spade)\b")) return PartType.PaddleBlind;
         if (Regex.IsMatch(lower, @"\b(pan|tray)\b")) return PartType.Pan;
         if (Regex.IsMatch(lower, @"\bhat\b"))        throw NotYet("Hat");
         throw new DrawingParseException(
@@ -280,6 +286,41 @@ public static class DrawingTextParser
             Material = material, Units = "in", Finish = finish,
             PanBottom = longN >= 1, PanTop = longN >= 2,
             PanLeft = shortN >= 1, PanRight = shortN >= 2,
+        };
+    }
+
+    /// <summary>Parses a paddle blind / spade — "Frying Pan {nps} #{class}, {material/thickness}".</summary>
+    private static PartSpec ParsePaddleBlind(string lower, double thickness, string material, double ri)
+    {
+        // NPS: the first number after the type keyword (fraction / mixed / decimal), optional inch mark.
+        var nm = Regex.Match(lower, $@"\b(?:frying\s*pan|paddle\s*(?:blind|blank)|spade)\b\s*({Num})\s*(?:""|in|inch)?");
+        if (!nm.Success)
+            throw new DrawingParseException("Frying pan needs a pipe size, e.g. \"Frying Pan 6 #150, SS\".");
+        double npsValue = NumOf(nm.Groups[1].Value);
+
+        // Pressure class: "#150" / "150" / "class 300".
+        int cls = (int)Math.Round(MatchNum(lower, @"(?:#|class\s*)?\b(150|300)\b") ?? 0);
+        if (cls != 150 && cls != 300)
+            throw new DrawingParseException("Pressure class must be #150 or #300, e.g. \"Frying Pan 6 #150\".");
+
+        var pb = PaddleBlankTable.Find(npsValue, cls)
+            ?? throw new DrawingParseException($"No ASME B16.48 spade for NPS {nm.Groups[1].Value}\" Class {cls}. Sizes are 1/2\" to 20\".");
+
+        // Thickness: the user's pick wins; fall back to the standard minimum if none was given.
+        double t = thickness > 0 ? thickness : pb.Thickness;
+
+        return new PartSpec
+        {
+            Type = PartType.PaddleBlind,
+            PaddleOd = pb.Od,
+            PaddleHandleWidth = pb.HandleWidth,
+            PaddleCenterToEnd = pb.CenterToEnd,
+            PaddleNps = pb.Nps,
+            PaddleClass = cls,
+            Thickness = t,
+            InsideRadius = ri > 0 ? ri : t,
+            Material = material,
+            Units = "in",
         };
     }
 

@@ -24,6 +24,7 @@ public static class FlatPattern
         PartType.FlitchPlate => DevelopPlate(spec),
         PartType.BasePlate   => DevelopPlate(spec),
         PartType.Pan         => DevelopPan(spec),
+        PartType.PaddleBlind => DevelopPaddleBlind(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
 
@@ -143,6 +144,69 @@ public static class FlatPattern
             lines.Add($"Given: L {F(s.Length)} {b(s.LengthBasis)}, W {F(s.Width)} {b(s.WidthBasis)}, D {F(s.Depth)} {b(s.DepthBasis)}");
         }
         return string.Join("\n", lines);
+    }
+
+    // ── Paddle blind / spade ("frying pan") — solid disc + handle, no bends ──
+    private static FlatPatternResult DevelopPaddleBlind(PartSpec spec)
+    {
+        double od = spec.PaddleOd, R = od / 2.0;
+        double hw = Math.Min(spec.PaddleHandleWidth / 2.0, R * 0.95);   // handle half-width
+        double C = spec.PaddleCenterToEnd;
+        double cx = R, cy = R;                                          // disc centre (positive coords, origin lower-left)
+
+        double xi = Math.Sqrt(Math.Max(1e-6, R * R - hw * hw));         // where the handle meets the disc
+        double theta = Math.Atan2(hw, xi);
+        double endCx = Math.Max(xi + hw * 0.5, C - hw);                 // centre of the rounded handle end
+
+        var ol = new List<CutVertex>();
+        const int discSeg = 64, endSeg = 16;
+        // Disc major arc: from +theta CCW around the back to -theta (the part the handle doesn't take).
+        for (int i = 0; i <= discSeg; i++)
+        {
+            double a = theta + (2 * Math.PI - 2 * theta) * i / discSeg;
+            ol.Add(new CutVertex(cx + R * Math.Cos(a), cy + R * Math.Sin(a)));
+        }
+        ol.Add(new CutVertex(cx + endCx, cy - hw));                     // down the bottom handle edge
+        // Rounded end: semicircle centred at (endCx,0), from -90° CCW through the tip to +90°.
+        for (int i = 1; i < endSeg; i++)
+        {
+            double a = -Math.PI / 2 + Math.PI * i / endSeg;
+            ol.Add(new CutVertex(cx + endCx + hw * Math.Cos(a), cy + hw * Math.Sin(a)));
+        }
+        ol.Add(new CutVertex(cx + endCx, cy + hw));                     // top of end (closes back to the first vertex)
+
+        var entities = new List<CutEntity> { CutEntity.Polyline(CutLayer, closed: true, ol) };
+
+        string slug = $"paddleblind_{spec.PaddleNps.Replace("/", "-")}in_cl{spec.PaddleClass}";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = C + R, FlatHeight = od,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsPaddle = true,
+            Summary = PaddleSummary(spec),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static string PaddleSummary(PartSpec s)
+    {
+        string u = s.Units;
+        return string.Join("\n", new[]
+        {
+            $"Paddle blind (spade / \"frying pan\")  {s.Material}  (T={F(s.Thickness)}{u})",
+            $"NPS {s.PaddleNps}\" Class {s.PaddleClass} per ASME B16.48",
+            $"Spade OD {F(s.PaddleOd)}{u}, handle {F(s.PaddleHandleWidth)}{u} wide x {F(s.PaddleCenterToEnd)}{u} centre-to-end",
+        });
     }
 
     // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
@@ -457,6 +521,9 @@ public static class FlatPattern
         if (s.Type == PartType.Pan)
             return $"{MaterialPlain(s.Material)} Pan {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Depth)}\" deep x {N(s.Thickness)}\"".Trim();
 
+        if (s.Type == PartType.PaddleBlind)
+            return $"{MaterialPlain(s.Material)} Paddle Blind {s.PaddleNps}\" #{s.PaddleClass} x {N(s.Thickness)}\"".Trim();
+
         string shape = s.Type switch
         {
             PartType.UChannel => "U Channel",
@@ -540,6 +607,8 @@ public sealed class FlatPatternResult
     public bool IsPlate { get; init; }
     /// <summary>True for pans — drawn as a single flat-pattern top view (cut + bend lines + reliefs).</summary>
     public bool IsPan { get; init; }
+    /// <summary>True for paddle blinds / spades — drawn as a single disc-plus-handle face view.</summary>
+    public bool IsPaddle { get; init; }
     // Pan base rectangle (between bend lines) + flange flat length, for dimensioning.
     public double PanBaseX0 { get; init; }
     public double PanBaseX1 { get; init; }

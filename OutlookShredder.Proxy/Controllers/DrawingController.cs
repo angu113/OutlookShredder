@@ -44,6 +44,22 @@ public class DrawingController : ControllerBase
     }));
 
     /// <summary>
+    /// ASME B16.48 paddle-blind ("frying pan") sizes for the wizard's NPS + class pickers and the
+    /// standard-thickness hint. The proxy holds the table; the lookup happens at generate time.
+    /// </summary>
+    [HttpGet("/api/drawing/paddle-blanks")]
+    public IActionResult PaddleBlanks() => Ok(PaddleBlankTable.All.Select(p => new
+    {
+        nps = p.Nps,
+        npsValue = p.NpsValue,
+        pressureClass = p.PressureClass,
+        od = p.Od,
+        centerToEnd = p.CenterToEnd,
+        handleWidth = p.HandleWidth,
+        thickness = p.Thickness,
+    }));
+
+    /// <summary>
     /// Parses a part description, develops the flat pattern, and returns the resolved spec,
     /// bend math, and cut geometry. (PDF/DXF bytes added in the next step.)
     /// </summary>

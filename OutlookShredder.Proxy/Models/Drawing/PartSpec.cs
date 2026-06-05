@@ -10,6 +10,7 @@ public enum PartType
     Pan,
     FlitchPlate,
     BasePlate,
+    PaddleBlind,
     Custom,
 }
 
@@ -87,6 +88,18 @@ public sealed class PartSpec
     public bool PanRight { get; init; } = true;
     /// <summary>Bolt holes for flat plates.</summary>
     public HoleSpec? Holes { get; init; }
+
+    // ── Paddle blind (ASME B16.48 spade / "frying pan") ─────────────────────
+    /// <summary>Spade disc outside diameter.</summary>
+    public double PaddleOd { get; init; }
+    /// <summary>Handle width.</summary>
+    public double PaddleHandleWidth { get; init; }
+    /// <summary>Disc centre to the end of the handle.</summary>
+    public double PaddleCenterToEnd { get; init; }
+    /// <summary>NPS label for display, e.g. "6" or "1-1/4".</summary>
+    public string PaddleNps { get; init; } = "";
+    /// <summary>Pressure class (150 or 300).</summary>
+    public int PaddleClass { get; init; }
 
     // ── Material + bend parameters ──────────────────────────────────────────
     /// <summary>Resolved material thickness T, in the spec's units.</summary>
