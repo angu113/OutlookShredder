@@ -54,7 +54,7 @@ public static class DrawingPdfRenderer
             string blankLabel = fp.IsPlate
                 ? $"Flat blank:  {F(fp.Spec.Thickness)}\" x {F(fp.FlatHeight)}\" x {F(fp.FlatWidth)}\""
                 : fp.IsPaddle
-                    ? $"Spade:  {F(fp.Spec.PaddleOd)}\" OD disc,  handle {F(fp.Spec.PaddleHandleWidth)}\" wide,  {F(fp.Spec.PaddleCenterToEnd)}\" centre-to-end,  {F(fp.Spec.Thickness)}\" thk"
+                    ? $"Plate to cut:  {F(fp.Spec.Thickness)}\" x {F(fp.FlatHeight)}\" x {F(fp.FlatWidth)}\"  (rectangular blank, incl. handle, for quoting)"
                     : $"Flat blank:  {F(fp.FlatWidth)}\" x {F(fp.FlatHeight)}\"";
             gfx.DrawString(blankLabel,
                 blankFont, XBrushes.Black, new XRect(M, M + 16, pw - 2 * M, 14), XStringFormats.TopLeft);
