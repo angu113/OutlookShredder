@@ -11,6 +11,7 @@ public enum PartType
     FlitchPlate,
     BasePlate,
     PaddleBlind,
+    Column,
     Custom,
 }
 
@@ -100,6 +101,28 @@ public sealed class PartSpec
     public string PaddleNps { get; init; } = "";
     /// <summary>Pressure class (150 or 300).</summary>
     public int PaddleClass { get; init; }
+
+    // ── Structural column (base plate + tube/pipe + bearing plate) ──────────
+    /// <summary>Full gap the column supports (overall height = base T + tube length + bearing T).</summary>
+    public double ColumnFullHeight { get; init; }
+    public double BaseLength { get; init; }
+    public double BaseWidth { get; init; }
+    public double BaseThickness { get; init; }
+    public HoleSpec? BaseHoles { get; init; }
+    public double BearingLength { get; init; }
+    public double BearingWidth { get; init; }
+    public double BearingThickness { get; init; }
+    public HoleSpec? BearingHoles { get; init; }
+    /// <summary>"round" (pipe), "square" or "rect" tube.</summary>
+    public string ColumnShape { get; init; } = "square";
+    /// <summary>Outer width (square/rect tube) or outside diameter (round pipe).</summary>
+    public double ColumnOuterWidth { get; init; }
+    /// <summary>Outer depth (rect tube). Equals the width for square / round.</summary>
+    public double ColumnOuterDepth { get; init; }
+    /// <summary>Tube/pipe wall thickness (informational; shown in the note).</summary>
+    public double ColumnWall { get; init; }
+    /// <summary>Product label for the title / cut note, e.g. "HSS 4x4x1/4".</summary>
+    public string ColumnLabel { get; init; } = "";
 
     // ── Material + bend parameters ──────────────────────────────────────────
     /// <summary>Resolved material thickness T, in the spec's units.</summary>

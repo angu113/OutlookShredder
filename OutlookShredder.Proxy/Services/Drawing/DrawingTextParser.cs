@@ -38,6 +38,11 @@ public static class DrawingTextParser
 
         // ── Material + thickness ────────────────────────────────────────────
         var (family, materialLabel) = DetectMaterial(lower);
+
+        // ── Structural column — its own field set (per-plate thickness + tube); parsed + returned here ──
+        if (type == PartType.Column)
+            return ParseColumn(text, lower, materialLabel);
+
         double thickness = ResolveThickness(lower, family, materialLabel);
 
         // ── Bend params ─────────────────────────────────────────────────────
@@ -170,6 +175,8 @@ public static class DrawingTextParser
 
     private static PartType DetectType(string lower)
     {
+        // Column first — its clause contains "base"/"bearing" which must not trip the plate checks.
+        if (Regex.IsMatch(lower, @"\bcolumn\b")) return PartType.Column;
         if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
         if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
@@ -323,6 +330,83 @@ public static class DrawingTextParser
             Units = "in",
         };
     }
+
+    /// <summary>
+    /// Parses a structural column —
+    ///   "Column height H, base L x W x T [holes N x D edge E], bearing L x W x T [holes …],
+    ///    column {round|square|rect} D1 [x D2] wall W, {material} "Product label"".
+    /// Tube cut length = H − base T − bearing T (computed in FlatPattern).
+    /// </summary>
+    private static PartSpec ParseColumn(string text, string lower, string material)
+    {
+        double height = MatchNum(lower, $@"\b(?:height|h|gap)\s*[:=]?\s*({Num})")
+            ?? throw new DrawingParseException("Column needs a full height, e.g. \"Column height 96, base 10 x 10 x 0.75, …\".");
+
+        var bm = Regex.Match(lower, $@"\bbase\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+        if (!bm.Success)
+            throw new DrawingParseException("Column needs a base plate, e.g. \"base 10 x 10 x 0.75\".");
+        double baseL = NumOf(bm.Groups[1].Value), baseW = NumOf(bm.Groups[2].Value), baseT = NumOf(bm.Groups[3].Value);
+
+        var rm = Regex.Match(lower, $@"\bbearing\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+        if (!rm.Success)
+            throw new DrawingParseException("Column needs a bearing plate, e.g. \"bearing 8 x 8 x 0.5\".");
+        double bearL = NumOf(rm.Groups[1].Value), bearW = NumOf(rm.Groups[2].Value), bearT = NumOf(rm.Groups[3].Value);
+
+        HoleSpec? baseHoles = ParseColumnPlateHoles(lower, "base");
+        HoleSpec? bearHoles = ParseColumnPlateHoles(lower, "bearing");
+
+        var cm = Regex.Match(lower,
+            $@"\bcolumn\s+(round|square|rect(?:angle|angular)?)\s+({Num})(?:\s*x\s*({Num}))?\s+wall\s+({Num})");
+        if (!cm.Success)
+            throw new DrawingParseException("Column needs a tube/pipe, e.g. \"column square 4 x 4 wall 0.25\" or \"column round 6.625 wall 0.28\".");
+        string shape = cm.Groups[1].Value.StartsWith("rect") ? "rect" : cm.Groups[1].Value;
+        double d1 = NumOf(cm.Groups[2].Value);
+        double d2 = cm.Groups[3].Success && cm.Groups[3].Value.Length > 0 ? NumOf(cm.Groups[3].Value) : d1;
+        double wall = NumOf(cm.Groups[4].Value);
+
+        // Product label: trailing quoted token, taken from the original-case text.
+        string label = "";
+        var lm = Regex.Match(text, "\"([^\"]+)\"");
+        if (lm.Success) label = lm.Groups[1].Value.Trim();
+
+        if (height <= 0 || baseL <= 0 || baseW <= 0 || baseT <= 0 || bearL <= 0 || bearW <= 0 || bearT <= 0 || d1 <= 0)
+            throw new DrawingParseException("Column dimensions must be positive numbers.");
+        if (height - baseT - bearT <= 0)
+            throw new DrawingParseException(
+                $"Full height {F0(height)}\" is too small for the plates (base {F0(baseT)}\" + bearing {F0(bearT)}\").");
+
+        return new PartSpec
+        {
+            Type = PartType.Column,
+            ColumnFullHeight = height,
+            BaseLength = baseL, BaseWidth = baseW, BaseThickness = baseT, BaseHoles = baseHoles,
+            BearingLength = bearL, BearingWidth = bearW, BearingThickness = bearT, BearingHoles = bearHoles,
+            ColumnShape = shape, ColumnOuterWidth = d1, ColumnOuterDepth = d2, ColumnWall = wall,
+            ColumnLabel = label,
+            Thickness = baseT,   // representative only; geometry uses the per-plate thicknesses
+            Material = material, Units = "in",
+        };
+    }
+
+    /// <summary>Corner-hole spec for one column plate, scoped to that plate's clause in the text.</summary>
+    private static HoleSpec? ParseColumnPlateHoles(string lower, string keyword)
+    {
+        // Isolate the clause from this plate keyword up to the next section keyword.
+        var clauseM = Regex.Match(lower, $@"\b{keyword}\b(.*?)(?=\bbearing\b|\bcolumn\b|$)");
+        if (!clauseM.Success) return null;
+        string clause = clauseM.Groups[1].Value;
+        var hm = Regex.Match(clause, $@"holes?\s+({Num})\s*(?:x\s*)?({Num})\s*(?:edge|ed)?\s*({Num})?");
+        if (!hm.Success) return null;
+        return new HoleSpec
+        {
+            Pattern = HolePattern.Corner,
+            Count = (int)Math.Round(NumOf(hm.Groups[1].Value)),
+            Diameter = NumOf(hm.Groups[2].Value),
+            EdgeDistance = hm.Groups[3].Success && hm.Groups[3].Value.Length > 0 ? NumOf(hm.Groups[3].Value) : 1.0,
+        };
+    }
+
+    private static string F0(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
     private static (MaterialFamily, string) DetectMaterial(string lower)
     {

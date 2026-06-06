@@ -51,7 +51,9 @@ public static class DrawingPdfRenderer
                 new XRect(M, M - 10, pw - 2 * M, 24), XStringFormats.TopLeft);
             // Plates carry the product-standard order (thickness x width x length); formed parts
             // keep the 2D blank extent (cut width x cut length).
-            string blankLabel = fp.IsPlate
+            string blankLabel = fp.IsColumn
+                ? $"Cut to:  pipe/tube {F(fp.ColumnTubeLength)}\"  +  base & bearing plate flat patterns (one DXF)"
+                : fp.IsPlate
                 ? $"Flat blank:  {F(fp.Spec.Thickness)}\" x {F(fp.FlatHeight)}\" x {F(fp.FlatWidth)}\""
                 : fp.IsPaddle
                     ? $"Plate to cut:  {F(fp.Spec.Thickness)}\" x {F(fp.FlatHeight)}\" x {F(fp.FlatWidth)}\"  (rectangular blank, incl. handle, for quoting)"
@@ -102,6 +104,10 @@ public static class DrawingPdfRenderer
                     fp.PanSideProfile, fp.PanBaseY1 - fp.PanBaseY0, fp.PanDepth, fp.Spec.Thickness, secScale);
                 DrawSection(gfx, endBox, "End section", SecColorB, XDashStyle.DashDot,
                     fp.PanEndProfile, fp.PanBaseX1 - fp.PanBaseX0, fp.PanDepth, fp.Spec.Thickness, secScale);
+            }
+            else if (fp.IsColumn)
+            {
+                DrawColumn(gfx, fp, new XRect(M, top, usable, h));
             }
             else if (fp.IsPlate)
             {
@@ -464,6 +470,120 @@ public static class DrawingPdfRenderer
         }
     }
 
+    // ── Structural column: two plate flat-patterns (left) + a dimensioned side elevation (right) ──
+    private static void DrawColumn(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        const double gap = 16;
+        double elevW = box.Width * 0.34;
+        double platesW = box.Width - elevW - gap;
+        double pw = (platesW - gap) / 2;
+
+        DrawPlatePanel(gfx, new XRect(box.X, box.Y, pw, box.Height),
+            "Base plate", fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles);
+        DrawPlatePanel(gfx, new XRect(box.X + pw + gap, box.Y, pw, box.Height),
+            "Bearing plate", fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles);
+        DrawColumnElevation(gfx, fp, new XRect(box.X + platesW + gap, box.Y, elevW, box.Height));
+    }
+
+    // ── One plate top view (rectangle + bolt holes + L/W + corner-hole offsets) ──
+    private static void DrawPlatePanel(XGraphics gfx, XRect box, string title, double L, double W,
+        List<(double x, double y, double dia)> holes)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var thin = new XPen(DimColor, 0.5);
+
+        gfx.DrawString($"{title} — top view", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+        if (L <= 0 || W <= 0) return;
+
+        const double band = 46;
+        double availW = area.Width - band * 2, availH = area.Height - band * 2;
+        double scale = Math.Min(availW / L, availH / W);
+        double drawW = L * scale, drawH = W * scale;
+        double ox = area.X + (area.Width - drawW) / 2;
+        double oy = area.Y + (area.Height - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        gfx.DrawRectangle(cutPen, new XRect(ox, oy, drawW, drawH));
+        foreach (var (hx, hy, dia) in holes)
+        {
+            double r = dia / 2.0 * scale;
+            var c = P(hx, hy);
+            gfx.DrawEllipse(cutPen, c.X - r, c.Y - r, 2 * r, 2 * r);
+            gfx.DrawLine(thin, c.X - r - 2, c.Y, c.X + r + 2, c.Y);
+            gfx.DrawLine(thin, c.X, c.Y - r - 2, c.X, c.Y + r + 2);
+        }
+
+        DimH(gfx, dimFont, P(0, 0).X, P(L, 0).X, oy + drawH, oy + drawH + 22, Fq(L), true);
+        DimV(gfx, dimFont, ox, ox - 40, oy, oy + drawH, Fq(W), true);
+
+        if (holes.Count > 0)
+        {
+            var first = holes.OrderBy(h => h.x).ThenBy(h => h.y).First();
+            DimH(gfx, dimFont, P(0, 0).X, P(first.x, 0).X, oy, oy - 16, Fq(first.x), false);
+            DimV(gfx, dimFont, ox, ox - 20, P(0, 0).Y, P(0, first.y).Y, Fq(first.y), false);
+            gfx.DrawString($"{holes.Count} x {Fq(holes[0].dia)} dia", dimFont, TextBrush,
+                new XRect(area.X, oy - 32, area.Width, 11), XStringFormats.TopCenter);
+        }
+    }
+
+    // ── Column side elevation: base / tube / bearing stacked, welded centred, with callouts ──
+    private static void DrawColumnElevation(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var tagFont = new XFont("Arial", 7, XFontStyleEx.Regular);
+        var cutPen = new XPen(CutColor, 1.1);
+
+        gfx.DrawString("Column elevation", titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double H = fp.ColumnFullHeight, baseT = fp.ColumnBaseThickness, bearT = fp.ColumnBearingThickness;
+        double tubeLen = fp.ColumnTubeLength;
+        double baseW = fp.ColumnBaseW, bearW = fp.ColumnBearingW, tubeW = fp.ColumnOuterWidth;
+        if (H <= 0 || tubeLen <= 0) return;
+        double maxW = Math.Max(Math.Max(baseW, bearW), Math.Max(tubeW, 0.1));
+
+        const double bandL = 62, bandR = 62, bandT = 10, bandB = 28;
+        double availW = area.Width - bandL - bandR, availH = area.Height - bandT - bandB;
+        double scale = Math.Min(availW / maxW, availH / H);
+        double drawH = H * scale;
+        double cx = area.X + bandL + availW / 2;                  // welded centreline
+        double baseY = area.Y + bandT + (availH - drawH) / 2 + drawH;   // bottom of the stack
+        double Yb(double hFromBottom) => baseY - hFromBottom * scale;
+
+        void Slab(double w, double y0, double y1)
+        {
+            double half = w * scale / 2.0;
+            gfx.DrawRectangle(cutPen, new XRect(cx - half, Yb(y1), w * scale, (y1 - y0) * scale));
+        }
+        Slab(baseW, 0, baseT);                       // base plate (bottom)
+        Slab(tubeW, baseT, baseT + tubeLen);         // tube / pipe (middle)
+        Slab(bearW, baseT + tubeLen, H);             // bearing plate (top)
+
+        void Tag(string s, double yMid) => gfx.DrawString(s, tagFont, TextBrush,
+            new XRect(cx - 60, Yb(yMid) - 5, 120, 10), XStringFormats.TopCenter);
+        Tag("Base plate", baseT / 2);
+        Tag(fp.ColumnShape == "round" ? "Pipe" : "Tube", baseT + tubeLen / 2);
+        Tag("Bearing plate", baseT + tubeLen + bearT / 2);
+
+        // Left: stacked segment dims (base thickness, tube length, bearing thickness).
+        double leftFace = cx - maxW * scale / 2;
+        double leftDimX = area.X + 56;
+        DimV(gfx, dimFont, leftFace, leftDimX, Yb(baseT), Yb(0), Fq(baseT), false);
+        DimV(gfx, dimFont, leftFace, leftDimX, Yb(baseT + tubeLen), Yb(baseT), Fq(tubeLen), true);
+        DimV(gfx, dimFont, leftFace, leftDimX, Yb(H), Yb(baseT + tubeLen), Fq(bearT), false);
+
+        // Right: overall full-height dim.
+        double rightFace = cx + maxW * scale / 2;
+        double rightDimX = area.X + area.Width - 56;
+        DimV(gfx, dimFont, rightFace, rightDimX, Yb(H), Yb(0), Fq(H), true);
+    }
+
     // ── Paddle blind / spade: face view (solid disc + handle) with OD, handle, centre-to-end dims ──
     private static void DrawPaddleBlind(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
@@ -683,8 +803,8 @@ public static class DrawingPdfRenderer
             gfx.DrawString(line, font, XBrushes.Black, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
             y += 10;
         }
-        // Paddle blinds have no bends — drop the bend/Ri legend bits that don't apply.
-        string legend = fp.IsPaddle
+        // Paddle blinds and columns have no bends — drop the bend/Ri legend bits that don't apply.
+        string legend = fp.IsPaddle || fp.IsColumn
             ? "solid = cut  |  bold = as specified  |  all dimensions in decimal inches"
             : $"solid = cut  |  dashed = bend up  |  bold = as specified  |  inside radius Ri {F(fp.Spec.InsideRadius)}\"  |  all dimensions in decimal inches";
         gfx.DrawString(legend, font, DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);

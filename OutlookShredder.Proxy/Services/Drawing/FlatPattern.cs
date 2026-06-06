@@ -25,8 +25,119 @@ public static class FlatPattern
         PartType.BasePlate   => DevelopPlate(spec),
         PartType.Pan         => DevelopPan(spec),
         PartType.PaddleBlind => DevelopPaddleBlind(spec),
+        PartType.Column      => DevelopColumn(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
+
+    // ── Structural column — two plate flat patterns (one DXF) + a dimensioned elevation ──
+    private static FlatPatternResult DevelopColumn(PartSpec spec)
+    {
+        double baseT = spec.BaseThickness, bearT = spec.BearingThickness;
+        double tubeLen = spec.ColumnFullHeight - baseT - bearT;
+
+        // Each plate reuses the plate developer; thickness only labels them (plates are flat-cut).
+        var baseSpec = new PartSpec
+        {
+            Type = PartType.BasePlate, Length = spec.BaseLength, Width = spec.BaseWidth,
+            Thickness = baseT, Holes = spec.BaseHoles, Material = spec.Material, Units = spec.Units,
+        };
+        var bearSpec = new PartSpec
+        {
+            Type = PartType.BasePlate, Length = spec.BearingLength, Width = spec.BearingWidth,
+            Thickness = bearT, Holes = spec.BearingHoles, Material = spec.Material, Units = spec.Units,
+        };
+        var baseRes = DevelopPlate(baseSpec);
+        var bearRes = DevelopPlate(bearSpec);
+
+        // Merge both flat patterns into ONE cut drawing: base at origin, bearing offset to the right.
+        double gap = Math.Max(2.0, spec.BaseWidth * 0.2);
+        double xOff = baseRes.FlatWidth + gap;
+        var entities = new List<CutEntity>(baseRes.Cut.Entities);
+        foreach (var e in bearRes.Cut.Entities) entities.Add(OffsetEntity(e, xOff, 0));
+
+        string slug = $"column_{Trim(spec.ColumnFullHeight)}h_base{Trim(spec.BaseLength)}x{Trim(spec.BaseWidth)}_brg{Trim(spec.BearingLength)}x{Trim(spec.BearingWidth)}";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = xOff + bearRes.FlatWidth,
+            FlatHeight = Math.Max(baseRes.FlatHeight, bearRes.FlatHeight),
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsColumn = true,
+            ColumnFullHeight = spec.ColumnFullHeight,
+            ColumnTubeLength = tubeLen,
+            ColumnBaseThickness = baseT,
+            ColumnBearingThickness = bearT,
+            ColumnBaseL = spec.BaseLength, ColumnBaseW = spec.BaseWidth,
+            ColumnBearingL = spec.BearingLength, ColumnBearingW = spec.BearingWidth,
+            ColumnBaseHoles = baseRes.Holes,
+            ColumnBearingHoles = bearRes.Holes,
+            ColumnOuterWidth = spec.ColumnOuterWidth,
+            ColumnOuterDepth = spec.ColumnOuterDepth,
+            ColumnWall = spec.ColumnWall,
+            ColumnShape = spec.ColumnShape,
+            ColumnLabel = spec.ColumnLabel,
+            Summary = ColumnSummary(spec, tubeLen),
+            Title = ColumnTitle(spec),
+        };
+    }
+
+    private static CutEntity OffsetEntity(CutEntity e, double dx, double dy) => e.Type switch
+    {
+        "polyline" => CutEntity.Polyline(e.Layer, e.Closed,
+            (e.Vertices ?? new()).Select(v => new CutVertex(v.X + dx, v.Y + dy, v.Bulge))),
+        "line"   => CutEntity.Line(e.Layer, e.X1 + dx, e.Y1 + dy, e.X2 + dx, e.Y2 + dy),
+        "circle" => CutEntity.Circle(e.Layer, e.Cx + dx, e.Cy + dy, e.R),
+        _ => e,
+    };
+
+    private static string ColumnTitle(PartSpec s)
+    {
+        string col = s.ColumnLabel.Length > 0
+            ? s.ColumnLabel
+            : ColShapeName(s.ColumnShape) + " " + ColDimText(s);
+        return $"{MaterialPlain(s.Material)} Column — {N(s.ColumnFullHeight)}\" overall  ({col})".Trim();
+    }
+
+    private static string ColShapeName(string shape) => shape switch
+    {
+        "round" => "Pipe",
+        "rect"  => "Rect Tube",
+        _       => "Square Tube",
+    };
+
+    private static string ColDimText(PartSpec s) => s.ColumnShape switch
+    {
+        "round" => $"{N(s.ColumnOuterWidth)}\" OD",
+        "rect"  => $"{N(s.ColumnOuterWidth)}\" x {N(s.ColumnOuterDepth)}\"",
+        _       => $"{N(s.ColumnOuterWidth)}\" x {N(s.ColumnOuterWidth)}\"",
+    };
+
+    private static string ColumnSummary(PartSpec s, double tubeLen)
+    {
+        string u = s.Units;
+        string shapeName = s.ColumnShape switch { "round" => "pipe", "rect" => "rectangular tube", _ => "square tube" };
+        string HoleNote(HoleSpec? h) =>
+            h is { Diameter: > 0 } ? $"  ({(h.Count <= 0 ? 4 : h.Count)} holes {F(h.Diameter)}{u} dia, edge {F(h.EdgeDistance)}{u})" : "";
+        var lines = new List<string>
+        {
+            $"Structural column  {MaterialPlain(s.Material)}" + (s.ColumnLabel.Length > 0 ? $"   [{s.ColumnLabel}]" : ""),
+            $"Full height {F(s.ColumnFullHeight)}{u}  =  base plate {F(s.BaseThickness)}{u} + {shapeName} {F(tubeLen)}{u} + bearing plate {F(s.BearingThickness)}{u}",
+            $"Base plate    {F(s.BaseLength)}{u} x {F(s.BaseWidth)}{u} x {F(s.BaseThickness)}{u}" + HoleNote(s.BaseHoles),
+            $"Bearing plate {F(s.BearingLength)}{u} x {F(s.BearingWidth)}{u} x {F(s.BearingThickness)}{u}" + HoleNote(s.BearingHoles),
+            $"Column        {shapeName} {ColDimText(s)}, wall {F(s.ColumnWall)}{u}  →  cut to {F(tubeLen)}{u}",
+            "Plates welded centred on the column.  DXF contains both plate flat patterns.",
+        };
+        return string.Join("\n", lines);
+    }
 
     // ── Pan (base + up to 4 walls, 90° bends, mitered corners with bend-root relief) ──
     private static FlatPatternResult DevelopPan(PartSpec spec)
@@ -625,6 +736,26 @@ public sealed class FlatPatternResult
     public List<(double x, double y)> PanEndProfile { get; init; } = new();    // U across the length
     /// <summary>Plate bolt holes (centre x, y, diameter) in plate coords.</summary>
     public List<(double x, double y, double dia)> Holes { get; init; } = new();
+
+    // ── Structural column — two plate flats + a dimensioned side elevation ──
+    /// <summary>True for structural columns — base + bearing plate flats and a column elevation.</summary>
+    public bool IsColumn { get; init; }
+    public double ColumnFullHeight { get; init; }
+    public double ColumnTubeLength { get; init; }
+    public double ColumnBaseThickness { get; init; }
+    public double ColumnBearingThickness { get; init; }
+    public double ColumnBaseL { get; init; }
+    public double ColumnBaseW { get; init; }
+    public double ColumnBearingL { get; init; }
+    public double ColumnBearingW { get; init; }
+    public List<(double x, double y, double dia)> ColumnBaseHoles { get; init; } = new();
+    public List<(double x, double y, double dia)> ColumnBearingHoles { get; init; } = new();
+    public double ColumnOuterWidth { get; init; }
+    public double ColumnOuterDepth { get; init; }
+    public double ColumnWall { get; init; }
+    public string ColumnShape { get; init; } = "square";
+    public string ColumnLabel { get; init; } = "";
+
     public required string Summary { get; init; }
     public string Title { get; init; } = "";
 }
