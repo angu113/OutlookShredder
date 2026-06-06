@@ -55,6 +55,13 @@ public static class FlatPattern
         var entities = new List<CutEntity>(baseRes.Cut.Entities);
         foreach (var e in bearRes.Cut.Entities) entities.Add(OffsetEntity(e, xOff, 0));
 
+        // Tube cross-section etched (marking layer — not cut) on the centre of each plate to
+        // locate the weld. Centred since the plates are welded centred on the column.
+        entities.AddRange(TubeWeldOutline(spec.ColumnShape, spec.BaseLength / 2, spec.BaseWidth / 2,
+            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall));
+        entities.AddRange(TubeWeldOutline(spec.ColumnShape, xOff + spec.BearingLength / 2, spec.BearingWidth / 2,
+            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall));
+
         string slug = $"column_{Trim(spec.ColumnFullHeight)}h_base{Trim(spec.BaseLength)}x{Trim(spec.BaseWidth)}_brg{Trim(spec.BearingLength)}x{Trim(spec.BearingWidth)}";
         var cut = new CutGeometry
         {
@@ -98,6 +105,36 @@ public static class FlatPattern
         "circle" => CutEntity.Circle(e.Layer, e.Cx + dx, e.Cy + dy, e.R),
         _ => e,
     };
+
+    /// <summary>
+    /// The tube/pipe cross-section as marking-layer geometry centred at (cx,cy): outer profile plus
+    /// the inner (wall) profile, so the etched plate shows exactly where the column lands for welding.
+    /// Square/rect → rectangles (w × d); round → circles (w = OD). On the BEND/marking layer (etch,
+    /// not cut).
+    /// </summary>
+    private static IEnumerable<CutEntity> TubeWeldOutline(string shape, double cx, double cy, double w, double d, double wall)
+    {
+        var list = new List<CutEntity>();
+        if (shape == "round")
+        {
+            double ro = w / 2.0;
+            if (ro <= 0) return list;
+            list.Add(CutEntity.Circle(BendLayer, cx, cy, ro));
+            if (ro - wall > 0.01) list.Add(CutEntity.Circle(BendLayer, cx, cy, ro - wall));
+        }
+        else
+        {
+            void Rect(double hw, double hh) => list.Add(CutEntity.Polyline(BendLayer, closed: true, new[]
+            {
+                new CutVertex(cx - hw, cy - hh), new CutVertex(cx + hw, cy - hh),
+                new CutVertex(cx + hw, cy + hh), new CutVertex(cx - hw, cy + hh),
+            }));
+            if (w <= 0 || d <= 0) return list;
+            Rect(w / 2.0, d / 2.0);
+            if (w / 2.0 - wall > 0.01 && d / 2.0 - wall > 0.01) Rect(w / 2.0 - wall, d / 2.0 - wall);
+        }
+        return list;
+    }
 
     private static string ColumnTitle(PartSpec s)
     {
@@ -246,8 +283,8 @@ public static class FlatPattern
         var lines = new List<string>
         {
             $"Pan  {s.Material}  (T={F(s.Thickness)}{u})",
-            $"Base {F(Lo)}{u} x {F(Wo)}{u} OD, wall {F(Do)}{u} deep OD",
-            $"Walls: {longN} long + {shortN} short; mitered corners, bend relief {F(s.Thickness)}{u}",
+            $"Base {F(Lo)}{u} x {F(Wo)}{u} OD, side flange {F(Do)}{u} deep OD",
+            $"Side flanges: {longN} long + {shortN} short; mitered corners, bend relief {F(s.Thickness)}{u}",
         };
         if (anyInside)
         {
@@ -679,8 +716,8 @@ public static class FlatPattern
             PartType.ZChannel => "Z-channel", _ => s.Type.ToString(),
         };
         string outside = s.Type == PartType.LAngle
-            ? $"legs {F(flLO)}{u} x {F(flRO)}{u}"
-            : $"web {F(webO)}{u}, flange {(Math.Abs(flLO - flRO) < 1e-6 ? F(flLO) : $"{F(flLO)}/{F(flRO)}")}{u}";
+            ? $"flange 1 {F(flLO)}{u}, flange 2 {F(flRO)}{u}"
+            : $"flange 1 {F(flLO)}{u}, web {F(webO)}{u}, flange 2 {F(flRO)}{u}";
         var lines = new List<string>
         {
             $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",

@@ -479,15 +479,18 @@ public static class DrawingPdfRenderer
         double pw = (platesW - gap) / 2;
 
         DrawPlatePanel(gfx, new XRect(box.X, box.Y, pw, box.Height),
-            "Base plate", fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles);
+            "Base plate", fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles,
+            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall);
         DrawPlatePanel(gfx, new XRect(box.X + pw + gap, box.Y, pw, box.Height),
-            "Bearing plate", fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles);
+            "Bearing plate", fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles,
+            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall);
         DrawColumnElevation(gfx, fp, new XRect(box.X + platesW + gap, box.Y, elevW, box.Height));
     }
 
-    // ── One plate top view (rectangle + bolt holes + L/W + corner-hole offsets) ──
+    // ── One plate top view (rectangle + bolt holes + L/W + corner-hole offsets + tube weld outline) ──
     private static void DrawPlatePanel(XGraphics gfx, XRect box, string title, double L, double W,
-        List<(double x, double y, double dia)> holes)
+        List<(double x, double y, double dia)> holes,
+        string tubeShape, double tubeW, double tubeD, double tubeWall)
     {
         var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
         var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
@@ -528,6 +531,35 @@ public static class DrawingPdfRenderer
             gfx.DrawString($"{holes.Count} x {Fq(holes[0].dia)} dia", dimFont, TextBrush,
                 new XRect(area.X, oy - 32, area.Width, 11), XStringFormats.TopCenter);
         }
+
+        // Tube weld-locating outline, centred (matches the etched marking layer in the DXF).
+        var weldPen = new XPen(SecColorA, 1.1);   // green = marking / weld locator
+        double mcx = L / 2.0, mcy = W / 2.0;
+        if (tubeShape == "round" && tubeW > 0)
+        {
+            void Circ(double r)
+            {
+                if (r <= 0) return;
+                var c = P(mcx, mcy); double rs = r * scale;
+                gfx.DrawEllipse(weldPen, c.X - rs, c.Y - rs, 2 * rs, 2 * rs);
+            }
+            Circ(tubeW / 2.0);
+            Circ(tubeW / 2.0 - tubeWall);
+        }
+        else if (tubeW > 0 && tubeD > 0)
+        {
+            void RectO(double hw, double hh)
+            {
+                if (hw <= 0 || hh <= 0) return;
+                var a = P(mcx - hw, mcy - hh); var b = P(mcx + hw, mcy + hh);
+                gfx.DrawRectangle(weldPen, Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Abs(b.X - a.X), Math.Abs(b.Y - a.Y));
+            }
+            RectO(tubeW / 2.0, tubeD / 2.0);
+            RectO(tubeW / 2.0 - tubeWall, tubeD / 2.0 - tubeWall);
+        }
+        var wc = P(mcx, mcy);
+        gfx.DrawString("tube", new XFont("Arial", 7, XFontStyleEx.Regular), new XSolidBrush(SecColorA),
+            new XRect(wc.X - 20, wc.Y - 4, 40, 9), XStringFormats.TopCenter);
     }
 
     // ── Column side elevation: base / tube / bearing stacked, welded centred, with callouts ──
