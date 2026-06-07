@@ -32,14 +32,44 @@ public class RfqStateOfPlayService
         "MATCH PRODUCTS BY NAME + SPEC across suppliers (e.g. \"304 SS plate 1/4 x 48 x 96\"): the same " +
         "item may be worded differently by each supplier. There are no product codes — rely on the text.\n" +
         "ACCOUNT FOR COVERAGE: a lower TOTAL that skipped/regretted items is NOT cheaper — compare only " +
-        "complete, apples-to-apples quotes. Call out single-sourced items (one supplier = no leverage) and " +
-        "any regrets/gaps. A supplier 'regret' (cannot supply an item) IS material to the picture.\n" +
+        "complete, apples-to-apples quotes; a supplier 'regret' (cannot supply an item) IS material.\n" +
+        "WE SPLIT BY LINE: on a multi-line RFQ we pick and choose — buy each line from whoever is cheapest on " +
+        "that line. Identify the WINNER per line and the best line-by-line split. Only discuss a supplier " +
+        "that WINS at least one line — do NOT spend words on suppliers who win nothing.\n" +
+        "NEGOTIATION: when a supplier wins some lines but loses others, flag the play to push their LOSING " +
+        "lines down (using their winning lines as leverage) so awarding them the whole order beats the split " +
+        "— name the lines and the dollar gap to close. Only mention leverage when it ACTUALLY exists (2+ " +
+        "suppliers competing on a line); NEVER state that there is no leverage or that an item is single-sourced.\n" +
         "WRITE TIGHTLY: a 1-line recommendation (who, and why), then a handful of short lines on the price " +
         "leader, the genuine trade-offs, and gaps/risks. Mention a dimension (lead time, freight terms, " +
         "payment terms, certs, MOQ, surcharges) ONLY when it MEANINGFULLY differs between suppliers — skip " +
-        "it otherwise. Be concrete: supplier names + dollar figures, no filler, no preamble or sign-off.\n" +
+        "it otherwise. MTRs (material test reports) are ALWAYS required and supplied as standard here — NEVER " +
+        "note a missing or unmentioned MTR as a gap or risk; only raise certs if a supplier explicitly cannot " +
+        "provide standard MTRs or offers something beyond them. IGNORE quote validity / expiry dates and " +
+        "times — never flag a short, burning, or expiring quote as a risk or an action item; if a price " +
+        "lapses we simply request a fresh quote. These are STANDARD — do NOT flag them: (a) removing supplier " +
+        "markings from material (we ask EVERY supplier for this, so a supplier merely restating it is not " +
+        "noteworthy); (b) cut mill stock (material cut down from larger mill lengths by the service center is " +
+        "normal and always acceptable — never raise it as a quality/acceptability concern). The ONLY thing to " +
+        "watch on cut items is the DELIVERY date (the extra processing can push it out), which the quote's " +
+        "delivery/ship/due date already captures. Be concrete: supplier names + dollar figures, " +
+        "no filler, no preamble or sign-off.\n" +
+        "PRICE TABLE: present the price comparison as a compact table that ALWAYS includes a price-per-pound " +
+        "($/lb) column next to the total, so suppliers are comparable on a unit basis. Compute $/lb from the " +
+        "total and the line weight. THEORETICAL WEIGHT: a line may show 'weight ~N lb (ESTIMATED)' — we " +
+        "computed that weight from the product's dimensions because the supplier did not state one. Any $/lb " +
+        "you derive using an ESTIMATED weight is THEORETICAL: append a '*' to that $/lb value and add ONE " +
+        "footnote — '* theoretical $/lb — based on our calculated weight; supplier gave no weight'. CRUCIAL: a " +
+        "$/lb is theoretical ONLY when you DIVIDED a total (or per-piece/per-foot price) by an ESTIMATED " +
+        "weight. If the supplier quoted a price PER POUND directly, that IS their own $/lb — NEVER mark it " +
+        "theoretical, even when the weight shown is ESTIMATED (the estimate only affects the weight column, " +
+        "not their stated $/lb).\n" +
         "TIMING: replies usually arrive within ~30 min and chasing is only warranted after ~60 min. The " +
         "input says how long ago the RFQ was sent; do NOT treat few/slow responses as a problem under 60 min.";
+
+    /// <summary>Bumped whenever the prompt / output guidance changes, so it folds into the inputs-hash
+    /// and existing cached summaries regenerate with the new prompt on next access.</summary>
+    private const string PromptVersion = "sop-v8-weight-estimate";
 
     public record Result(string Summary, string InputsHash, string Model, string Mode);
 
@@ -117,7 +147,7 @@ public class RfqStateOfPlayService
             .Where(s => s.Replace("|", "").Trim().Length > 0)
             .OrderBy(s => s, StringComparer.Ordinal)
             .ToList();
-        var raw = (includePdfs ? "pdf\n" : "text\n") + string.Join("\n", parts);
+        var raw = PromptVersion + (includePdfs ? "\npdf\n" : "\ntext\n") + string.Join("\n", parts);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
     }
 
@@ -140,6 +170,8 @@ public class RfqStateOfPlayService
                 sb.Append("  - ").Append(ProductLabel(r));
                 var spec = Spec(r);            if (spec.Length > 0)               sb.Append("  [").Append(spec).Append(']');
                 var price = PriceText(r);      if (price.Length > 0)              sb.Append("  ").Append(price);
+                var (wtLb, wtEst) = ResolveWeight(r);
+                if (wtLb is > 0) sb.Append($"  weight ~{wtLb.Value:0.#} lb{(wtEst ? " (ESTIMATED)" : "")}");
                 var lead = S(r, "LeadTimeText"); if (lead.Length > 0)             sb.Append("  lead: ").Append(lead);
                 var certs = S(r, "Certifications"); if (certs.Length > 0)         sb.Append("  certs: ").Append(certs);
                 var note = S(r, "SupplierProductComments"); if (note.Length > 0)  sb.Append("  note: ").Append(Trim(note, 200));
@@ -202,4 +234,43 @@ public class RfqStateOfPlayService
     private static string FirstNonEmpty(IEnumerable<Dictionary<string, object?>> rows, string k)
         => rows.Select(r => S(r, k)).FirstOrDefault(s => s.Length > 0) ?? "";
     private static string Trim(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
+    // ── weight resolution (supplier-stated, else computed from dimensions via WeightCalculator) ───────
+    /// <summary>Line total weight in lb + whether it was ESTIMATED from dimensions because the supplier
+    /// gave no weight (same calculator QC + the catalog use), so the model can mark such $/lb theoretical.</summary>
+    private static (double? TotalLb, bool Estimated) ResolveWeight(Dictionary<string, object?> r)
+    {
+        double qty = ParseD(S(r, "UnitsQuoted")) ?? 1;
+        if (qty <= 0) qty = 1;
+
+        var sw = ParseD(S(r, "WeightPerUnit"));
+        if (sw is > 0) return (ToLb(sw.Value, S(r, "WeightUnit")) * qty, false);
+
+        var wc = WeightCalculator.Calculate(ProductLabel(r));
+        if (wc.LbPerFoot is > 0)
+        {
+            var lenFt = ToFeet(ParseD(S(r, "LengthPerUnit")), S(r, "LengthUnit"));
+            if (lenFt is > 0) return (wc.LbPerFoot.Value * lenFt.Value * qty, true);
+        }
+        return (null, false);
+    }
+
+    private static double? ParseD(string s) => double.TryParse(s, out var d) ? d : null;
+
+    private static double? ToFeet(double? v, string unit)
+    {
+        if (v is not > 0) return null;
+        return unit.ToLowerInvariant() switch
+        {
+            "in" or "inch" or "inches" or "\"" => v / 12.0,
+            "mm" => v / 304.8, "cm" => v / 30.48, "m" => v * 3.28084,
+            _ => v,   // ft / blank
+        };
+    }
+
+    private static double ToLb(double v, string unit) => unit.ToLowerInvariant() switch
+    {
+        "kg" => v * 2.20462, "g" => v / 453.592, "oz" => v / 16.0,
+        _ => v,   // lb / blank
+    };
 }
