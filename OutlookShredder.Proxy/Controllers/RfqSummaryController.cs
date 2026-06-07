@@ -112,10 +112,12 @@ public class RfqSummaryController : ControllerBase
             }
 
             bool pdfs = _config.GetValue("RfqStateOfPlay:IncludePdfs", false);
-            int withSummary = 0, stale = 0, regen = 0;
+            _log.LogInformation("[refresh-stale] scanning {Total} RFQ(s) (dryRun={Dry})", ids.Count, dryRun);
+            int withSummary = 0, stale = 0, regen = 0, idx = 0;
             var staleIds = new List<string>();
             foreach (var rfqId in ids)
             {
+                idx++;
                 var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
                 if (RfqStateOfPlayService.CompetingSuppliers(rows) < 2) continue;
                 var cached = await _sp.ReadRfqSummaryAsync(rfqId);
@@ -130,8 +132,12 @@ public class RfqSummaryController : ControllerBase
                     await _sp.WriteRfqSummaryAsync(rfqId, result.Summary, result.InputsHash, result.Model, result.Mode);
                     _notify.NotifyRfqSummary(rfqId);
                     regen++;
+                    _log.LogInformation("[refresh-stale] progress {Idx}/{Total}: regenerated {RfqId} ({Regen} done, stale #{Stale})",
+                        idx, ids.Count, rfqId, regen, stale);
                 }
             }
+            _log.LogInformation("[refresh-stale] DONE: regenerated={Regen} of {Stale} stale ({WithSummary} had summaries, {Total} scanned, dryRun={Dry})",
+                regen, stale, withSummary, ids.Count, dryRun);
             return Ok(new { scope = string.IsNullOrWhiteSpace(rfqIds) ? $"last {days}d" : "explicit",
                             dryRun, withSummary, stale, regenerated = regen, staleRfqs = staleIds });
         }
