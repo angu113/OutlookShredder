@@ -2186,6 +2186,14 @@ public class ExtractController : ControllerBase
         catch (Exception ex) { _log.LogError(ex, "SeedSupplierParameters failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── GET /api/diag/price-bands (refresh + view the calculated $/lb plausibility bands) ──
+    [HttpGet("diag/price-bands")]
+    public async Task<IActionResult> GetPriceBands()
+    {
+        try { return Ok(new { bands = await _sp.GetPriceBandsAsync() }); }
+        catch (Exception ex) { _log.LogError(ex, "GetPriceBands failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     /// <summary>Re-reads the PO and publishes a "PO_STATUS" bus event so Trigger Ordered cards on every
     /// machine re-colour live. Best-effort — a publish failure never fails the mutation.</summary>
     private async Task PublishPoStatusAsync(string spItemId)

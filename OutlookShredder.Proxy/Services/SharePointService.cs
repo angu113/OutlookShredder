@@ -2701,19 +2701,88 @@ public partial class SharePointService
 
     // ??"?????"??? Write SupplierLineItems (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
-    /// <summary>Sane $/lb band for the metal family, used by the price guard so it never "corrects" a price
-    /// to a value implied by a wrong weight. Generous on the high side to avoid overriding real (if pricey)
-    /// quotes; the guard only acts when the STORED value is out of band and the derived one is in band.</summary>
-    private static (double Lo, double Hi) PlausiblePerLbBand(string? name)
+    // ── $/lb plausibility bands — CALCULATED from QC sharp pricing (NOT hard-coded) ─────────────────────
+    // Base $/lb per metal class = the QC list's Last-Quote ("LQ", the haircut sharp price); band = base
+    // +/- a configurable percentage (PriceGuard:BandPct, default 50%). Refreshed in the background so the
+    // bands TRACK real prices over time. DefaultPerLbBand is only a cold-start fallback.
+    private volatile Dictionary<string, (double Lo, double Hi)>? _lbBands;
+    private DateTime _lbBandsAt   = DateTime.MinValue;
+    private int      _lbBandsBusy = 0;
+
+    private static string ClassifyMetalClass(string? name)
     {
         var n = (name ?? "").ToLowerInvariant();
-        bool alum = n.Contains("alum") || n.Contains("6061") || n.Contains("6063") || n.Contains("5052")
-                 || n.Contains("5086") || n.Contains("3003") || n.Contains("2024") || n.Contains("7075");
-        bool ss   = n.Contains("stainless") || n.Contains(" ss ") || n.Contains("t304") || n.Contains("t316")
-                 || n.Contains("304") || n.Contains("316") || n.Contains("321") || n.Contains("410") || n.Contains("430");
-        if (alum) return (1.5, 15.0);
-        if (ss)   return (1.5, 20.0);
-        return (0.4, 4.0);   // carbon / galvanized / structural steel
+        if (n.Contains("brass") || n.Contains("bronze") || n.Contains("copper")) return "brass";
+        if (n.Contains("alum") || n.Contains("6061") || n.Contains("6063") || n.Contains("5052")
+            || n.Contains("5086") || n.Contains("3003") || n.Contains("2024") || n.Contains("7075")) return "alum";
+        if (n.Contains("stainless") || n.Contains(" ss ") || n.Contains("t304") || n.Contains("t316")
+            || n.Contains("304") || n.Contains("316") || n.Contains("321") || n.Contains("410") || n.Contains("430")) return "ss";
+        return "steel";   // hot rolled / cold rolled / galvanized / carbon
+    }
+
+    private static (double Lo, double Hi) DefaultPerLbBand(string cls) => cls switch
+    {
+        "alum"  => (1.5, 15.0),
+        "ss"    => (1.5, 20.0),
+        "brass" => (2.0, 10.0),
+        _       => (0.4, 3.0),   // cold-start fallback only — real bands come from QC LQ
+    };
+
+    /// <summary>Plausible $/lb band for the product's metal: the QC-LQ base +/- BandPct (refreshed in the
+    /// background). Used by the price guard so it never "corrects" toward a value implied by a wrong weight.</summary>
+    private (double Lo, double Hi) PlausiblePerLbBand(string? name)
+    {
+        var cls = ClassifyMetalClass(name);
+        if ((DateTime.UtcNow - _lbBandsAt).TotalHours >= 6
+            && System.Threading.Interlocked.CompareExchange(ref _lbBandsBusy, 1, 0) == 0)
+            _ = Task.Run(async () => { try { await RefreshPriceBandsAsync(); } finally { System.Threading.Interlocked.Exchange(ref _lbBandsBusy, 0); } });
+        var bands = _lbBands;
+        return bands is not null && bands.TryGetValue(cls, out var b) ? b : DefaultPerLbBand(cls);
+    }
+
+    /// <summary>Recomputes per-metal $/lb plausibility bands from the QC list's sharp LQ pricing:
+    /// base = median LQ for the metal class, band = base +/- PriceGuard:BandPct (default 0.5).</summary>
+    public async Task RefreshPriceBandsAsync()
+    {
+        try
+        {
+            var pct = Math.Clamp(_config.GetValue("PriceGuard:BandPct", 0.5), 0.1, 0.95);
+            var qc  = await ReadQcListAsync();
+            var cols = qc.Columns.ToList();
+            int mi = cols.IndexOf("Metal");
+            int lq = cols.IndexOf("LQ");
+            if (mi < 0 || lq < 0) { _log.LogWarning("[SP] price bands: QC Metal/LQ columns not found"); return; }
+
+            var byClass = new Dictionary<string, List<double>>();
+            foreach (var row in qc.Rows)
+            {
+                if (row is not System.Collections.IList arr || arr.Count <= Math.Max(mi, lq)) continue;
+                var cls = ClassifyMetalClass(arr[mi]?.ToString());
+                if (double.TryParse(arr[lq]?.ToString(), out var v) && v > 0)
+                    (byClass.TryGetValue(cls, out var l) ? l : byClass[cls] = new()).Add(v);
+            }
+
+            var bands = new Dictionary<string, (double Lo, double Hi)>();
+            foreach (var (cls, vals) in byClass)
+            {
+                if (vals.Count < 2) continue;
+                vals.Sort();
+                var med = vals[vals.Count / 2];
+                if (med > 0) bands[cls] = (Math.Max(0.05, med * (1 - pct)), med * (1 + pct));
+            }
+            _lbBands = bands;
+            _lbBandsAt = DateTime.UtcNow;
+            _log.LogInformation("[SP] price bands (QC LQ +/-{Pct:P0}): {B}", pct,
+                string.Join("; ", bands.Select(kv => $"{kv.Key}=[{kv.Value.Lo:F2},{kv.Value.Hi:F2}]")));
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[SP] RefreshPriceBandsAsync failed"); }
+    }
+
+    /// <summary>Refreshes + returns the current $/lb bands (for the diagnostic surface).</summary>
+    public async Task<List<object>> GetPriceBandsAsync()
+    {
+        await RefreshPriceBandsAsync();
+        return (_lbBands ?? new()).Select(kv => (object)new { metal = kv.Key, lo = kv.Value.Lo, hi = kv.Value.Hi }).ToList();
     }
 
     private async Task<string?> WriteSupplierLineItemAsync(
@@ -2784,13 +2853,29 @@ public partial class SharePointService
             && _catalog.FindWeightPerFoot(productSearchKey) is double catWt and > 0)
         {
             var derived = Math.Round(product.PricePerFoot.Value / catWt, 6);
-            if (pricePerPound is not null && Math.Abs(derived - pricePerPound.Value) / pricePerPound.Value > 0.05)
+            if (pricePerPound is double pp0 && Math.Abs(derived - pp0) / pp0 > 0.05)
             {
-                _log.LogWarning("[SP] PricePerPound override: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
-                    pricePerPound, derived, product.PricePerFoot, catWt, productSearchKey);
-                priceAudit.Add($"$/lb {pricePerPound:F4}->{derived:F4} from PricePerFoot {product.PricePerFoot:F4} / catalog wt-per-ft {catWt:F3}");
+                // PLAUSIBILITY BOUND: the catalog weight-per-ft can itself be wrong, so only override a
+                // PLAUSIBLE stored $/lb when the catalog-derived value is in band and the stored one is NOT.
+                var (lo, hi)   = PlausiblePerLbBand(prodName);
+                bool storedOk  = pp0     >= lo && pp0     <= hi;
+                bool derivedOk = derived >= lo && derived <= hi;
+                if (!storedOk && derivedOk)
+                {
+                    _log.LogWarning("[SP] PricePerPound corrected: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
+                        pp0, derived, product.PricePerFoot, catWt, productSearchKey);
+                    priceAudit.Add($"$/lb {pp0:F4}->{derived:F4} from PricePerFoot {product.PricePerFoot:F4} / catalog wt-per-ft {catWt:F3} [corrected]");
+                    pricePerPound = derived;
+                }
+                else
+                {
+                    priceAudit.Add($"$/lb DISCREPANCY: stored {pp0:F4} vs catalog-derived {derived:F4} (PricePerFoot {product.PricePerFoot:F4} / wt-per-ft {catWt:F3}) — KEPT stored");
+                }
             }
-            pricePerPound = derived;
+            else if (pricePerPound is null)
+            {
+                pricePerPound = derived;   // no AI value -- use the catalog-derived $/lb
+            }
         }
         // (b) total ÷ weight reconciliation: catches a per-ft / per-pc price mis-slotted into PricePerPound
         //     when there's no PricePerFoot (the JM005X case). Only fires with an independent total + the
