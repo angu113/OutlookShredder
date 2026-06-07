@@ -29,15 +29,20 @@ public sealed class MailWorkbenchService
     private readonly SeedProgress _seed = new();
     private readonly string _archiveRoot;
 
+    private readonly PoConfirmationMatcherService _poMatcher;
+    private readonly BillToPoMatcherService       _billMatcher;
+
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
         RfqNotificationService notify, SupplierCacheService suppliers, MailProjectService projects,
         BillExtractionService bill, ConfirmationExtractionService confirm,
+        PoConfirmationMatcherService poMatcher, BillToPoMatcherService billMatcher,
         IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
         _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects;
-        _bill = bill; _confirm = confirm; _config = config; _log = log;
+        _bill = bill; _confirm = confirm; _poMatcher = poMatcher; _billMatcher = billMatcher;
+        _config = config; _log = log;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -389,8 +394,21 @@ public sealed class MailWorkbenchService
             _cache.UpsertClass(cls);
             _notify.NotifyMailItem(action, mailItemId,
                 _cache.TryGetItem(mailItemId, out var row) ? _cache.ToBusItem(row, cls) : null);
+            KickMatcherForCategory(r.Category);
         }
         catch (Exception ex) { _log.LogWarning(ex, "[MailWB] cache/publish (class) failed for {Id}", mailItemId); }
+    }
+
+    /// <summary>After an email is (re)classified, nudge the relevant fulfillment matcher so a bill /
+    /// confirmation / receipt updates its PO within seconds instead of waiting for the periodic timer.</summary>
+    private void KickMatcherForCategory(string? category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return;
+        if (string.Equals(category, "Supplier/Invoices and Bills", StringComparison.OrdinalIgnoreCase))
+            _billMatcher.KickSoon();
+        else if (string.Equals(category, "Supplier/Order Confirmations", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(category, "Supplier/Receipts", StringComparison.OrdinalIgnoreCase))
+            _poMatcher.KickSoon();
     }
 
     /// <summary>

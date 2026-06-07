@@ -88,6 +88,17 @@ public class RfqProcessedNotification
     /// Bus recipients apply this directly to their MailCache without an SP round-trip.
     /// </summary>
     public MailBusItem? MailItem { get; set; }
+
+    // ── Populated when EventType = "PO_STATUS" (a PO's confirm/payment status changed: manual
+    //    dropdown, auto-confirm, bill match, or receipt). Lets Trigger Ordered cards re-colour live. ──
+    public string? PoSpItemId       { get; set; }
+    public string? PoNumber         { get; set; }
+    public string? ConfirmStatus    { get; set; }
+    public string? PaymentStatus    { get; set; }
+    /// <summary>True when there's an email to show for the current state (Required→bill, Paid→receipt).</summary>
+    public bool    HasPaymentEmail  { get; set; }
+    /// <summary>True once the material is received — the client removes the card from the board.</summary>
+    public bool    MaterialReceived { get; set; }
 }
 
 /// <summary>
@@ -250,6 +261,9 @@ public class PurchaseOrderRecord
     public string? BillAmount      { get; set; }
     public string? BillSupplierRef { get; set; }
     public string? BillMatchedAt   { get; set; }
+    /// <summary>MailItemId of the receipt email that confirmed payment — once Paid, the payment icon
+    /// opens this receipt instead of the bill.</summary>
+    public string? ReceiptMailItemId { get; set; }
 
     // ── Derived at-risk (computed on read by PoConfirmationMonitor; NOT stored in SP) ────────
     /// <summary>Supplier-acknowledgment risk: green | amber | red. Only "Pending" POs are scored.</summary>

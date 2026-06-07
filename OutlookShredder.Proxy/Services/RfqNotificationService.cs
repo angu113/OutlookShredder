@@ -282,6 +282,27 @@ public class RfqNotificationService
             ErpDocument = record,
         });
 
+    /// <summary>Publishes a "PO_STATUS" event so Trigger Ordered cards re-colour live the moment a
+    /// PO's confirm/payment status changes (manual dropdown, auto-confirm, bill match, or receipt).</summary>
+    public void NotifyPoStatus(Models.PurchaseOrderRecord r)
+    {
+        bool hasEmail =
+            (string.Equals(r.PaymentStatus, "Required", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.BillMailItemId)) ||
+            (string.Equals(r.PaymentStatus, "Paid",     StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.ReceiptMailItemId));
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType        = "PO_STATUS",
+            PoSpItemId       = r.SpItemId,
+            PoNumber         = r.PoNumber,
+            RfqId            = r.RfqId,
+            SupplierName     = r.SupplierName,
+            ConfirmStatus    = r.ConfirmStatus ?? "Pending",
+            PaymentStatus    = r.PaymentStatus ?? "None",
+            HasPaymentEmail  = hasEmail,
+            MaterialReceived = !string.IsNullOrWhiteSpace(r.MaterialReceivedAt),
+        });
+    }
+
     /// <summary>
     /// Broadcasts an <c>rfq-processed</c> SSE event to all connected SSE clients
     /// and publishes the same payload to Azure Service Bus so Shredder instances on

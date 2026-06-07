@@ -19,6 +19,7 @@ public class ExtractController : ControllerBase
     private readonly ProductCatalogService      _catalog;
     private readonly RfqNotificationService     _notifications;
     private readonly ShrConvInRouter            _shrRouter;
+    private readonly MailWorkbenchService       _workbench;
     private readonly IConfiguration             _config;
     private readonly ILogger<ExtractController> _log;
 
@@ -34,6 +35,7 @@ public class ExtractController : ControllerBase
         ProductCatalogService       catalog,
         RfqNotificationService      notifications,
         ShrConvInRouter             shrRouter,
+        MailWorkbenchService        workbench,
         IConfiguration              config,
         ILogger<ExtractController>  log)
     {
@@ -48,6 +50,7 @@ public class ExtractController : ControllerBase
         _catalog       = catalog;
         _notifications = notifications;
         _shrRouter     = shrRouter;
+        _workbench     = workbench;
         _config        = config;
         _log           = log;
     }
@@ -1877,6 +1880,7 @@ public class ExtractController : ControllerBase
         {
             await _sp.UpdatePurchaseOrderConfirmAsync(spItemId, confirmed: true,
                 via: req?.Via, expectedDate: req?.ExpectedDate, note: req?.Note);
+            await PublishPoStatusAsync(spItemId);
             return Ok(new { ok = true });
         }
         catch (Exception ex)
@@ -1894,6 +1898,7 @@ public class ExtractController : ControllerBase
         try
         {
             await _sp.UpdatePurchaseOrderConfirmAsync(spItemId, confirmed: false, via: null, expectedDate: null, note: null);
+            await PublishPoStatusAsync(spItemId);
             return Ok(new { ok = true });
         }
         catch (Exception ex)
@@ -1909,7 +1914,7 @@ public class ExtractController : ControllerBase
     [HttpPatch("purchase-orders/{spItemId}/payment-required")]
     public async Task<IActionResult> PaymentRequired(string spItemId, [FromBody] PoPaymentRequest? req)
     {
-        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Required", req?.Note); return Ok(new { ok = true }); }
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Required", req?.Note); await PublishPoStatusAsync(spItemId); return Ok(new { ok = true }); }
         catch (Exception ex) { _log.LogError(ex, "PaymentRequired failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
@@ -1918,7 +1923,7 @@ public class ExtractController : ControllerBase
     [HttpPatch("purchase-orders/{spItemId}/paid")]
     public async Task<IActionResult> PaymentPaid(string spItemId, [FromBody] PoPaymentRequest? req)
     {
-        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Paid", req?.Note); return Ok(new { ok = true }); }
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "Paid", req?.Note); await PublishPoStatusAsync(spItemId); return Ok(new { ok = true }); }
         catch (Exception ex) { _log.LogError(ex, "PaymentPaid failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
@@ -1927,12 +1932,56 @@ public class ExtractController : ControllerBase
     [HttpPatch("purchase-orders/{spItemId}/payment-clear")]
     public async Task<IActionResult> PaymentClear(string spItemId, [FromBody] PoPaymentRequest? req)
     {
-        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "None", req?.Note); return Ok(new { ok = true }); }
+        try { await _sp.UpdatePurchaseOrderPaymentAsync(spItemId, "None", req?.Note); await PublishPoStatusAsync(spItemId); return Ok(new { ok = true }); }
         catch (Exception ex) { _log.LogError(ex, "PaymentClear failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
     public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
     public record PoPaymentRequest(string? Note);
+
+    /// <summary>Re-reads the PO and publishes a "PO_STATUS" bus event so Trigger Ordered cards on every
+    /// machine re-colour live. Best-effort — a publish failure never fails the mutation.</summary>
+    private async Task PublishPoStatusAsync(string spItemId)
+    {
+        try
+        {
+            var rec = (await _sp.ReadPurchaseOrdersAsync()).FirstOrDefault(p => p.SpItemId == spItemId);
+            if (rec is not null) _notifications.NotifyPoStatus(rec);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "PublishPoStatus failed for {Id}", spItemId); }
+    }
+
+    // ── GET /api/purchase-orders/{spItemId}/payment-email ─────────────────────
+    /// <summary>The payment-related email to show for a PO: the bill / payment-request email while
+    /// PaymentStatus=Required, or the receipt once Paid. HTML body comes from the mail-workbench archive.</summary>
+    [HttpGet("purchase-orders/{spItemId}/payment-email")]
+    public async Task<IActionResult> GetPaymentEmail(string spItemId)
+    {
+        try
+        {
+            var rec = (await _sp.ReadPurchaseOrdersAsync()).FirstOrDefault(p => p.SpItemId == spItemId);
+            if (rec is null) return NotFound(new { error = "PO not found" });
+            bool paid  = string.Equals(rec.PaymentStatus, "Paid", StringComparison.OrdinalIgnoreCase);
+            var  mailId = paid ? rec.ReceiptMailItemId : rec.BillMailItemId;
+            if (string.IsNullOrWhiteSpace(mailId)) return NotFound(new { error = "no payment email for this PO" });
+            var d = await _workbench.GetItemDetailAsync(mailId);
+            if (d is null) return NotFound(new { error = "payment email not found in the archive" });
+            return Ok(new
+            {
+                kind        = paid ? "receipt" : "bill",
+                subject     = d.Subject,
+                fromName    = d.FromName,
+                fromAddress = d.FromAddress,
+                receivedAt  = d.ReceivedAt,
+                isHtml      = d.IsHtml,
+                html        = d.Html,
+                bodyText    = d.BodyText,
+                payLink     = d.PayLink,
+                amount      = d.Amount,
+            });
+        }
+        catch (Exception ex) { _log.LogError(ex, "GetPaymentEmail failed for {Id}", spItemId); return StatusCode(500, new { error = ex.Message }); }
+    }
 
     // ── GET /api/purchase-orders/waiting-cards ────────────────────────────────
     /// <summary>Projection of active, not-yet-received POs as Transfer/Waiting board cards. Scope is
@@ -1981,6 +2030,9 @@ public class ExtractController : ControllerBase
                 // A confirmed PO is always kept regardless of age (material genuinely inbound).
                 if (state == "stale") continue;
 
+                bool hasPayEmail =
+                    (string.Equals(r.PaymentStatus, "Required", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.BillMailItemId)) ||
+                    (string.Equals(r.PaymentStatus, "Paid",     StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.ReceiptMailItemId));
                 cards.Add(new PoWaitingCard(
                     SpItemId: r.SpItemId, PoNumber: r.PoNumber!, Supplier: r.SupplierName, RfqId: r.RfqId,
                     AssignedDate: placeDate?.ToString("yyyy-MM-dd"),
@@ -1988,7 +2040,8 @@ public class ExtractController : ControllerBase
                     Rescheduled: !string.IsNullOrWhiteSpace(r.BoardDate),
                     CardState: state, ConfirmStatus: r.ConfirmStatus ?? "Pending",
                     PaymentStatus: r.PaymentStatus ?? "None", AckLevel: r.AckLevel, PayLevel: r.PayLevel,
-                    Notes: r.WaitingNotes, Products: SummarizeProducts(r.LineItems, out var n), LineItemCount: n));
+                    Notes: r.WaitingNotes, Products: SummarizeProducts(r.LineItems, out var n), LineItemCount: n,
+                    HasPaymentEmail: hasPayEmail));
             }
 
             // Dedup duplicate PO rows (same PoNumber): keep the most-progressed card.
@@ -2022,7 +2075,13 @@ public class ExtractController : ControllerBase
                 var qty = el.TryGetProperty("quantity", out var q)
                     ? (q.ValueKind == System.Text.Json.JsonValueKind.Number ? q.GetRawText() : q.GetString() ?? "")
                     : "";
-                lines.Add(string.IsNullOrWhiteSpace(qty) ? $"- {prod}" : $"- {prod} (x{qty})");
+                var size  = el.TryGetProperty("size", out var s) ? s.GetString()?.Trim() : null;
+                var label = prod!.Trim();
+                // Append size only when it adds something — the extractor often duplicates the whole
+                // product description into "size", which would otherwise print twice.
+                if (!string.IsNullOrWhiteSpace(size) && label.IndexOf(size, StringComparison.OrdinalIgnoreCase) < 0)
+                    label += $"  {size}";
+                lines.Add(string.IsNullOrWhiteSpace(qty) ? $"- {label}" : $"- {label} (x{qty})");
             }
             count = lines.Count;
             return string.Join("\n", lines);
@@ -2046,7 +2105,7 @@ public class ExtractController : ControllerBase
     [HttpPatch("purchase-orders/{spItemId}/received")]
     public async Task<IActionResult> PatchReceived(string spItemId, [FromBody] PoReceivedRequest? req)
     {
-        try { await _sp.UpdatePurchaseOrderReceivedAsync(spItemId, req?.Received ?? true); return Ok(new { ok = true }); }
+        try { await _sp.UpdatePurchaseOrderReceivedAsync(spItemId, req?.Received ?? true); await PublishPoStatusAsync(spItemId); return Ok(new { ok = true }); }
         catch (Exception ex) { _log.LogError(ex, "PatchReceived failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
@@ -2055,7 +2114,7 @@ public class ExtractController : ControllerBase
     public record PoWaitingCard(string SpItemId, string PoNumber, string Supplier, string RfqId,
         string? AssignedDate, string? EtaDate, bool Rescheduled, string CardState,
         string ConfirmStatus, string PaymentStatus, string? AckLevel, string? PayLevel,
-        string? Notes, string Products, int LineItemCount);
+        string? Notes, string Products, int LineItemCount, bool HasPaymentEmail);
 
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>

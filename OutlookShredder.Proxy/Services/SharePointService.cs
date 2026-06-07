@@ -4797,6 +4797,8 @@ public partial class SharePointService
                 ("BillAmount",      "text"),
                 ("BillSupplierRef", "text"),
                 ("BillMatchedAt",   "dateTime"),
+                // Receipt email that confirmed payment — once Paid, the payment icon opens this instead of the bill.
+                ("ReceiptMailItemId", "text"),
                 // Waiting board (Fulfillment loop): a PO appears on the Transfer/Waiting board until
                 // material is marked received. Notes + a reschedule override (preserves the ack ETA).
                 ("WaitingNotes",       "note"),
@@ -7306,7 +7308,7 @@ public partial class SharePointService
 
     /// <summary>Sets the pay-to-release state on a PurchaseOrders row. status = "Required" | "Paid" |
     /// "None"; stamps PaymentRequiredAt / PaidAt accordingly (Fulfillment loop).</summary>
-    public async Task UpdatePurchaseOrderPaymentAsync(string spItemId, string status, string? note)
+    public async Task UpdatePurchaseOrderPaymentAsync(string spItemId, string status, string? note, string? receiptMailItemId = null)
     {
         var siteId = await GetSiteIdAsync();
         var listId = await GetPurchaseOrdersListIdAsync();
@@ -7329,6 +7331,9 @@ public partial class SharePointService
             fields["BillMatchedAt"]     = null;
         }
         if (note is not null) fields["PaymentNote"] = note;
+        if (!string.IsNullOrWhiteSpace(receiptMailItemId)
+            && string.Equals(status, "Paid", StringComparison.OrdinalIgnoreCase))
+            fields["ReceiptMailItemId"] = receiptMailItemId;
 
         await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
             .PatchAsync(new FieldValueSet { AdditionalData = fields });
@@ -7434,7 +7439,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,WaitingNotes,BoardDate,MaterialReceivedAt)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,ReceiptMailItemId,WaitingNotes,BoardDate,MaterialReceivedAt)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -7471,6 +7476,7 @@ public partial class SharePointService
                     BillAmount        = GetStr(f, "BillAmount"),
                     BillSupplierRef   = GetStr(f, "BillSupplierRef"),
                     BillMatchedAt     = GetStr(f, "BillMatchedAt"),
+                    ReceiptMailItemId = GetStr(f, "ReceiptMailItemId"),
                     WaitingNotes       = GetStr(f, "WaitingNotes"),
                     BoardDate          = GetStr(f, "BoardDate"),
                     MaterialReceivedAt = GetStr(f, "MaterialReceivedAt"),

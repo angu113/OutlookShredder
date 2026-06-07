@@ -51,18 +51,23 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
     private readonly MailCacheService    _mail;
     private readonly SliCacheService     _sli;
     private readonly SupplierCacheService _suppliers;
+    private readonly RfqNotificationService _notifications;
     private readonly IConfiguration      _config;
     private readonly ILogger<BillToPoMatcherService> _log;
     private Timer? _timer;
+    private Timer? _kickTimer;
+    private readonly object _kickLock = new();
 
     public BillToPoMatcherService(SharePointService sp, MailCacheService mail, SliCacheService sli,
-        SupplierCacheService suppliers, IConfiguration config, ILogger<BillToPoMatcherService> log)
+        SupplierCacheService suppliers, RfqNotificationService notifications, IConfiguration config,
+        ILogger<BillToPoMatcherService> log)
     {
-        _sp = sp; _mail = mail; _sli = sli; _suppliers = suppliers; _config = config; _log = log;
+        _sp = sp; _mail = mail; _sli = sli; _suppliers = suppliers; _notifications = notifications;
+        _config = config; _log = log;
     }
 
     private bool   Enabled         => _config.GetValue("BillMatcher:Enabled", true);
-    private bool   Auto            => _config.GetValue("BillMatcher:Auto", false);   // suggest-first
+    private bool   Auto            => _config.GetValue("BillMatcher:Auto", true);    // auto-apply on a confident single match (supplier+amount, or supplier-ref = 100%)
     private int    IntervalMinutes => Math.Max(1, _config.GetValue("BillMatcher:IntervalMinutes", 15));
     private decimal AmountTolerance => _config.GetValue("BillMatcher:AmountTolerance", 0.01m);
 
@@ -77,8 +82,24 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken ct) { _timer?.Dispose(); return Task.CompletedTask; }
-    public void Dispose() => _timer?.Dispose();
+    public Task StopAsync(CancellationToken ct) { _timer?.Dispose(); _kickTimer?.Dispose(); return Task.CompletedTask; }
+    public void Dispose() { _timer?.Dispose(); _kickTimer?.Dispose(); }
+
+    /// <summary>Coalesces post-classification triggers into one run a few seconds after the last one,
+    /// so a freshly-classified bill is matched + flips its PO to Payment-required within seconds.</summary>
+    public void KickSoon()
+    {
+        if (!Enabled) return;
+        lock (_kickLock)
+        {
+            _kickTimer?.Dispose();
+            _kickTimer = new Timer(async _ =>
+            {
+                try { await RunOnceAsync(apply: Auto, CancellationToken.None); }
+                catch (Exception ex) { _log.LogWarning(ex, "[BillMatcher] kick failed"); }
+            }, null, TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
+        }
+    }
 
     public record BillMatch(string MailItemId, string Subject, string? BillSupplier, string? Amount,
         string? SupplierRef, string? BillPoNumber, string MatchedPo, string MatchedPoSpItemId, string Via, bool Applied);
@@ -159,6 +180,9 @@ public sealed class BillToPoMatcherService : IHostedService, IDisposable
             {
                 await _sp.UpdatePurchaseOrderBillMatchAsync(po.SpItemId, c.MailItemId, c.Amount, c.SupplierReference, note);
                 applied++;
+                po.PaymentStatus  = "Required";
+                po.BillMailItemId = c.MailItemId;
+                _notifications.NotifyPoStatus(po);   // live re-colour + payment icon on the Ordered board
                 // Don't match this PO again in this pass.
                 if (!string.IsNullOrWhiteSpace(po.PoNumber) && byPoNumber.TryGetValue(po.PoNumber!.Trim().ToUpperInvariant(), out var l)) l.Remove(po);
                 pos.Remove(po);

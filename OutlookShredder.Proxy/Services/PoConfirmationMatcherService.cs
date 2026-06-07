@@ -26,14 +26,17 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
 
     private readonly SharePointService _sp;
     private readonly MailCacheService  _mail;
+    private readonly RfqNotificationService _notifications;
     private readonly IConfiguration    _config;
     private readonly ILogger<PoConfirmationMatcherService> _log;
     private Timer? _timer;
+    private Timer? _kickTimer;
+    private readonly object _kickLock = new();
 
     public PoConfirmationMatcherService(SharePointService sp, MailCacheService mail,
-        IConfiguration config, ILogger<PoConfirmationMatcherService> log)
+        RfqNotificationService notifications, IConfiguration config, ILogger<PoConfirmationMatcherService> log)
     {
-        _sp = sp; _mail = mail; _config = config; _log = log;
+        _sp = sp; _mail = mail; _notifications = notifications; _config = config; _log = log;
     }
 
     private bool   Enabled         => _config.GetValue("PoMatcher:Enabled", true);
@@ -53,8 +56,24 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken ct) { _timer?.Dispose(); return Task.CompletedTask; }
-    public void Dispose() => _timer?.Dispose();
+    public Task StopAsync(CancellationToken ct) { _timer?.Dispose(); _kickTimer?.Dispose(); return Task.CompletedTask; }
+    public void Dispose() { _timer?.Dispose(); _kickTimer?.Dispose(); }
+
+    /// <summary>Coalesces post-classification triggers into one run a few seconds after the last one,
+    /// so a freshly-classified confirmation/receipt is matched within seconds, not on the next timer.</summary>
+    public void KickSoon()
+    {
+        if (!Enabled || !Auto) return;
+        lock (_kickLock)
+        {
+            _kickTimer?.Dispose();
+            _kickTimer = new Timer(async _ =>
+            {
+                try { await RunOnceAsync(CancellationToken.None); }
+                catch (Exception ex) { _log.LogWarning(ex, "[PoMatcher] kick failed"); }
+            }, null, TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
+        }
+    }
 
     public record MatchResult(int Scanned, int Matched, int Confirmed, bool Auto, List<string> Details);
 
@@ -107,8 +126,15 @@ public sealed class PoConfirmationMatcherService : IHostedService, IDisposable
                     {
                         await _sp.UpdatePurchaseOrderConfirmAsync(po.SpItemId, confirmed: true, via: via,
                                                                   expectedDate: eta, note: note);
+                        po.ConfirmStatus = "Confirmed";
+                        if (eta is not null) po.ExpectedDate = eta;
                         if (via == "payment")   // a receipt means we paid -> clear the pay-to-release clock
-                            await _sp.UpdatePurchaseOrderPaymentAsync(po.SpItemId, "Paid", note);
+                        {
+                            await _sp.UpdatePurchaseOrderPaymentAsync(po.SpItemId, "Paid", note, receiptMailItemId: c.MailItemId);
+                            po.PaymentStatus     = "Paid";
+                            po.ReceiptMailItemId = c.MailItemId;   // payment icon now opens the receipt
+                        }
+                        _notifications.NotifyPoStatus(po);   // live re-colour on the Ordered board
                         confirmed++;
                         details.Add($"{po.PoNumber} <- {via}{etaTag} (\"{subj}\")");
                     }
