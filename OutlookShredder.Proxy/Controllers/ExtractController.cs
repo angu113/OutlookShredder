@@ -1939,6 +1939,185 @@ public class ExtractController : ControllerBase
     public record PoConfirmRequest(string? Via, string? ExpectedDate, string? Note);
     public record PoPaymentRequest(string? Note);
 
+    // ── GET /api/mail/list-attachments?messageId= (diagnostic) ────────────────
+    /// <summary>Lists the raw Graph attachments on a message (name, type, size, odata-type) so we can see
+    /// whether a quote PDF is present as a file attachment vs nested inside a forwarded item attachment.</summary>
+    [HttpGet("mail/list-attachments")]
+    public async Task<IActionResult> ListAttachments([FromQuery] string messageId)
+    {
+        try
+        {
+            var mailbox = _config["Mail:MailboxAddress"];
+            if (string.IsNullOrWhiteSpace(mailbox)) return BadRequest(new { error = "Mail:MailboxAddress not configured" });
+            var atts = await _mail.GetAttachmentsAsync(mailbox, messageId);
+            return Ok(atts.Select(a => new
+            {
+                name        = a.Name,
+                odataType   = a.OdataType,                 // #microsoft.graph.fileAttachment | itemAttachment | referenceAttachment
+                contentType = a.ContentType,
+                size        = a.Size,
+                isInline    = a.IsInline,
+            }));
+        }
+        catch (Exception ex) { _log.LogError(ex, "ListAttachments failed for {Id}", messageId); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── GET /api/mail/message?messageId= (diagnostic) ────────────────────────
+    /// <summary>Re-reads a message live from Graph (subject, from, body + content-type, attachment flag)
+    /// so we can inspect the RAW HTML body, not the stored stripped plain text.</summary>
+    [HttpGet("mail/message")]
+    public async Task<IActionResult> GetRawMessage([FromQuery] string messageId)
+    {
+        try
+        {
+            var mailbox = _config["Mail:MailboxAddress"];
+            if (string.IsNullOrWhiteSpace(mailbox)) return BadRequest(new { error = "Mail:MailboxAddress not configured" });
+            var msg = await _mail.GetMessageByIdAsync(mailbox, messageId);
+            if (msg is null) return NotFound(new { error = "message not found" });
+            return Ok(new
+            {
+                subject        = msg.Subject,
+                from           = msg.From?.EmailAddress?.Address,
+                received       = msg.ReceivedDateTime,
+                hasAttachments = msg.HasAttachments,
+                bodyType       = msg.Body?.ContentType?.ToString(),
+                body           = msg.Body?.Content,
+            });
+        }
+        catch (Exception ex) { _log.LogError(ex, "GetRawMessage failed for {Id}", messageId); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── GET /api/diag/mspc-mismatches?days=7 (analysis) ──────────────────────
+    /// <summary>Scans RFQs in the window and lists products where suppliers were matched to DIFFERENT
+    /// MSPCs for the same physical item (mixed custom CUST_ + catalog, or several distinct CUST_ hashes)
+    /// — the split-winner-pool problem. Grouping is by parsed shape+dimensions, not by code.</summary>
+    [HttpGet("diag/mspc-mismatches")]
+    public async Task<IActionResult> MspcMismatches([FromQuery] int days = 7)
+    {
+        try
+        {
+            var since = DateTimeOffset.UtcNow.AddDays(-Math.Abs(days));
+            static string Get(Dictionary<string, object?> d, params string[] keys)
+            {
+                foreach (var k in keys)
+                {
+                    var hit = d.Keys.FirstOrDefault(x => string.Equals(x, k, StringComparison.OrdinalIgnoreCase));
+                    if (hit != null && d[hit] is { } v && !string.IsNullOrWhiteSpace(v.ToString())) return v.ToString()!;
+                }
+                return "";
+            }
+
+            var refs   = await _sp.ReadRfqReferencesAsync();
+            var recent = refs
+                .Where(r => DateTimeOffset.TryParse(Get(r, "DateSent", "Created", "Modified"), out var d) && d >= since)
+                .Select(r => Get(r, "RfqId", "RFQ_ID", "Title"))
+                .Where(id => id.Length > 0 && !string.Equals(id, "000000", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var report = new List<object>();
+            int groups = 0;
+            foreach (var rfqId in recent)
+            {
+                var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
+                var mm   = RfqStateOfPlayService.MspcMismatches(rows);
+                if (mm.Count == 0) continue;
+                groups += mm.Count;
+                report.Add(new
+                {
+                    rfqId,
+                    mismatches = mm.Select(g => new
+                    {
+                        line                  = g.LineLabel,
+                        distinctMspcs         = g.DistinctMspcs,
+                        mixedCustomAndCatalog = g.MixedCustomAndCatalog,
+                        multipleCustom        = g.MultipleCustom,
+                        members               = g.Members.Select(m => new { m.Supplier, m.Product, m.Mspc, catalog = m.CatalogName })
+                    })
+                });
+            }
+            return Ok(new { days, rfqsScanned = recent.Count, rfqsWithMismatches = report.Count, mismatchGroups = groups, report });
+        }
+        catch (Exception ex) { _log.LogError(ex, "MspcMismatches diag failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── GET /api/diag/custom-mspc-review?days=7 (Tools | System review surface) ──
+    /// <summary>Review surface for custom-MSPC matching: within the window, finds UNDER-matches (same
+    /// parsed dimensions but ≥2 distinct MSPCs incl. a CUST_ — products that probably should have matched)
+    /// and OVER-matches (one CUST_ id spanning different products). Joins the catalog tokens so the parser
+    /// behaviour is visible. Grouping uses parsed shape+dimensions; MSPC only flags the candidates.</summary>
+    [HttpGet("diag/custom-mspc-review")]
+    public async Task<IActionResult> CustomMspcReview([FromQuery] int days = 7)
+    {
+        try
+        {
+            var since = DateTimeOffset.UtcNow.AddDays(-Math.Abs(days));
+            static string G(Dictionary<string, object?> d, params string[] keys)
+            {
+                foreach (var k in keys)
+                {
+                    var hit = d.Keys.FirstOrDefault(x => string.Equals(x, k, StringComparison.OrdinalIgnoreCase));
+                    if (hit != null && d[hit] is { } v && !string.IsNullOrWhiteSpace(v.ToString())) return v.ToString()!;
+                }
+                return "";
+            }
+
+            var refs = await _sp.ReadRfqReferencesAsync();
+            var recent = refs
+                .Where(r => DateTimeOffset.TryParse(G(r, "DateSent", "Created", "Modified"), out var d) && d >= since)
+                .Select(r => G(r, "RfqId", "RFQ_ID", "Title"))
+                .Where(id => id.Length > 0 && !string.Equals(id, "000000", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+            var tok = _catalog.GetCustomCatalogEntries()
+                .GroupBy(e => e.SearchKey, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            object? Tokens(string mspc) => tok.TryGetValue(mspc, out var e)
+                ? new { metal = e.TkMetal, shape = e.TkShape, alloy = e.TkAlloy, temper = e.TkTemper,
+                        conditions = e.TkConditions, originalTerm = e.OriginalTerm }
+                : null;
+            static bool IsCust(string m) => m.StartsWith("CUST_", StringComparison.OrdinalIgnoreCase);
+
+            var rows = new List<(string Rfq, string Sup, string Prod, string Mspc)>();
+            foreach (var rfqId in recent)
+                foreach (var r in await _sp.ReadSupplierItemsByRfqIdAsync(rfqId))
+                {
+                    var sup  = G(r, "SupplierName");
+                    var prod = G(r, "SupplierProductName", "ProductName");
+                    var mspc = G(r, "ProductSearchKey");
+                    if (sup.Length == 0 || prod.Length == 0 || mspc.Length == 0) continue;
+                    rows.Add((rfqId, sup, prod, mspc));
+                }
+
+            // UNDER-match: same parsed dimensions within one RFQ, but ≥2 distinct MSPCs incl. a CUST_.
+            var under = rows
+                .GroupBy(x => (x.Rfq, Key: RfqStateOfPlayService.LineKey(x.Prod)))
+                .Where(g => g.Select(m => m.Mspc).Distinct(StringComparer.OrdinalIgnoreCase).Count() >= 2 && g.Any(m => IsCust(m.Mspc)))
+                .Select(g => new
+                {
+                    rfq    = g.Key.Rfq,
+                    dimKey = g.Key.Key,
+                    members = g.OrderBy(m => m.Mspc).Select(m => new
+                    {
+                        supplier = m.Sup, product = m.Prod, mspc = m.Mspc, custom = IsCust(m.Mspc), tokens = Tokens(m.Mspc)
+                    })
+                }).ToList();
+
+            // OVER-match: one CUST_ id spanning ≥2 distinct parsed dimensions (different products, same id).
+            var over = rows.Where(x => IsCust(x.Mspc))
+                .GroupBy(x => x.Mspc)
+                .Where(g => g.Select(m => RfqStateOfPlayService.LineKey(m.Prod)).Distinct().Count() >= 2)
+                .Select(g => new
+                {
+                    mspc = g.Key, tokens = Tokens(g.Key),
+                    members = g.Select(m => new { rfq = m.Rfq, supplier = m.Sup, product = m.Prod }).Distinct()
+                }).ToList();
+
+            return Ok(new { days, rfqsScanned = recent.Count, underMatchClusters = under.Count, overMatchIds = over.Count, underMatches = under, overMatches = over });
+        }
+        catch (Exception ex) { _log.LogError(ex, "CustomMspcReview diag failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     /// <summary>Re-reads the PO and publishes a "PO_STATUS" bus event so Trigger Ordered cards on every
     /// machine re-colour live. Best-effort — a publish failure never fails the mutation.</summary>
     private async Task PublishPoStatusAsync(string spItemId)

@@ -93,13 +93,14 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
     public ParseResult<ContactRow> ParseContacts(string csv)
     {
         var warnings = new List<string>();
+        var skipped  = new List<SkippedItem>();
         var raw      = new List<(string Bp, string Contact, string Phone)>();
         var lines    = ReadCsv(csv);
 
         if (lines.Count < 2)
         {
             warnings.Add("Contacts CSV: no data rows found");
-            return new([], warnings, []);
+            return new([], warnings, skipped);
         }
 
         var hdr        = lines[0];
@@ -110,7 +111,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         if (bpIdx < 0 || contactIdx < 0 || phoneIdx < 0)
         {
             warnings.Add($"Contacts CSV: required columns not found. Header: {string.Join(" | ", hdr)}");
-            return new([], warnings, []);
+            return new([], warnings, skipped);
         }
 
         for (int i = 1; i < lines.Count; i++)
@@ -133,6 +134,9 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
                     var msg = $"Row {i + 1}: invalid phone '{rawPh}' for {bp}/{contact} — skipped";
                     log.LogWarning("[CustImport] {Msg}", msg);
                     warnings.Add(msg);
+                    // Surface every phone-formatting reject for review so the bad ERP phone can be cleaned
+                    // up — flows to the _skipped_review_*.csv file + the response's skippedForReview count.
+                    skipped.Add(new SkippedItem($"{bp} / {contact}", $"unloadable phone format: '{rawPh}'"));
                 }
                 continue;
             }
@@ -140,7 +144,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             raw.Add((bp, contact, phone));
         }
 
-        return new(Deduplicate(raw), warnings, []);
+        return new(Deduplicate(raw), warnings, skipped);
     }
 
     // ── Dedup: per-BP, prefer phones not shared across multiple contacts ─────

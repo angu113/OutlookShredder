@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace OutlookShredder.Proxy.Services;
 
@@ -34,12 +36,42 @@ public class RfqStateOfPlayService
         "ACCOUNT FOR COVERAGE: a lower TOTAL that skipped/regretted items is NOT cheaper — compare only " +
         "complete, apples-to-apples quotes; a supplier 'regret' (cannot supply an item) IS material.\n" +
         "WE SPLIT BY LINE: on a multi-line RFQ we pick and choose — buy each line from whoever is cheapest on " +
-        "that line. Identify the WINNER per line and the best line-by-line split. Only discuss a supplier " +
-        "that WINS at least one line — do NOT spend words on suppliers who win nothing.\n" +
+        "that line. The per-line WINNERS, the optimal split total, and each supplier's full-order total are " +
+        "GIVEN to you in the 'DETERMINISTIC WINNERS' block at the end of the input — the system computed them " +
+        "from the prices and they are AUTHORITATIVE. Use them EXACTLY: bold the given winner in your table, " +
+        "quote those totals verbatim, and NEVER recompute, second-guess, or override the winner or the math. " +
+        "Only discuss a supplier that WINS at least one line — do NOT spend words on suppliers who win nothing.\n" +
+        "ALLOY DIFFERENCES ARE OK: we routinely request one alloy and accept an interchangeable one that " +
+        "prices better and still works for the customer, so suppliers on the SAME line may carry different " +
+        "alloys (and match a different MSPC than requested) — that is FINE, keep them in the one comparison " +
+        "and pick the cheapest. When the DETERMINISTIC WINNERS block tags a line 'ALLOY VARIES', add a SHORT " +
+        "note naming the alloys (e.g. '6063-T52 vs 6061-T6') so the rep can confirm the substitution — do NOT " +
+        "split the line by alloy or treat it as a problem.\n" +
         "NEGOTIATION: when a supplier wins some lines but loses others, flag the play to push their LOSING " +
         "lines down (using their winning lines as leverage) so awarding them the whole order beats the split " +
         "— name the lines and the dollar gap to close. Only mention leverage when it ACTUALLY exists (2+ " +
         "suppliers competing on a line); NEVER state that there is no leverage or that an item is single-sourced.\n" +
+        "OMIT THE OBVIOUS: never state the ABSENCE or non-existence of something, and never restate the setup. " +
+        "Do NOT write sentences like 'no single-sourced items', 'this is one line', 'fully covered by N " +
+        "respondents', 'no split needed', 'all suppliers quoted everything', or 'no leverage here'. If a topic " +
+        "has nothing ACTIONABLE to say, write nothing about it — silence, not a sentence confirming the obvious.\n" +
+        "SMALL GAPS → CONSOLIDATE, DON'T SPLIT: when a supplier already leads on most / the highest-value lines " +
+        "and the lines they LOSE are each within the SMALL-GAP THRESHOLD given in the input, do NOT recommend a " +
+        "split — recommend awarding that supplier the WHOLE order and asking for a price reduction on those " +
+        "near-miss lines (name the lines + the small gap to close). Only split a line out when its gap is " +
+        "MATERIAL (greater than the threshold). Always show the CONSOLIDATION PREMIUM (single-supplier total " +
+        "minus the best split) so the magnitude is visible.\n" +
+        "WINNER vs RECOMMENDATION ARE DIFFERENT — do NOT conflate them: the per-line 'Winner' (in the table " +
+        "and any 'wins line X' wording) is ALWAYS the deterministic CHEAPEST supplier on that line, even when " +
+        "you RECOMMEND consolidating the award to someone else. NEVER mark the consolidation/recommended " +
+        "supplier as the 'winner' of a line they are not cheapest on, and NEVER write 'X wins every line' " +
+        "unless X is genuinely cheapest on every line. Phrase consolidation as: 'recommend awarding the whole " +
+        "order to X even though Y wins lines A and B (small gaps) — close $N to consolidate.'\n" +
+        "SHIPPING applies to the FULL order, not per line: where a supplier states a freight DOLLAR amount, add " +
+        "a SHIPPING row to the table and a delivered total (line items + shipping), and FACTOR IT INTO the " +
+        "winner — even when the line items are all within the threshold, one supplier's shipping can swing the " +
+        "full order materially. If only freight TERMS are given (e.g. FOB origin/destination, collect/prepaid), " +
+        "state the terms; if shipping is unknown for a supplier, note it briefly so it isn't forgotten.\n" +
         "WRITE TIGHTLY: a 1-line recommendation (who, and why), then a handful of short lines on the price " +
         "leader, the genuine trade-offs, and gaps/risks. Mention a dimension (lead time, freight terms, " +
         "payment terms, certs, MOQ, surcharges) ONLY when it MEANINGFULLY differs between suppliers — skip " +
@@ -47,12 +79,14 @@ public class RfqStateOfPlayService
         "note a missing or unmentioned MTR as a gap or risk; only raise certs if a supplier explicitly cannot " +
         "provide standard MTRs or offers something beyond them. IGNORE quote validity / expiry dates and " +
         "times — never flag a short, burning, or expiring quote as a risk or an action item; if a price " +
-        "lapses we simply request a fresh quote. These are STANDARD — do NOT flag them: (a) removing supplier " +
-        "markings from material (we ask EVERY supplier for this, so a supplier merely restating it is not " +
-        "noteworthy); (b) cut mill stock (material cut down from larger mill lengths by the service center is " +
-        "normal and always acceptable — never raise it as a quality/acceptability concern). The ONLY thing to " +
-        "watch on cut items is the DELIVERY date (the extra processing can push it out), which the quote's " +
-        "delivery/ship/due date already captures. Be concrete: supplier names + dollar figures, " +
+        "lapses we simply request a fresh quote. The following are STANDARD and carry ZERO signal — NEVER " +
+        "mention them ANYWHERE in the output: not as a risk, not as a trade-off, not as a minor note, not as a " +
+        "'flag for the shop'. OMIT them ENTIRELY even if a supplier's quote explicitly states them: (1) a " +
+        "supplier asking that THEIR markings be removed from the material — we require this of EVERY supplier, " +
+        "it is routine and expected; (2) cut mill stock (material cut down from larger mill lengths by the " +
+        "service center) — normal and always acceptable, never a quality/acceptability concern; the only thing " +
+        "that matters on cut items is the DELIVERY date, which the quote's delivery/ship/due date already " +
+        "captures. Do not write a sentence about either of these topics. Be concrete: supplier names + dollar figures, " +
         "no filler, no preamble or sign-off.\n" +
         "PRICE TABLE: present the price comparison as a compact table that ALWAYS includes a price-per-pound " +
         "($/lb) column next to the total, so suppliers are comparable on a unit basis. Compute $/lb from the " +
@@ -64,12 +98,15 @@ public class RfqStateOfPlayService
         "weight. If the supplier quoted a price PER POUND directly, that IS their own $/lb — NEVER mark it " +
         "theoretical, even when the weight shown is ESTIMATED (the estimate only affects the weight column, " +
         "not their stated $/lb).\n" +
+        "BRIEF + ACTIONABLE: every line must be a MOVE the rep can make (award, negotiate, chase, confirm) — " +
+        "not information for its own sake. Explain ONLY where the recommendation genuinely needs the " +
+        "justification to stand; otherwise cut it. If a line doesn't change what the rep does, delete it.\n" +
         "TIMING: replies usually arrive within ~30 min and chasing is only warranted after ~60 min. The " +
         "input says how long ago the RFQ was sent; do NOT treat few/slow responses as a problem under 60 min.";
 
     /// <summary>Bumped whenever the prompt / output guidance changes, so it folds into the inputs-hash
     /// and existing cached summaries regenerate with the new prompt on next access.</summary>
-    private const string PromptVersion = "sop-v8-weight-estimate";
+    private const string PromptVersion = "sop-v15-unionfind-pool";
 
     public record Result(string Summary, string InputsHash, string Model, string Mode);
 
@@ -84,7 +121,8 @@ public class RfqStateOfPlayService
 
         string mode  = includePdfs ? "pdf" : "text";
         string hash  = ComputeInputsHash(rows, includePdfs);
-        string input = BuildInput(rfqId, rows, sentAgo);
+        int    gap   = _config.GetValue("RfqStateOfPlay:LineGapThreshold", 10);
+        string input = BuildInput(rfqId, rows, sentAgo, gap);
         if (string.IsNullOrWhiteSpace(input)) return null;
 
         var model = _config["Claude:Model"] ?? "claude-sonnet-4-6";
@@ -152,12 +190,14 @@ public class RfqStateOfPlayService
     }
 
     // ── Input assembly (names + specs + prices + email bodies; NO codes) ─────────────────────────────
-    private static string BuildInput(string rfqId, List<Dictionary<string, object?>> rows, string? sentAgo)
+    private static string BuildInput(string rfqId, List<Dictionary<string, object?>> rows, string? sentAgo, int gapThreshold)
     {
         var sb = new StringBuilder();
         sb.Append("RFQ ").Append(rfqId);
         if (!string.IsNullOrWhiteSpace(sentAgo)) sb.Append("  (sent ").Append(sentAgo).Append(')');
         sb.Append('\n');
+        sb.Append("Small-gap threshold: $").Append(gapThreshold)
+          .Append(" (a line lost by <= $").Append(gapThreshold).Append(" is a SMALL gap — consolidate, don't split)\n");
 
         foreach (var g in rows.Where(r => !string.IsNullOrWhiteSpace(S(r, "SupplierName")))
                               .GroupBy(r => S(r, "SupplierName"), StringComparer.OrdinalIgnoreCase)
@@ -177,10 +217,13 @@ public class RfqStateOfPlayService
                 var note = S(r, "SupplierProductComments"); if (note.Length > 0)  sb.Append("  note: ").Append(Trim(note, 200));
                 sb.Append('\n');
             }
+            var freight = FirstNonEmpty(g, "FreightTerms");
+            if (freight.Length > 0) sb.Append("  Freight/shipping: ").Append(Trim(freight, 200)).Append('\n');
             var bodyKey = FirstNonEmpty(g, "EmailBody");
             if (bodyKey.Length > 0)
                 sb.Append("  Email: ").Append(Trim(bodyKey.Replace("\r", " ").Replace("\n", " "), 1200)).Append('\n');
         }
+        sb.Append(ComputeWinnerBlock(rows));
         return sb.ToString();
     }
 
@@ -273,4 +316,186 @@ public class RfqStateOfPlayService
         "kg" => v * 2.20462, "g" => v / 453.592, "oz" => v / 16.0,
         _ => v,   // lb / blank
     };
+
+    // ── deterministic per-line winners (group by metal+shape+dims, alloy-agnostic; NO codes) ───────────
+    /// <summary>System-computed authoritative comparison so the model never miscalculates the cheapest
+    /// supplier: per-line winner + runner-up gap, the optimal line-by-line split, and each supplier's
+    /// full-order total (suppliers that priced every line). Lines are grouped by METAL + shape + dimensions
+    /// (alloy-agnostic) so suppliers who quoted an interchangeable alloy — even one matching a different MSPC
+    /// than requested — stay in ONE pool; lines where the alloy differs are FLAGGED, not split. The block
+    /// shows product NAMES, never codes, so the model stays code-free.</summary>
+    private static string ComputeWinnerBlock(List<Dictionary<string, object?>> rows)
+    {
+        var items = new List<(string Sup, string Label, string Mspc, double Tot, string Alloy, string Key)>();
+        foreach (var r in rows)
+        {
+            if (Bool(r, "IsRegret")) continue;
+            var sup = S(r, "SupplierName"); if (sup.Length == 0) continue;
+            var tot = EffectiveTotal(r);    if (tot is not > 0) continue;
+            var label = ProductLabel(r);
+            items.Add((sup, label, S(r, "ProductSearchKey"), tot.Value, AlloySig(label), LineKey(label)));
+        }
+        if (items.Count == 0) return "";
+
+        // Pool rows that share an MSPC (robust to wording/length/cut variance WITHIN an alloy) OR a
+        // metal+shape+dimension key (alloy-agnostic — merges interchangeable-alloy variants that took a
+        // different MSPC). Union-find makes the relation transitive so both effects compose.
+        var parent = Enumerable.Range(0, items.Count).ToArray();
+        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        void Union(int a, int b) { parent[Find(a)] = Find(b); }
+        var byMspc = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var byKey  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i].Mspc.Length > 0)
+            {
+                if (byMspc.TryGetValue(items[i].Mspc, out var j)) Union(i, j); else byMspc[items[i].Mspc] = i;
+            }
+            if (byKey.TryGetValue(items[i].Key, out var k)) Union(i, k); else byKey[items[i].Key] = i;
+        }
+
+        var poolSup    = new Dictionary<int, Dictionary<string, double>>();   // pool -> supplier -> cheapest
+        var poolLabel  = new Dictionary<int, string>();
+        var poolAlloys = new Dictionary<int, SortedSet<string>>();
+        for (int i = 0; i < items.Count; i++)
+        {
+            var root = Find(i);
+            if (!poolSup.TryGetValue(root, out var d))
+            {
+                poolSup[root] = d = new(StringComparer.OrdinalIgnoreCase);
+                poolLabel[root]  = Trim(items[i].Label, 48);
+                poolAlloys[root] = new(StringComparer.OrdinalIgnoreCase);
+            }
+            if (!d.TryGetValue(items[i].Sup, out var cur) || items[i].Tot < cur) d[items[i].Sup] = items[i].Tot;
+            if (items[i].Alloy.Length > 0) poolAlloys[root].Add(items[i].Alloy);
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("\nDETERMINISTIC WINNERS (system-computed from the prices — AUTHORITATIVE; present these, do NOT recompute or override the winner or the totals):\n");
+        var pools = poolSup.Keys.ToList();
+        double split = 0;
+        foreach (var root in pools)
+        {
+            var ranked = poolSup[root].OrderBy(kv => kv.Value).ToList();
+            var win = ranked[0]; split += win.Value;
+            sb.Append("  ").Append(poolLabel[root]).Append("  ->  winner ").Append(win.Key).Append(" $").Append(win.Value.ToString("0.00"));
+            if (ranked.Count > 1)
+                sb.Append("  (next ").Append(ranked[1].Key).Append(" $").Append(ranked[1].Value.ToString("0.00"))
+                  .Append(", gap $").Append((ranked[1].Value - win.Value).ToString("0.00")).Append(')');
+            if (poolAlloys[root].Count > 1)
+                sb.Append("  [ALLOY VARIES: ").Append(string.Join(" vs ", poolAlloys[root])).Append(" — interchangeable, flag for user]");
+            sb.Append('\n');
+        }
+        sb.Append("  Optimal line-by-line split total = $").Append(split.ToString("0.00")).Append('\n');
+        var allSups = poolSup.Values.SelectMany(d => d.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
+        var full = allSups
+            .Where(s => pools.All(p => poolSup[p].ContainsKey(s)))
+            .Select(s => (Sup: s, Tot: pools.Sum(p => poolSup[p][s])))
+            .OrderBy(x => x.Tot).ToList();
+        if (full.Count > 0)
+            sb.Append("  Single-supplier full-order totals (priced every line): ")
+              .Append(string.Join(", ", full.Select(f => $"{f.Sup} ${f.Tot:0.00}"))).Append('\n');
+        return sb.ToString();
+    }
+
+    /// <summary>Deterministic effective line total: the supplier's TotalPrice, else derived from per-piece /
+    /// per-foot / per-pound (using the supplier or estimated weight).</summary>
+    private static double? EffectiveTotal(Dictionary<string, object?> r)
+    {
+        var t = ParseD(S(r, "TotalPrice")); if (t is > 0) return t;
+        double qty = ParseD(S(r, "UnitsQuoted")) ?? 1; if (qty <= 0) qty = 1;
+        var pc = ParseD(S(r, "PricePerPiece")); if (pc is > 0) return pc.Value * qty;
+        var pf = ParseD(S(r, "PricePerFoot"));
+        var lenFt = ToFeet(ParseD(S(r, "LengthPerUnit")), S(r, "LengthUnit"));
+        if (pf is > 0 && lenFt is > 0) return pf.Value * qty * lenFt.Value;
+        var pl = ParseD(S(r, "PricePerPound"));
+        var (wt, _) = ResolveWeight(r);
+        if (pl is > 0 && wt is > 0) return pl.Value * wt.Value;
+        return null;
+    }
+
+    /// <summary>Canonical line key for the winner pool: METAL-family + shape + sorted numeric dimensions.
+    /// The metal family (aluminum / stainless / galv / steel) STAYS in the key, but the specific ALLOY and
+    /// temper within a family do NOT — so alloy-only differences land in the SAME pool (and get flagged via
+    /// <see cref="AlloySig"/>) rather than splitting it. Feet are normalized to inches so 20' and 240"
+    /// group together. No MSPC/code is used.</summary>
+    internal static string LineKey(string name)
+    {
+        var raw = name.ToLowerInvariant();
+        string metal =
+            (raw.Contains("galvaniz") || Regex.IsMatch(raw, @"\bg-?90\b"))                                ? "galv"  :
+            (raw.Contains("stainless") || Regex.IsMatch(raw, @"\bt?3(?:04|16|21)l?\b") || Regex.IsMatch(raw, @"\b4(?:10|30)\b")) ? "ss" :
+            (raw.Contains("alum") || Regex.IsMatch(raw, @"\b(?:1100|2024|3003|5052|5086|6061|6063|7075)\b")) ? "alum" :
+            "steel";
+        // Normalize feet -> inches so 20' and 240" group together.
+        var n = Regex.Replace(raw, @"(\d+(?:\.\d+)?)\s*(?:'|’|ft\b|feet\b|foot\b)", m =>
+            double.TryParse(m.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var ft)
+                ? (ft * 12).ToString("0.###", CultureInfo.InvariantCulture) : m.Value);
+        // Strip metallurgical grade / temper / coating tokens — they are NOT dimensions.
+        n = Regex.Replace(n, @"\ba\d{2,3}(\s*/\s*a?\d{2,3})?\b", " ");          // A36, A500, A500/A513, A572/A992
+        n = Regex.Replace(n, @"\b(304|316|321|410|430)l?\b",     " ");          // stainless series
+        n = Regex.Replace(n, @"\b(1100|2024|3003|5052|5086|6061|6063|7075)\b", " ");  // aluminum series
+        n = Regex.Replace(n, @"\bt\d{1,4}\b",                    " ");          // tempers T5/T6/T52/T6511
+        n = Regex.Replace(n, @"\bg-?90\b",                       " ");          // galv coating
+        string shape =
+            n.Contains("angle")                                            ? "angle"   :
+            (n.Contains("wide flange") || n.Contains("w beam") || n.Contains("beam") || Regex.IsMatch(n, @"\bw\d")) ? "beam" :
+            n.Contains("channel")                                          ? "channel" :
+            n.Contains("pipe")                                             ? "pipe"    :
+            n.Contains("tube")                                             ? "tube"    :
+            n.Contains("rebar")                                            ? "rebar"   :
+            (n.Contains("plate") || n.Contains("sheet"))                   ? "plate"   :
+            (n.Contains("flat") || n.Contains("bar"))                      ? "bar"     : "other";
+        var nums = new List<double>();
+        foreach (Match m in Regex.Matches(n, @"(\d+)\s*/\s*(\d+)"))
+            if (double.TryParse(m.Groups[1].Value, out var a) && double.TryParse(m.Groups[2].Value, out var b) && b != 0)
+                nums.Add(Math.Round(a / b, 3));
+        foreach (Match m in Regex.Matches(Regex.Replace(n, @"\d+\s*/\s*\d+", " "), @"\d+\.?\d*"))
+            if (double.TryParse(m.Value, out var d)) nums.Add(Math.Round(d, 3));
+        nums.Sort();
+        return metal + "|" + shape + "|" + string.Join(",", nums.Select(x => x.ToString("0.###")));
+    }
+
+    /// <summary>Coarse alloy/temper signature from a product name (e.g. "6063/t52", "a500/a513", "304") so
+    /// the winner block can FLAG when otherwise-matching suppliers quoted different (interchangeable) alloys.
+    /// Empty when no recognizable grade is present.</summary>
+    internal static string AlloySig(string name)
+    {
+        var n = name.ToLowerInvariant();
+        var sigs = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(n, @"\ba\d{2,3}(?:\s*/\s*a?\d{2,3})?\b")) sigs.Add(Regex.Replace(m.Value, @"\s+", ""));
+        foreach (Match m in Regex.Matches(n, @"\b(?:1100|2024|3003|5052|5086|6061|6063|7075|304|316|321|410|430)l?\b")) sigs.Add(m.Value);
+        foreach (Match m in Regex.Matches(n, @"\bt\d{1,4}\b")) sigs.Add(m.Value);
+        return string.Join("/", sigs);
+    }
+
+    // ── MSPC mismatch analysis (custom CUST_ vs catalog — split winner pools) ─────────────────────────
+    /// <summary>Within one RFQ, groups SLI rows by the parsed dimension key and reports any group whose
+    /// rows carry MORE THAN ONE distinct ProductSearchKey (MSPC) — i.e. the same physical product matched
+    /// to different codes across suppliers (mixed custom CUST_ + catalog, or several distinct CUST_
+    /// hashes), which splits the winner pool. Empty list = every line's MSPC is consistent.</summary>
+    public static List<MspcMismatch> MspcMismatches(List<Dictionary<string, object?>> rows)
+    {
+        var result = new List<MspcMismatch>();
+        foreach (var grp in rows.Where(r => S(r, "SupplierName").Length > 0)
+                                .GroupBy(r => LineKey(ProductLabel(r))))
+        {
+            var members = grp.Select(r => new MspcMember(
+                                 S(r, "SupplierName"), Trim(ProductLabel(r), 70),
+                                 S(r, "ProductSearchKey"), S(r, "CatalogProductName")))
+                             .ToList();
+            var distinct = members.Select(m => m.Mspc).Where(s => s.Length > 0)
+                                  .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (distinct.Count < 2) continue;   // consistent — not a mismatch
+            int cust = distinct.Count(m => m.StartsWith("CUST_", StringComparison.OrdinalIgnoreCase));
+            result.Add(new MspcMismatch(grp.Key, members[0].Product, distinct,
+                                        MixedCustomAndCatalog: cust > 0 && cust < distinct.Count,
+                                        MultipleCustom: cust > 1, members));
+        }
+        return result;
+    }
+
+    public record MspcMember(string Supplier, string Product, string Mspc, string CatalogName);
+    public record MspcMismatch(string LineKey, string LineLabel, List<string> DistinctMspcs,
+                               bool MixedCustomAndCatalog, bool MultipleCustom, List<MspcMember> Members);
 }
