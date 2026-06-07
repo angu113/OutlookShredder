@@ -27,6 +27,7 @@ public class MailPollerService : BackgroundService
     private readonly SharePointService          _sp;
     private readonly ProductCatalogService      _catalog;
     private readonly RfqNotificationService     _notifications;
+    private readonly RfqSummaryQueue            _summaryQueue;
     private readonly SliCacheService            _sliCache;
     private readonly ShrConvInRouter            _shrRouter;
     private readonly CatalogAnalysisService     _analysis;
@@ -396,6 +397,7 @@ public class MailPollerService : BackgroundService
         SharePointService          sp,
         ProductCatalogService      catalog,
         RfqNotificationService     notifications,
+        RfqSummaryQueue            summaryQueue,
         SliCacheService            sliCache,
         ShrConvInRouter            shrRouter,
         CatalogAnalysisService     analysis,
@@ -407,6 +409,7 @@ public class MailPollerService : BackgroundService
         _sp            = sp;
         _catalog       = catalog;
         _notifications = notifications;
+        _summaryQueue  = summaryQueue;
         _sliCache      = sliCache;
         _shrRouter     = shrRouter;
         _analysis      = analysis;
@@ -1204,6 +1207,9 @@ public class MailPollerService : BackgroundService
                     {
                         notification.SliRows = await _sp.ReadSupplierItemsByRfqIdAsync(notification.RfqId);
                         _sliCache.MergeRfqRows(notification.RfqId, notification.SliRows);
+                        // Race-free state-of-play: enqueue a (re)generation for this RFQ. Dup-detection on
+                        // {rfqId}:{inputsHash} collapses concurrent proxies; one consumer ever generates.
+                        await _summaryQueue.MaybeEnqueueAsync(notification.RfqId, notification.SliRows);
                     }
                     catch (Exception ex)
                     {

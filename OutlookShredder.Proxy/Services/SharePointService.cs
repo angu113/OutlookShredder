@@ -41,6 +41,7 @@ public partial class SharePointService
     private string? _qcListId;            // QC list
     private string? _shredderConfigListId; // ShredderConfig
     private string? _poListId;            // PurchaseOrders
+    private string? _rfqSummaryListId;    // RfqSummaries (state-of-play cache)
     private string? _synonymListId;       // ProductSynonyms
     private string? _erpDocumentsListId;  // ErpDocuments
     private string? _customersListId;        // Customers
@@ -4805,6 +4806,16 @@ public partial class SharePointService
                 ("BoardDate",          "dateTime"),
                 ("MaterialReceivedAt", "dateTime"),
             ]),
+            // RFQ "state of play" AI comparison cache — one row per RFQ, regenerated when InputsHash changes.
+            ["RfqSummaries"] = await EnsureListColumnsAsync(siteId, "RfqSummaries",
+            [
+                ("RfqId",       "text"),
+                ("Summary",     "note"),
+                ("InputsHash",  "text"),
+                ("GeneratedAt", "dateTime"),
+                ("Model",       "text"),
+                ("Mode",        "text"),
+            ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
                 ("RFQ_ID",             "text"),
@@ -7098,6 +7109,60 @@ public partial class SharePointService
         if (_poListId is not null) return _poListId;
         _poListId = await ResolveListIdAsync("PurchaseOrders");
         return _poListId;
+    }
+
+    private async Task<string> GetRfqSummariesListIdAsync()
+    {
+        if (_rfqSummaryListId is not null) return _rfqSummaryListId;
+        _rfqSummaryListId = await ResolveListIdAsync("RfqSummaries");
+        return _rfqSummaryListId;
+    }
+
+    // ── RfqSummaries (RFQ state-of-play cache; one row per RFQ) ────────────────
+    public sealed record RfqSummaryRecord(string SpItemId, string RfqId, string? Summary,
+        string? InputsHash, string? GeneratedAt, string? Model, string? Mode);
+
+    public async Task<RfqSummaryRecord?> ReadRfqSummaryAsync(string rfqId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqSummariesListIdAsync();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=RfqId,Summary,InputsHash,GeneratedAt,Model,Mode)"];
+            req.QueryParameters.Top    = 5000;
+        });
+        foreach (var item in page?.Value ?? new())
+        {
+            var f = item.Fields?.AdditionalData;
+            if (f is null) continue;
+            if (!string.Equals(GetStr(f, "RfqId"), rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+            return new RfqSummaryRecord(item.Id ?? "", rfqId, GetStr(f, "Summary"),
+                GetStr(f, "InputsHash"), GetStr(f, "GeneratedAt"), GetStr(f, "Model"), GetStr(f, "Mode"));
+        }
+        return null;
+    }
+
+    public async Task WriteRfqSummaryAsync(string rfqId, string summary, string inputsHash, string model, string mode)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqSummariesListIdAsync();
+        var data = new Dictionary<string, object?>
+        {
+            ["RfqId"]       = rfqId,
+            ["Summary"]     = summary,
+            ["InputsHash"]  = inputsHash,
+            ["GeneratedAt"] = DateTimeOffset.UtcNow.ToString("o"),
+            ["Model"]       = model,
+            ["Mode"]        = mode,
+        };
+        var existing = await ReadRfqSummaryAsync(rfqId);
+        if (existing is not null)
+            await GetGraph().Sites[siteId].Lists[listId].Items[existing.SpItemId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = data });
+        else
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+        _log.LogInformation("[StateOfPlay] cached summary for {Rfq} ({Mode})", rfqId, mode);
     }
 
     private async Task<string> GetSynonymListIdAsync()

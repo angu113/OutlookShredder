@@ -282,6 +282,11 @@ public class RfqNotificationService
             ErpDocument = record,
         });
 
+    /// <summary>Publishes an "RFQ_SUMMARY" event so an open RFQ Focus view re-fetches the cached
+    /// state-of-play after a queue worker (re)generates it for that RFQ.</summary>
+    public void NotifyRfqSummary(string rfqId) =>
+        NotifyRfqProcessed(new RfqProcessedNotification { EventType = "RFQ_SUMMARY", RfqId = rfqId });
+
     /// <summary>Publishes a "PO_STATUS" event so Trigger Ordered cards re-colour live the moment a
     /// PO's confirm/payment status changes (manual dropdown, auto-confirm, bill match, or receipt).</summary>
     public void NotifyPoStatus(Models.PurchaseOrderRecord r)
