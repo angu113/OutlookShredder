@@ -480,17 +480,17 @@ public static class DrawingPdfRenderer
 
         DrawPlatePanel(gfx, new XRect(box.X, box.Y, pw, box.Height),
             "Base plate", fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles,
-            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall);
+            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
         DrawPlatePanel(gfx, new XRect(box.X + pw + gap, box.Y, pw, box.Height),
             "Bearing plate", fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles,
-            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall);
+            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
         DrawColumnElevation(gfx, fp, new XRect(box.X + platesW + gap, box.Y, elevW, box.Height));
     }
 
     // ── One plate top view (rectangle + bolt holes + L/W + corner-hole offsets + tube weld outline) ──
     private static void DrawPlatePanel(XGraphics gfx, XRect box, string title, double L, double W,
         List<(double x, double y, double dia)> holes,
-        string tubeShape, double tubeW, double tubeD, double tubeWall)
+        string tubeShape, double tubeW, double tubeD, double tubeWall, double tubeCornerR)
     {
         var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
         var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
@@ -548,14 +548,20 @@ public static class DrawingPdfRenderer
         }
         else if (tubeW > 0 && tubeD > 0)
         {
-            void RectO(double hw, double hh)
+            void RectO(double hw, double hh, double rr)
             {
                 if (hw <= 0 || hh <= 0) return;
                 var a = P(mcx - hw, mcy - hh); var b = P(mcx + hw, mcy + hh);
-                gfx.DrawRectangle(weldPen, Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Abs(b.X - a.X), Math.Abs(b.Y - a.Y));
+                double x = Math.Min(a.X, b.X), y = Math.Min(a.Y, b.Y), wpx = Math.Abs(b.X - a.X), hpx = Math.Abs(b.Y - a.Y);
+                if (rr > 0.001)
+                {
+                    double e = Math.Min(2 * rr * scale, Math.Min(wpx, hpx));
+                    gfx.DrawRoundedRectangle(weldPen, x, y, wpx, hpx, e, e);
+                }
+                else gfx.DrawRectangle(weldPen, x, y, wpx, hpx);
             }
-            RectO(tubeW / 2.0, tubeD / 2.0);
-            RectO(tubeW / 2.0 - tubeWall, tubeD / 2.0 - tubeWall);
+            RectO(tubeW / 2.0, tubeD / 2.0, tubeCornerR);                          // outer — filleted (non-alum)
+            RectO(tubeW / 2.0 - tubeWall, tubeD / 2.0 - tubeWall, tubeCornerR);     // inner bore — filleted too
         }
         var wc = P(mcx, mcy);
         gfx.DrawString("tube", new XFont("Arial", 7, XFontStyleEx.Regular), new XSolidBrush(SecColorA),
@@ -580,7 +586,7 @@ public static class DrawingPdfRenderer
         if (H <= 0 || tubeLen <= 0) return;
         double maxW = Math.Max(Math.Max(baseW, bearW), Math.Max(tubeW, 0.1));
 
-        const double bandL = 62, bandR = 62, bandT = 10, bandB = 28;
+        const double bandL = 64, bandR = 58, bandT = 14, bandB = 16;
         double availW = area.Width - bandL - bandR, availH = area.Height - bandT - bandB;
         double scale = Math.Min(availW / maxW, availH / H);
         double drawH = H * scale;
@@ -597,23 +603,27 @@ public static class DrawingPdfRenderer
         Slab(tubeW, baseT, baseT + tubeLen);         // tube / pipe (middle)
         Slab(bearW, baseT + tubeLen, H);             // bearing plate (top)
 
-        void Tag(string s, double yMid) => gfx.DrawString(s, tagFont, TextBrush,
-            new XRect(cx - 60, Yb(yMid) - 5, 120, 10), XStringFormats.TopCenter);
-        Tag("Base plate", baseT / 2);
-        Tag(fp.ColumnShape == "round" ? "Pipe" : "Tube", baseT + tubeLen / 2);
-        Tag("Bearing plate", baseT + tubeLen + bearT / 2);
-
-        // Left: stacked segment dims (base thickness, tube length, bearing thickness).
         double leftFace = cx - maxW * scale / 2;
-        double leftDimX = area.X + 56;
-        DimV(gfx, dimFont, leftFace, leftDimX, Yb(baseT), Yb(0), Fq(baseT), false);
-        DimV(gfx, dimFont, leftFace, leftDimX, Yb(baseT + tubeLen), Yb(baseT), Fq(tubeLen), true);
-        DimV(gfx, dimFont, leftFace, leftDimX, Yb(H), Yb(baseT + tubeLen), Fq(bearT), false);
-
-        // Right: overall full-height dim.
         double rightFace = cx + maxW * scale / 2;
-        double rightDimX = area.X + area.Width - 56;
-        DimV(gfx, dimFont, rightFace, rightDimX, Yb(H), Yb(0), Fq(H), true);
+
+        // Tube name centred in the tall middle segment (room there); its cut length dimensioned left.
+        gfx.DrawString(fp.ColumnShape == "round" ? "Pipe" : "Tube", tagFont, TextBrush,
+            new XRect(cx - 28, Yb(baseT + tubeLen / 2.0) - 5, 56, 10), XStringFormats.TopCenter);
+        DimV(gfx, dimFont, leftFace, area.X + 56, Yb(baseT + tubeLen), Yb(baseT), Fq(tubeLen), true);
+
+        // Overall full height on the right.
+        DimV(gfx, dimFont, rightFace, area.X + area.Width - 56, Yb(H), Yb(0), Fq(H), true);
+
+        // Base + bearing plates are too thin to dimension inline — leader-call them out into the
+        // clear space just below / above the column so nothing overlaps.
+        var leadPen = new XPen(DimColor, 0.7);
+        void PlateCallout(double slabY, double labelY, string text)
+        {
+            gfx.DrawLine(leadPen, leftFace, slabY, area.X + 74, labelY + 5);
+            gfx.DrawString(text, tagFont, TextBrush, new XRect(area.X + 2, labelY, 84, 10), XStringFormats.TopLeft);
+        }
+        PlateCallout(Yb(baseT / 2.0), baseY + 4, $"Base plate {Fq(baseT)}");
+        PlateCallout(Yb(baseT + tubeLen + bearT / 2.0), Yb(H) - 13, $"Bearing plate {Fq(bearT)}");
     }
 
     // ── Paddle blind / spade: face view (solid disc + handle) with OD, handle, centre-to-end dims ──

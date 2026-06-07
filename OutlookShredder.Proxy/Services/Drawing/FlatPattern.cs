@@ -60,11 +60,14 @@ public static class FlatPattern
         foreach (var e in bearRes.Cut.Entities) entities.Add(OffsetEntity(e, xOff, 0));
 
         // Tube cross-section etched (marking layer — not cut) on the centre of each plate to
-        // locate the weld. Centred since the plates are welded centred on the column.
+        // locate the weld. Centred since the plates are welded centred on the column. Square/rect
+        // tube gets filleted corners (radius = wall thickness) for steel; aluminium extrusion is sharp.
+        bool aluminium = spec.Material.IndexOf("alum", StringComparison.OrdinalIgnoreCase) >= 0;
+        double cornerR = (spec.ColumnShape != "round" && !aluminium) ? spec.ColumnWall : 0;
         entities.AddRange(TubeWeldOutline(spec.ColumnShape, spec.BaseLength / 2, spec.BaseWidth / 2,
-            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall));
+            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
         entities.AddRange(TubeWeldOutline(spec.ColumnShape, xOff + spec.BearingLength / 2, spec.BearingWidth / 2,
-            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall));
+            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
 
         string slug = $"column_{Trim(spec.ColumnFullHeight)}h_base{Trim(spec.BaseLength)}x{Trim(spec.BaseWidth)}_brg{Trim(spec.BearingLength)}x{Trim(spec.BearingWidth)}";
         var cut = new CutGeometry
@@ -94,6 +97,7 @@ public static class FlatPattern
             ColumnOuterWidth = spec.ColumnOuterWidth,
             ColumnOuterDepth = spec.ColumnOuterDepth,
             ColumnWall = spec.ColumnWall,
+            ColumnTubeCornerR = cornerR,
             ColumnShape = spec.ColumnShape,
             ColumnLabel = spec.ColumnLabel,
             Summary = ColumnSummary(spec, tubeLen),
@@ -116,7 +120,7 @@ public static class FlatPattern
     /// Square/rect → rectangles (w × d); round → circles (w = OD). On the BEND/marking layer (etch,
     /// not cut).
     /// </summary>
-    private static IEnumerable<CutEntity> TubeWeldOutline(string shape, double cx, double cy, double w, double d, double wall)
+    private static IEnumerable<CutEntity> TubeWeldOutline(string shape, double cx, double cy, double w, double d, double wall, double cornerR)
     {
         var list = new List<CutEntity>();
         if (shape == "round")
@@ -128,16 +132,42 @@ public static class FlatPattern
         }
         else
         {
-            void Rect(double hw, double hh) => list.Add(CutEntity.Polyline(BendLayer, closed: true, new[]
-            {
-                new CutVertex(cx - hw, cy - hh), new CutVertex(cx + hw, cy - hh),
-                new CutVertex(cx + hw, cy + hh), new CutVertex(cx - hw, cy + hh),
-            }));
             if (w <= 0 || d <= 0) return list;
-            Rect(w / 2.0, d / 2.0);
-            if (w / 2.0 - wall > 0.01 && d / 2.0 - wall > 0.01) Rect(w / 2.0 - wall, d / 2.0 - wall);
+            // Outer AND inner (bore) corners filleted to the wall radius for any non-aluminium tube;
+            // sharp for an aluminium extrusion (cornerR == 0).
+            list.Add(CutEntity.Polyline(BendLayer, closed: true, RectVerts(cx, cy, w / 2.0, d / 2.0, cornerR)));
+            if (w / 2.0 - wall > 0.01 && d / 2.0 - wall > 0.01)
+                list.Add(CutEntity.Polyline(BendLayer, closed: true, RectVerts(cx, cy, w / 2.0 - wall, d / 2.0 - wall, cornerR)));
         }
         return list;
+    }
+
+    /// <summary>Rectangle outline centred at (cx,cy), half-extents (hw,hh); corners filleted to radius r
+    /// (r ≤ 0 = sharp), tessellated CCW.</summary>
+    private static List<CutVertex> RectVerts(double cx, double cy, double hw, double hh, double r)
+    {
+        r = Math.Min(r, Math.Min(hw, hh) - 1e-6);
+        if (r <= 0.001)
+            return new List<CutVertex>
+            {
+                new(cx - hw, cy - hh), new(cx + hw, cy - hh),
+                new(cx + hw, cy + hh), new(cx - hw, cy + hh),
+            };
+        var pts = new List<CutVertex>();
+        const int seg = 6;
+        void Arc(double acx, double acy, double a0, double a1)
+        {
+            for (int i = 0; i <= seg; i++)
+            {
+                double a = (a0 + (a1 - a0) * i / seg) * Math.PI / 180.0;
+                pts.Add(new CutVertex(acx + r * Math.Cos(a), acy + r * Math.Sin(a)));
+            }
+        }
+        Arc(cx - hw + r, cy - hh + r, 180, 270);   // bottom-left
+        Arc(cx + hw - r, cy - hh + r, 270, 360);   // bottom-right
+        Arc(cx + hw - r, cy + hh - r, 0, 90);      // top-right
+        Arc(cx - hw + r, cy + hh - r, 90, 180);    // top-left
+        return pts;
     }
 
     private static string ColumnTitle(PartSpec s)
@@ -791,6 +821,7 @@ public sealed class FlatPatternResult
     public double ColumnBearingW { get; init; }
     public List<(double x, double y, double dia)> ColumnBaseHoles { get; init; } = new();
     public List<(double x, double y, double dia)> ColumnBearingHoles { get; init; } = new();
+    public double ColumnTubeCornerR { get; init; }
     public double ColumnOuterWidth { get; init; }
     public double ColumnOuterDepth { get; init; }
     public double ColumnWall { get; init; }
