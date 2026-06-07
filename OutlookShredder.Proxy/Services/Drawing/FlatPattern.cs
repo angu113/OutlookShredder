@@ -15,6 +15,10 @@ public static class FlatPattern
     public const string CutLayer = "Big Graph";
     /// <summary>DXF layer for bend lines / sheet marking (the CNC's expected name).</summary>
     public const string BendLayer = "Mid Graph";
+    /// <summary>ACI colour for the CUT layer — yellow (2), matching Weihong NcStudio's "Big Graph".</summary>
+    public const short CutColor = 2;
+    /// <summary>ACI colour for the BEND / MARK layer — blue (5), matching NcStudio's "Mid Graph".</summary>
+    public const short BendColor = 5;
 
     public static FlatPatternResult Develop(PartSpec spec) => spec.Type switch
     {
@@ -66,7 +70,7 @@ public static class FlatPattern
         var cut = new CutGeometry
         {
             Units = spec.Units, Part = slug,
-            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
             Entities = entities,
         };
 
@@ -253,7 +257,7 @@ public static class FlatPattern
         var cut = new CutGeometry
         {
             Units = spec.Units, Part = slug,
-            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
             Entities = entities,
         };
 
@@ -329,7 +333,7 @@ public static class FlatPattern
         var cut = new CutGeometry
         {
             Units = spec.Units, Part = slug,
-            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
             Entities = entities,
         };
 
@@ -378,7 +382,7 @@ public static class FlatPattern
         {
             Units = spec.Units,
             Part = slug,
-            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
             Entities = entities,
         };
 
@@ -561,7 +565,7 @@ public static class FlatPattern
         {
             Units = spec.Units,
             Part = slug,
-            Layers = { new CutLayer { Name = CutLayer, Color = 1 }, new CutLayer { Name = BendLayer, Color = 5 } },
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
             Entities = entities,
         };
 
