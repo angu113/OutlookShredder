@@ -2701,6 +2701,21 @@ public partial class SharePointService
 
     // ??"?????"??? Write SupplierLineItems (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
+    /// <summary>Sane $/lb band for the metal family, used by the price guard so it never "corrects" a price
+    /// to a value implied by a wrong weight. Generous on the high side to avoid overriding real (if pricey)
+    /// quotes; the guard only acts when the STORED value is out of band and the derived one is in band.</summary>
+    private static (double Lo, double Hi) PlausiblePerLbBand(string? name)
+    {
+        var n = (name ?? "").ToLowerInvariant();
+        bool alum = n.Contains("alum") || n.Contains("6061") || n.Contains("6063") || n.Contains("5052")
+                 || n.Contains("5086") || n.Contains("3003") || n.Contains("2024") || n.Contains("7075");
+        bool ss   = n.Contains("stainless") || n.Contains(" ss ") || n.Contains("t304") || n.Contains("t316")
+                 || n.Contains("304") || n.Contains("316") || n.Contains("321") || n.Contains("410") || n.Contains("430");
+        if (alum) return (1.5, 15.0);
+        if (ss)   return (1.5, 20.0);
+        return (0.4, 4.0);   // carbon / galvanized / structural steel
+    }
+
     private async Task<string?> WriteSupplierLineItemAsync(
         string siteId, string listId,
         string supplierResponseId, string jobRef, string supplier,
@@ -2790,16 +2805,35 @@ public partial class SharePointService
                 var derived = Math.Round(totalA.Value / totalLb, 6);
                 if (derived > 0 && Math.Abs(pp - derived) / derived > 0.15)
                 {
-                    double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
-                        { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
-                    var totFt = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
-                    var why   = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.05 ? "was actually the $/ft price"
-                              : Math.Abs(pp - totalA.Value / qtyA) / (totalA.Value / qtyA) < 0.05               ? "was actually the $/piece price"
-                              : "did not reconcile with total / weight";
-                    _log.LogWarning("[SP] PricePerPound guard: extracted {Ppp:F4} → derived {Derived:F4} (total {Total:N2} / {Lb:N1} lb); stored value {Why} for [{Rfq}] {Sup} '{Name}'",
-                        pp, derived, totalA, totalLb, why, jobRef, supplier, prodName);
-                    priceAudit.Add($"$/lb {pp:F4}->{derived:F4} (total {totalA:N2} / {totalLb:N1} lb); stored value {why}");
-                    pricePerPound = derived;
+                    // PLAUSIBILITY BOUND: a derived value outside a sane $/lb band for the metal means the
+                    // WEIGHT (or qty) is wrong, so the derived value cannot be trusted either. Only CORRECT a
+                    // clear mis-slot (stored implausible, derived plausible); otherwise keep the stored value
+                    // and just flag the discrepancy in PriceAudit for review — never corrupt a good $/lb.
+                    var (lo, hi)   = PlausiblePerLbBand(prodName);
+                    bool storedOk  = pp      >= lo && pp      <= hi;
+                    bool derivedOk = derived >= lo && derived <= hi;
+                    if (!storedOk && derivedOk)
+                    {
+                        double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
+                            { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
+                        var totFt = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
+                        var why   = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.05 ? "was actually the $/ft price"
+                                  : Math.Abs(pp - totalA.Value / qtyA) / (totalA.Value / qtyA) < 0.05               ? "was actually the $/piece price"
+                                  : "did not reconcile with total / weight";
+                        _log.LogWarning("[SP] PricePerPound guard: corrected {Ppp:F4} → {Derived:F4} (total {Total:N2} / {Lb:N1} lb); stored value {Why} for [{Rfq}] {Sup} '{Name}'",
+                            pp, derived, totalA, totalLb, why, jobRef, supplier, prodName);
+                        priceAudit.Add($"$/lb {pp:F4}->{derived:F4} (total {totalA:N2} / {totalLb:N1} lb); stored value {why} [corrected]");
+                        pricePerPound = derived;
+                    }
+                    else
+                    {
+                        var note = !derivedOk && storedOk  ? "derived $/lb implausible (weight/qty suspect) — KEPT stored"
+                                 : !derivedOk && !storedOk ? "stored AND derived $/lb both implausible — KEPT stored, REVIEW"
+                                 :                           "stored & total/weight $/lb both plausible but differ — KEPT stored";
+                        _log.LogWarning("[SP] PricePerPound discrepancy (not corrected): stored {Ppp:F4} vs total/weight {Derived:F4} ({Total:N2} / {Lb:N1} lb); {Note} for [{Rfq}] {Sup} '{Name}'",
+                            pp, derived, totalA, totalLb, note, jobRef, supplier, prodName);
+                        priceAudit.Add($"$/lb DISCREPANCY: stored {pp:F4} vs total/weight {derived:F4} (total {totalA:N2} / {totalLb:N1} lb) — {note}");
+                    }
                 }
             }
         }
