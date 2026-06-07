@@ -2756,25 +2756,51 @@ public partial class SharePointService
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
-        // Derive $/lb from catalog weight when PricePerFoot is available — preferred over
-        // AI-provided PricePerPound, which can be wrong if Claude misidentified total vs
-        // per-unit weight. Catalog weight path is more reliable for standard shapes.
+        // $/lb guard + audit. The AI sometimes mis-slots a per-ft / per-pc price into PricePerPound, so we
+        // prefer a derivation when we can reconcile one. Every decision is recorded in PriceAudit so it
+        // travels with the row and is reviewable across proxies (see also %LOCALAPPDATA%\ShredderData\Logs).
         var pricePerPound = product.PricePerPound;
-        if (product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey))
+        var priceAudit    = new List<string>();
+        var qtyA          = product.UnitsQuoted ?? product.UnitsRequested ?? 0;
+        var totalA        = product.TotalPrice ?? ComputeTotalPrice(product);
+
+        // (a) catalog-weight path: PricePerFoot / catalog weight-per-foot (most reliable for standard shapes).
+        if (product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey)
+            && _catalog.FindWeightPerFoot(productSearchKey) is double catWt and > 0)
         {
-            var catWt = _catalog.FindWeightPerFoot(productSearchKey);
-            if (catWt is > 0)
+            var derived = Math.Round(product.PricePerFoot.Value / catWt, 6);
+            if (pricePerPound is not null && Math.Abs(derived - pricePerPound.Value) / pricePerPound.Value > 0.05)
             {
-                var derived = Math.Round(product.PricePerFoot.Value / catWt.Value, 6);
-                if (pricePerPound is not null && Math.Abs(derived - pricePerPound.Value) / pricePerPound.Value > 0.05)
-                    _log.LogWarning(
-                        "[SP] PricePerPound override: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
-                        pricePerPound, derived, product.PricePerFoot, catWt, productSearchKey);
-                else
-                    _log.LogInformation(
-                        "[SP] Derived PricePerPound={Derived:F4} from PricePerFoot={Ppf} / CatalogWeight={Wt} for MSPC={Key}",
-                        derived, product.PricePerFoot, catWt, productSearchKey);
-                pricePerPound = derived;
+                _log.LogWarning("[SP] PricePerPound override: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
+                    pricePerPound, derived, product.PricePerFoot, catWt, productSearchKey);
+                priceAudit.Add($"$/lb {pricePerPound:F4}->{derived:F4} from PricePerFoot {product.PricePerFoot:F4} / catalog wt-per-ft {catWt:F3}");
+            }
+            pricePerPound = derived;
+        }
+        // (b) total ÷ weight reconciliation: catches a per-ft / per-pc price mis-slotted into PricePerPound
+        //     when there's no PricePerFoot (the JM005X case). Only fires with an independent total + the
+        //     supplier's own weight, so it never replaces a genuine $/lb with a theoretical one.
+        else if (pricePerPound is double pp && totalA is > 0 && qtyA > 0 && product.WeightPerUnit is > 0)
+        {
+            double wlb = (product.WeightUnit ?? "").Trim().ToLowerInvariant() switch
+                { "kg" => product.WeightPerUnit.Value * 2.20462, "g" => product.WeightPerUnit.Value / 453.592, "oz" => product.WeightPerUnit.Value / 16.0, _ => product.WeightPerUnit.Value };
+            var totalLb = wlb * qtyA;
+            if (totalLb > 0)
+            {
+                var derived = Math.Round(totalA.Value / totalLb, 6);
+                if (derived > 0 && Math.Abs(pp - derived) / derived > 0.15)
+                {
+                    double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
+                        { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
+                    var totFt = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
+                    var why   = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.05 ? "was actually the $/ft price"
+                              : Math.Abs(pp - totalA.Value / qtyA) / (totalA.Value / qtyA) < 0.05               ? "was actually the $/piece price"
+                              : "did not reconcile with total / weight";
+                    _log.LogWarning("[SP] PricePerPound guard: extracted {Ppp:F4} → derived {Derived:F4} (total {Total:N2} / {Lb:N1} lb); stored value {Why} for [{Rfq}] {Sup} '{Name}'",
+                        pp, derived, totalA, totalLb, why, jobRef, supplier, prodName);
+                    priceAudit.Add($"$/lb {pp:F4}->{derived:F4} (total {totalA:N2} / {totalLb:N1} lb); stored value {why}");
+                    pricePerPound = derived;
+                }
             }
         }
 
@@ -2820,6 +2846,7 @@ public partial class SharePointService
             ["IsDeleted"]                = false,
             ["SliVersion"]               = sliVersion,
             ["MatchConfidence"]          = matchConfidence > 0 ? matchConfidence : (object?)null,
+            ["PriceAudit"]               = priceAudit.Count > 0 ? string.Join(" | ", priceAudit) : (object?)null,
         };
 
         var existing = await FindExistingSupplierLineItemAsync(
@@ -4755,6 +4782,7 @@ public partial class SharePointService
                 ("IsDeleted",               "boolean"),
                 ("SliVersion",             "number"),
                 ("MatchConfidence",         "number"),
+                ("PriceAudit",              "note"),
             ]),
             ["RFQ Line Items"] = await EnsureListColumnsAsync(siteId,
                 _config["SharePoint:ListName"] ?? "RFQ Line Items",
