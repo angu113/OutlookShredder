@@ -63,6 +63,13 @@ public class ExtractRequest
     /// Empty when the RFQ ID is unknown or no RLI rows exist.
     /// </summary>
     public List<RliContextItem> RliItems { get; set; } = [];
+
+    /// <summary>
+    /// Per-supplier quote-format hint (the SupplierParameters ParsingNotes for the resolved supplier).
+    /// Injected by MailPollerService before extraction so the AI is pre-biased to this supplier's known
+    /// layout (price unit, weight basis, freight/surcharge). Null when the supplier is unknown or has no notes.
+    /// </summary>
+    public string? SupplierHint { get; set; }
 }
 
 /// <summary>One requested item from the RFQ Line Items list, used to anchor the AI's product matching.</summary>

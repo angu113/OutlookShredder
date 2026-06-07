@@ -4891,6 +4891,94 @@ public partial class SharePointService
         return created?.Id ?? "";
     }
 
+    // Codified supplier aliases: every variant (canonical SupplierName + each Aliases entry) maps to the
+    // canonical name + its parsing notes. Match = exact normalized first, then token-subset (ALL of an alias's
+    // tokens present in the input). Distinguishing tokens keep entities apart -- "Penn Steel" {penn,steel} ->
+    // Pennsylvania PA Steel, "Penn Stainless" {penn,stainless} -> Penn Stainless, no collision.
+    private volatile Dictionary<string, (string Canonical, string? Notes)>? _supplierExact;
+    private volatile List<(string[] Tokens, string Canonical, string? Notes)>? _supplierAliases;
+    private DateTime _supplierNotesAt   = DateTime.MinValue;
+    private int      _supplierNotesBusy = 0;
+
+    private static readonly HashSet<string> _supplierStop = new(StringComparer.OrdinalIgnoreCase)
+        { "inc", "llc", "llp", "co", "corp", "corporation", "company", "ltd", "lp", "the", "of", "and" };
+
+    private static string NormSupplier(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var chars  = s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray();
+        var tokens = new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(t => !_supplierStop.Contains(t));
+        return string.Join(' ', tokens);
+    }
+
+    private async Task EnsureSupplierNotesFreshAsync()
+    {
+        if (_supplierExact is null) await RefreshSupplierNotesAsync();   // first load: block once
+        else if ((DateTime.UtcNow - _supplierNotesAt).TotalMinutes >= 30
+                 && System.Threading.Interlocked.CompareExchange(ref _supplierNotesBusy, 1, 0) == 0)
+            _ = Task.Run(async () => { try { await RefreshSupplierNotesAsync(); } finally { System.Threading.Interlocked.Exchange(ref _supplierNotesBusy, 0); } });
+    }
+
+    private async Task<(string? Canonical, string? Notes)> ResolveSupplierEntryAsync(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return (null, null);
+        await EnsureSupplierNotesFreshAsync();
+        var key = NormSupplier(name);
+        if (_supplierExact is { } ex && ex.TryGetValue(key, out var e)) return (e.Canonical, e.Notes);
+        if (_supplierAliases is { } al)
+        {
+            var input = key.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+            (string? C, string? N, int Score) best = (null, null, 0);
+            foreach (var a in al)                          // pick the most-specific alias whose tokens all appear
+                if (a.Tokens.Length > best.Score && a.Tokens.All(input.Contains))
+                    best = (a.Canonical, a.Notes, a.Tokens.Length);
+            if (best.C is not null) return (best.C, best.N);
+        }
+        return (null, null);
+    }
+
+    /// <summary>Resolve any supplier-name variant to the canonical SupplierName via the codified alias map.</summary>
+    public async Task<string?> ResolveCanonicalSupplierAsync(string? name) => (await ResolveSupplierEntryAsync(name)).Canonical;
+
+    /// <summary>The SupplierParameters ParsingNotes for a supplier (resolved through aliases). Null if unknown.</summary>
+    public async Task<string?> GetSupplierParsingNotesAsync(string? supplierName) => (await ResolveSupplierEntryAsync(supplierName)).Notes;
+
+    private async Task RefreshSupplierNotesAsync()
+    {
+        try
+        {
+            var rows    = await ReadSupplierParametersAsync();
+            var exact   = new Dictionary<string, (string, string?)>();
+            var aliases = new List<(string[], string, string?)>();
+            foreach (var r in rows)
+            {
+                var name = r.TryGetValue("SupplierName", out var n) ? n?.ToString()?.Trim() : null;
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var notesRaw = r.TryGetValue("ParsingNotes", out var pn) ? pn?.ToString() : null;
+                var notes    = string.IsNullOrWhiteSpace(notesRaw) ? null : notesRaw!.Trim();
+
+                var variants = new List<string> { name };
+                if (r.TryGetValue("Aliases", out var av) && av?.ToString() is string aliasStr && aliasStr.Length > 0)
+                    variants.AddRange(aliasStr.Split(new[] { ';', '\n', ',', '|' },
+                        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+                foreach (var v in variants)
+                {
+                    var k = NormSupplier(v);
+                    if (k.Length < 3) continue;
+                    exact[k] = (name, notes);
+                    aliases.Add((k.Split(' ', StringSplitOptions.RemoveEmptyEntries), name, notes));
+                }
+            }
+            _supplierExact   = exact;
+            _supplierAliases = aliases;
+            _supplierNotesAt = DateTime.UtcNow;
+            _log.LogInformation("[SP] supplier alias map: {Variants} variants -> {Suppliers} suppliers",
+                exact.Count, exact.Values.Select(x => x.Item1).Distinct().Count());
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[SP] RefreshSupplierNotes failed"); }
+    }
+
     public async Task<Dictionary<string, object>> EnsureSupplierListsAsync()
     {
         var siteId  = await GetSiteIdAsync();
@@ -5074,7 +5162,8 @@ public partial class SharePointService
             // quote/purchase decision + front-end enrichment). Extensible — add columns as needs grow.
             ["SupplierParameters"] = await EnsureListColumnsAsync(siteId, "SupplierParameters",
             [
-                ("SupplierName",        "text"),    // key
+                ("SupplierName",        "text"),    // key (canonical)
+                ("Aliases",             "note"),    // codified name variants (; , | or newline separated) -> canonical
                 ("ParsingNotes",        "note"),    // per-supplier quote-format hint, injected into extraction
                 ("PriceUnitDefault",    "text"),    // expected price unit form ("UM column", "per foot", "per cwt", "per piece")
                 ("WeightIsLineTotal",   "boolean"), // weight column is the LINE TOTAL (÷ pcs for per-unit)

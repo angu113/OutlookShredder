@@ -495,6 +495,16 @@ public class GeminiExtractionService : IAiExtractionService
             sb.AppendLine();
         }
 
+        if (!string.IsNullOrWhiteSpace(req.SupplierHint))
+        {
+            sb.AppendLine("SUPPLIER FORMAT HINT — this supplier's known quote layout; use it to read the");
+            sb.AppendLine("price UNIT (UM column / suffix / qty UOM), the weight basis, and any freight/surcharge");
+            sb.AppendLine("correctly. Still CONFIRM against the line Extension; if the actual quote differs from");
+            sb.AppendLine("this hint, trust the quote.");
+            sb.AppendLine($"  {req.SupplierHint.Trim()}");
+            sb.AppendLine();
+        }
+
         if (req.RliItems.Count > 0)
         {
             sb.AppendLine("Requested items:");

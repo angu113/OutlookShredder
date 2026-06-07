@@ -1002,6 +1002,13 @@ public class MailPollerService : BackgroundService
             }
         }
 
+        // Pre-bias extraction with this supplier's known quote layout (SupplierParameters ParsingNotes),
+        // resolved from the sender domain before the AI call. The hint is advisory — the prompt still
+        // confirms against the line Extension and trusts the actual quote when it differs.
+        req.SupplierHint ??= await _sp.GetSupplierParsingNotesAsync(req.ResolvedSupplierName);
+        if (!string.IsNullOrEmpty(req.SupplierHint))
+            _log.LogInformation("[Mail] Applied parsing hint for supplier '{Supplier}'", req.ResolvedSupplierName);
+
         try
         {
             var extraction = await _aiFactory.GetService().ExtractRfqAsync(req);
