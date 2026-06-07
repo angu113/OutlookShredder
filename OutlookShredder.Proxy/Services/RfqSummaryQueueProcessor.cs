@@ -64,6 +64,17 @@ public sealed class RfqSummaryQueueProcessor : IHostedService, IAsyncDisposable
                 return;
             }
 
+            // Leading-edge 60s rate-limit: generate at most once per RFQ per cooldown window so a burst of
+            // responses doesn't put the same RFQ through the AI repeatedly. The latest state is picked up by
+            // the next job after the window; writes are idempotent so an occasional duplicate is harmless.
+            int cooldown = _config.GetValue("RfqStateOfPlay:CooldownSeconds", 60);
+            if (cached is not null && DateTimeOffset.TryParse(cached.GeneratedAt, out var genAt)
+                && (DateTimeOffset.UtcNow - genAt).TotalSeconds < cooldown)
+            {
+                await args.CompleteMessageAsync(args.Message);
+                return;
+            }
+
             var result = await _state.GenerateAsync(rfqId, rows, pdfs, null, args.CancellationToken);
             if (result is not null)
             {

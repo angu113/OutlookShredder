@@ -47,16 +47,19 @@ public class RfqSummaryController : ControllerBase
     {
         try
         {
-            var rows   = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
-            bool pdfs  = _config.GetValue("RfqStateOfPlay:IncludePdfs", false);
-            var hash   = _state.ComputeInputsHash(rows, pdfs);
+            // Read-only by default — the response pipeline (queue) owns generation + keeps the cache
+            // fresh. The UI only triggers a one-off TEXT fallback when nothing has been cached yet.
             var cached = await _sp.ReadRfqSummaryAsync(rfqId);
-            if (cached?.Summary is { Length: > 0 } && cached.InputsHash == hash)
+            if (cached?.Summary is { Length: > 0 })
                 return Ok(new { rfqId, summary = cached.Summary, generatedAt = cached.GeneratedAt, model = cached.Model, mode = cached.Mode, fresh = true });
 
-            var result = await _state.GenerateAsync(rfqId, rows, pdfs, null, ct);
-            if (result is null)   // AI unavailable / no quotes — keep whatever was cached
-                return Ok(new { rfqId, summary = cached?.Summary, generatedAt = cached?.GeneratedAt, model = cached?.Model, mode = cached?.Mode, fresh = false });
+            var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
+            if (RfqStateOfPlayService.CompetingSuppliers(rows) < 2)
+                return Ok(new { rfqId, summary = (string?)null, fresh = false });   // nothing to compare yet
+
+            var result = await _state.GenerateAsync(rfqId, rows, includePdfs: false, sentAgo: null, ct);
+            if (result is null)
+                return Ok(new { rfqId, summary = (string?)null, fresh = false });
 
             await _sp.WriteRfqSummaryAsync(rfqId, result.Summary, result.InputsHash, result.Model, result.Mode);
             return Ok(new { rfqId, summary = result.Summary, generatedAt = DateTimeOffset.UtcNow.ToString("o"), model = result.Model, mode = result.Mode, fresh = true });
