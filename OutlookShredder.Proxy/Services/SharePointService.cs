@@ -4757,6 +4757,55 @@ public partial class SharePointService
 
     // ??"?????"??? Provision new supplier lists (run once) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
+    // ── Supplier Parameters (per-supplier quote-parse hints + business params) ────────────────────────
+
+    /// <summary>All SupplierParameters rows as flat dicts (for the front end + extraction pre-bias).</summary>
+    public async Task<List<Dictionary<string, object?>>> ReadSupplierParametersAsync()
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync("SupplierParameters");
+        var resp = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 500; });
+        var result = new List<Dictionary<string, object?>>();
+        foreach (var it in resp?.Value ?? [])
+        {
+            if (it.Fields?.AdditionalData is null) continue;
+            var row = it.Fields.AdditionalData.Where(kv => IsAppField(kv.Key)).ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+            if (it.Id is not null) row["SpItemId"] = it.Id;
+            result.Add(row);
+        }
+        return result;
+    }
+
+    /// <summary>Upsert one SupplierParameters row, keyed by SupplierName (PATCH if present else POST).</summary>
+    public async Task<string> UpsertSupplierParameterAsync(Dictionary<string, object?> fields)
+    {
+        var name = fields.TryGetValue("SupplierName", out var nv) ? nv?.ToString() : null;
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("SupplierName is required");
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync("SupplierParameters");
+
+        var data = new Dictionary<string, object>();
+        foreach (var kv in fields) if (kv.Value is not null) data[kv.Key] = kv.Value;
+        data["Title"] = name;
+
+        var existing = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 500; });
+        var match = existing?.Value?.FirstOrDefault(i =>
+            i.Fields?.AdditionalData is { } ad && ad.TryGetValue("SupplierName", out var v)
+            && string.Equals(v?.ToString(), name, StringComparison.OrdinalIgnoreCase));
+
+        if (match is not null)
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[match.Id].Fields
+                .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data });
+            return match.Id!;
+        }
+        var created = await GetGraph().Sites[siteId].Lists[listId].Items
+            .PostAsync(new Microsoft.Graph.Models.ListItem { Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data } });
+        return created?.Id ?? "";
+    }
+
     public async Task<Dictionary<string, object>> EnsureSupplierListsAsync()
     {
         var siteId  = await GetSiteIdAsync();
@@ -4935,6 +4984,23 @@ public partial class SharePointService
                 ("RelatedRfqId", "text"),
                 ("CompletedAt",  "dateTime"),
                 ("TodoId",       "text"),
+            ]),
+            // Per-supplier metadata: quote-parse hints (fed into extraction) + business params (feed the
+            // quote/purchase decision + front-end enrichment). Extensible — add columns as needs grow.
+            ["SupplierParameters"] = await EnsureListColumnsAsync(siteId, "SupplierParameters",
+            [
+                ("SupplierName",        "text"),    // key
+                ("ParsingNotes",        "note"),    // per-supplier quote-format hint, injected into extraction
+                ("PriceUnitDefault",    "text"),    // expected price unit form ("UM column", "per foot", "per cwt", "per piece")
+                ("WeightIsLineTotal",   "boolean"), // weight column is the LINE TOTAL (÷ pcs for per-unit)
+                ("MinimumOrderLbs",     "number"),
+                ("DeliveryDays",        "number"),
+                ("DeliveredDefault",    "boolean"), // almost always delivered
+                ("FuelSurchargePerCwt", "number"),  // stated standing surcharge to add to landed cost
+                ("OrderCutoffTime",     "text"),
+                ("FreightNotes",        "text"),
+                ("Active",              "boolean"),
+                ("Notes",               "note"),
             ]),
         };
         if (results.TryGetValue("PurchaseOrders", out var poMap) &&

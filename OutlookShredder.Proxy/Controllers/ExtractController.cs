@@ -2118,6 +2118,74 @@ public class ExtractController : ControllerBase
         catch (Exception ex) { _log.LogError(ex, "CustomMspcReview diag failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── Supplier Parameters (per-supplier parse hints + business params) ──────
+    /// <summary>All SupplierParameters rows (for the front end + extraction pre-bias).</summary>
+    [HttpGet("supplier-parameters")]
+    public async Task<IActionResult> GetSupplierParameters()
+    {
+        try { return Ok(await _sp.ReadSupplierParametersAsync()); }
+        catch (Exception ex) { _log.LogError(ex, "GetSupplierParameters failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Upsert one SupplierParameters row (keyed by SupplierName).</summary>
+    [HttpPost("supplier-parameters")]
+    public async Task<IActionResult> UpsertSupplierParameter([FromBody] Dictionary<string, object?> body)
+    {
+        try
+        {
+            static object? Conv(object? v) => v is System.Text.Json.JsonElement je ? je.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.String => je.GetString(),
+                System.Text.Json.JsonValueKind.Number => je.TryGetInt64(out var l) ? l : je.GetDouble(),
+                System.Text.Json.JsonValueKind.True   => true,
+                System.Text.Json.JsonValueKind.False  => false,
+                System.Text.Json.JsonValueKind.Null   => null,
+                _ => je.ToString(),
+            } : v;
+            if (body is null || !body.ContainsKey("SupplierName")) return BadRequest(new { error = "SupplierName required" });
+            var clean = body.ToDictionary(kv => kv.Key, kv => Conv(kv.Value));
+            return Ok(new { id = await _sp.UpsertSupplierParameterAsync(clean) });
+        }
+        catch (Exception ex) { _log.LogError(ex, "UpsertSupplierParameter failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>One-time seed of the SupplierParameters list from the quote-format rules walked with the
+    /// user (PA Steel, Certified, Tri Steel, Fazzio, Hadco, Penn Stainless, Eastern, Kelly, Phoenix, McKnight).
+    /// Idempotent (upsert by SupplierName).</summary>
+    [HttpPost("supplier-parameters/seed")]
+    public async Task<IActionResult> SeedSupplierParameters()
+    {
+        var seed = new (string Name, string Unit, bool WtLineTotal, string Notes)[]
+        {
+            ("Pennsylvania PA Steel", "UM column (F=foot)", true,  "Enmark layout. Price unit = UM column (F=foot, C=cwt, EA=each, LB=pound). Weight column is the LINE TOTAL (divide by qty for per-unit). Alloy on a 2nd description line. Fuel surcharge $0.70/cwt."),
+            ("Certified Steel",       "UM column (C=cwt)",  true,  "Enmark layout. Price unit = UM column (uses C=cwt; divide by 100 for $/lb). Weight = line total. Delivery charge may be a per-truck line item. Min order 3500 lb, ~2 days ARO. Often attaches MTRs separately."),
+            ("Tri Steel",             "price suffix",       true,  "Own format. Price unit is a SUFFIX on the price value (25.95/EA, 18.10/FT, may use /LB or /CW). Weight = line total. Standing 'remove markings' note (ignore)."),
+            ("J F Fazzio",            "per piece",          true,  "POS format. 'Unit Price' = per piece (bare, no code). Ext. Weight = line total."),
+            ("Hadco",                 "qty UOM + suffix",   false, "Pentagon 2000. Qty is in the unit (300 FT) and the price has a trailing unit ($1.90 FT). NO weight column (estimate $/lb). Flat fuel-surcharge line."),
+            ("Penn Stainless Products","price suffix (LB)", false, "Two quantity columns: Quantity (PC) and Pricing Qty (e.g. 191 LB). Price is per the Pricing-Qty unit (e.g. 12.41 LB). Pricing Qty is the TOTAL priced weight, NOT per-unit weight. Random lengths affect total."),
+            ("Eastern",               "qty UOM",            false, "Quantity column carries the unit (2 PCS or 400 FT) and the Unit Price is per that unit. Page-1 cover note often holds an alloy substitution. WEIGHT is a single ORDER total at the bottom. $50 max ship/will-call fee per day."),
+            ("Kelly Pipe",            "UM column (FT)",     false, "U/M column (FT). Qty in that unit. Unit Price per U/M. Wt/LN = line weight. (A no-attachment forward is a one-off, not normal.)"),
+            ("Phoenix",               "UM column",          false, "Multiple UM columns. The UM next to the Price is the price unit (e.g. PCS). Bill Qty x Price = Extension. Flat est. fuel-surcharge line."),
+            ("McKnight",              "",                   false, "Often attaches a Material Test Report (MTR) from the mill (Atlas Tube etc.) with NO prices. The quote is in the email body or a 2nd attachment - do not parse the MTR as a quote."),
+        };
+        try
+        {
+            var ids = new List<string>();
+            foreach (var s in seed)
+                ids.Add(await _sp.UpsertSupplierParameterAsync(new Dictionary<string, object?>
+                {
+                    ["SupplierName"]      = s.Name,
+                    ["PriceUnitDefault"]  = s.Unit,
+                    ["WeightIsLineTotal"] = s.WtLineTotal,
+                    ["DeliveredDefault"]  = true,
+                    ["Active"]            = true,
+                    ["ParsingNotes"]      = s.Notes,
+                }));
+            return Ok(new { seeded = ids.Count });
+        }
+        catch (Exception ex) { _log.LogError(ex, "SeedSupplierParameters failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     /// <summary>Re-reads the PO and publishes a "PO_STATUS" bus event so Trigger Ordered cards on every
     /// machine re-colour live. Best-effort — a publish failure never fails the mutation.</summary>
     private async Task PublishPoStatusAsync(string spItemId)
