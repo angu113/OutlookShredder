@@ -10,15 +10,17 @@ public class RfqSummaryController : ControllerBase
     private readonly RfqSummaryService             _summary;
     private readonly RfqStateOfPlayService         _state;
     private readonly SharePointService             _sp;
+    private readonly RfqNotificationService        _notify;
     private readonly IConfiguration                _config;
     private readonly ILogger<RfqSummaryController> _log;
 
     public RfqSummaryController(RfqSummaryService summary, RfqStateOfPlayService state,
-        SharePointService sp, IConfiguration config, ILogger<RfqSummaryController> log)
+        SharePointService sp, RfqNotificationService notify, IConfiguration config, ILogger<RfqSummaryController> log)
     {
         _summary = summary;
         _state   = state;
         _sp      = sp;
+        _notify  = notify;
         _config  = config;
         _log     = log;
     }
@@ -81,6 +83,59 @@ public class RfqSummaryController : ControllerBase
             return Ok(new { rfqId, mode = pdfs ? "pdf" : "text", summary = result?.Summary, model = result?.Model });
         }
         catch (Exception ex) { _log.LogError(ex, "RegenerateStateOfPlay failed for {Rfq}", rfqId); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ── POST /api/rfq/state-of-play/refresh-stale?days=&rfqIds=&dryRun= ────────
+    /// <summary>Rechecks cached state-of-play summaries against current SLI data (via InputsHash) and
+    /// regenerates + persists the STALE ones — an existing summary whose inputs changed, e.g. after a
+    /// price re-extraction/backfill. dryRun=true reports which are stale WITHOUT spending AI. Scope =
+    /// explicit rfqIds (comma-separated) or every reference created within `days`. Never bulk-creates
+    /// brand-new summaries (skips RFQs that were never summarized).</summary>
+    [HttpPost("state-of-play/refresh-stale")]
+    public async Task<IActionResult> RefreshStaleSummaries(
+        [FromQuery] int days = 7, [FromQuery] string? rfqIds = null, [FromQuery] bool dryRun = false,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            List<string> ids;
+            if (!string.IsNullOrWhiteSpace(rfqIds))
+                ids = rfqIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            else
+            {
+                var refs = await _sp.ReadRfqReferencesAsync();
+                var cut  = DateTimeOffset.UtcNow.AddDays(-Math.Abs(days));
+                ids = refs.Where(r => DateTimeOffset.TryParse(
+                            r.TryGetValue("DateCreated", out var d) ? d?.ToString() : null, out var dt) && dt >= cut)
+                    .Select(r => r.TryGetValue("RFQ_ID", out var v) ? v?.ToString() : null)
+                    .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!).Distinct().ToList();
+            }
+
+            bool pdfs = _config.GetValue("RfqStateOfPlay:IncludePdfs", false);
+            int withSummary = 0, stale = 0, regen = 0;
+            var staleIds = new List<string>();
+            foreach (var rfqId in ids)
+            {
+                var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
+                if (RfqStateOfPlayService.CompetingSuppliers(rows) < 2) continue;
+                var cached = await _sp.ReadRfqSummaryAsync(rfqId);
+                if (cached?.Summary is not { Length: > 0 }) continue;          // never summarized — leave for on-demand
+                withSummary++;
+                if (cached.InputsHash == _state.ComputeInputsHash(rows, pdfs)) continue;   // fresh
+                stale++; staleIds.Add(rfqId);
+                if (dryRun) continue;
+                var result = await _state.GenerateAsync(rfqId, rows, pdfs, null, ct);
+                if (result is not null)
+                {
+                    await _sp.WriteRfqSummaryAsync(rfqId, result.Summary, result.InputsHash, result.Model, result.Mode);
+                    _notify.NotifyRfqSummary(rfqId);
+                    regen++;
+                }
+            }
+            return Ok(new { scope = string.IsNullOrWhiteSpace(rfqIds) ? $"last {days}d" : "explicit",
+                            dryRun, withSummary, stale, regenerated = regen, staleRfqs = staleIds });
+        }
+        catch (Exception ex) { _log.LogError(ex, "RefreshStaleSummaries failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
     public record RfqSummarizeRequest(string? Input);
