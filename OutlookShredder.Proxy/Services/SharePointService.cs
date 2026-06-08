@@ -2897,14 +2897,22 @@ public partial class SharePointService
                     var (lo, hi)   = PlausiblePerLbBand(prodName);
                     bool storedOk  = pp      >= lo && pp      <= hi;
                     bool derivedOk = derived >= lo && derived <= hi;
-                    if (!storedOk && derivedOk)
+                    // DEFINITIVE MIS-SLOT: stored "$/lb" reconciles EXACTLY to the $/ft or $/piece price → the
+                    // AI dropped a per-foot / per-piece price into PricePerPound. Correct it even when the stray
+                    // value also reads as a plausible $/lb (PA Steel's $2.60/ft is a fine-looking aluminum $/lb,
+                    // so the plausibility band alone would keep the wrong value). A genuine supplier $/lb won't
+                    // coincide with its own $/ft or $/piece price, so this should not clobber a real per-pound quote.
+                    // NOTE (2026-06-07): heuristic UNDER REVIEW — see todos.md "Price-unit mis-slot guard".
+                    double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
+                        { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
+                    var totFt         = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
+                    bool matchesFt    = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.02;
+                    bool matchesPiece = qtyA  > 0 && Math.Abs(pp - totalA.Value / qtyA)  / (totalA.Value / qtyA)  < 0.02;
+                    if (derivedOk && (!storedOk || matchesFt || matchesPiece))
                     {
-                        double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
-                            { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
-                        var totFt = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
-                        var why   = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.05 ? "was actually the $/ft price"
-                                  : Math.Abs(pp - totalA.Value / qtyA) / (totalA.Value / qtyA) < 0.05               ? "was actually the $/piece price"
-                                  : "did not reconcile with total / weight";
+                        var why = matchesFt    ? "was actually the $/ft price"
+                                : matchesPiece ? "was actually the $/piece price"
+                                :                "did not reconcile with total / weight";
                         _log.LogWarning("[SP] PricePerPound guard: corrected {Ppp:F4} → {Derived:F4} (total {Total:N2} / {Lb:N1} lb); stored value {Why} for [{Rfq}] {Sup} '{Name}'",
                             pp, derived, totalA, totalLb, why, jobRef, supplier, prodName);
                         priceAudit.Add($"$/lb {pp:F4}->{derived:F4} (total {totalA:N2} / {totalLb:N1} lb); stored value {why} [corrected]");
