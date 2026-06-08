@@ -40,7 +40,8 @@ public class RfqStateOfPlayService
         "GIVEN to you in the 'DETERMINISTIC WINNERS' block at the end of the input — the system computed them " +
         "from the prices and they are AUTHORITATIVE. Use them EXACTLY: bold the given winner in your table, " +
         "quote those totals verbatim, and NEVER recompute, second-guess, or override the winner or the math. " +
-        "Only discuss a supplier that WINS at least one line — do NOT spend words on suppliers who win nothing.\n" +
+        "Spend PROSE only on a supplier that WINS at least one line — do NOT write paragraphs about suppliers " +
+        "who win nothing; the PRICE TABLE itself, however, ALWAYS lists EVERY supplier that responded (see PRICE TABLE).\n" +
         "ALLOY DIFFERENCES ARE OK: we routinely request one alloy and accept an interchangeable one that " +
         "prices better and still works for the customer, so suppliers on the SAME line may carry different " +
         "alloys (and match a different MSPC than requested) — that is FINE, keep them in the one comparison " +
@@ -88,16 +89,22 @@ public class RfqStateOfPlayService
         "that matters on cut items is the DELIVERY date, which the quote's delivery/ship/due date already " +
         "captures. Do not write a sentence about either of these topics. Be concrete: supplier names + dollar figures, " +
         "no filler, no preamble or sign-off.\n" +
-        "PRICE TABLE: present the price comparison as a compact table that ALWAYS includes a price-per-pound " +
-        "($/lb) column next to the total, so suppliers are comparable on a unit basis. Compute $/lb from the " +
-        "total and the line weight. THEORETICAL WEIGHT: a line may show 'weight ~N lb (ESTIMATED)' — we " +
-        "computed that weight from the product's dimensions because the supplier did not state one. Any $/lb " +
-        "you derive using an ESTIMATED weight is THEORETICAL: append a '*' to that $/lb value and add ONE " +
-        "footnote — '* theoretical $/lb — based on our calculated weight; supplier gave no weight'. CRUCIAL: a " +
-        "$/lb is theoretical ONLY when you DIVIDED a total (or per-piece/per-foot price) by an ESTIMATED " +
-        "weight. If the supplier quoted a price PER POUND directly, that IS their own $/lb — NEVER mark it " +
-        "theoretical, even when the weight shown is ESTIMATED (the estimate only affects the weight column, " +
-        "not their stated $/lb).\n" +
+        "PRICE TABLE: present the comparison as ONE table — a row per line item, and a COLUMN FOR EVERY " +
+        "supplier that responded. INCLUDE suppliers who win nothing, and suppliers who quoted only SOME lines " +
+        "(show their price where they quoted, and 'regret' or '—' in the lines they did not). NEVER drop a " +
+        "supplier from the table just because they lose. In EACH supplier price cell put that supplier's TOTAL " +
+        "for the line on the first row and their price-per-pound ($/lb) directly beneath it in a smaller font — " +
+        "write the cell LITERALLY as '$TOTAL<br><small>$X.XX/lb</small>' (emit the <br> and <small> tags " +
+        "verbatim; they render in the client). BOLD the cheapest (winning) supplier's cell on each line, e.g. " +
+        "'**$1,548.00**<br><small>$2.58/lb</small>' — that bolded cell IS the winner marker, so you do NOT need " +
+        "a separate 'Winner' column. Add a SHIPPING row and a delivered-total row wherever a supplier states a " +
+        "freight dollar amount. Compute $/lb from the total and the line weight. THEORETICAL WEIGHT: a line may " +
+        "show 'weight ~N lb (ESTIMATED)' — we computed that weight from the product's dimensions because the " +
+        "supplier did not state one. Any $/lb you derive using an ESTIMATED weight is THEORETICAL: append a '*' " +
+        "to that $/lb value and add ONE footnote — '* theoretical $/lb — based on our calculated weight; " +
+        "supplier gave no weight'. CRUCIAL: a $/lb is theoretical ONLY when you DIVIDED a total (or " +
+        "per-piece/per-foot price) by an ESTIMATED weight. If the supplier quoted a price PER POUND directly, " +
+        "that IS their own $/lb — NEVER mark it theoretical, even when the weight shown is ESTIMATED.\n" +
         "BRIEF + ACTIONABLE: every line must be a MOVE the rep can make (award, negotiate, chase, confirm) — " +
         "not information for its own sake. Explain ONLY where the recommendation genuinely needs the " +
         "justification to stand; otherwise cut it. If a line doesn't change what the rep does, delete it.\n" +
@@ -106,7 +113,7 @@ public class RfqStateOfPlayService
 
     /// <summary>Bumped whenever the prompt / output guidance changes, so it folds into the inputs-hash
     /// and existing cached summaries regenerate with the new prompt on next access.</summary>
-    private const string PromptVersion = "sop-v15-unionfind-pool";
+    private const string PromptVersion = "sop-v16-full-supplier-grid";
 
     public record Result(string Summary, string InputsHash, string Model, string Mode);
 
