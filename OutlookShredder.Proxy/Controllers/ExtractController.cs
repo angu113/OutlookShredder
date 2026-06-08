@@ -2131,6 +2131,50 @@ public class ExtractController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── GET /api/diag/suspect-regrets?days= (false-regret detector) ──
+    /// <summary>Flags suppliers that are ENTIRELY regret on an RFQ yet sent a PDF attachment — a PDF almost
+    /// always carries prices, so an all-regret+PDF supplier is the tell-tale of a parse-failure regret (the
+    /// Hadco AW003X pattern), not a genuine out-of-stock. Read-only data-quality sweep over recent RFQs.</summary>
+    [HttpGet("diag/suspect-regrets")]
+    public async Task<IActionResult> SuspectRegrets([FromQuery] int days = 10)
+    {
+        try
+        {
+            var refs = await _sp.ReadRfqReferencesAsync();
+            var cut  = DateTimeOffset.UtcNow.AddDays(-Math.Abs(days));
+            var ids  = refs.Where(r => DateTimeOffset.TryParse(r.TryGetValue("DateCreated", out var d) ? d?.ToString() : null, out var dt) && dt >= cut)
+                .Select(r => r.TryGetValue("RFQ_ID", out var v) ? v?.ToString() : null)
+                .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!).Distinct().ToList();
+            _log.LogInformation("[suspect-regrets] scanning {N} RFQ(s) over {Days}d", ids.Count, days);
+            var suspects = new List<object>();
+            int idx = 0;
+            foreach (var rfqId in ids)
+            {
+                idx++;
+                List<Dictionary<string, object?>> rows;
+                try { rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId); } catch { continue; }
+                foreach (var g in rows.GroupBy(r => r.TryGetValue("SupplierName", out var s) ? s?.ToString() : null))
+                {
+                    if (string.IsNullOrWhiteSpace(g.Key) || g.Key.Contains("@mithril", StringComparison.OrdinalIgnoreCase)) continue;
+                    bool allRegret = g.All(r => IsTrueBool(r.TryGetValue("IsRegret", out var rg) ? rg : null));
+                    bool hasPdf    = g.Any(r => (r.TryGetValue("SourceFile", out var sf) ? sf?.ToString() : null)?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true);
+                    if (!allRegret || !hasPdf) continue;
+                    var sample = g.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.TryGetValue("SupplierProductComments", out var c) ? c?.ToString() : null));
+                    suspects.Add(new
+                    {
+                        rfqId, supplier = g.Key, rows = g.Count(),
+                        sourceFile = g.Select(r => r.TryGetValue("SourceFile", out var sf) ? sf?.ToString() : null).FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)),
+                        comment = sample is null ? null : (sample.TryGetValue("SupplierProductComments", out var c) ? c?.ToString() : null)
+                    });
+                    _log.LogInformation("[suspect-regrets] {Idx}/{Total}: {Rfq} {Sup} all-regret+PDF", idx, ids.Count, rfqId, g.Key);
+                }
+            }
+            _log.LogInformation("[suspect-regrets] DONE: {Count} suspect(s) across {N} RFQ(s)", suspects.Count, ids.Count);
+            return Ok(new { days, rfqsScanned = ids.Count, suspectCount = suspects.Count, suspects });
+        }
+        catch (Exception ex) { _log.LogError(ex, "SuspectRegrets failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     // ── Supplier Parameters (per-supplier parse hints + business params) ──────
     /// <summary>All SupplierParameters rows (for the front end + extraction pre-bias).</summary>
     [HttpGet("supplier-parameters")]
