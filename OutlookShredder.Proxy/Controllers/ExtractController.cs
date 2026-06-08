@@ -2131,6 +2131,12 @@ public class ExtractController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
+    /// <summary>Diagnostic: theoretical weight (lb/ft or lb/sqft) the WeightCalculator derives from a product
+    /// label — used to verify the dimension parsing for tube/bar/sheet formats.</summary>
+    [HttpGet("diag/weight")]
+    public IActionResult DiagWeight([FromQuery] string name)
+        => Ok(WeightCalculator.Calculate(name ?? ""));
+
     // ── GET /api/diag/suspect-regrets?days= (false-regret detector) ──
     /// <summary>Flags suppliers that are ENTIRELY regret on an RFQ yet sent a PDF attachment — a PDF almost
     /// always carries prices, so an all-regret+PDF supplier is the tell-tale of a parse-failure regret (the

@@ -98,13 +98,12 @@ public class RfqStateOfPlayService
         "verbatim; they render in the client). BOLD the cheapest (winning) supplier's cell on each line, e.g. " +
         "'**$1,548.00**<br><small>$2.58/lb</small>' — that bolded cell IS the winner marker, so you do NOT need " +
         "a separate 'Winner' column. Add a SHIPPING row and a delivered-total row wherever a supplier states a " +
-        "freight dollar amount. Compute $/lb from the total and the line weight. THEORETICAL WEIGHT: a line may " +
-        "show 'weight ~N lb (ESTIMATED)' — we computed that weight from the product's dimensions because the " +
-        "supplier did not state one. Any $/lb you derive using an ESTIMATED weight is THEORETICAL: append a '*' " +
-        "to that $/lb value and add ONE footnote — '* theoretical $/lb — based on our calculated weight; " +
-        "supplier gave no weight'. CRUCIAL: a $/lb is theoretical ONLY when you DIVIDED a total (or " +
-        "per-piece/per-foot price) by an ESTIMATED weight. If the supplier quoted a price PER POUND directly, " +
-        "that IS their own $/lb — NEVER mark it theoretical, even when the weight shown is ESTIMATED.\n" +
+        "freight dollar amount. Each line gives a PRE-COMPUTED per-pound value as '=> USE $/lb N.NN' — put THAT " +
+        "exact number in the cell's $/lb sub-line and do NOT recompute it (the raw per-piece/-foot/-pound fields " +
+        "are frequently mis-slotted; ignore them for the $/lb). A trailing '*' on the value means THEORETICAL " +
+        "(we derived the weight from the product's dimensions because the supplier stated none): carry the '*' " +
+        "onto that cell and add ONE footnote '* theoretical $/lb — based on our calculated weight; supplier gave " +
+        "no weight'. If a line shows no '=> USE $/lb' at all, omit the $/lb sub-line for that cell.\n" +
         "BRIEF + ACTIONABLE: every line must be a MOVE the rep can make (award, negotiate, chase, confirm) — " +
         "not information for its own sake. Explain ONLY where the recommendation genuinely needs the " +
         "justification to stand; otherwise cut it. If a line doesn't change what the rep does, delete it.\n" +
@@ -113,7 +112,7 @@ public class RfqStateOfPlayService
 
     /// <summary>Bumped whenever the prompt / output guidance changes, so it folds into the inputs-hash
     /// and existing cached summaries regenerate with the new prompt on next access.</summary>
-    private const string PromptVersion = "sop-v16-full-supplier-grid";
+    private const string PromptVersion = "sop-v17-precomputed-perlb";
 
     public record Result(string Summary, string InputsHash, string Model, string Mode);
 
@@ -218,7 +217,15 @@ public class RfqStateOfPlayService
                 var spec = Spec(r);            if (spec.Length > 0)               sb.Append("  [").Append(spec).Append(']');
                 var price = PriceText(r);      if (price.Length > 0)              sb.Append("  ").Append(price);
                 var (wtLb, wtEst) = ResolveWeight(r);
-                if (wtLb is > 0) sb.Append($"  weight ~{wtLb.Value:0.#} lb{(wtEst ? " (ESTIMATED)" : "")}");
+                if (wtLb is > 0)
+                {
+                    sb.Append($"  weight ~{wtLb.Value:0.#} lb{(wtEst ? " (ESTIMATED)" : "")}");
+                    // Pre-compute the $/lb DETERMINISTICALLY (total ÷ resolved weight) so the model never has
+                    // to derive it from the raw per-unit fields, which are frequently mis-slotted. The trailing
+                    // '*' (when the weight was estimated) is the authoritative theoretical marker.
+                    var totP = ParseD(S(r, "TotalPrice"));
+                    if (totP is > 0) sb.Append($"  => USE $/lb {totP.Value / wtLb.Value:0.00}{(wtEst ? "*" : "")}");
+                }
                 var lead = S(r, "LeadTimeText"); if (lead.Length > 0)             sb.Append("  lead: ").Append(lead);
                 var certs = S(r, "Certifications"); if (certs.Length > 0)         sb.Append("  certs: ").Append(certs);
                 var note = S(r, "SupplierProductComments"); if (note.Length > 0)  sb.Append("  note: ").Append(Trim(note, 200));
@@ -296,7 +303,13 @@ public class RfqStateOfPlayService
         var sw = ParseD(S(r, "WeightPerUnit"));
         if (sw is > 0) return (ToLb(sw.Value, S(r, "WeightUnit")) * qty, false);
 
-        var wc = WeightCalculator.Calculate(ProductLabel(r));
+        // No supplier weight → compute from the cross-section. PREFER the matched catalog product's name: its
+        // dimensions are clean/canonical (e.g. "…1.000 X 1.000 X 0.120 / 0.125") where the supplier's free-text
+        // ("1\" SQ. x .125 WA.") is fragile to parse. Fall back to the supplier label only when UNMATCHED.
+        var catName = S(r, "CatalogProductName");
+        var wc = WeightCalculator.Calculate(catName.Length > 0 ? catName : ProductLabel(r));
+        if (wc.LbPerFoot is not > 0 && catName.Length > 0)
+            wc = WeightCalculator.Calculate(ProductLabel(r));
         if (wc.LbPerFoot is > 0)
         {
             var lenFt = ToFeet(ParseD(S(r, "LengthPerUnit")), S(r, "LengthUnit"));

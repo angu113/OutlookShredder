@@ -103,9 +103,35 @@ public static class WeightCalculator
         @"H\s*(\d+\.?\d*)\s*[Xx×]\s*W\s*(\d+\.?\d*)\s*[Xx×]\s*WT\s+(\d+\.?\d*)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Fractions with metal-standard (power-of-two) denominators only — avoids corrupting grades like
+    // "304/304L". Mixed ("1 1/2"), simple ("1/8"), plus leading-dot decimals (".125") and inch/foot marks
+    // and unit/finish words that sit BETWEEN dimension numbers and the × separators (which the dim regexes
+    // require to be whitespace-only). Without this, "1\" SQ x 1/8\" Wall x 24'" extracts NO dims.
+    private static readonly Regex _mixedFrac = new(@"(?<![\d./])(\d+)\s+(\d+)\s*/\s*(2|4|8|16|32|64)\b", RegexOptions.Compiled);
+    private static readonly Regex _simpleFrac = new(@"(?<![\d./])(\d+)\s*/\s*(2|4|8|16|32|64)\b", RegexOptions.Compiled);
+    private static readonly Regex _leadDot   = new(@"(?<![\d.])\.(\d+)", RegexOptions.Compiled);
+    private static readonly Regex _unitWords = new(
+        @"\b(SQ|SQUARE|RECT|RECTANGULAR|RND|ROUND|WALL|WA|THICK|THK|MILL|FINISH|MF|LONG|LG|RANDOM|RDM|OD|ID|DIA|PCS?|EA|FT|FOOT|FEET|IN|INCH|INCHES)\.?\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // A period that is NOT part of a decimal (e.g. the "." left behind by stripping "SQ." / "WA.") — it would
+    // otherwise sit between a dimension number and the × and re-break the dim regex.
+    private static readonly Regex _strayDot = new(@"(?<!\d)\.(?!\d)", RegexOptions.Compiled);
+
+    private static string NormalizeDimText(string s)
+    {
+        string Fmt(double d) => d.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+        s = _mixedFrac.Replace(s, m => Fmt(double.Parse(m.Groups[1].Value) + double.Parse(m.Groups[2].Value) / double.Parse(m.Groups[3].Value)));
+        s = _simpleFrac.Replace(s, m => Fmt(double.Parse(m.Groups[1].Value) / double.Parse(m.Groups[2].Value)));
+        s = _leadDot.Replace(s, "0.$1");
+        s = s.Replace("\"", " ").Replace("'", " ");
+        s = _unitWords.Replace(s, " ");
+        s = _strayDot.Replace(s, " ");
+        return s;
+    }
+
     private static double[]? ExtractDims(string name)
     {
-        var cleaned = Regex.Replace(name, @"\([^)]*\)", " ");  // strip parentheticals
+        var cleaned = NormalizeDimText(Regex.Replace(name, @"\([^)]*\)", " "));  // strip parentheticals + normalize
 
         var m3 = _dim3.Match(cleaned);
         if (m3.Success) return [D(m3, 1), D(m3, 2), D(m3, 3)];
