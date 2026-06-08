@@ -27,14 +27,40 @@ public static class WeightCalculator
         _           => 0.2833   // carbon steel: HR, CR, galvanized, A36, A500, A513, etc.
     };
 
+    // Alloy-designation fallbacks for grade-only / abbreviated supplier labels that carry NO metal word
+    // (e.g. "6063 T52", "304L", "C260"). Only consulted after the explicit metal-word checks below, and
+    // only matters for UNMATCHED rows (a catalog match supplies the clean metal name). Word-boundaried so
+    // they don't fire on dimensions; steel grades (10xx/41xx/A36/A500) intentionally fall through to steel.
+    private static readonly Regex _alAlloy = new(
+        @"\b(1100|2011|2014|2017|2024|3003|3004|3105|5005|5052|5083|5086|5754|6005|6061|6063|6082|6101|7050|7075)(?:[- ]?[TH]\d{1,4})?\b",
+        RegexOptions.Compiled);
+    private static readonly Regex _ssGrade = new(
+        @"\b(?:T-?)?(301|303|304|309|310|316|317|321|347|410|416|420|430|440)L?\b|\b(?:17-?4|15-?5|2205|2507)\b",
+        RegexOptions.Compiled);
+    // Copper-family UNS codes are 3-digit (short, e.g. C110/C260/C932) or 5-digit (full, e.g. C11000).
+    // A 4-digit C-code is AISI carbon/alloy STEEL (C1018, C1045, C4140) — excluded by (?:\d{2}|\d{4}).
+    private static readonly Regex _cuAlloy     = new(@"\bC1(?:\d{2}|\d{4})\b", RegexOptions.Compiled);
+    private static readonly Regex _brassAlloy  = new(@"\bC[234](?:\d{2}|\d{4})\b", RegexOptions.Compiled);
+    private static readonly Regex _bronzeAlloy = new(@"\bC[5-9](?:\d{2}|\d{4})\b", RegexOptions.Compiled);
+    private static readonly Regex _ssTokenRe   = new(@"(?<![A-Za-z])S/?S(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static string DetectMetal(string name)
     {
-        if (CI(name, "Aluminum") || CI(name, "Aluminium")) return "aluminum";
+        // Explicit metal words first (most reliable).
+        if (CI(name, "Aluminum") || CI(name, "Aluminium") || CI(name, "Alum")) return "aluminum";
         if (CI(name, "Stainless"))                         return "stainless";
         if (CI(name, "Copper"))                            return "copper";
         if (CI(name, "Brass"))                             return "brass";
         if (CI(name, "Bronze"))                            return "bronze";
-        return "steel";
+
+        // Grade-only / abbreviated labels (no metal word) — infer the metal from the alloy designation.
+        if (_alAlloy.IsMatch(name))                         return "aluminum";
+        if (_ssGrade.IsMatch(name) || _ssTokenRe.IsMatch(name)) return "stainless";
+        if (_brassAlloy.IsMatch(name))                      return "brass";
+        if (_bronzeAlloy.IsMatch(name))                     return "bronze";
+        if (_cuAlloy.IsMatch(name))                         return "copper";
+
+        return "steel";   // carbon: HR / CR / galvanized / A36 / A500 / A513 / 10xx / 41xx, etc.
     }
 
     private static string DetectShape(string name)
