@@ -1002,12 +1002,19 @@ public class MailPollerService : BackgroundService
             }
         }
 
-        // Pre-bias extraction with this supplier's known quote layout (SupplierParameters ParsingNotes),
-        // resolved from the sender domain before the AI call. The hint is advisory — the prompt still
-        // confirms against the line Extension and trusts the actual quote when it differs.
-        req.SupplierHint ??= await _sp.GetSupplierParsingNotesAsync(req.ResolvedSupplierName);
-        if (!string.IsNullOrEmpty(req.SupplierHint))
-            _log.LogInformation("[Mail] Applied parsing hint for supplier '{Supplier}'", req.ResolvedSupplierName);
+        // Pre-bias extraction with this supplier's known quote layout (SupplierParameters ParsingNotes).
+        // ResolvedSupplierName is only set when the SHR conversation router matched a token/thread; a plain
+        // supplier quote has none, so resolve the hint from the SENDER DOMAIN too — otherwise the hint was
+        // silently skipped (the PA Steel "F = per CWT" mis-read). Advisory only: the prompt still trusts the
+        // actual quote when it differs, and we do NOT change the name the SR/SLI is filed under.
+        if (req.SupplierHint is null)
+        {
+            var (hintSupplier, hintNotes) = await _sp.ResolveSupplierHintAsync(
+                req.ResolvedSupplierName, req.EmailFrom, req.EmailBody);
+            req.SupplierHint = hintNotes;
+            if (!string.IsNullOrEmpty(hintNotes))
+                _log.LogInformation("[Mail] Applied parsing hint for supplier '{Supplier}'", hintSupplier);
+        }
 
         try
         {

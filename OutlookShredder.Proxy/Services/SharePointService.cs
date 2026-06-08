@@ -4989,6 +4989,45 @@ public partial class SharePointService
     /// <summary>The SupplierParameters ParsingNotes for a supplier (resolved through aliases). Null if unknown.</summary>
     public async Task<string?> GetSupplierParsingNotesAsync(string? supplierName) => (await ResolveSupplierEntryAsync(supplierName)).Notes;
 
+    /// <summary>Resolve a supplier NAME from an inbound email's sender domain (DomainMap exact →
+    /// token-substring), parsing the forwarded-original sender when the email arrives from an internal
+    /// address. Null when unresolved. Mirrors the SR-write supplier-domain step; used to pre-bias the
+    /// extraction parsing hint before the AI call.</summary>
+    private string? ResolveSupplierNameFromDomain(string? emailFrom, string? emailBody)
+    {
+        static bool IsInternal(string? addr) =>
+            addr is not null && (
+                addr.EndsWith("@mithrilmetals.com",     StringComparison.OrdinalIgnoreCase) ||
+                addr.EndsWith("@metalsupermarkets.com", StringComparison.OrdinalIgnoreCase));
+
+        var resolveEmail = IsInternal(emailFrom) ? TryExtractForwardedSenderEmail(emailBody) : emailFrom;
+        if (string.IsNullOrWhiteSpace(resolveEmail) || !resolveEmail.Contains('@')) return null;
+
+        var domain = resolveEmail[(resolveEmail.IndexOf('@') + 1)..].ToLowerInvariant();
+        if (_suppliers.DomainMap.TryGetValue(domain, out var exact)) return exact;
+        return _suppliers.ResolveByDomainSubstring(domain.Split('.')[0]);
+    }
+
+    /// <summary>Parsing hint for an inbound supplier email: prefer the already-resolved supplier name
+    /// (SHR conversation router, when a token/thread matched), else resolve from the SENDER DOMAIN so a
+    /// plain quote with no conversation token still gets its SupplierParameters ParsingNotes BEFORE the
+    /// AI call. Returns the supplier name used (for logging) + the notes (null when unknown / no notes).
+    /// Does NOT decide the name the SR/SLI is filed under — the write path owns that.</summary>
+    public async Task<(string? Supplier, string? Notes)> ResolveSupplierHintAsync(
+        string? resolvedName, string? emailFrom, string? emailBody)
+    {
+        var (canon, notes) = await ResolveSupplierEntryAsync(resolvedName);
+        if (notes is not null) return (canon ?? resolvedName, notes);
+
+        var fromDomain = ResolveSupplierNameFromDomain(emailFrom, emailBody);
+        if (!string.IsNullOrWhiteSpace(fromDomain))
+        {
+            var (c2, n2) = await ResolveSupplierEntryAsync(fromDomain);
+            return (c2 ?? fromDomain, n2);
+        }
+        return (canon ?? resolvedName, notes);
+    }
+
     private async Task RefreshSupplierNotesAsync()
     {
         try
