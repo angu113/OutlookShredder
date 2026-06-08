@@ -144,5 +144,19 @@ public class RfqSummaryController : ControllerBase
         catch (Exception ex) { _log.LogError(ex, "RefreshStaleSummaries failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── GET /api/rfq/{rfqId}/winner-block?dimsAware= (deterministic, NO AI — for backtesting) ──
+    /// <summary>The raw deterministic winner block for an RFQ (no AI cost). dimsAware=false reproduces the
+    /// legacy MSPC-alone pooling for A/B regression comparison against the new dimension-aware pooling.</summary>
+    [HttpGet("{rfqId}/winner-block")]
+    public async Task<IActionResult> WinnerBlock(string rfqId, [FromQuery] bool dimsAware = true)
+    {
+        try
+        {
+            var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
+            return Ok(new { rfqId, dimsAware, block = _state.WinnerBlockForDiag(rows, dimsAware) });
+        }
+        catch (Exception ex) { _log.LogError(ex, "WinnerBlock diag failed for {Rfq}", rfqId); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     public record RfqSummarizeRequest(string? Input);
 }

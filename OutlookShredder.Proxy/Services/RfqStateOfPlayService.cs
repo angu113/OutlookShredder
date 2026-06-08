@@ -324,7 +324,7 @@ public class RfqStateOfPlayService
     /// (alloy-agnostic) so suppliers who quoted an interchangeable alloy — even one matching a different MSPC
     /// than requested — stay in ONE pool; lines where the alloy differs are FLAGGED, not split. The block
     /// shows product NAMES, never codes, so the model stays code-free.</summary>
-    private static string ComputeWinnerBlock(List<Dictionary<string, object?>> rows)
+    private static string ComputeWinnerBlock(List<Dictionary<string, object?>> rows, bool dimsAware = true)
     {
         var items = new List<(string Sup, string Label, string Mspc, double Tot, string Alloy, string Key)>();
         foreach (var r in rows)
@@ -343,16 +343,47 @@ public class RfqStateOfPlayService
         var parent = Enumerable.Range(0, items.Count).ToArray();
         int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
         void Union(int a, int b) { parent[Find(a)] = Find(b); }
-        var byMspc = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var byKey  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        for (int i = 0; i < items.Count; i++)
+        if (dimsAware)
         {
-            if (items[i].Mspc.Length > 0)
+            //   • FLAT (sheet/plate): the MSPC is size-agnostic (thickness+alloy only), so pool by a robust
+            //     SIZE SIGNATURE (thickness + W×L, all decimal-inch) across ALL flat rows regardless of
+            //     MSPC/alloy/finish — so the same sheet quoted under different MSPCs or alloys still pools,
+            //     while 48x120 / 60x144 / 72x144 stay separate.
+            //   • LONG (tube/pipe/bar/angle/channel/beam/rebar): the MSPC already fixes the cross-section and
+            //     the length is FUNGIBLE, so pool by MSPC alone (PA Steel 288" / Eastern 24' / Hadco 289").
+            var flatByMetal = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+            var longByMspc  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < items.Count; i++)
             {
-                if (byMspc.TryGetValue(items[i].Mspc, out var j)) Union(i, j); else byMspc[items[i].Mspc] = i;
+                if (items[i].Key.Split('|').ElementAtOrDefault(1) == "plate")
+                {
+                    var bk = items[i].Key.Split('|')[0];   // metal only (alloy stripped) -> alloy-agnostic
+                    (flatByMetal.TryGetValue(bk, out var l) ? l : flatByMetal[bk] = new()).Add(i);
+                }
+                else if (items[i].Mspc.Length > 0)
+                {
+                    if (longByMspc.TryGetValue(items[i].Mspc, out var j)) Union(i, j); else longByMspc[items[i].Mspc] = i;
+                }
             }
-            if (byKey.TryGetValue(items[i].Key, out var k)) Union(i, k); else byKey[items[i].Key] = i;
+            foreach (var g in flatByMetal.Values)
+                for (int a = 0; a < g.Count; a++)
+                    for (int b = a + 1; b < g.Count; b++)
+                        if (SizeSigMatch(items[g[a]].Key, items[g[b]].Key)) Union(g[a], g[b]);
         }
+        else
+        {
+            // legacy: pool by MSPC alone — over-merges different sizes that share a size-agnostic MSPC.
+            var byMspc = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < items.Count; i++)
+                if (items[i].Mspc.Length > 0)
+                {
+                    if (byMspc.TryGetValue(items[i].Mspc, out var j)) Union(i, j); else byMspc[items[i].Mspc] = i;
+                }
+        }
+        // (B) alloy-agnostic merge: same metal+shape+dimension LineKey (both modes).
+        var byKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < items.Count; i++)
+            if (byKey.TryGetValue(items[i].Key, out var k)) Union(i, k); else byKey[items[i].Key] = i;
 
         var poolSup    = new Dictionary<int, Dictionary<string, double>>();   // pool -> supplier -> cheapest
         var poolLabel  = new Dictionary<int, string>();
@@ -419,10 +450,76 @@ public class RfqStateOfPlayService
     /// temper within a family do NOT — so alloy-only differences land in the SAME pool (and get flagged via
     /// <see cref="AlloySig"/>) rather than splitting it. Feet are normalized to inches so 20' and 240"
     /// group together. No MSPC/code is used.</summary>
+    /// <summary>Deterministic winner block for diagnostics/backtesting (no AI). dimsAware=false reproduces
+    /// the legacy MSPC-alone pooling so the new dimension-aware pooling can be A/B-compared per RFQ.</summary>
+    public string WinnerBlockForDiag(List<Dictionary<string, object?>> rows, bool dimsAware = true)
+        => ComputeWinnerBlock(rows, dimsAware);
+
+    /// <summary>Robust SIZE SIGNATURE of a flat (sheet/plate) LineKey: (thickness, face-dim-1, face-dim-2) in
+    /// decimal inches. Picks the thinnest plausible thickness (0.005-4") and the two largest plausible face
+    /// dims (4-600") — so finish codes ("2B"→2, "#4"→4) and internal product codes ("4228") are ignored, and
+    /// gauge/fractions (already converted to decimal in <see cref="LineKey"/>) line up. Lets the SAME sheet
+    /// pool across different MSPCs / alloys / finishes.</summary>
+    private static (double Th, double D1, double D2) SizeSig(string key)
+    {
+        var dims = (key.Contains('|') ? key[(key.LastIndexOf('|') + 1)..] : key)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => double.TryParse(t, NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : double.NaN)
+            .Where(d => !double.IsNaN(d)).ToList();
+        var th = dims.Where(d => d is >= 0.005 and <= 4).DefaultIfEmpty(0).Min();
+        var wl = dims.Where(d => d is > 4 and < 600).OrderByDescending(d => d).Take(2).OrderBy(d => d).ToList();
+        return (th, wl.ElementAtOrDefault(0), wl.ElementAtOrDefault(1));
+    }
+
+    private static bool SizeSigMatch(string a, string b)
+    {
+        var (ta, a1, a2) = SizeSig(a);
+        var (tb, b1, b2) = SizeSig(b);
+        static bool Close(double x, double y) => (x == 0 && y == 0) || Math.Abs(x - y) <= 0.08 * Math.Max(Math.Abs(x), Math.Abs(y));
+        if (!Close(a1, b1) || !Close(a2, b2)) return false;       // face W×L must match
+        if (ta > 0 && tb > 0 && !Close(ta, tb)) return false;     // thickness must match when BOTH state one
+        return true;
+    }
+
+    // Sheet-metal gauge -> decimal inches, material-specific (Manufacturers' Standard for steel; the
+    // stainless and galvanized standards differ). Lets "20 Gauge"/"7GA" normalize onto the same decimal
+    // basis as "3/16"/"0.188" before any dimension comparison.
+    private static readonly Dictionary<int,double> _gaugeSteel = new() {
+        {3,0.2391},{4,0.2242},{5,0.2092},{6,0.1943},{7,0.1793},{8,0.1644},{9,0.1495},{10,0.1345},{11,0.1196},
+        {12,0.1046},{13,0.0897},{14,0.0747},{15,0.0673},{16,0.0598},{17,0.0538},{18,0.0478},{19,0.0418},
+        {20,0.0359},{21,0.0329},{22,0.0299},{23,0.0269},{24,0.0239},{25,0.0209},{26,0.0179},{28,0.0149},{30,0.0120} };
+    private static readonly Dictionary<int,double> _gaugeSS = new() {
+        {7,0.1875},{8,0.1719},{9,0.1563},{10,0.1406},{11,0.1250},{12,0.1094},{13,0.0938},{14,0.0781},{15,0.0703},
+        {16,0.0625},{17,0.0563},{18,0.0500},{19,0.0438},{20,0.0375},{22,0.0313},{24,0.0250},{26,0.0188},{28,0.0156} };
+    private static readonly Dictionary<int,double> _gaugeGalv = new() {
+        {8,0.1681},{9,0.1532},{10,0.1382},{11,0.1233},{12,0.1084},{13,0.0934},{14,0.0785},{15,0.0710},{16,0.0635},
+        {17,0.0575},{18,0.0516},{19,0.0456},{20,0.0396},{21,0.0366},{22,0.0336},{24,0.0276},{26,0.0217},{28,0.0187} };
+
+    // Birmingham Wire Gauge (BWG) — TUBE/PIPE wall, differs from sheet (our catalog's galv tube 12->0.109,
+    // 14->0.083 confirm BWG). Brown & Sharpe (B&S / AWG) — non-ferrous SHEET (aluminum / brass / copper).
+    private static readonly Dictionary<int,double> _gaugeBwg = new() {
+        {4,0.238},{5,0.220},{6,0.203},{7,0.180},{8,0.165},{9,0.148},{10,0.134},{11,0.120},{12,0.109},{13,0.095},
+        {14,0.083},{15,0.072},{16,0.065},{17,0.058},{18,0.049},{19,0.042},{20,0.035},{21,0.032},{22,0.028},{24,0.022} };
+    private static readonly Dictionary<int,double> _gaugeBnS = new() {
+        {6,0.162},{7,0.144},{8,0.129},{9,0.114},{10,0.102},{11,0.091},{12,0.081},{13,0.072},{14,0.064},{15,0.057},
+        {16,0.051},{17,0.045},{18,0.040},{19,0.036},{20,0.032},{21,0.029},{22,0.025},{23,0.023},{24,0.020},{25,0.018},{26,0.016} };
+
+    private static double? GaugeToInches(string metal, bool tube, int ga)
+    {
+        var t = tube                                   ? _gaugeBwg     // tube/pipe wall -> BWG (any metal)
+              : metal == "ss"                          ? _gaugeSS
+              : metal == "galv"                        ? _gaugeGalv
+              : metal is "alum" or "brass" or "copper" ? _gaugeBnS     // non-ferrous sheet -> Brown & Sharpe
+              :                                          _gaugeSteel;  // carbon steel sheet -> Manufacturers' Standard
+        return t.TryGetValue(ga, out var v) ? v : (double?)null;
+    }
+
     internal static string LineKey(string name)
     {
         var raw = name.ToLowerInvariant();
         string metal =
+            (raw.Contains("brass")  || Regex.IsMatch(raw, @"\bc(?:2\d{2}|3\d{2}|46[024])\b"))             ? "brass" :
+            (raw.Contains("copper") || Regex.IsMatch(raw, @"\bc1\d{2}\b"))                                ? "copper":
             (raw.Contains("galvaniz") || Regex.IsMatch(raw, @"\bg-?90\b"))                                ? "galv"  :
             (raw.Contains("stainless") || Regex.IsMatch(raw, @"\bt?3(?:04|16|21)l?\b") || Regex.IsMatch(raw, @"\b4(?:10|30)\b")) ? "ss" :
             (raw.Contains("alum") || Regex.IsMatch(raw, @"\b(?:1100|2024|3003|5052|5086|6061|6063|7075)\b")) ? "alum" :
@@ -431,11 +528,18 @@ public class RfqStateOfPlayService
         var n = Regex.Replace(raw, @"(\d+(?:\.\d+)?)\s*(?:'|’|ft\b|feet\b|foot\b)", m =>
             double.TryParse(m.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var ft)
                 ? (ft * 12).ToString("0.###", CultureInfo.InvariantCulture) : m.Value);
+        // Normalize sheet-metal gauge -> decimal inches (material-specific) so "20 Gauge" / "7GA" compare
+        // on the same basis as "3/16" / "0.188". Done before the strips so the gauge digit never leaks as a dim.
+        bool isTube = raw.Contains("tube") || raw.Contains("pipe");   // tube/pipe wall uses BWG, not sheet gauge
+        n = Regex.Replace(n, @"#?\s*(\d{1,2})\s*(?:gauge|ga)\b", m =>
+            int.TryParse(m.Groups[1].Value, out var ga) && GaugeToInches(metal, isTube, ga) is double th
+                ? th.ToString("0.###", CultureInfo.InvariantCulture) : " ");
         // Strip metallurgical grade / temper / coating tokens — they are NOT dimensions.
         n = Regex.Replace(n, @"\ba\d{2,3}(\s*/\s*a?\d{2,3})?\b", " ");          // A36, A500, A500/A513, A572/A992
         n = Regex.Replace(n, @"\b(304|316|321|410|430)l?\b",     " ");          // stainless series
         n = Regex.Replace(n, @"\b(1100|2024|3003|5052|5086|6061|6063|7075)\b", " ");  // aluminum series
         n = Regex.Replace(n, @"\bt\d{1,4}\b",                    " ");          // tempers T5/T6/T52/T6511
+        n = Regex.Replace(n, @"\bh\d{2,3}\b",                    " ");          // tempers H14/H32/H34/H112/H321 (else 14 leaks as a dim)
         n = Regex.Replace(n, @"\bg-?90\b",                       " ");          // galv coating
         string shape =
             n.Contains("angle")                                            ? "angle"   :
@@ -450,8 +554,8 @@ public class RfqStateOfPlayService
         foreach (Match m in Regex.Matches(n, @"(\d+)\s*/\s*(\d+)"))
             if (double.TryParse(m.Groups[1].Value, out var a) && double.TryParse(m.Groups[2].Value, out var b) && b != 0)
                 nums.Add(Math.Round(a / b, 3));
-        foreach (Match m in Regex.Matches(Regex.Replace(n, @"\d+\s*/\s*\d+", " "), @"\d+\.?\d*"))
-            if (double.TryParse(m.Value, out var d)) nums.Add(Math.Round(d, 3));
+        foreach (Match m in Regex.Matches(Regex.Replace(n, @"\d+\s*/\s*\d+", " "), @"\.\d+|\d+(?:\.\d+)?"))
+            if (double.TryParse(m.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)) nums.Add(Math.Round(d, 3));
         nums.Sort();
         return metal + "|" + shape + "|" + string.Join(",", nums.Select(x => x.ToString("0.###")));
     }
