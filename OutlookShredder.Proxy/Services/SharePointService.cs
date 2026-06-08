@@ -5093,12 +5093,16 @@ public partial class SharePointService
             // RFQ "state of play" AI comparison cache — one row per RFQ, regenerated when InputsHash changes.
             ["RfqSummaries"] = await EnsureListColumnsAsync(siteId, "RfqSummaries",
             [
-                ("RfqId",       "text"),
-                ("Summary",     "note"),
-                ("InputsHash",  "text"),
-                ("GeneratedAt", "dateTime"),
-                ("Model",       "text"),
-                ("Mode",        "text"),
+                ("RfqId",        "text"),
+                ("Summary",      "note"),
+                ("InputsHash",   "text"),
+                ("GeneratedAt",  "dateTime"),
+                ("Model",        "text"),
+                ("Mode",         "text"),
+                ("Feedback",     "text"),     // "up" | "down" — user rating of the summary
+                ("FeedbackNote", "note"),     // free-text reason captured on thumbs-down
+                ("FeedbackBy",   "text"),
+                ("FeedbackAt",   "dateTime"),
             ]),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
@@ -7465,6 +7469,56 @@ public partial class SharePointService
             await GetGraph().Sites[siteId].Lists[listId].Items
                 .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
         _log.LogInformation("[StateOfPlay] cached summary for {Rfq} ({Mode})", rfqId, mode);
+    }
+
+    public sealed record SummaryFeedbackRecord(string RfqId, string Rating, string? Note, string? By,
+        string? At, string? Summary, string? GeneratedAt);
+
+    /// <summary>Records a thumbs up/down (and optional reason) on an RFQ's cached summary, in place.</summary>
+    public async Task WriteSummaryFeedbackAsync(string rfqId, string rating, string? note, string? by)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqSummariesListIdAsync();
+        var data = new Dictionary<string, object?>
+        {
+            ["RfqId"]        = rfqId,
+            ["Feedback"]     = rating,
+            ["FeedbackNote"] = note ?? "",
+            ["FeedbackBy"]   = by ?? "",
+            ["FeedbackAt"]   = DateTimeOffset.UtcNow.ToString("o"),
+        };
+        var existing = await ReadRfqSummaryAsync(rfqId);
+        if (existing is not null)
+            await GetGraph().Sites[siteId].Lists[listId].Items[existing.SpItemId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = data });
+        else
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
+        _log.LogInformation("[StateOfPlay] feedback '{Rating}' on {Rfq}", rating, rfqId);
+    }
+
+    /// <summary>All summaries carrying feedback (optionally filtered by rating, e.g. "down"), newest first.</summary>
+    public async Task<List<SummaryFeedbackRecord>> ReadSummaryFeedbackAsync(string? ratingFilter)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetRfqSummariesListIdAsync();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=RfqId,Summary,GeneratedAt,Feedback,FeedbackNote,FeedbackBy,FeedbackAt)"];
+            req.QueryParameters.Top    = 5000;
+        });
+        var result = new List<SummaryFeedbackRecord>();
+        foreach (var item in page?.Value ?? new())
+        {
+            var f = item.Fields?.AdditionalData;
+            if (f is null) continue;
+            var rating = GetStr(f, "Feedback");
+            if (string.IsNullOrWhiteSpace(rating)) continue;
+            if (!string.IsNullOrWhiteSpace(ratingFilter) && !string.Equals(rating, ratingFilter, StringComparison.OrdinalIgnoreCase)) continue;
+            result.Add(new SummaryFeedbackRecord(GetStr(f, "RfqId") ?? "", rating, GetStr(f, "FeedbackNote"),
+                GetStr(f, "FeedbackBy"), GetStr(f, "FeedbackAt"), GetStr(f, "Summary"), GetStr(f, "GeneratedAt")));
+        }
+        return result.OrderByDescending(r => r.At ?? "").ToList();
     }
 
     private async Task<string> GetSynonymListIdAsync()

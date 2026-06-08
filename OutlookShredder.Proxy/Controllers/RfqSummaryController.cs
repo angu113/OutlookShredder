@@ -158,5 +158,30 @@ public class RfqSummaryController : ControllerBase
         catch (Exception ex) { _log.LogError(ex, "WinnerBlock diag failed for {Rfq}", rfqId); return StatusCode(500, new { error = ex.Message }); }
     }
 
+    // ── POST /api/rfq/{rfqId}/summary-feedback  &  GET /api/rfq/summary-feedback ──
+    /// <summary>Records a thumbs up/down on an RFQ's state-of-play summary (thumbs-down carries a reason),
+    /// persisted alongside the cached summary.</summary>
+    [HttpPost("{rfqId}/summary-feedback")]
+    public async Task<IActionResult> SummaryFeedback(string rfqId, [FromBody] SummaryFeedbackRequest req)
+    {
+        try
+        {
+            var rating = (req?.Rating ?? "").Trim().ToLowerInvariant();
+            if (rating is not ("up" or "down")) return BadRequest(new { error = "rating must be 'up' or 'down'" });
+            await _sp.WriteSummaryFeedbackAsync(rfqId, rating, req?.Note, req?.By);
+            return Ok(new { rfqId, rating });
+        }
+        catch (Exception ex) { _log.LogError(ex, "SummaryFeedback failed for {Rfq}", rfqId); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Summaries carrying feedback, for review — defaults to thumbs-DOWN + notes (rating=all for both).</summary>
+    [HttpGet("summary-feedback")]
+    public async Task<IActionResult> ListSummaryFeedback([FromQuery] string? rating = "down")
+    {
+        try { return Ok(await _sp.ReadSummaryFeedbackAsync(string.Equals(rating, "all", StringComparison.OrdinalIgnoreCase) ? null : rating)); }
+        catch (Exception ex) { _log.LogError(ex, "ListSummaryFeedback failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record SummaryFeedbackRequest(string? Rating, string? Note, string? By);
     public record RfqSummarizeRequest(string? Input);
 }
