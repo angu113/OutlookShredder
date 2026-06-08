@@ -296,46 +296,17 @@ public class RfqStateOfPlayService
     /// <summary>Line total weight in lb + whether it was ESTIMATED from dimensions because the supplier
     /// gave no weight (same calculator QC + the catalog use), so the model can mark such $/lb theoretical.</summary>
     private static (double? TotalLb, bool Estimated) ResolveWeight(Dictionary<string, object?> r)
-    {
-        double qty = ParseD(S(r, "UnitsQuoted")) ?? 1;
-        if (qty <= 0) qty = 1;
-
-        var sw = ParseD(S(r, "WeightPerUnit"));
-        if (sw is > 0) return (ToLb(sw.Value, S(r, "WeightUnit")) * qty, false);
-
-        // No supplier weight → compute from the cross-section. PREFER the matched catalog product's name: its
-        // dimensions are clean/canonical (e.g. "…1.000 X 1.000 X 0.120 / 0.125") where the supplier's free-text
-        // ("1\" SQ. x .125 WA.") is fragile to parse. Fall back to the supplier label only when UNMATCHED.
-        var catName = S(r, "CatalogProductName");
-        var wc = WeightCalculator.Calculate(catName.Length > 0 ? catName : ProductLabel(r));
-        if (wc.LbPerFoot is not > 0 && catName.Length > 0)
-            wc = WeightCalculator.Calculate(ProductLabel(r));
-        if (wc.LbPerFoot is > 0)
-        {
-            var lenFt = ToFeet(ParseD(S(r, "LengthPerUnit")), S(r, "LengthUnit"));
-            if (lenFt is > 0) return (wc.LbPerFoot.Value * lenFt.Value * qty, true);
-        }
-        return (null, false);
-    }
+        => WeightCalculator.ResolveLineWeightLb(
+            ParseD(S(r, "UnitsQuoted")) ?? 1,
+            ParseD(S(r, "WeightPerUnit")), S(r, "WeightUnit"),
+            S(r, "CatalogProductName"), ProductLabel(r),
+            ParseD(S(r, "LengthPerUnit")), S(r, "LengthUnit"));
 
     private static double? ParseD(string s) => double.TryParse(s, out var d) ? d : null;
 
-    private static double? ToFeet(double? v, string unit)
-    {
-        if (v is not > 0) return null;
-        return unit.ToLowerInvariant() switch
-        {
-            "in" or "inch" or "inches" or "\"" => v / 12.0,
-            "mm" => v / 304.8, "cm" => v / 30.48, "m" => v * 3.28084,
-            _ => v,   // ft / blank
-        };
-    }
-
-    private static double ToLb(double v, string unit) => unit.ToLowerInvariant() switch
-    {
-        "kg" => v * 2.20462, "g" => v / 453.592, "oz" => v / 16.0,
-        _ => v,   // lb / blank
-    };
+    // Unit converters delegate to the single source in WeightCalculator (also used by EffectiveTotal).
+    private static double? ToFeet(double? v, string unit) => WeightCalculator.ToFeet(v, unit);
+    private static double  ToLb(double v, string unit)    => WeightCalculator.ToLb(v, unit);
 
     // ── deterministic per-line winners (group by metal+shape+dims, alloy-agnostic; NO codes) ───────────
     /// <summary>System-computed authoritative comparison so the model never miscalculates the cheapest

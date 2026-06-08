@@ -1,0 +1,29 @@
+fix(rfq): unify $/lb on one canonical computation (total ÷ resolved weight)
+
+Three divergent $/lb computations existed — the SLI-write guard, the client grid guard, and
+the state-of-play summary — and only the summary handled no-supplier-weight suppliers
+(Eastern/Hadco) via catalog-dim weights. So the stored PricePerPound and the grid showed a
+wrong $/lb for those rows (Eastern AW003X stored 0.2175; real $/lb is 5.22*). The per-unit
+price fields the AI emits are frequently mis-slotted (a $/ft or $/CWT price dropped into
+PricePerPound), so the ONLY reliable $/lb is TotalPrice ÷ the line's total weight.
+
+- WeightCalculator.ResolveLineWeightLb: the single weight basis used everywhere — supplier-
+  stated WeightPerUnit when present (exact), else a theoretical estimate from the matched
+  catalog product's clean dims (flagged estimated), falling back to the supplier label only
+  when unmatched. ToLb/ToFeet lifted here too. RfqStateOfPlayService.ResolveWeight now
+  delegates — one source of truth, can't diverge again.
+- SLI write: replaced the branch (a)/(b)/2%-reconcile guard with PricePerPound =
+  TotalPrice ÷ ResolveLineWeightLb, plus a PricePerPoundEstimated flag. PriceAudit keeps the
+  raw AI value for review.
+- New SLI column PricePerPoundEstimated (provisioned in EnsureSupplierListsAsync; flows
+  through GET /api/items via the generic field projection — no read-side change).
+- POST /api/sli/recompute-ppl?days=&dryRun= — deterministic (no-AI) backfill that recomputes
+  the canonical $/lb from stored total/weight/dims; per-row + START/DONE logging.
+
+Verified AW003X: Eastern 5.22*/5.24*, Hadco 5.46* (est), PA Steel 4.94/4.95 (stated, unmarked)
+— matches the state-of-play summary exactly. Backfill (60d): scanned 2152, changed 430,
+unchanged 1595, noWeight 127. The est=False (supplier-weight) changes were confirmed as genuine
+CWT/per-ft mis-slot fixes against the supplier comments (GMJLCC 2.59→1.19 "UM: F ... per CWT";
+MPU7JJ 3.60→0.99 "$1,890/525 ft = $3.60/ft").
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

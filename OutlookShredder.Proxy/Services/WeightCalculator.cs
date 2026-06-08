@@ -272,6 +272,55 @@ public static class WeightCalculator
         };
     }
 
+    // ── Line $/lb weight basis (SINGLE source of truth) ───────────────────────
+    // Resolves a line's TOTAL weight in lb for $/lb derivation, using the SAME basis everywhere it is
+    // needed (the state-of-play summary, the SLI write, and the backfill): the supplier's stated
+    // WeightPerUnit when present (exact), else a THEORETICAL estimate from the matched catalog product's
+    // clean dimensions (flagged Estimated=true), falling back to the supplier's own free-text label only
+    // when no catalog match. Returns (null,false) when no weight can be resolved (e.g. a flat sheet, whose
+    // weight is per-sqft not per-foot, or dimensions that don't parse) — the caller then keeps the AI value.
+    public static (double? TotalLb, bool Estimated) ResolveLineWeightLb(
+        double qty, double? supplierWeightPerUnit, string? supplierWeightUnit,
+        string? catalogProductName, string? supplierLabel,
+        double? lengthPerUnit, string? lengthUnit)
+    {
+        if (qty <= 0) qty = 1;
+        if (supplierWeightPerUnit is > 0)
+            return (ToLb(supplierWeightPerUnit.Value, supplierWeightUnit) * qty, false);
+
+        var catName = catalogProductName?.Trim() ?? "";
+        var label   = supplierLabel?.Trim() ?? "";
+        var name    = catName.Length > 0 ? catName : label;
+        if (name.Length == 0) return (null, false);
+
+        var wc = Calculate(name);
+        if (wc.LbPerFoot is not > 0 && catName.Length > 0 && label.Length > 0)
+            wc = Calculate(label);   // catalog name didn't parse → fall back to the supplier's label
+        if (wc.LbPerFoot is > 0)
+        {
+            var lenFt = ToFeet(lengthPerUnit, lengthUnit);
+            if (lenFt is > 0) return (wc.LbPerFoot.Value * lenFt.Value * qty, true);
+        }
+        return (null, false);
+    }
+
+    public static double ToLb(double v, string? unit) => (unit ?? "").Trim().ToLowerInvariant() switch
+    {
+        "kg" => v * 2.20462, "g" => v / 453.592, "oz" => v / 16.0,
+        _    => v,   // lb / blank
+    };
+
+    public static double? ToFeet(double? v, string? unit)
+    {
+        if (v is not > 0) return null;
+        return (unit ?? "").Trim().ToLowerInvariant() switch
+        {
+            "in" or "inch" or "inches" or "\"" => v / 12.0,
+            "mm" => v / 304.8, "cm" => v / 30.48, "m" => v * 3.28084,
+            _    => v,   // ft / blank
+        };
+    }
+
     private static WeightResult SquareTubeWeight(double[] dims, double rho, string metal)
     {
         double s, t;

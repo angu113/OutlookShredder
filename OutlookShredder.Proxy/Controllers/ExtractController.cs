@@ -235,6 +235,25 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/sli/recompute-ppl ──────────────────────────────────────────
+    /// <summary>Deterministic (no-AI) backfill of the canonical $/lb (TotalPrice ÷ resolved weight, same
+    /// basis as the SLI write + state-of-play) over SupplierLineItems created within ?days (default 14).
+    /// Patches PricePerPound + PricePerPoundEstimated where the stored value differs >2%. Pass ?dryRun=true
+    /// to preview without writing. Self-heals rows written before the canonical-$/lb change.</summary>
+    [HttpPost("sli/recompute-ppl")]
+    public async Task<IActionResult> RecomputeCanonicalPpl([FromQuery] int days = 14, [FromQuery] bool dryRun = false, CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await _sp.RecomputeCanonicalPplAsync(days, dryRun, ct);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, error = ex.Message });
+        }
+    }
+
     // ── GET /api/sp-test ─────────────────────────────────────────────────────
     /// <summary>
     /// Diagnoses SharePoint connectivity step by step.

@@ -2840,96 +2840,44 @@ public partial class SharePointService
         var title = $"[{jobRef}] {supplier} - {prodName}";
         title = title[..Math.Min(title.Length, 255)];
 
-        // $/lb guard + audit. The AI sometimes mis-slots a per-ft / per-pc price into PricePerPound, so we
-        // prefer a derivation when we can reconcile one. Every decision is recorded in PriceAudit so it
-        // travels with the row and is reviewable across proxies (see also %LOCALAPPDATA%\ShredderData\Logs).
-        var pricePerPound = product.PricePerPound;
-        var priceAudit    = new List<string>();
-        var qtyA          = product.UnitsQuoted ?? product.UnitsRequested ?? 0;
-        var totalA        = product.TotalPrice ?? ComputeTotalPrice(product);
+        // ── Canonical $/lb (SINGLE source of truth) ─────────────────────────────────────────────────
+        // The supplier's per-unit price fields (PricePerPound/Foot/Piece) are frequently mis-slotted by the
+        // AI — a $/ft or $/CWT price dropped into PricePerPound, observed across per-foot/CWT suppliers. The
+        // ONLY reliable $/lb is TotalPrice ÷ the line's total weight, computed here from the SAME weight basis
+        // the state-of-play summary uses (WeightCalculator.ResolveLineWeightLb: supplier-stated WeightPerUnit
+        // when present, else a theoretical estimate from the matched catalog product's clean dimensions,
+        // flagged estimated). This stored value is the single source of truth — the client grid and QC LQ read
+        // it directly (no separate guard). PriceAudit keeps the raw AI value for review.
+        var pricePerPound          = product.PricePerPound;
+        var pricePerPoundEstimated = false;
+        var priceAudit             = new List<string>();
+        var qtyA                   = product.UnitsQuoted ?? product.UnitsRequested ?? 0;
+        var totalA                 = product.TotalPrice ?? ComputeTotalPrice(product);
 
-        // (a) catalog-weight path: PricePerFoot / catalog weight-per-foot (most reliable for standard shapes).
-        if (product.PricePerFoot is > 0 && !string.IsNullOrEmpty(productSearchKey)
-            && _catalog.FindWeightPerFoot(productSearchKey) is double catWt and > 0)
+        var (totalLb, wEst) = WeightCalculator.ResolveLineWeightLb(
+            qtyA, product.WeightPerUnit, product.WeightUnit,
+            catalogProductName, prodName,
+            product.LengthPerUnit, product.LengthUnit);
+
+        if (totalA is > 0 && totalLb is > 0)
         {
-            var derived = Math.Round(product.PricePerFoot.Value / catWt, 6);
-            if (pricePerPound is double pp0 && Math.Abs(derived - pp0) / pp0 > 0.05)
+            var canonical = Math.Round(totalA.Value / totalLb.Value, 6);
+            pricePerPoundEstimated = wEst;
+            var rawPpl = pricePerPound;
+            pricePerPound = canonical;
+            // Audit + log only when the AI value actually disagreed (>2%) — that's the mis-slot we're fixing.
+            if (rawPpl is double rp && rp > 0 && Math.Abs(rp - canonical) / canonical > 0.02)
             {
-                // PLAUSIBILITY BOUND: the catalog weight-per-ft can itself be wrong, so only override a
-                // PLAUSIBLE stored $/lb when the catalog-derived value is in band and the stored one is NOT.
-                var (lo, hi)   = PlausiblePerLbBand(prodName);
-                bool storedOk  = pp0     >= lo && pp0     <= hi;
-                bool derivedOk = derived >= lo && derived <= hi;
-                if (!storedOk && derivedOk)
-                {
-                    _log.LogWarning("[SP] PricePerPound corrected: AI={AiPpp:F4} → catalog-derived={Derived:F4} (PricePerFoot={Ppf} / CatalogWeight={Wt}) for MSPC={Key}",
-                        pp0, derived, product.PricePerFoot, catWt, productSearchKey);
-                    priceAudit.Add($"$/lb {pp0:F4}->{derived:F4} from PricePerFoot {product.PricePerFoot:F4} / catalog wt-per-ft {catWt:F3} [corrected]");
-                    pricePerPound = derived;
-                }
-                else
-                {
-                    priceAudit.Add($"$/lb DISCREPANCY: stored {pp0:F4} vs catalog-derived {derived:F4} (PricePerFoot {product.PricePerFoot:F4} / wt-per-ft {catWt:F3}) — KEPT stored");
-                }
+                _log.LogInformation("[SP] PricePerPound canonical: {Raw:F4} -> {Canon:F4} (total {Total:N2} / {Lb:N1} lb{Est}) for [{Rfq}] {Sup} '{Name}'",
+                    rp, canonical, totalA, totalLb.Value, wEst ? " est" : "", jobRef, supplier, prodName);
+                priceAudit.Add($"$/lb {rp:F4}->{canonical:F4} (total {totalA:N2} / {totalLb.Value:N1} lb{(wEst ? ", est" : "")}) [canonical]");
             }
-            else if (pricePerPound is null)
+            else if (rawPpl is null)
             {
-                pricePerPound = derived;   // no AI value -- use the catalog-derived $/lb
+                priceAudit.Add($"$/lb ->{canonical:F4} (total {totalA:N2} / {totalLb.Value:N1} lb{(wEst ? ", est" : "")}) [canonical, no AI value]");
             }
         }
-        // (b) total ÷ weight reconciliation: catches a per-ft / per-pc price mis-slotted into PricePerPound
-        //     when there's no PricePerFoot (the JM005X case). Only fires with an independent total + the
-        //     supplier's own weight, so it never replaces a genuine $/lb with a theoretical one.
-        else if (pricePerPound is double pp && totalA is > 0 && qtyA > 0 && product.WeightPerUnit is > 0)
-        {
-            double wlb = (product.WeightUnit ?? "").Trim().ToLowerInvariant() switch
-                { "kg" => product.WeightPerUnit.Value * 2.20462, "g" => product.WeightPerUnit.Value / 453.592, "oz" => product.WeightPerUnit.Value / 16.0, _ => product.WeightPerUnit.Value };
-            var totalLb = wlb * qtyA;
-            if (totalLb > 0)
-            {
-                var derived = Math.Round(totalA.Value / totalLb, 6);
-                if (derived > 0 && Math.Abs(pp - derived) / derived > 0.15)
-                {
-                    // PLAUSIBILITY BOUND: a derived value outside a sane $/lb band for the metal means the
-                    // WEIGHT (or qty) is wrong, so the derived value cannot be trusted either. Only CORRECT a
-                    // clear mis-slot (stored implausible, derived plausible); otherwise keep the stored value
-                    // and just flag the discrepancy in PriceAudit for review — never corrupt a good $/lb.
-                    var (lo, hi)   = PlausiblePerLbBand(prodName);
-                    bool storedOk  = pp      >= lo && pp      <= hi;
-                    bool derivedOk = derived >= lo && derived <= hi;
-                    // DEFINITIVE MIS-SLOT: stored "$/lb" reconciles EXACTLY to the $/ft or $/piece price → the
-                    // AI dropped a per-foot / per-piece price into PricePerPound. Correct it even when the stray
-                    // value also reads as a plausible $/lb (PA Steel's $2.60/ft is a fine-looking aluminum $/lb,
-                    // so the plausibility band alone would keep the wrong value). A genuine supplier $/lb won't
-                    // coincide with its own $/ft or $/piece price, so this should not clobber a real per-pound quote.
-                    // NOTE (2026-06-07): heuristic UNDER REVIEW — see todos.md "Price-unit mis-slot guard".
-                    double lft = (product.LengthUnit ?? "").Trim().ToLowerInvariant() switch
-                        { "mm" => product.LengthPerUnit.GetValueOrDefault() / 304.8, "cm" => product.LengthPerUnit.GetValueOrDefault() / 30.48, "m" => product.LengthPerUnit.GetValueOrDefault() * 3.28084, "ft" or "'" or "foot" or "feet" => product.LengthPerUnit.GetValueOrDefault(), _ => product.LengthPerUnit.GetValueOrDefault() / 12.0 };
-                    var totFt         = product.LengthPerUnit is > 0 ? lft * qtyA : 0;
-                    bool matchesFt    = totFt > 0 && Math.Abs(pp - totalA.Value / totFt) / (totalA.Value / totFt) < 0.02;
-                    bool matchesPiece = qtyA  > 0 && Math.Abs(pp - totalA.Value / qtyA)  / (totalA.Value / qtyA)  < 0.02;
-                    if (derivedOk && (!storedOk || matchesFt || matchesPiece))
-                    {
-                        var why = matchesFt    ? "was actually the $/ft price"
-                                : matchesPiece ? "was actually the $/piece price"
-                                :                "did not reconcile with total / weight";
-                        _log.LogWarning("[SP] PricePerPound guard: corrected {Ppp:F4} → {Derived:F4} (total {Total:N2} / {Lb:N1} lb); stored value {Why} for [{Rfq}] {Sup} '{Name}'",
-                            pp, derived, totalA, totalLb, why, jobRef, supplier, prodName);
-                        priceAudit.Add($"$/lb {pp:F4}->{derived:F4} (total {totalA:N2} / {totalLb:N1} lb); stored value {why} [corrected]");
-                        pricePerPound = derived;
-                    }
-                    else
-                    {
-                        var note = !derivedOk && storedOk  ? "derived $/lb implausible (weight/qty suspect) — KEPT stored"
-                                 : !derivedOk && !storedOk ? "stored AND derived $/lb both implausible — KEPT stored, REVIEW"
-                                 :                           "stored & total/weight $/lb both plausible but differ — KEPT stored";
-                        _log.LogWarning("[SP] PricePerPound discrepancy (not corrected): stored {Ppp:F4} vs total/weight {Derived:F4} ({Total:N2} / {Lb:N1} lb); {Note} for [{Rfq}] {Sup} '{Name}'",
-                            pp, derived, totalA, totalLb, note, jobRef, supplier, prodName);
-                        priceAudit.Add($"$/lb DISCREPANCY: stored {pp:F4} vs total/weight {derived:F4} (total {totalA:N2} / {totalLb:N1} lb) — {note}");
-                    }
-                }
-            }
-        }
+        // else: no resolvable weight (flat sheet, or dims unparseable) → keep the AI's PricePerPound best-effort.
 
         var fieldData = new Dictionary<string, object?>
         {
@@ -2954,6 +2902,7 @@ public partial class SharePointService
             ["WeightPerUnit"]            = product.WeightPerUnit,
             ["WeightUnit"]               = product.WeightUnit,
             ["PricePerPound"]            = pricePerPound,
+            ["PricePerPoundEstimated"]   = pricePerPoundEstimated,
             ["PricePerFoot"]             = product.PricePerFoot,
             ["PricePerPiece"]            = product.PricePerPiece,
             ["TotalPrice"]               = product.TotalPrice ?? ComputeTotalPrice(product),
@@ -3777,6 +3726,95 @@ public partial class SharePointService
 
         _log.LogInformation("[SP] Promoted {Count} SLI rows {Cust} → {Mspc}", count, custKey, newMspc);
         return count;
+    }
+
+    /// <summary>Deterministic (no-AI) backfill: recomputes the canonical $/lb (TotalPrice ÷ resolved weight,
+    /// the SAME basis as the SLI write + state-of-play summary via WeightCalculator.ResolveLineWeightLb) for
+    /// SupplierLineItems created within the window, and patches PricePerPound + PricePerPoundEstimated where
+    /// the stored value differs by >2% (or the estimated flag changed). Self-heals rows written before the
+    /// canonical-$/lb change without re-running AI extraction. Pass dryRun=true to preview.</summary>
+    public async Task<object> RecomputeCanonicalPplAsync(int days, bool dryRun, CancellationToken ct = default)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var cutoff    = DateTimeOffset.UtcNow.AddDays(-Math.Max(1, days));
+
+        static double? Num(IDictionary<string, object?> d, string k)
+        {
+            if (!d.TryGetValue(k, out var v) || v is null) return null;
+            return v switch
+            {
+                double db => db, int i => i, long l => l,
+                JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetDouble(),
+                _ => double.TryParse(v.ToString(), out var db) ? db : null
+            };
+        }
+        static string? Txt(IDictionary<string, object?> d, string k)
+            => d.TryGetValue(k, out var v) && v is not null
+                ? (v is JsonElement je ? (je.ValueKind == JsonValueKind.String ? je.GetString() : je.ToString()) : v.ToString())
+                : null;
+        static bool Flag(IDictionary<string, object?> d, string k)
+            => d.TryGetValue(k, out var v) && v is not null && (v is bool b ? b : v is JsonElement je && je.ValueKind == JsonValueKind.True);
+        static string Cut(string? s, int n) => string.IsNullOrEmpty(s) ? "" : s.Length <= n ? s : s[..n];
+
+        int scanned = 0, changed = 0, unchanged = 0, noWeight = 0;
+        var samples = new List<object>();
+        _log.LogInformation("[Recompute-ppl] START days={Days} dryRun={Dry} cutoff={Cutoff:u}", days, dryRun, cutoff);
+
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = ["fields"]; r.QueryParameters.Top = 5000; }, cancellationToken: ct);
+
+        while (page is not null)
+        {
+            foreach (var it in page.Value ?? [])
+            {
+                if (it.Id is null || it.Fields?.AdditionalData is not { } d) continue;
+                if (it.CreatedDateTime is { } cd && cd < cutoff) continue;
+                if (Flag(d, "IsDeleted") || Flag(d, "IsRegret")) continue;
+
+                var total = Num(d, "TotalPrice");
+                if (total is not > 0) continue;   // no total → can't compute $/lb
+                scanned++;
+
+                var qty = Num(d, "UnitsQuoted") ?? Num(d, "UnitsRequested") ?? 1;
+                var (lb, est) = WeightCalculator.ResolveLineWeightLb(
+                    qty, Num(d, "WeightPerUnit"), Txt(d, "WeightUnit"),
+                    Txt(d, "CatalogProductName"), Txt(d, "SupplierProductName") ?? Txt(d, "ProductName"),
+                    Num(d, "LengthPerUnit"), Txt(d, "LengthUnit"));
+                if (lb is not > 0) { noWeight++; continue; }
+
+                var canonical = Math.Round(total.Value / lb.Value, 6);
+                var curPpl    = Num(d, "PricePerPound");
+                var curEst    = Flag(d, "PricePerPoundEstimated");
+                bool pplDiff  = curPpl is not double cp || cp <= 0 || Math.Abs(cp - canonical) / canonical > 0.02;
+                bool estDiff  = curEst != est;
+                if (!pplDiff && !estDiff) { unchanged++; continue; }
+
+                changed++;
+                var nm = Txt(d, "SupplierProductName") ?? Txt(d, "ProductName");
+                if (samples.Count < 30)
+                    samples.Add(new { id = it.Id, rfq = Txt(d, "RFQ_ID"), supplier = Txt(d, "SupplierName"),
+                                      name = nm, was = curPpl, now = canonical, est, total = total.Value, lb = Math.Round(lb.Value, 1) });
+                _log.LogInformation("[Recompute-ppl] {N} [{Rfq}] {Sup} '{Name}': {Was} -> {Now}{Est} (total {Total:N2} / {Lb:N1} lb)",
+                    changed, Txt(d, "RFQ_ID"), Txt(d, "SupplierName"), Cut(nm, 48),
+                    curPpl?.ToString("F4") ?? "(null)", canonical, est ? "*" : "", total.Value, lb.Value);
+
+                if (!dryRun)
+                    await GetGraph().Sites[siteId].Lists[sliListId].Items[it.Id].Fields.PatchAsync(
+                        new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["PricePerPound"]          = canonical,
+                            ["PricePerPoundEstimated"] = est,
+                        } }, cancellationToken: ct);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+                .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+        }
+
+        _log.LogInformation("[Recompute-ppl] DONE scanned={Scanned} changed={Changed} unchanged={Unchanged} noWeight={NoWeight} dryRun={Dry}",
+            scanned, changed, unchanged, noWeight, dryRun);
+        return new { days, dryRun, scanned, changed, unchanged, noWeight, samples };
     }
 
     /// <summary>
@@ -5032,6 +5070,7 @@ public partial class SharePointService
                 ("WeightPerUnit",            "number"),
                 ("WeightUnit",               "text"),
                 ("PricePerPound",            "number"),
+                ("PricePerPoundEstimated",   "boolean"),
                 ("PricePerFoot",             "number"),
                 ("PricePerPiece",            "number"),
                 ("TotalPrice",               "number"),
