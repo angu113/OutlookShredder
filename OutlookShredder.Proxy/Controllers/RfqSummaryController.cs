@@ -94,7 +94,7 @@ public class RfqSummaryController : ControllerBase
     [HttpPost("state-of-play/refresh-stale")]
     public async Task<IActionResult> RefreshStaleSummaries(
         [FromQuery] int days = 7, [FromQuery] string? rfqIds = null, [FromQuery] bool dryRun = false,
-        CancellationToken ct = default)
+        [FromQuery] bool force = false, CancellationToken ct = default)
     {
         try
         {
@@ -123,7 +123,7 @@ public class RfqSummaryController : ControllerBase
                 var cached = await _sp.ReadRfqSummaryAsync(rfqId);
                 if (cached?.Summary is not { Length: > 0 }) continue;          // never summarized — leave for on-demand
                 withSummary++;
-                if (cached.InputsHash == _state.ComputeInputsHash(rows, pdfs)) continue;   // fresh
+                if (!force && cached.InputsHash == _state.ComputeInputsHash(rows, pdfs)) continue;   // fresh (force regenerates anyway — e.g. after a pooling-logic change)
                 stale++; staleIds.Add(rfqId);
                 if (dryRun) continue;
                 var result = await _state.GenerateAsync(rfqId, rows, pdfs, null, ct);
