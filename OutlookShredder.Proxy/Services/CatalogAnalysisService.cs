@@ -1171,6 +1171,7 @@ public class CatalogAnalysisService
 
             var tokenDtos = JsonSerializer.Deserialize<List<ProductTokens>>(text, Json)
                             ?? [];
+            foreach (var t in tokenDtos) DimensionNormalizer.Apply(t);   // canonical decimal-inch dims
 
             // Pad with nulls if Claude returned fewer entries than expected
             while (tokenDtos.Count < names.Count) tokenDtos.Add(null!);
@@ -1279,9 +1280,27 @@ public class CatalogAnalysisService
     {
         var conds    = string.Join(",",
             (tokens.TkConditions ?? []).OrderBy(c => c, StringComparer.Ordinal));
-        var canonical = $"{tokens.TkMetal ?? ""}|{tokens.TkShape ?? ""}|{tokens.TkAlloy ?? ""}|{tokens.TkTemper ?? ""}|{conds}|{tokens.TkDims ?? ""}";
+        // Canonicalise dims to decimal inches so the same product under different wording ("3/16" vs "0.188"
+        // vs "7GA") hashes to ONE CUST_ id across suppliers.
+        var dims     = DimensionNormalizer.CanonicalizeDims(tokens.TkDims, tokens.TkMetal, tokens.TkShape) ?? "";
+        var canonical = $"{tokens.TkMetal ?? ""}|{tokens.TkShape ?? ""}|{tokens.TkAlloy ?? ""}|{tokens.TkTemper ?? ""}|{conds}|{dims}";
         var hash     = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return "CUST_" + Convert.ToHexString(hash)[..8];
+    }
+
+    /// <summary>Diagnostic (no SP writes): tokenise one product name and return its token bag + the
+    /// deterministic CUST_ id, so dimension normalisation can be verified — the same product under different
+    /// wording ("3/16" vs "0.188" vs "7GA") should yield the same canonical TkDims and the same id.</summary>
+    public async Task<object> DiagTokenizeAsync(string name, CancellationToken ct = default)
+    {
+        var t = await TokeniseSingleLiveAsync(name, ct);
+        return new
+        {
+            name,
+            tokenizationFailed = t is null || t.TokenizationFailed,
+            tokens             = t,
+            customId           = t is null || t.TokenizationFailed ? null : ComputeCustomId(t),
+        };
     }
 
     /// <summary>
@@ -1355,6 +1374,7 @@ public class CatalogAnalysisService
         {
             var json = await File.ReadAllTextAsync(CatalogTokensPath);
             _catalogTokenCache  = JsonSerializer.Deserialize<List<ProductTokens>>(json, Json) ?? [];
+            foreach (var t in _catalogTokenCache) DimensionNormalizer.Apply(t);   // canonical decimal-inch dims
             _catalogTokenCacheAt = fileTime;
             return _catalogTokenCache;
         }
@@ -1582,6 +1602,7 @@ public class CatalogAnalysisService
             if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
 
             var tokenDtos = JsonSerializer.Deserialize<List<ProductTokens>>(text, Json) ?? [];
+            foreach (var t in tokenDtos) DimensionNormalizer.Apply(t);   // canonical decimal-inch dims
             while (tokenDtos.Count < names.Count) tokenDtos.Add(null!);
             return tokenDtos.Take(names.Count).Select(t => (ProductTokens?)t).ToList();
         }

@@ -481,38 +481,10 @@ public class RfqStateOfPlayService
         return true;
     }
 
-    // Sheet-metal gauge -> decimal inches, material-specific (Manufacturers' Standard for steel; the
-    // stainless and galvanized standards differ). Lets "20 Gauge"/"7GA" normalize onto the same decimal
-    // basis as "3/16"/"0.188" before any dimension comparison.
-    private static readonly Dictionary<int,double> _gaugeSteel = new() {
-        {3,0.2391},{4,0.2242},{5,0.2092},{6,0.1943},{7,0.1793},{8,0.1644},{9,0.1495},{10,0.1345},{11,0.1196},
-        {12,0.1046},{13,0.0897},{14,0.0747},{15,0.0673},{16,0.0598},{17,0.0538},{18,0.0478},{19,0.0418},
-        {20,0.0359},{21,0.0329},{22,0.0299},{23,0.0269},{24,0.0239},{25,0.0209},{26,0.0179},{28,0.0149},{30,0.0120} };
-    private static readonly Dictionary<int,double> _gaugeSS = new() {
-        {7,0.1875},{8,0.1719},{9,0.1563},{10,0.1406},{11,0.1250},{12,0.1094},{13,0.0938},{14,0.0781},{15,0.0703},
-        {16,0.0625},{17,0.0563},{18,0.0500},{19,0.0438},{20,0.0375},{22,0.0313},{24,0.0250},{26,0.0188},{28,0.0156} };
-    private static readonly Dictionary<int,double> _gaugeGalv = new() {
-        {8,0.1681},{9,0.1532},{10,0.1382},{11,0.1233},{12,0.1084},{13,0.0934},{14,0.0785},{15,0.0710},{16,0.0635},
-        {17,0.0575},{18,0.0516},{19,0.0456},{20,0.0396},{21,0.0366},{22,0.0336},{24,0.0276},{26,0.0217},{28,0.0187} };
-
-    // Birmingham Wire Gauge (BWG) — TUBE/PIPE wall, differs from sheet (our catalog's galv tube 12->0.109,
-    // 14->0.083 confirm BWG). Brown & Sharpe (B&S / AWG) — non-ferrous SHEET (aluminum / brass / copper).
-    private static readonly Dictionary<int,double> _gaugeBwg = new() {
-        {4,0.238},{5,0.220},{6,0.203},{7,0.180},{8,0.165},{9,0.148},{10,0.134},{11,0.120},{12,0.109},{13,0.095},
-        {14,0.083},{15,0.072},{16,0.065},{17,0.058},{18,0.049},{19,0.042},{20,0.035},{21,0.032},{22,0.028},{24,0.022} };
-    private static readonly Dictionary<int,double> _gaugeBnS = new() {
-        {6,0.162},{7,0.144},{8,0.129},{9,0.114},{10,0.102},{11,0.091},{12,0.081},{13,0.072},{14,0.064},{15,0.057},
-        {16,0.051},{17,0.045},{18,0.040},{19,0.036},{20,0.032},{21,0.029},{22,0.025},{23,0.023},{24,0.020},{25,0.018},{26,0.016} };
-
+    // Sheet-metal gauge -> decimal inches (material-specific). The tables live in the shared
+    // DimensionNormalizer so the winner pool and the catalog tokenizer convert gauge on ONE basis.
     private static double? GaugeToInches(string metal, bool tube, int ga)
-    {
-        var t = tube                                   ? _gaugeBwg     // tube/pipe wall -> BWG (any metal)
-              : metal == "ss"                          ? _gaugeSS
-              : metal == "galv"                        ? _gaugeGalv
-              : metal is "alum" or "brass" or "copper" ? _gaugeBnS     // non-ferrous sheet -> Brown & Sharpe
-              :                                          _gaugeSteel;  // carbon steel sheet -> Manufacturers' Standard
-        return t.TryGetValue(ga, out var v) ? v : (double?)null;
-    }
+        => DimensionNormalizer.GaugeToInches(metal, tube, ga);
 
     internal static string LineKey(string name)
     {

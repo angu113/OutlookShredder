@@ -46,6 +46,12 @@ public class AnalysisController(CatalogAnalysisService analysis) : ControllerBas
     public IActionResult Status()
         => Ok(analysis.GetStatus());
 
+    /// <summary>Diagnostic: tokenise one product name → tokens + CUST_ id. Verifies dimension normalisation
+    /// (same product, different dim wording -> same canonical TkDims and CUST_ id). No SP writes.</summary>
+    [HttpGet("tokenize-one")]
+    public async Task<IActionResult> TokenizeOne([FromQuery] string name, CancellationToken ct)
+        => Ok(await analysis.DiagTokenizeAsync(name, ct));
+
     /// <summary>
     /// Mine catalog-tokens + sli-tokens for unique alloy/condition/temper values and upsert
     /// them into the SP IndustryDictionary list. Safe to re-run — existing entries are updated
