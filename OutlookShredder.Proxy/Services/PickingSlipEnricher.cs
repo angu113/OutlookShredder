@@ -138,6 +138,10 @@ internal static class PickingSlipEnricher
         List<CommentBlock> blocks;
         List<string> allLinesAcrossPages = [];
         int pdfPageCount;
+        // Header cell bounds per page (0-based PdfSharp page index). The header field VALUES are taken
+        // from page 1, but multi-page picking slips repeat the empty header cells on every page, so we
+        // stamp each page that still carries the "PICKING SLIP"/"MSPC" anchors.
+        var headerBounds = new List<(int PageIndex, double PsTop, double PsHeight)>();
 
         using (var pigDoc = PigDoc.Open(pdfBytes))
         {
@@ -155,6 +159,18 @@ internal static class PickingSlipEnricher
             (header, hdrPsTop, hdrPsHeight) = ExtractHeaderFields(
                 page1Lines, pigPageW, pigPageH,
                 shipToName ?? knownCustomerName, log);
+            if (hdrPsTop.HasValue && hdrPsHeight is > 0)
+                headerBounds.Add((0, hdrPsTop.Value, hdrPsHeight.Value));
+
+            // 2b. Header cell bounds on subsequent pages (values reused from page 1) — only where the
+            //     page actually repeats the header anchors, so bare continuation pages are left alone.
+            for (int p = 2; p <= pdfPageCount; p++)
+            {
+                var pg    = pigDoc.GetPage(p);
+                var lines = GroupIntoLines(pg.GetWords().ToList());
+                var (_, t, ht) = ExtractHeaderFields(lines, pg.Width, pg.Height, null, log);
+                if (t.HasValue && ht is > 0) headerBounds.Add((p - 1, t.Value, ht.Value));
+            }
 
             // 3. Comment blocks from all pages, plus the flat list of every text line on every page
             //    (used for the broader processing-keyword scan below — the keyword list intentionally
@@ -162,7 +178,7 @@ internal static class PickingSlipEnricher
             blocks = ParseCommentBlocksFromDoc(pigDoc, log, out allLinesAcrossPages);
         }
 
-        bool hasHeaderBounds = hdrPsTop.HasValue && hdrPsHeight is > 0;
+        bool hasHeaderBounds = headerBounds.Count > 0;
 
         // Processing-operation keyword scan over EVERY text line on every page.
         // Keywords (Laser Cutting / Bending / Welding / Drilling / Fabricating) typically appear
@@ -177,11 +193,13 @@ internal static class PickingSlipEnricher
         using var ms  = new MemoryStream(pdfBytes);
         var doc       = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
 
-        if (hasHeaderBounds)
+        foreach (var (pageIndex, psTop, psHeight) in headerBounds)
         {
-            double pageW = doc.Pages[0].Width.Point;
-            StampLeftCellOnDoc(doc,  header, hdrPsTop!.Value, hdrPsHeight!.Value, pageW, log);
-            StampRightCellOnDoc(doc, header, hdrPsTop!.Value, hdrPsHeight!.Value, pageW, log);
+            if (pageIndex < 0 || pageIndex >= doc.Pages.Count) continue;
+            var page     = doc.Pages[pageIndex];
+            double pageW = page.Width.Point;
+            StampLeftCellOnDoc(doc,  page, header, psTop, psHeight, pageW, log);
+            StampRightCellOnDoc(doc, page, header, psTop, psHeight, pageW, log);
         }
 
         if (blocks.Count > 0)
@@ -439,10 +457,9 @@ internal static class PickingSlipEnricher
     ///   - Contact Phone: [num] (12pt bold)
     /// </summary>
     private static void StampLeftCellOnDoc(
-        SharpDoc doc, SlipHeader h,
+        SharpDoc doc, PdfPage page, SlipHeader h,
         double psTop, double psHeight, double pageW, ILogger? log)
     {
-        var page = doc.Pages[0];
         using var gfx = XGraphics.FromPdfPage(page);
         const double margin = 8.0;
         double splitX = pageW / 2.0;
@@ -503,10 +520,9 @@ internal static class PickingSlipEnricher
     /// Font size auto-shrinks to fit all rows.
     /// </summary>
     private static void StampRightCellOnDoc(
-        SharpDoc doc, SlipHeader h,
+        SharpDoc doc, PdfPage page, SlipHeader h,
         double psTop, double psHeight, double pageW, ILogger? log)
     {
-        var page = doc.Pages[0];
         using var gfx = XGraphics.FromPdfPage(page);
         const double margin = 8.0;
         double splitX = pageW / 2.0;
