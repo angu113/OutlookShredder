@@ -15,6 +15,11 @@
     <UserSecretsId>9f91eb69-7caf-41b3-aadb-5fbe0a2b2252</UserSecretsId>
   </PropertyGroup>
 
+  <!-- Let the test project see internal pure helpers (e.g. ProductDeduplicator). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="OutlookShredder.Proxy.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Anthropic.SDK" Version="3.2.0" />
     <PackageReference Include="Azure.Identity" Version="1.11.4" />
