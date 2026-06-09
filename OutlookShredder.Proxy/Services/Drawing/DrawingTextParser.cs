@@ -437,9 +437,18 @@ public static class DrawingTextParser
             if (fromGauge is > 0) return fromGauge.Value;
         }
 
-        // Decimal thickness for non-gauge materials (e.g. "0.060 alum" or "1.000 steel").
-        var dec = MatchNum(lower, @"\b(\d*\.\d+)\s*(?:""|in|inch)?\b");
+        // Decimal thickness for non-gauge picks. The wizard emits the value immediately before the
+        // material word ("0.125 CRS", "0.060 alum"); free NL reads the same. ANCHOR the match to the
+        // material token (or an explicit inch mark) so a decimal DIMENSION (flange 1.5, web 3.25, length
+        // 0.5) is never grabbed as the thickness — that mis-parse was garbling U/Z/L whenever a
+        // custom/decimal thickness met a decimal dimension (gauges were unaffected, matched above).
+        const string matTok = @"(?:galv\w*|hrpo|hot[\s-]?rolled|hrs|hr|crs|cr|cold[\s-]?rolled|alum\w*|al|stainless|ss|brass|copper|cu|steel)";
+        var dec = MatchNum(lower, $@"\b(\d*\.\d+)\s*(?:""|in|inch)?\s*{matTok}\b");
         if (dec is > 0) return dec.Value;
+
+        // No material word — accept a decimal that explicitly carries an inch mark ("0.25in", "0.25\"").
+        var decInch = MatchNum(lower, @"\b(\d*\.\d+)\s*(?:""|in|inch)\b");
+        if (decInch is > 0) return decInch.Value;
 
         return 0; // signalled as an error upstream
     }
