@@ -129,7 +129,7 @@ public partial class SharePointService
     {
         var siteId = await GetSiteIdAsync();
         var listId = await ResolveListIdAsync(MailMatchListsList);
-        var spId   = await FindMatchListSpIdAsync(siteId, listId, list.Name, ct);
+        var spId   = await FindMatchListSpIdAsync(list.Name, ct);
         var fields = new Dictionary<string, object?>
         {
             ["Title"]      = Trunc(list.Name, 250),
@@ -152,20 +152,18 @@ public partial class SharePointService
     {
         var siteId = await GetSiteIdAsync();
         var listId = await ResolveListIdAsync(MailMatchListsList);
-        var spId   = await FindMatchListSpIdAsync(siteId, listId, name, ct);
+        var spId   = await FindMatchListSpIdAsync(name, ct);
         if (spId is null) return false;
         await GetGraph().Sites[siteId].Lists[listId].Items[spId].DeleteAsync(cancellationToken: ct);
         return true;
     }
 
-    private async Task<string?> FindMatchListSpIdAsync(string siteId, string listId, string name, CancellationToken ct)
+    /// <summary>Title is the list-name column but isn't indexed (and the match-list set is tiny), so
+    /// match in-memory rather than a $filter — which Graph rejects on an unindexed column.</summary>
+    private async Task<string?> FindMatchListSpIdAsync(string name, CancellationToken ct)
     {
-        var res = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-        {
-            req.QueryParameters.Expand = ["fields($select=Title)"];
-            req.QueryParameters.Filter = $"fields/Title eq '{Esc(name)}'";
-            req.QueryParameters.Top    = 1;
-        }, ct);
-        return res?.Value?.FirstOrDefault()?.Id;
+        var rows = await ReadAllListItemsAsync(MailMatchListsList, ["Title"], null, ct);
+        var row  = rows.FirstOrDefault(f => string.Equals(GetStr(f, "Title"), name, StringComparison.OrdinalIgnoreCase));
+        return row is null ? null : GetStr(row, "__spId");
     }
 }

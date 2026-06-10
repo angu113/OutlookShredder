@@ -15,9 +15,10 @@ public sealed class MailRulesController : ControllerBase
 {
     private readonly MailRuleService _rules;
     private readonly MailTaxonomyService _taxonomy;
-    public MailRulesController(MailRuleService rules, MailTaxonomyService taxonomy)
+    private readonly SharePointService _sp;
+    public MailRulesController(MailRuleService rules, MailTaxonomyService taxonomy, SharePointService sp)
     {
-        _rules = rules; _taxonomy = taxonomy;
+        _rules = rules; _taxonomy = taxonomy; _sp = sp;
     }
 
     /// <summary>All rules, ordered by priority (ascending = evaluated first).</summary>
@@ -75,6 +76,7 @@ public sealed class MailRulesController : ControllerBase
     [HttpPost("seed-defaults")]
     public async Task<IActionResult> SeedDefaults(CancellationToken ct)
     {
+        await _sp.EnsureMailListsAsync();   // self-provision the MailRules / MailMatchLists SP lists (idempotent)
         var created = new List<string>();
         string[] processors = ["unitedtranzactions.com", "enmarksystems.com", "cybersource.com", "intuit.com"];
 
