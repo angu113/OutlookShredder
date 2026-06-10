@@ -43,17 +43,22 @@ public class RfqSummaryController : ControllerBase
     // ── GET /api/rfq/{rfqId}/state-of-play ────────────────────────────────────
     /// <summary>The cached AI "state of play" comparison for an RFQ. Generates on demand when the cache
     /// is missing or its InputsHash is stale (then persists it). `summary` is null when there are no
-    /// quotes yet / AI is unavailable and nothing was cached.</summary>
+    /// quotes yet / AI is unavailable and nothing was cached. <paramref name="force"/>=true (the UI's
+    /// refresh icon) skips the cache, regenerates from current SLI data, and persists the result.</summary>
     [HttpGet("{rfqId}/state-of-play")]
-    public async Task<IActionResult> GetStateOfPlay(string rfqId, CancellationToken ct)
+    public async Task<IActionResult> GetStateOfPlay(string rfqId, [FromQuery] bool force, CancellationToken ct)
     {
         try
         {
             // Read-only by default — the response pipeline (queue) owns generation + keeps the cache
             // fresh. The UI only triggers a one-off TEXT fallback when nothing has been cached yet.
-            var cached = await _sp.ReadRfqSummaryAsync(rfqId);
-            if (cached?.Summary is { Length: > 0 })
-                return Ok(new { rfqId, summary = cached.Summary, generatedAt = cached.GeneratedAt, model = cached.Model, mode = cached.Mode, fresh = true });
+            // force=true (refresh icon) bypasses the cache so the user gets a genuinely fresh summary.
+            if (!force)
+            {
+                var cached = await _sp.ReadRfqSummaryAsync(rfqId);
+                if (cached?.Summary is { Length: > 0 })
+                    return Ok(new { rfqId, summary = cached.Summary, generatedAt = cached.GeneratedAt, model = cached.Model, mode = cached.Mode, fresh = true });
+            }
 
             var rows = await _sp.ReadSupplierItemsByRfqIdAsync(rfqId);
             if (RfqStateOfPlayService.CompetingSuppliers(rows) < 2)
