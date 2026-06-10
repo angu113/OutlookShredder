@@ -24,6 +24,8 @@ public sealed class MailWorkbenchService
     private readonly MailProjectService _projects;
     private readonly BillExtractionService _bill;
     private readonly ConfirmationExtractionService _confirm;
+    private readonly MailRuleService _rules;
+    private readonly double _confidenceThreshold;
     private readonly IConfiguration _config;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
@@ -35,14 +37,15 @@ public sealed class MailWorkbenchService
     public MailWorkbenchService(SharePointService sp, MailClassifierService classifier,
         MailboxBridgeService bridge, MailTaxonomyService taxonomy, MailCacheService cache,
         RfqNotificationService notify, SupplierCacheService suppliers, MailProjectService projects,
-        BillExtractionService bill, ConfirmationExtractionService confirm,
+        BillExtractionService bill, ConfirmationExtractionService confirm, MailRuleService rules,
         PoConfirmationMatcherService poMatcher, BillToPoMatcherService billMatcher,
         IConfiguration config, ILogger<MailWorkbenchService> log)
     {
         _sp = sp; _classifier = classifier; _bridge = bridge; _taxonomy = taxonomy;
         _cache = cache; _notify = notify; _suppliers = suppliers; _projects = projects;
-        _bill = bill; _confirm = confirm; _poMatcher = poMatcher; _billMatcher = billMatcher;
+        _bill = bill; _confirm = confirm; _rules = rules; _poMatcher = poMatcher; _billMatcher = billMatcher;
         _config = config; _log = log;
+        _confidenceThreshold = config.GetValue<double?>("MailClassifier:ConfidenceThreshold") ?? 0.80;
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -169,7 +172,36 @@ public sealed class MailWorkbenchService
             // conversation already received, so a reply doesn't scatter to a different leaf.
             ThreadCategoryHint = ThreadCategory(body.ConversationId),
         };
-        var result   = await _classifier.ClassifyAsync(input, ct);
+
+        // Deterministic rules run BEFORE the AI: a matched rule files at full confidence and skips the
+        // model. No match -> AI classify, then the confidence gate quarantines a low-confidence guess to
+        // "Needs Review" so nothing silently mis-files (the original guess is kept in Reasoning).
+        MailClassificationResult? result;
+        var matchedRule = await _rules.FirstMatchAsync(BuildRuleSignals(body, input.AttachmentNames), ct);
+        if (matchedRule is not null)
+        {
+            result = new MailClassificationResult
+            {
+                Category   = matchedRule.CategoryPath,
+                Confidence = 1.0,
+                AiProvider = "rule",
+                AiModel    = matchedRule.Name,
+                Reasoning  = $"Matched rule '{matchedRule.Name}'",
+            };
+            _log.LogInformation("[MailWB] rule '{Rule}' -> {Cat} ({Id})", matchedRule.Name, result.Category, mailItemId);
+        }
+        else
+        {
+            result = await _classifier.ClassifyAsync(input, ct);
+            if (result is not null && result.Confidence < _confidenceThreshold
+                && !string.Equals(result.Category, MailTaxonomy.NeedsReviewPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.LogInformation("[MailWB] low confidence {Conf:P0} < {Thr:P0} -> Needs Review ({Id}, was {Cat})",
+                    result.Confidence, _confidenceThreshold, mailItemId, result.Category);
+                result.Reasoning = $"AI guessed '{result.Category}' @ {result.Confidence:P0} (below {_confidenceThreshold:P0} threshold); quarantined for review. {result.Reasoning}".Trim();
+                result.Category  = MailTaxonomy.NeedsReviewPath;
+            }
+        }
         var category = result?.Category ?? "Unclassified";
 
         // Always archive (folder + raw .eml, plus any attachments) so the full HTML viewer can render
@@ -281,6 +313,24 @@ public sealed class MailWorkbenchService
     }
 
     // ── Cache + bus fan-out (keeps every machine's Inbox coherent without per-request SP reads) ──
+
+    /// <summary>Extracts the signals a rule evaluates from an email. AttachmentContent is left empty
+    /// until Phase 2 wires PDF-text / OCR attachment extraction.</summary>
+    private static MailRuleSignals BuildRuleSignals(MailboxMessageBody body, List<string> attachmentNames)
+    {
+        var from   = (body.FromAddress ?? "").Trim();
+        var at     = from.LastIndexOf('@');
+        var domain = at >= 0 && at < from.Length - 1 ? from[(at + 1)..].Trim() : "";
+        return new MailRuleSignals
+        {
+            SenderAddress     = from,
+            SenderDomain      = domain,
+            Subject           = body.Subject ?? "",
+            Body              = body.BodyText ?? "",
+            AttachmentNames   = attachmentNames,
+            AttachmentContent = "",
+        };
+    }
 
     private static MailClassRow ToClassRow(string mailItemId, MailClassificationResult r, int version) => new()
     {
