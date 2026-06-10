@@ -85,9 +85,10 @@ public static class DrawingTextParser
         // ── Dimensions (per part type) ──────────────────────────────────────
         Dim web = new(0, globalBasis), flangeL, flangeR;
         double length;
-        // Optional inline per-bend angle + direction captured from the flange tokens.
+        // Optional inline per-bend angle + direction + return captured from the flange tokens.
         double? bendAngleL = null, bendAngleR = null;
         string? bendDirL = null, bendDirR = null;
+        ReturnSpec? retL = null, retR = null;
         double? lenKw() => MatchNum(lower, $@"\b(?:length|len|run|long)\s*[:=]?\s*({Num})");
 
         if (type == PartType.LAngle)
@@ -105,8 +106,8 @@ public static class DrawingTextParser
                 var fx = MatchFlangesEx(lower, globalBasis)
                     ?? throw new DrawingParseException("Missing leg dimensions. Try \"L 2 x 3 x 36\" or \"legs 2/3\".");
                 flangeL = fx.Left.Dim; flangeR = fx.Right.Dim;
-                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir;
-                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir;
+                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir; retL = fx.Left.Return;
+                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir; retR = fx.Right.Return;
                 length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
             }
         }
@@ -128,8 +129,8 @@ public static class DrawingTextParser
                 var fx = MatchFlangesEx(lower, globalBasis)
                     ?? throw new DrawingParseException("Missing flange dimension. Try \"flange 2\".");
                 flangeL = fx.Left.Dim; flangeR = fx.Right.Dim;
-                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir;
-                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir;
+                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir; retL = fx.Left.Return;
+                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir; retR = fx.Right.Return;
                 length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
             }
         }
@@ -151,8 +152,8 @@ public static class DrawingTextParser
                 var fx = MatchFlangesEx(lower, globalBasis)
                     ?? throw new DrawingParseException("Missing flange dimension. Try \"flange 2\" (or \"flange 2/1.5\" for unequal).");
                 flangeL = fx.Left.Dim; flangeR = fx.Right.Dim;
-                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir;
-                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir;
+                bendAngleL = fx.Left.AngleDeg; bendDirL = fx.Left.Dir; retL = fx.Left.Return;
+                bendAngleR = fx.Right.AngleDeg; bendDirR = fx.Right.Dir; retR = fx.Right.Return;
                 length  = lenKw() ?? throw new DrawingParseException("Missing length. Try \"length 36\".");
             }
         }
@@ -194,6 +195,8 @@ public static class DrawingTextParser
             MeasuredBendDeduction = measuredBd,
             Bends = bends,
             AnglesAnnotated = annotated,
+            ReturnLeft = retL,
+            ReturnRight = retR,
             Material = materialLabel,
             Units = "in",
             Finish = finish,
@@ -309,6 +312,16 @@ public static class DrawingTextParser
         int longN  = (int)Math.Round(MatchNum(lower, $@"({Num})\s*long")  ?? 2);
         int shortN = (int)Math.Round(MatchNum(lower, $@"({Num})\s*short") ?? 2);
 
+        // Optional shared return (lip/hem) applied to every present wall: "returns 0.5 [id|od] @ 90|180 [up|down]".
+        ReturnSpec? panReturn = null;
+        var rm = Regex.Match(lower, $@"\breturns?\s+({Num})\s*(id|od)?\s*(?:@?\s*(90|180)\s*(?:°|deg|degrees)?)?\s*(up|down)?");
+        if (rm.Success && NumOf(rm.Groups[1].Value) > 0)
+            panReturn = new ReturnSpec(
+                NumOf(rm.Groups[1].Value),
+                BasisFrom(rm.Groups[2].Value, DimBasis.Outside),
+                rm.Groups[3].Success && rm.Groups[3].Value.Length > 0 ? NumOf(rm.Groups[3].Value) : 90.0,
+                DirOf(rm.Groups[4].Success && rm.Groups[4].Value.Length > 0 ? rm.Groups[4].Value : null, BendDir.Up));
+
         return new PartSpec
         {
             Type = PartType.Pan,
@@ -320,6 +333,7 @@ public static class DrawingTextParser
             Material = material, Units = "in", Finish = finish,
             PanBottom = longN >= 1, PanTop = longN >= 2,
             PanLeft = shortN >= 1, PanRight = shortN >= 2,
+            PanReturn = panReturn,
         };
     }
 
@@ -527,39 +541,53 @@ public static class DrawingTextParser
         _ => fallback,
     };
 
-    /// <summary>A flange/leg dimension plus an optional inline per-bend angle + fold direction.</summary>
-    private readonly record struct FlangeInfo(Dim Dim, double? AngleDeg, string? Dir);
+    /// <summary>A flange/leg dimension plus an optional inline per-bend angle + fold direction and
+    /// an optional return (lip/hem) clause.</summary>
+    private readonly record struct FlangeInfo(Dim Dim, double? AngleDeg, string? Dir, ReturnSpec? Return);
 
     /// <summary>
-    /// Like <see cref="MatchFlanges"/> but also captures an optional inline
-    /// "[@] {angle}[deg|°] {up|down}" suffix on each flange (e.g. "flange 2 @ 75° up").
+    /// Like <see cref="MatchFlanges"/> but also captures an optional inline "[@] {angle}[deg|°]
+    /// {up|down}" bend suffix and an optional "return {len} [id|od] @ {90|180} {up|down}" clause
+    /// on each flange (e.g. "flange 2 @ 75° up return 0.5 id @ 90 up").
     /// </summary>
     private static (FlangeInfo Left, FlangeInfo Right)? MatchFlangesEx(string lower, DimBasis fallback)
     {
-        var rx = $@"\b(?:flanges?|legs?|walls?|sides?)\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?\s*\(?\s*(id|od)?\s*\)?(?:\s*@?\s*({Num})\s*(?:°|deg|degrees)?)?(?:\s*(up|down))?";
+        var rx = $@"\b(?:flanges?|legs?|walls?|sides?)\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?\s*\(?\s*(id|od)?\s*\)?" +
+                 $@"(?:\s*@?\s*({Num})\s*(?:°|deg|degrees)?)?(?:\s*(up|down))?" +
+                 $@"(?:\s*return\s+({Num})\s*(id|od)?\s*(?:@?\s*(90|180)\s*(?:°|deg|degrees)?)?\s*(up|down)?)?";
         var ms = Regex.Matches(lower, rx);
         if (ms.Count == 0) return null;
 
         static double? Ang(Match m) => m.Groups[4].Success && m.Groups[4].Value.Length > 0 ? NumOf(m.Groups[4].Value) : (double?)null;
         static string? Dir(Match m) => m.Groups[5].Success && m.Groups[5].Value.Length > 0 ? m.Groups[5].Value : null;
+        static ReturnSpec? Ret(Match m)
+        {
+            if (!m.Groups[6].Success || m.Groups[6].Value.Length == 0) return null;
+            double len = NumOf(m.Groups[6].Value);
+            if (len <= 0) return null;
+            var basis = BasisFrom(m.Groups[7].Value, DimBasis.Outside);
+            double ang = m.Groups[8].Success && m.Groups[8].Value.Length > 0 ? NumOf(m.Groups[8].Value) : 90.0;
+            var dir = DirOf(m.Groups[9].Success && m.Groups[9].Value.Length > 0 ? m.Groups[9].Value : null, BendDir.Up);
+            return new ReturnSpec(len, basis, ang, dir);
+        }
 
         var m1 = ms[0];
         var b1 = BasisFrom(m1.Groups[3].Value, fallback);
-        var left = new FlangeInfo(new Dim(NumOf(m1.Groups[1].Value), b1), Ang(m1), Dir(m1));
+        var left = new FlangeInfo(new Dim(NumOf(m1.Groups[1].Value), b1), Ang(m1), Dir(m1), Ret(m1));
 
         FlangeInfo right;
         if (ms.Count >= 2)
         {
             var m2 = ms[1];
-            right = new FlangeInfo(new Dim(NumOf(m2.Groups[1].Value), BasisFrom(m2.Groups[3].Value, fallback)), Ang(m2), Dir(m2));
+            right = new FlangeInfo(new Dim(NumOf(m2.Groups[1].Value), BasisFrom(m2.Groups[3].Value, fallback)), Ang(m2), Dir(m2), Ret(m2));
         }
         else if (m1.Groups[2].Success && m1.Groups[2].Value.Length > 0)
         {
-            right = new FlangeInfo(new Dim(NumOf(m1.Groups[2].Value), b1), Ang(m1), Dir(m1));   // "F/F2" shares basis + bend
+            right = new FlangeInfo(new Dim(NumOf(m1.Groups[2].Value), b1), Ang(m1), Dir(m1), Ret(m1));   // "F/F2" shares basis + bend + return
         }
         else
         {
-            right = new FlangeInfo(left.Dim, Ang(m1), Dir(m1));   // one value ⇒ equal flanges, equal bend
+            right = new FlangeInfo(left.Dim, Ang(m1), Dir(m1), Ret(m1));   // one value ⇒ equal flanges, equal bend + return
         }
         return (left, right);
     }

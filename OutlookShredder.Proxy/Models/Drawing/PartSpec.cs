@@ -25,6 +25,13 @@ public enum BendDir { Up, Down }
 public sealed record BendSpec(double AngleDeg, BendDir Direction);
 
 /// <summary>
+/// A return: an extra lip/hem folded at a flange's free edge. <see cref="AngleDeg"/> is 90 (return)
+/// or 180 (hem); <see cref="Length"/> is the lip length (Inside/Outside per <see cref="Basis"/>);
+/// <see cref="Direction"/> is the fold direction (Up = inward by default).
+/// </summary>
+public sealed record ReturnSpec(double Length, DimBasis Basis, double AngleDeg, BendDir Direction);
+
+/// <summary>
 /// Which face carries the finish (brushed stainless, paint, etc.). Inside/Outside for
 /// U / L / pan (relative to the bend direction); Top/Bottom for Z (relative to the first flange).
 /// </summary>
@@ -150,6 +157,14 @@ public sealed class PartSpec
     public IReadOnlyList<BendSpec>? Bends { get; init; }
     /// <summary>True when the input carried explicit per-bend angles (gates the degree/arc callouts).</summary>
     public bool AnglesAnnotated { get; init; }
+
+    // ── Returns (lip/hem at a flange's free edge) ───────────────────────────
+    /// <summary>Return on the left flange (U/Z) / leg A (L). Null = none.</summary>
+    public ReturnSpec? ReturnLeft { get; init; }
+    /// <summary>Return on the right flange (U/Z) / leg B (L). Null = none.</summary>
+    public ReturnSpec? ReturnRight { get; init; }
+    /// <summary>Return applied to every present pan wall (pans share one return). Null = none.</summary>
+    public ReturnSpec? PanReturn { get; init; }
 
     /// <summary>Human-readable material label for display/labelling, e.g. "16ga CRS".</summary>
     public string Material { get; init; } = "";

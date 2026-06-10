@@ -31,17 +31,11 @@ internal static class PickingSlipFabAppender
     /// </summary>
     public static byte[] AppendFabDrawings(byte[] slipBytes, ILogger? log = null)
     {
-        var descs = new List<string>();
+        List<string> descs;
         try
         {
             using var pig = PigDoc.Open(slipBytes);
-            foreach (var line in ExtractLines(pig))
-            {
-                var m = FabRx.Match(line);
-                if (!m.Success) continue;
-                var desc = m.Groups[2].Value.Trim();
-                if (desc.Length >= 3) descs.Add(desc);
-            }
+            descs = ExtractFabDescs(ExtractRows(pig));
         }
         catch (Exception ex)
         {
@@ -103,16 +97,53 @@ internal static class PickingSlipFabAppender
         }
     }
 
-    /// <summary>Groups a page's words into text lines by baseline, top-to-bottom.</summary>
-    private static IEnumerable<string> ExtractLines(PigDoc doc)
+    /// <summary>
+    /// Pulls FAB note descriptions out of the page rows, stitching wrapped continuations back on.
+    /// The FAB cell often wraps in the narrow Product column (e.g. "… finish" on one row, "outside"
+    /// on the next); a continuation stays in the FAB cell's column (left edge ≳ the FAB row's) and
+    /// isn't a new FAB note, a blank, or a new line-item (which reaches the far-left MSPC column).
+    /// </summary>
+    internal static List<string> ExtractFabDescs(List<(string Text, double Left)> rows)
     {
+        var descs = new List<string>();
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var m = FabRx.Match(rows[i].Text);
+            if (!m.Success) continue;
+            var desc = m.Groups[2].Value.Trim();
+
+            double fabLeft = rows[i].Left;
+            for (int j = i + 1; j < rows.Count; j++)
+            {
+                var next = rows[j];
+                if (string.IsNullOrWhiteSpace(next.Text)) break;
+                if (FabRx.IsMatch(next.Text)) break;
+                if (next.Left < fabLeft - 12.0) break;   // reaches a left column (MSPC) → new line-item
+                desc += " " + next.Text.Trim();
+                i = j;                                    // consume the continuation
+            }
+
+            if (desc.Length >= 3) descs.Add(desc);
+        }
+        return descs;
+    }
+
+    /// <summary>Groups every page's words into text rows by baseline (top-to-bottom), each with the
+    /// row's left edge so wrapped FAB continuations can be stitched back on by column.</summary>
+    private static List<(string Text, double Left)> ExtractRows(PigDoc doc)
+    {
+        var result = new List<(string, double)>();
         foreach (var page in doc.GetPages())
         {
             var rows = page.GetWords()
                 .GroupBy(w => (int)Math.Round(w.BoundingBox.Bottom / 2.0))   // ~2pt baseline tolerance
                 .OrderByDescending(g => g.Key);
             foreach (var row in rows)
-                yield return string.Join(" ", row.OrderBy(w => w.BoundingBox.Left).Select(w => w.Text));
+            {
+                var ordered = row.OrderBy(w => w.BoundingBox.Left).ToList();
+                result.Add((string.Join(" ", ordered.Select(w => w.Text)), ordered.Min(w => w.BoundingBox.Left)));
+            }
         }
+        return result;
     }
 }

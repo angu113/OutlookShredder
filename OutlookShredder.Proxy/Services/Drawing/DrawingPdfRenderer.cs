@@ -309,8 +309,9 @@ public static class DrawingPdfRenderer
                 FinishCallout(webO * 0.38, -t2, 0, 1); break;
         }
 
-        // ── Per-bend angle callouts: arc at the bend + a "75°" label carried outside the part ──
-        if (fp.Spec.AnglesAnnotated && fp.SectionBends.Count > 0)
+        // ── Per-bend callouts: arc at the bend + label carried outside the part. Flange bends show
+        //    the actual included angle (angle mode only); returns are always labelled (90° / HEM). ──
+        if (fp.SectionBends.Count > 0)
         {
             var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
             // Part centroid (page space) — the label is pushed outward, away from this, so it clears the part.
@@ -320,6 +321,9 @@ public static class DrawingPdfRenderer
 
             foreach (var b in fp.SectionBends)
             {
+                // Flange bends are only called out in angle mode; returns always (they're a real feature).
+                if (!b.IsReturn && !fp.Spec.AnglesAnnotated) continue;
+
                 var apex = P(b.X, b.Y);
 
                 // Face rays from the apex (page space — y points down, so negate model hy).
@@ -329,26 +333,30 @@ public static class DrawingPdfRenderer
                 double a1 = Math.Atan2(-iny, -inx), a2 = Math.Atan2(outy, outx);
                 double da = a2 - a1; while (da <= -Math.PI) da += 2 * Math.PI; while (da > Math.PI) da -= 2 * Math.PI;
 
-                // Small arc spanning the two faces at the bend.
+                // Callout text: the ACTUAL angle between the faces (what the arc spans). A 180° hem's
+                // faces are parallel (≈0° between them) — label it "HEM" and skip the degenerate arc.
+                double shownDeg = Math.Abs(da) * 180.0 / Math.PI;
+                bool hem = b.IsReturn && b.AngleDeg >= 170;
+                var txt = hem ? "HEM" : (b.IsReturn ? $"{shownDeg:0.#}° ret" : $"{shownDeg:0.#}°");
+
+                // Small arc spanning the two faces at the bend (skip for a hem).
                 double r = 12;
                 var arcPen = new XPen(DimColor, 0.8);
-                XPoint Prev = new(apex.X + r * Math.Cos(a1), apex.Y + r * Math.Sin(a1));
-                for (int i = 1; i <= 10; i++)
+                if (!hem)
                 {
-                    double a = a1 + da * i / 10.0;
-                    var cur = new XPoint(apex.X + r * Math.Cos(a), apex.Y + r * Math.Sin(a));
-                    gfx.DrawLine(arcPen, Prev, cur); Prev = cur;
+                    XPoint Prev = new(apex.X + r * Math.Cos(a1), apex.Y + r * Math.Sin(a1));
+                    for (int i = 1; i <= 10; i++)
+                    {
+                        double a = a1 + da * i / 10.0;
+                        var cur = new XPoint(apex.X + r * Math.Cos(a), apex.Y + r * Math.Sin(a));
+                        gfx.DrawLine(arcPen, Prev, cur); Prev = cur;
+                    }
                 }
-
-                // Callout = the ACTUAL angle between the two faces (what the arc spans / a protractor reads),
-                // NOT the bend-from-flat input. A 50°-from-flat bend opens the faces to 130°, so it reads 130°.
-                double shownDeg = Math.Abs(da) * 180.0 / Math.PI;
 
                 // Label pushed outward (apex away from centroid), clamped inside the panel; short leader.
                 double odx = apex.X - centroid.X, ody = apex.Y - centroid.Y;
                 double ol2 = Math.Sqrt(odx * odx + ody * ody); if (ol2 < 1e-6) { odx = 0; ody = -1; ol2 = 1; }
                 odx /= ol2; ody /= ol2;
-                var txt = $"{shownDeg:0.#}°";
                 var sz = gfx.MeasureString(txt, angFont);
                 double lx = apex.X + odx * (r + 14), ly = apex.Y + ody * (r + 14);
                 double bx = Math.Max(area.X + 1, Math.Min(lx - sz.Width / 2, area.X + area.Width - sz.Width - 1));
@@ -731,7 +739,16 @@ public static class DrawingPdfRenderer
             new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
         var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
 
-        double L = fp.FlatWidth, W = fp.FlatHeight;
+        // Bounds from the actual cut geometry (returns push vertices beyond [0,FlatWidth]).
+        double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
+        void Acc(double x, double y) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+        foreach (var e in fp.Cut.Entities)
+        {
+            if (e.Vertices is { } vs) foreach (var v in vs) Acc(v.X, v.Y);
+            if (e.Type == "line") { Acc(e.X1, e.Y1); Acc(e.X2, e.Y2); }
+        }
+        if (minX > maxX) { minX = 0; maxX = fp.FlatWidth; minY = 0; maxY = fp.FlatHeight; }
+        double L = maxX - minX, W = maxY - minY;
         if (L <= 0 || W <= 0) return;
         const double band = 60;
         double availW = area.Width - band * 2, availH = area.Height - band * 2;
@@ -739,7 +756,7 @@ public static class DrawingPdfRenderer
         double drawW = L * scale, drawH = W * scale;
         double ox = area.X + (area.Width - drawW) / 2;
         double oy = area.Y + (area.Height - drawH) / 2;
-        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+        XPoint P(double mx, double my) => new(ox + (mx - minX) * scale, oy + drawH - (my - minY) * scale);
 
         foreach (var e in fp.Cut.Entities)
         {
@@ -769,6 +786,19 @@ public static class DrawingPdfRenderer
             DimV(gfx, dimFont, P(bx1, 0).X, P(bx1, 0).X + 26, P(bx1, 0).Y, P(bx1, by0).Y, Fq(fp.PanWallDev), false);
         else if (s.PanLeft && bx0 > 0)
             DimH(gfx, dimFont, P(0, by0).X, P(bx0, by0).X, P(0, by0).Y, oy + drawH + 24, Fq(fp.PanWallDev), false);
+
+        // Finish callout — boxed label on the base (pans show inside/outside on the base face).
+        if (s.Finish is FinishSide.Outside or FinishSide.Inside)
+        {
+            var f = new XFont("Arial", 9, XFontStyleEx.Bold);
+            string txt = s.Finish == FinishSide.Outside ? "Finish: outside" : "Finish: inside";
+            var bc = P((bx0 + bx1) / 2, (by0 + by1) / 2);
+            var sz = gfx.MeasureString(txt, f);
+            var br = new XRect(bc.X - sz.Width / 2 - 4, bc.Y - sz.Height / 2 - 2, sz.Width + 8, sz.Height + 4);
+            gfx.DrawRectangle(XBrushes.White, br);
+            gfx.DrawRectangle(new XPen(XColor.FromArgb(110, 110, 110), 0.9), br);
+            gfx.DrawString(txt, f, XBrushes.Black, br, XStringFormats.Center);
+        }
     }
 
     // ── Pan: formed-part isometric (the folded tray) ─────────────────────────
@@ -808,7 +838,9 @@ public static class DrawingPdfRenderer
         gfx.DrawPolygon(faint, floor);
 
         // Walls (back walls first so the front ones overlap them). Every wall edge — including the
-        // two vertical corner edges — is drawn so the folded corners read correctly.
+        // two vertical corner edges — is drawn so the folded corners read correctly. A return lip is
+        // drawn at the top: 90° folds inward over the opening, 180° hems back down onto the wall.
+        var ret = s.PanReturn;
         void Wall(bool present, double ax, double ay, double bx, double by, bool front)
         {
             if (!present) return;
@@ -816,6 +848,32 @@ public static class DrawingPdfRenderer
             gfx.DrawPolygon(wallFill, new[] { p0, p1, p2, p3 }, XFillMode.Winding);
             var wp = front ? pen : faint;
             gfx.DrawLine(wp, p0, p1); gfx.DrawLine(wp, p1, p2); gfx.DrawLine(wp, p2, p3); gfx.DrawLine(wp, p3, p0);
+
+            if (ret is not null)
+            {
+                double Lr = ret.Length;
+                // Inward normal (toward the pan centre) in the XY plane.
+                double ex = bx - ax, ey = by - ay; double el = Math.Sqrt(ex * ex + ey * ey); if (el < 1e-6) el = 1; ex /= el; ey /= el;
+                double nx = -ey, ny = ex;
+                double mx = (ax + bx) / 2, my = (ay + by) / 2, cx = Lo / 2, cy = Wo / 2;
+                double dPlus = (mx + nx - cx) * (mx + nx - cx) + (my + ny - cy) * (my + ny - cy);
+                double dMinus = (mx - nx - cx) * (mx - nx - cx) + (my - ny - cy) * (my - ny - cy);
+                if (dPlus > dMinus) { nx = -nx; ny = -ny; }
+                XPoint q0, q1, q2, q3;
+                if (ret.AngleDeg >= 170)   // hem: folds back down along the wall face
+                {
+                    double th = s.Thickness;
+                    q0 = S(ax, ay, Do); q1 = S(bx, by, Do);
+                    q2 = S(bx + nx * th, by + ny * th, Do - Lr); q3 = S(ax + nx * th, ay + ny * th, Do - Lr);
+                }
+                else                        // 90° return: folds inward over the opening
+                {
+                    q0 = S(ax, ay, Do); q1 = S(bx, by, Do);
+                    q2 = S(bx + nx * Lr, by + ny * Lr, Do); q3 = S(ax + nx * Lr, ay + ny * Lr, Do);
+                }
+                gfx.DrawPolygon(wallFill, new[] { q0, q1, q2, q3 }, XFillMode.Winding);
+                gfx.DrawLine(wp, q1, q2); gfx.DrawLine(wp, q2, q3); gfx.DrawLine(wp, q3, q0);
+            }
         }
         // Painter's order: far walls (back corner, top of image) first, near walls (front corner,
         // bottom of image) last — so the front walls sit ON TOP and aren't clipped by the back ones.
