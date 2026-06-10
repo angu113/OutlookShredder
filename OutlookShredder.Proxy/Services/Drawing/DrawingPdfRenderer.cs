@@ -308,6 +308,55 @@ public static class DrawingPdfRenderer
             case FinishSide.Bottom:                                     // Z: first flange's bottom face
                 FinishCallout(webO * 0.38, -t2, 0, 1); break;
         }
+
+        // ── Per-bend angle callouts: arc at the bend + a "75°" label carried outside the part ──
+        if (fp.Spec.AnglesAnnotated && fp.SectionBends.Count > 0)
+        {
+            var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+            // Part centroid (page space) — the label is pushed outward, away from this, so it clears the part.
+            double cxs = 0, cys = 0;
+            foreach (var p in prof) { var pp = P(p.x, p.y); cxs += pp.X; cys += pp.Y; }
+            var centroid = new XPoint(cxs / prof.Count, cys / prof.Count);
+
+            foreach (var b in fp.SectionBends)
+            {
+                var apex = P(b.X, b.Y);
+
+                // Face rays from the apex (page space — y points down, so negate model hy).
+                double inx = b.InHx, iny = -b.InHy, outx = b.OutHx, outy = -b.OutHy;
+                double il = Math.Sqrt(inx * inx + iny * iny); if (il < 1e-6) il = 1; inx /= il; iny /= il;
+                double ol = Math.Sqrt(outx * outx + outy * outy); if (ol < 1e-6) ol = 1; outx /= ol; outy /= ol;
+                double a1 = Math.Atan2(-iny, -inx), a2 = Math.Atan2(outy, outx);
+                double da = a2 - a1; while (da <= -Math.PI) da += 2 * Math.PI; while (da > Math.PI) da -= 2 * Math.PI;
+
+                // Small arc spanning the two faces at the bend.
+                double r = 12;
+                var arcPen = new XPen(DimColor, 0.8);
+                XPoint Prev = new(apex.X + r * Math.Cos(a1), apex.Y + r * Math.Sin(a1));
+                for (int i = 1; i <= 10; i++)
+                {
+                    double a = a1 + da * i / 10.0;
+                    var cur = new XPoint(apex.X + r * Math.Cos(a), apex.Y + r * Math.Sin(a));
+                    gfx.DrawLine(arcPen, Prev, cur); Prev = cur;
+                }
+
+                // Callout = the ACTUAL angle between the two faces (what the arc spans / a protractor reads),
+                // NOT the bend-from-flat input. A 50°-from-flat bend opens the faces to 130°, so it reads 130°.
+                double shownDeg = Math.Abs(da) * 180.0 / Math.PI;
+
+                // Label pushed outward (apex away from centroid), clamped inside the panel; short leader.
+                double odx = apex.X - centroid.X, ody = apex.Y - centroid.Y;
+                double ol2 = Math.Sqrt(odx * odx + ody * ody); if (ol2 < 1e-6) { odx = 0; ody = -1; ol2 = 1; }
+                odx /= ol2; ody /= ol2;
+                var txt = $"{shownDeg:0.#}°";
+                var sz = gfx.MeasureString(txt, angFont);
+                double lx = apex.X + odx * (r + 14), ly = apex.Y + ody * (r + 14);
+                double bx = Math.Max(area.X + 1, Math.Min(lx - sz.Width / 2, area.X + area.Width - sz.Width - 1));
+                double by = Math.Max(area.Y + 1, Math.Min(ly - sz.Height / 2, area.Y + area.Height - sz.Height - 1));
+                gfx.DrawLine(arcPen, new XPoint(apex.X + odx * r, apex.Y + ody * r), new XPoint(bx + sz.Width / 2, by + sz.Height / 2));
+                gfx.DrawString(txt, angFont, TextBrush, new XRect(bx, by, sz.Width + 2, sz.Height + 1), XStringFormats.TopLeft);
+            }
+        }
     }
 
     // ── 3. Thick-walled isometric (extrudes the profile) ─────────────────────

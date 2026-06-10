@@ -515,62 +515,92 @@ public static class FlatPattern
         return string.Join("\n", lines);
     }
 
+    // ── Resolve per-bend angle + direction (from spec.Bends, else shape defaults) ──
+    private static BendSpec[] ResolveBends(PartSpec spec, PartType type)
+    {
+        int n = type == PartType.LAngle ? 1 : 2;
+        var arr = new BendSpec[n];
+        for (int i = 0; i < n; i++)
+        {
+            if (spec.Bends is { } b && i < b.Count) arr[i] = b[i];
+            else arr[i] = new BendSpec(spec.AngleDeg,
+                (type == PartType.ZChannel && i == 1) ? BendDir.Down : BendDir.Up);
+        }
+        return arr;
+    }
+
     // ── U-channel (2 bends same direction) / Z-channel (2 bends opposing) ────
     private static FlatPatternResult DevelopChannel(PartSpec spec, bool isZ)
     {
-        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = spec.AngleDeg;
+        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor;
 
         // Inside → outside compensation: web spans both flanges (+2T); each flange runs to a free edge (+1T).
         double webO = spec.Web.Basis == DimBasis.Inside ? spec.Web.Value + 2 * t : spec.Web.Value;
         double flLO = spec.FlangeLeft.Basis == DimBasis.Inside ? spec.FlangeLeft.Value + t : spec.FlangeLeft.Value;
         double flRO = spec.FlangeRight.Basis == DimBasis.Inside ? spec.FlangeRight.Value + t : spec.FlangeRight.Value;
 
-        double ossb = BendMath.Ossb(ri, t, angle);
-        double ba = BendMath.BendAllowance(ri, t, k, angle);
-        double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
+        var bs = ResolveBends(spec, isZ ? PartType.ZChannel : PartType.UChannel);
+        double ossb0 = BendMath.Ossb(ri, t, bs[0].AngleDeg), ossb1 = BendMath.Ossb(ri, t, bs[1].AngleDeg);
+        double ba0 = BendMath.BendAllowance(ri, t, k, bs[0].AngleDeg), ba1 = BendMath.BendAllowance(ri, t, k, bs[1].AngleDeg);
+        double bd0 = BendMath.BendDeduction(ri, t, k, bs[0].AngleDeg, spec.MeasuredBendDeduction);
+        double bd1 = BendMath.BendDeduction(ri, t, k, bs[1].AngleDeg, spec.MeasuredBendDeduction);
 
-        double flatWidth = flLO + webO + flRO - 2 * bd;
+        double flatWidth = flLO + webO + flRO - bd0 - bd1;
         double flatHeight = spec.Length;
 
-        double leftFlangeFlat = flLO - ossb;
-        double webFlat = webO - 2 * ossb;
-        double bend1X = leftFlangeFlat + ba / 2.0;
-        double bend2X = leftFlangeFlat + ba + webFlat + ba / 2.0;
-        var bends = new[] { bend1X, bend2X };
+        double leftFlangeFlat = flLO - ossb0;
+        double webFlat = webO - ossb0 - ossb1;
+        double bend1X = leftFlangeFlat + ba0 / 2.0;
+        double bend2X = leftFlangeFlat + ba0 + webFlat + ba1 / 2.0;
+        var bendsX = new[] { bend1X, bend2X };
 
-        // Z folds its flanges in opposite directions; U folds them the same way.
-        var profile = isZ
-            ? BuildOffsetProfile(new[] { flLO, webO, flRO }, new[] { +1, -1 }, t, ri, 0, flLO, 0, -1)
-            : BuildRadiusedU(webO, flLO, flRO, t, ri);
+        List<(double x, double y)> profile;
+        List<SectionBend> sb;
+        if (!isZ && !spec.AnglesAnnotated)
+        {
+            // Default U (both 90°, both up): keep the original radiused-U section unchanged.
+            profile = BuildRadiusedU(webO, flLO, flRO, t, ri);
+            sb = new();
+        }
+        else
+        {
+            // Z (and any annotated U) walk the centreline with per-bend angle + direction.
+            (profile, sb) = BuildOffsetProfile(
+                new[] { flLO, webO, flRO },
+                new[] { (bs[0].AngleDeg, bs[0].Direction), (bs[1].AngleDeg, bs[1].Direction) },
+                t, ri, 0, flLO, 0, -1);
+        }
 
         string slug = (isZ ? "zchannel_" : "uchannel_") + $"{Trim(webO)}x{Trim(flLO)}x{Trim(flatHeight)}";
-        return Build(spec, ossb, ba, bd, webO, flLO, flRO, flatWidth, flatHeight, bends, profile, slug);
+        return Build(spec, ossb0, ba0, bd0, webO, flLO, flRO, flatWidth, flatHeight, bendsX, profile, slug, bs, new[] { bd0, bd1 }, sb);
     }
 
     // ── L-angle (1 bend, two legs) ───────────────────────────────────────────
     private static FlatPatternResult DevelopLAngle(PartSpec spec)
     {
-        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor, angle = spec.AngleDeg;
+        double t = spec.Thickness, ri = spec.InsideRadius, k = spec.KFactor;
 
         // legA = FlangeLeft, legB = FlangeRight. Each leg runs to a free edge (+1T inside).
         double legAo = spec.FlangeLeft.Basis == DimBasis.Inside ? spec.FlangeLeft.Value + t : spec.FlangeLeft.Value;
         double legBo = spec.FlangeRight.Basis == DimBasis.Inside ? spec.FlangeRight.Value + t : spec.FlangeRight.Value;
 
-        double ossb = BendMath.Ossb(ri, t, angle);
-        double ba = BendMath.BendAllowance(ri, t, k, angle);
-        double bd = BendMath.BendDeduction(ri, t, k, angle, spec.MeasuredBendDeduction);
+        var bs = ResolveBends(spec, PartType.LAngle);
+        double ossb = BendMath.Ossb(ri, t, bs[0].AngleDeg);
+        double ba = BendMath.BendAllowance(ri, t, k, bs[0].AngleDeg);
+        double bd = BendMath.BendDeduction(ri, t, k, bs[0].AngleDeg, spec.MeasuredBendDeduction);
 
         double flatWidth = legAo + legBo - bd;
         double flatHeight = spec.Length;
         double bend1X = (legAo - ossb) + ba / 2.0;
-        var bends = new[] { bend1X };
+        var bendsX = new[] { bend1X };
 
         // Centreline: (0,legBo) down to (0,0), bend, across to (legAo,0).
-        var profile = BuildOffsetProfile(new[] { legBo, legAo }, new[] { +1 }, t, ri, 0, legBo, 0, -1);
+        var (profile, sb) = BuildOffsetProfile(
+            new[] { legBo, legAo }, new[] { (bs[0].AngleDeg, bs[0].Direction) }, t, ri, 0, legBo, 0, -1);
 
         string slug = $"angle_{Trim(legAo)}x{Trim(legBo)}x{Trim(flatHeight)}";
         // WebOutside unused for L; legA in FlangeLeftOutside, legB in FlangeRightOutside.
-        return Build(spec, ossb, ba, bd, 0, legAo, legBo, flatWidth, flatHeight, bends, profile, slug);
+        return Build(spec, ossb, ba, bd, 0, legAo, legBo, flatWidth, flatHeight, bendsX, profile, slug, bs, new[] { bd }, sb);
     }
 
     // ── Shared result assembly (cut geometry rectangle + N bend lines) ───────
@@ -578,7 +608,8 @@ public static class FlatPattern
         PartSpec spec, double ossb, double ba, double bd,
         double webO, double flLO, double flRO,
         double flatWidth, double flatHeight, double[] bends,
-        List<(double x, double y)> profile, string slug)
+        List<(double x, double y)> profile, string slug,
+        BendSpec[] resolvedBends, double[] bdEach, List<SectionBend> sectionBends)
     {
         var entities = new List<CutEntity>
         {
@@ -613,7 +644,8 @@ public static class FlatPattern
             BendLinesX = bends,
             Cut = cut,
             Profile = profile,
-            Summary = BuildSummary(spec, webO, flLO, flRO, bd, bends.Length),
+            SectionBends = sectionBends,
+            Summary = BuildSummary(spec, webO, flLO, flRO, resolvedBends, bdEach),
             Title = PlainTitle(spec),
         };
     }
@@ -658,41 +690,49 @@ public static class FlatPattern
     /// 90° arcs of radius Ri+T/2 at each bend, turning +1 = left / -1 = right), then offsets ±T/2
     /// along the local normal to form the two faces. Handles same- and opposing-direction bends.
     /// </summary>
-    private static List<(double x, double y)> BuildOffsetProfile(
-        double[] segs, int[] turns, double t, double ri, double sx, double sy, double hx, double hy)
+    private static (List<(double x, double y)> Loop, List<SectionBend> Bends) BuildOffsetProfile(
+        double[] segs, (double AngleDeg, BendDir Dir)[] bends, double t, double ri, double sx, double sy, double hx, double hy)
     {
         double rc = ri + t / 2.0;
         const int K = 6;
         var c = new List<(double x, double y, double nx, double ny)>();
+        var marks = new List<SectionBend>();
         double px = sx, py = sy;
         double hn = Math.Sqrt(hx * hx + hy * hy); hx /= hn; hy /= hn;
         c.Add((px, py, -hy, hx));
+        // Centreline tangent consumed by the fillet at each adjacent bend = rc·tan(angle/2).
+        double TanCut(int bendIdx) => bendIdx >= 0 && bendIdx < bends.Length
+            ? rc * Math.Tan(bends[bendIdx].AngleDeg * Math.PI / 360.0) : 0;
         for (int i = 0; i < segs.Length; i++)
         {
-            // The bend arc consumes ~rc of length at each adjacent bend; subtract it so segment
-            // ends land on their nominal coordinates (so section dimensions touch the real edges).
-            double cut = (i > 0 ? rc : 0) + (i < segs.Length - 1 ? rc : 0);
+            double cut = TanCut(i - 1) + TanCut(i);
             double straight = Math.Max(0.001, segs[i] - cut);
             px += hx * straight; py += hy * straight;
             c.Add((px, py, -hy, hx));
             if (i < segs.Length - 1)
             {
-                int d = turns[i];
+                var (angDeg, dir) = bends[i];
+                int d = dir == BendDir.Up ? +1 : -1;
+                double sweep = angDeg * Math.PI / 180.0;
+                double inHx = hx, inHy = hy;
+                // Sharp-corner apex (where the two straight runs meet) — the bend's reference point.
+                double vx = px + hx * TanCut(i), vy = py + hy * TanCut(i);
                 double cx = px + d * (-hy) * rc, cy = py + d * hx * rc;
                 double a0 = Math.Atan2(py - cy, px - cx);
                 for (int kk = 1; kk <= K; kk++)
                 {
-                    double a = a0 + d * (Math.PI / 2.0) * (kk / (double)K);
+                    double a = a0 + d * sweep * (kk / (double)K);
                     px = cx + rc * Math.Cos(a); py = cy + rc * Math.Sin(a);
                     hx = -d * Math.Sin(a); hy = d * Math.Cos(a);
                     c.Add((px, py, -hy, hx));
                 }
+                marks.Add(new SectionBend(vx, vy, inHx, inHy, hx, hy, angDeg, dir));
             }
         }
         var loop = new List<(double x, double y)>();
         foreach (var p in c) loop.Add((p.x + p.nx * t / 2, p.y + p.ny * t / 2));
         for (int i = c.Count - 1; i >= 0; i--) loop.Add((c[i].x - c[i].nx * t / 2, c[i].y - c[i].ny * t / 2));
-        return loop;
+        return (loop, marks);
     }
 
     // ── Title / summary ──────────────────────────────────────────────────────
@@ -739,7 +779,7 @@ public static class FlatPattern
 
     private static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
-    private static string BuildSummary(PartSpec s, double webO, double flLO, double flRO, double bd, int nBends)
+    private static string BuildSummary(PartSpec s, double webO, double flLO, double flRO, BendSpec[] bends, double[] bdEach)
     {
         string basis = (s.Web.Basis == s.FlangeLeft.Basis && s.FlangeLeft.Basis == s.FlangeRight.Basis)
             ? s.Web.Basis.ToString().ToLowerInvariant() : "mixed";
@@ -756,8 +796,18 @@ public static class FlatPattern
         {
             $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",
             $"Basis: {basis}  ->  outside {outside}",
-            $"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {s.AngleDeg:0.#} deg,  BD {F(bd)}{u}/bend (x{nBends})",
         };
+        if (s.AnglesAnnotated)
+        {
+            lines.Add($"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}");
+            for (int i = 0; i < bends.Length; i++)
+                // Show the ACTUAL angle between the faces (180 − bend-from-flat), matching the drawn callout.
+                lines.Add($"  bend {i + 1}: {(180.0 - bends[i].AngleDeg):0.#} deg {bends[i].Direction.ToString().ToLowerInvariant()}, BD {F(bdEach[i])}{u}");
+        }
+        else
+        {
+            lines.Add($"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {bends[0].AngleDeg:0.#} deg,  BD {F(bdEach[0])}{u}/bend (x{bends.Length})");
+        }
         string? finishNote = s.Finish switch
         {
             FinishSide.Inside  => "Finish on inside face",
@@ -773,6 +823,13 @@ public static class FlatPattern
     private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
     private static string Trim(double v) => v.ToString("0.##", CultureInfo.InvariantCulture);
 }
+
+/// <summary>
+/// A bend marker in cross-section (model) coords: the sharp-corner apex, the incoming/outgoing
+/// centreline unit headings, and the bend's angle + direction. Drives the degree/arc callouts.
+/// </summary>
+public sealed record SectionBend(
+    double X, double Y, double InHx, double InHy, double OutHx, double OutHy, double AngleDeg, BendDir Dir);
 
 /// <summary>Result of developing a part — drives the DXF, the PDF render, and the UI summary.</summary>
 public sealed class FlatPatternResult
@@ -790,6 +847,8 @@ public sealed class FlatPatternResult
     public required CutGeometry Cut { get; init; }
     /// <summary>Radiused cross-section material loop (model coords) for the section + iso views.</summary>
     public List<(double x, double y)> Profile { get; init; } = new();
+    /// <summary>Per-bend markers (centreline apex + headings + angle/dir) for drawing angle callouts.</summary>
+    public List<SectionBend> SectionBends { get; init; } = new();
     /// <summary>True for flat plates (Flitch / Base) — drawn as a single top view, not 3 panels.</summary>
     public bool IsPlate { get; init; }
     /// <summary>True for pans — drawn as a single flat-pattern top view (cut + bend lines + reliefs).</summary>

@@ -18,6 +18,12 @@ public enum PartType
 /// <summary>How holes are laid out on a flat plate.</summary>
 public enum HolePattern { Staggered, Paired, Corner }
 
+/// <summary>Which way a flange folds relative to the web plane: Up = above, Down = below.</summary>
+public enum BendDir { Up, Down }
+
+/// <summary>One bend: its angle from flat (90 = square corner) and fold direction.</summary>
+public sealed record BendSpec(double AngleDeg, BendDir Direction);
+
 /// <summary>
 /// Which face carries the finish (brushed stainless, paint, etc.). Inside/Outside for
 /// U / L / pan (relative to the bend direction); Top/Bottom for Z (relative to the first flange).
@@ -131,10 +137,19 @@ public sealed class PartSpec
     public double InsideRadius { get; init; }
     /// <summary>K-factor for the bend-allowance estimate.</summary>
     public double KFactor { get; init; }
-    /// <summary>Bend angle in degrees (90 = right angle).</summary>
+    /// <summary>Bend angle in degrees (90 = right angle). Fallback when <see cref="Bends"/> is null.</summary>
     public double AngleDeg { get; init; } = 90.0;
     /// <summary>When set, used directly as the per-bend deduction; the K estimate is skipped.</summary>
     public double? MeasuredBendDeduction { get; init; }
+
+    /// <summary>
+    /// Per-bend angle + fold direction for U / L / Z. Order follows the flanges left→right
+    /// (U/Z: [flange-left bend, flange-right bend]; L: [the single bend]). Null ⇒ derive from
+    /// <see cref="AngleDeg"/> + the shape's default directions (back-compat / shorthand input).
+    /// </summary>
+    public IReadOnlyList<BendSpec>? Bends { get; init; }
+    /// <summary>True when the input carried explicit per-bend angles (gates the degree/arc callouts).</summary>
+    public bool AnglesAnnotated { get; init; }
 
     /// <summary>Human-readable material label for display/labelling, e.g. "16ga CRS".</summary>
     public string Material { get; init; } = "";
