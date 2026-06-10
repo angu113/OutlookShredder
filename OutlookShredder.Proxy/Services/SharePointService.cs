@@ -4608,7 +4608,7 @@ public partial class SharePointService
                 }
 
                 reportSliGroups.Add(new DedupeReportSliDupeGroup(
-                    srId, rfqId, supplier,
+                    srId, rfqId ?? "", supplier,
                     sliKeeper.Id!, Fld(sliKeeper, "ProductName") ?? "",
                     [.. reportDupes]));
             }

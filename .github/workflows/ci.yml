@@ -2,10 +2,8 @@ name: CI
 
 # Build + run the proxy unit tests on every push and PR to master. The staleness gate for the
 # proxy's pure logic (WeightCalculator, ProductDeduplicator, DimensionNormalizer): a behaviour
-# change that doesn't update its test, or a red suite, fails here.
-#
-# No -warnaserror yet: the proxy still carries pre-existing warnings (CS8602/CS8604/CA2017).
-# Add the gate once those are cleared (mirrors the Shredder repo's CI).
+# change that doesn't update its test, or a red suite, fails here. The proxy build is warning-clean,
+# so -warnaserror keeps it that way (mirrors the Shredder repo's CI).
 
 on:
   push:
@@ -25,5 +23,5 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Restore and test
-        run: dotnet test OutlookShredder.Proxy.Tests/OutlookShredder.Proxy.Tests.csproj --configuration Release
+      - name: Restore and test (warnings = errors)
+        run: dotnet test OutlookShredder.Proxy.Tests/OutlookShredder.Proxy.Tests.csproj --configuration Release -warnaserror

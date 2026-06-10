@@ -57,7 +57,7 @@ public class FallbackAiExtractionService : IAiExtractionService
         }
         catch (AiServiceOverloadedException) when (!ct.IsCancellationRequested && primaryWasOverloaded)
         {
-            _log.LogWarning("[Fallback] Both {Primary} and {Secondary} overloaded — retrying {Primary}",
+            _log.LogWarning("[Fallback] Both {Primary} and {Secondary} overloaded — retrying the primary",
                 _primary.ProviderName, _secondary.ProviderName);
             return await _primary.ExtractRfqAsync(request, ct);
         }
@@ -102,7 +102,7 @@ public class FallbackAiExtractionService : IAiExtractionService
         }
         catch (AiServiceOverloadedException) when (!ct.IsCancellationRequested && primaryWasOverloaded)
         {
-            _log.LogWarning("[Fallback] Both {Primary} and {Secondary} overloaded — retrying {Primary}",
+            _log.LogWarning("[Fallback] Both {Primary} and {Secondary} overloaded — retrying the primary",
                 _primary.ProviderName, _secondary.ProviderName);
             return await _primary.ExtractPurchaseOrderAsync(
                 base64Pdf, fileName, emailBodyContext, emailSubject, jobRefs, ct);

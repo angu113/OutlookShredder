@@ -635,7 +635,7 @@ public sealed class MailboxBridgeService : BackgroundService
         var part = src.Attachments
             .OfType<MimePart>()
             .FirstOrDefault(p => string.Equals(p.FileName ?? p.ContentType?.Name, attachmentName, StringComparison.OrdinalIgnoreCase));
-        if (part is null) return null;
+        if (part?.Content is null) return null;
 
         using var ms = new MemoryStream();
         await part.Content.DecodeToAsync(ms, ct);
@@ -739,7 +739,7 @@ public sealed class MailboxBridgeService : BackgroundService
         var msg = await MimeMessage.LoadAsync(mime, ct);
         var part = msg.Attachments.OfType<MimePart>()
             .FirstOrDefault(p => string.Equals(p.FileName ?? p.ContentType?.Name, attachmentName, StringComparison.OrdinalIgnoreCase));
-        if (part is null) return null;
+        if (part?.Content is null) return null;
         using var ms = new MemoryStream();
         await part.Content.DecodeToAsync(ms, ct);
         return (part.ContentType?.MimeType ?? "application/octet-stream", ms.ToArray(), part.FileName ?? attachmentName);

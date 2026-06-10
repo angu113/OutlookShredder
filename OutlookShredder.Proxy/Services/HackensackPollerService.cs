@@ -221,6 +221,7 @@ public class HackensackPollerService : BackgroundService
                 var attName = attachment.FileName ?? "attachment";
                 var attType = attachment.ContentType.MimeType;
 
+                if (attachment.Content is null) continue;   // no decodable content — skip
                 using var mem = new MemoryStream();
                 await attachment.Content.DecodeToAsync(mem);
                 var attBytes = Convert.ToBase64String(mem.ToArray());
