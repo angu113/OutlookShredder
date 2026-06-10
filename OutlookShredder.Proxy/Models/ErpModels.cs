@@ -83,6 +83,17 @@ public class ErpAnnotation
     public string Color   { get; set; } = "#2E7D32";
     public string AddedAt { get; set; } = "";
     public string AddedBy { get; set; } = "";
+
+    /// <summary>Stable per-instance id (GUID "N"). Multiple stamps may share a Label; the id disambiguates.</summary>
+    public string Id { get; set; } = "";
+    /// <summary>Zero-based page the stamp is placed on. Defaults to page 1 (index 0).</summary>
+    public int PageIndex { get; set; }
+    /// <summary>Fractional X of the stamp's top-left in [0..1]; null means unplaced (renders stacked in the box).</summary>
+    public double? XFrac { get; set; }
+    /// <summary>Fractional Y of the stamp's top-left in [0..1]; null means unplaced.</summary>
+    public double? YFrac { get; set; }
+    /// <summary>Per-stamp font scale multiplier (1.0 = default). Adjusted by the +/- controls.</summary>
+    public double FontScale { get; set; } = 1.0;
 }
 
 public class ErpScanResult
