@@ -10,11 +10,15 @@ namespace OutlookShredder.Proxy.Models;
 /// </summary>
 public static class MailTaxonomy
 {
-    public sealed record Leaf(string Top, string Sub, string Description)
+    public sealed record Leaf(string Top, string Sub, string Description, bool InPrompt = true)
     {
         /// <summary>Canonical path, e.g. "Supplier/MTRs". "Other" has no sub.</summary>
         public string Path => string.IsNullOrEmpty(Sub) ? Top : $"{Top}/{Sub}";
     }
+
+    /// <summary>System triage bucket for low-confidence classifications (set by the workbench, never
+    /// chosen by the AI). A valid path so the tree/coerce accept it, but excluded from the prompt.</summary>
+    public const string NeedsReviewPath = "Needs Review";
 
     public static readonly IReadOnlyList<Leaf> Leaves =
     [
@@ -68,6 +72,11 @@ public static class MailTaxonomy
             "Unsolicited marketing, cold sales solicitations, and other low-value mail that can sit here until reviewed."),
         new("Other", "",
             "Everything else that does not fit the categories above. Propose a concise free-text sub-label naming the emergent category."),
+
+        // System triage bucket — NOT offered to the classifier (InPrompt: false). The workbench files
+        // low-confidence AI results here so nothing silently mis-files; cleared by confirm/correct.
+        new(NeedsReviewPath, "",
+            "Low-confidence classifications quarantined for human review. Confirm or correct each (a correction can become a rule).", InPrompt: false),
     ];
 
     public static readonly IReadOnlySet<string> ValidPaths =
@@ -86,10 +95,11 @@ public static class MailTaxonomy
     public static string RenderForPrompt()
     {
         var sb = new StringBuilder();
-        foreach (var top in Leaves.Select(l => l.Top).Distinct())
+        var prompt = Leaves.Where(l => l.InPrompt).ToList();
+        foreach (var top in prompt.Select(l => l.Top).Distinct())
         {
             sb.Append("- ").Append(top).Append('\n');
-            foreach (var leaf in Leaves.Where(l => l.Top == top))
+            foreach (var leaf in prompt.Where(l => l.Top == top))
             {
                 if (string.IsNullOrEmpty(leaf.Sub))
                     sb.Append("    (").Append(top).Append("): ").Append(leaf.Description).Append('\n');

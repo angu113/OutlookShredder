@@ -1,6 +1,9 @@
+using System.Text.Json.Serialization;
+
 namespace OutlookShredder.Proxy.Models;
 
 /// <summary>The signal a rule condition inspects on an email.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum MailRuleSignal
 {
     SenderAddress,     // full from address, e.g. billing@acme.com
@@ -12,6 +15,7 @@ public enum MailRuleSignal
 }
 
 /// <summary>How a condition's value(s) are tested against the signal text.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum MailRuleOperator
 {
     Contains,     // signal contains Values[0] (case-insensitive)

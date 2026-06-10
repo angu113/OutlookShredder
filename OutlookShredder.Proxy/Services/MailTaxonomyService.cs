@@ -84,7 +84,7 @@ public sealed class MailTaxonomyService
     public async Task<string> RenderForPromptAsync(CancellationToken ct = default)
     {
         await EnsureFreshAsync(ct);
-        var leaves = _leaves;
+        var leaves = _leaves.Where(l => l.InPrompt).ToList();   // exclude system buckets (e.g. Needs Review)
         var sb = new StringBuilder();
         foreach (var top in leaves.Select(l => l.Top).Distinct())
         {

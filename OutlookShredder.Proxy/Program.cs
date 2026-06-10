@@ -126,6 +126,7 @@ try
     builder.Services.AddSingleton<TodoService>();
     builder.Services.AddSingleton<MailboxBridgeService>();
     builder.Services.AddSingleton<MailTaxonomyService>();
+    builder.Services.AddSingleton<MailRuleService>();
     builder.Services.AddSingleton<MailCacheService>();
     builder.Services.AddSingleton<MailProjectService>();
     builder.Services.AddSingleton<MailClassifierService>();

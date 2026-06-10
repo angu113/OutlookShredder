@@ -1,0 +1,112 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Graph.Models;
+using OutlookShredder.Proxy.Models;
+
+namespace OutlookShredder.Proxy.Services;
+
+/// <summary>
+/// MailRules persistence — the deterministic classification rules managed back-office in Tools and
+/// applied (before the AI) by <see cref="MailRuleService"/>. Each rule's Conditions list is stored as
+/// JSON in one column (string-enum serialised so reordering the enums never corrupts stored rules).
+/// </summary>
+public partial class SharePointService
+{
+    private static readonly JsonSerializerOptions RuleJson = new()
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
+
+    public async Task<List<MailRule>> ReadMailRulesAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailRulesList,
+            ["Title", "RuleId", "Enabled", "Priority", "CategoryPath", "ConditionsJson", "HitCount"], null, ct);
+        var rules = new List<MailRule>();
+        foreach (var f in rows)
+        {
+            var id = GetStr(f, "RuleId");
+            if (string.IsNullOrEmpty(id)) id = GetStr(f, "__spId");
+            if (string.IsNullOrEmpty(id)) continue;
+            List<MailRuleCondition> conds = [];
+            var cj = GetStr(f, "ConditionsJson");
+            if (!string.IsNullOrWhiteSpace(cj))
+                try { conds = JsonSerializer.Deserialize<List<MailRuleCondition>>(cj, RuleJson) ?? []; }
+                catch (Exception ex) { _log.LogWarning(ex, "[MailRules] bad ConditionsJson for {Id}", id); }
+            rules.Add(new MailRule
+            {
+                Id           = id!,
+                Name         = GetStr(f, "Title") ?? "",
+                Enabled      = GetBool(f, "Enabled"),
+                Priority     = (int)GetDouble(f, "Priority"),
+                CategoryPath = GetStr(f, "CategoryPath") ?? "",
+                Conditions   = conds,
+                HitCount     = (int)GetDouble(f, "HitCount"),
+            });
+        }
+        return rules;
+    }
+
+    public async Task<string> WriteMailRuleAsync(MailRule rule, string createdBy, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailRulesList);
+        if (string.IsNullOrEmpty(rule.Id)) rule.Id = Guid.NewGuid().ToString("N");
+        await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+            {
+                ["Title"]          = Trunc(rule.Name, 250),
+                ["RuleId"]         = rule.Id,
+                ["Enabled"]        = rule.Enabled,
+                ["Priority"]       = rule.Priority,
+                ["CategoryPath"]   = rule.CategoryPath,
+                ["ConditionsJson"] = Trunc(JsonSerializer.Serialize(rule.Conditions, RuleJson), 30000),
+                ["HitCount"]       = rule.HitCount,
+                ["CreatedAt"]      = DateTimeOffset.UtcNow.ToString("o"),
+                ["CreatedBy"]      = createdBy,
+            } }
+        }, cancellationToken: ct);
+        _log.LogInformation("[MailRules] rule added: {Name} -> {Cat}", rule.Name, rule.CategoryPath);
+        return rule.Id;
+    }
+
+    public async Task<bool> UpdateMailRuleAsync(string ruleId, MailRule rule, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailRulesList);
+        var spId = await FindMailRuleSpIdAsync(siteId, listId, ruleId, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+            {
+                ["Title"]          = Trunc(rule.Name, 250),
+                ["Enabled"]        = rule.Enabled,
+                ["Priority"]       = rule.Priority,
+                ["CategoryPath"]   = rule.CategoryPath,
+                ["ConditionsJson"] = Trunc(JsonSerializer.Serialize(rule.Conditions, RuleJson), 30000),
+            } }, cancellationToken: ct);
+        return true;
+    }
+
+    public async Task<bool> DeleteMailRuleAsync(string ruleId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailRulesList);
+        var spId = await FindMailRuleSpIdAsync(siteId, listId, ruleId, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].DeleteAsync(cancellationToken: ct);
+        _log.LogInformation("[MailRules] rule deleted: {Id}", ruleId);
+        return true;
+    }
+
+    private async Task<string?> FindMailRuleSpIdAsync(string siteId, string listId, string ruleId, CancellationToken ct)
+    {
+        var res = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=RuleId)"];
+            req.QueryParameters.Filter = $"fields/RuleId eq '{Esc(ruleId)}'";
+            req.QueryParameters.Top    = 1;
+        }, ct);
+        return res?.Value?.FirstOrDefault()?.Id;
+    }
+}

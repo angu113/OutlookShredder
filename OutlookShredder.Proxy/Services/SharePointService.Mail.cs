@@ -17,6 +17,7 @@ public partial class SharePointService
     private const string MailClassList = "MailClassifications";
     private const string MailHintsList = "MailTaxonomyHints";
     private const string MailProjectsList = "MailProjects";
+    private const string MailRulesList = "MailRules";
 
     // ── Provisioning ──────────────────────────────────────────────────────────────
 
@@ -63,7 +64,15 @@ public partial class SharePointService
         ]);
         await IndexListColumnsAsync(siteId, MailProjectsList, "ProjectId", "Status");
 
-        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints, mailProjects = projects };
+        var rules = await EnsureListColumnsAsync(siteId, MailRulesList,
+        [
+            ("RuleId","text"), ("Enabled","boolean"), ("Priority","number"),
+            ("CategoryPath","text"), ("ConditionsJson","note"), ("HitCount","number"),
+            ("CreatedAt","dateTime"), ("CreatedBy","text"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailRulesList, "RuleId", "Priority");
+
+        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints, mailProjects = projects, mailRules = rules };
     }
 
     // ── MailProjects (Layer 2: cross-conversation grouping) ──────────────────────────
