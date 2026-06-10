@@ -72,6 +72,13 @@ public sealed class MailTaxonomyService
 
     public async Task<List<TaxonomyHintRow>> GetHintsAsync(CancellationToken ct = default) { await EnsureFreshAsync(ct); return _hints; }
 
+    /// <summary>The payment-processor / billing-service sender domains currently mapped (the "@sender:" hints).</summary>
+    public async Task<IReadOnlySet<string>> GetSenderDomainsAsync(CancellationToken ct = default)
+    {
+        await EnsureFreshAsync(ct);
+        return _senderMap.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
     /// <summary>Snaps a category to a known effective leaf (sync; uses the last-loaded set).</summary>
     public string Coerce(string? category)
     {

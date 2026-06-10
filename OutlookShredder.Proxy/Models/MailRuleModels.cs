@@ -11,7 +11,8 @@ public enum MailRuleSignal
     Subject,
     Body,
     AttachmentName,    // any attachment filename
-    AttachmentContent, // extracted/OCR'd text of the attachments (populated in Phase 2)
+    AttachmentContent,     // extracted/OCR'd text of the attachments (populated in Phase 2)
+    SenderIsKnownSupplier, // derived: sender domain is in the Suppliers table (text "true"/"false")
 }
 
 /// <summary>How a condition's value(s) are tested against the signal text.</summary>
@@ -34,6 +35,10 @@ public sealed class MailRuleCondition
     public List<string> Values { get; set; } = [];
     /// <summary>For AnyOf: how many of Values must be present for the condition to match (min 1).</summary>
     public int MinMatches { get; set; } = 1;
+    /// <summary>Optional name of a persisted <see cref="MailMatchList"/> whose values are merged into
+    /// Values at evaluation time — so a shared, growable list (payment-processor domains, MTR content
+    /// indicators, …) can back many rules. Resolved by MailRuleService before the pure engine runs.</summary>
+    public string? ValueListRef { get; set; }
 }
 
 /// <summary>
@@ -68,4 +73,16 @@ public sealed class MailRuleSignals
     public string Body { get; set; } = "";
     public List<string> AttachmentNames { get; set; } = [];
     public string AttachmentContent { get; set; } = "";
+    /// <summary>Derived: the sender's domain is a known supplier (Suppliers table). Exposed to rules as
+    /// the SenderIsKnownSupplier signal (text "true"/"false", matched with the Equals operator).</summary>
+    public bool SenderIsKnownSupplier { get; set; }
+}
+
+/// <summary>A named, persisted list of match values a rule condition can reference via
+/// <see cref="MailRuleCondition.ValueListRef"/> — e.g. "payment-processors" (billing domains) or
+/// "mtr-content-indicators". Lets a shared list grow without editing every rule that uses it.</summary>
+public sealed class MailMatchList
+{
+    public string Name { get; set; } = "";
+    public List<string> Values { get; set; } = [];
 }

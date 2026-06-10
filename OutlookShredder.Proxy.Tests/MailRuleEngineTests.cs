@@ -17,11 +17,12 @@ public class MailRuleEngineTests
 
     private static MailRuleSignals Signals(
         string sender = "", string domain = "", string subject = "", string body = "",
-        string attachContent = "", string[]? attachNames = null)
+        string attachContent = "", string[]? attachNames = null, bool knownSupplier = false)
         => new()
         {
             SenderAddress = sender, SenderDomain = domain, Subject = subject, Body = body,
             AttachmentContent = attachContent, AttachmentNames = [.. (attachNames ?? [])],
+            SenderIsKnownSupplier = knownSupplier,
         };
 
     [Fact]
@@ -112,4 +113,34 @@ public class MailRuleEngineTests
     [Fact]
     public void No_rules_returns_null_fall_through_to_ai()
         => Assert.Null(MailRuleEngine.FirstMatch([], Signals(domain: "acme.com")));
+
+    [Fact]
+    public void Known_supplier_with_po_in_body_files_as_order_confirmation()
+    {
+        // The seeded protective rule: a known supplier referencing our HSK-PO number.
+        var rule = Rule("Supplier/Order Confirmations", 10, true,
+            Cond(MailRuleSignal.SenderIsKnownSupplier, MailRuleOperator.Equals, 1, "true"),
+            Cond(MailRuleSignal.Body, MailRuleOperator.Regex, 1, @"HSK-PO\d+"));
+
+        Assert.Equal("Supplier/Order Confirmations",
+            MailRuleEngine.FirstMatch([rule], Signals(body: "Acknowledging HSK-PO0012345", knownSupplier: true))?.CategoryPath);
+        // same PO but NOT a known supplier (e.g. a payment processor) -> rule skips, AI handles it
+        Assert.Null(MailRuleEngine.FirstMatch([rule], Signals(body: "Invoice for HSK-PO0012345", knownSupplier: false)));
+    }
+
+    [Fact]
+    public void Condition_resolves_a_named_match_list_subdomain_aware()
+    {
+        // A condition references the growable "processors" list instead of inlining domains.
+        var rule = Rule("Supplier/Invoices and Bills", 0, true,
+            new MailRuleCondition { Signal = MailRuleSignal.SenderDomain, Operator = MailRuleOperator.AnyOf, ValueListRef = "processors" });
+        var lists = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["processors"] = ["enmarksystems.com", "intuit.com"],
+        };
+
+        Assert.NotNull(MailRuleEngine.FirstMatch([rule], Signals(domain: "billing.intuit.com"), lists));  // subdomain contains intuit.com
+        Assert.Null(MailRuleEngine.FirstMatch([rule], Signals(domain: "acme.com"), lists));
+        Assert.Null(MailRuleEngine.FirstMatch([rule], Signals(domain: "intuit.com")));   // no lists passed -> ref unresolved -> no match
+    }
 }

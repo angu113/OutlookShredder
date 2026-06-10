@@ -12,6 +12,8 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public partial class SharePointService
 {
+    private const string MailMatchListsList = "MailMatchLists";
+
     private static readonly JsonSerializerOptions RuleJson = new()
     {
         Converters = { new JsonStringEnumConverter() },
@@ -105,6 +107,63 @@ public partial class SharePointService
         {
             req.QueryParameters.Expand = ["fields($select=RuleId)"];
             req.QueryParameters.Filter = $"fields/RuleId eq '{Esc(ruleId)}'";
+            req.QueryParameters.Top    = 1;
+        }, ct);
+        return res?.Value?.FirstOrDefault()?.Id;
+    }
+
+    // ── Match lists (named value sets referenced by rule conditions) ──────────────────
+
+    public async Task<List<MailMatchList>> ReadMatchListsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailMatchListsList, ["Title", "ValuesJson"], null, ct);
+        return rows.Select(f => new MailMatchList
+        {
+            Name   = GetStr(f, "Title") ?? "",
+            Values = SafeList(GetStr(f, "ValuesJson")),
+        }).Where(l => l.Name.Length > 0).ToList();
+    }
+
+    /// <summary>Upsert a match list by name (case-insensitive). Returns true if it already existed.</summary>
+    public async Task<bool> WriteMatchListAsync(MailMatchList list, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailMatchListsList);
+        var spId   = await FindMatchListSpIdAsync(siteId, listId, list.Name, ct);
+        var fields = new Dictionary<string, object?>
+        {
+            ["Title"]      = Trunc(list.Name, 250),
+            ["ValuesJson"] = Trunc(JsonSerializer.Serialize(list.Values), 30000),
+        };
+        if (spId is null)
+        {
+            fields["CreatedAt"] = DateTimeOffset.UtcNow.ToString("o");
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = fields } }, cancellationToken: ct);
+            _log.LogInformation("[MailRules] match list created: {Name} ({N})", list.Name, list.Values.Count);
+            return false;
+        }
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+        return true;
+    }
+
+    public async Task<bool> DeleteMatchListAsync(string name, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailMatchListsList);
+        var spId   = await FindMatchListSpIdAsync(siteId, listId, name, ct);
+        if (spId is null) return false;
+        await GetGraph().Sites[siteId].Lists[listId].Items[spId].DeleteAsync(cancellationToken: ct);
+        return true;
+    }
+
+    private async Task<string?> FindMatchListSpIdAsync(string siteId, string listId, string name, CancellationToken ct)
+    {
+        var res = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=Title)"];
+            req.QueryParameters.Filter = $"fields/Title eq '{Esc(name)}'";
             req.QueryParameters.Top    = 1;
         }, ct);
         return res?.Value?.FirstOrDefault()?.Id;

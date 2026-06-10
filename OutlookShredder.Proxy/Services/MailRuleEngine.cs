@@ -14,13 +14,38 @@ public static class MailRuleEngine
     // hang the poller (ReDoS). An invalid or slow pattern simply doesn't match.
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
 
-    /// <summary>The first matching rule, or null when none match (caller falls through to the AI).</summary>
-    public static MailRule? FirstMatch(IEnumerable<MailRule> rules, MailRuleSignals signals)
+    /// <summary>The first matching rule, or null when none match (caller falls through to the AI).
+    /// When <paramref name="lists"/> is supplied, each condition's ValueListRef is expanded against it
+    /// (the named match list's values are merged in) before matching.</summary>
+    public static MailRule? FirstMatch(IEnumerable<MailRule> rules, MailRuleSignals signals,
+        IReadOnlyDictionary<string, List<string>>? lists = null)
     {
         foreach (var rule in rules.Where(r => r.Enabled).OrderBy(r => r.Priority))
-            if (Matches(rule, signals))
-                return rule;
+        {
+            var effective = lists is null ? rule : Resolve(rule, lists);
+            if (Matches(effective, signals)) return rule;   // return the ORIGINAL rule (name/HitCount)
+        }
         return null;
+    }
+
+    /// <summary>Pure expansion: a copy of the rule with each condition's ValueListRef resolved (the named
+    /// list's values merged into Values), so the matcher always works on concrete values.</summary>
+    public static MailRule Resolve(MailRule r, IReadOnlyDictionary<string, List<string>> lists)
+    {
+        if (r.Conditions.All(c => string.IsNullOrEmpty(c.ValueListRef))) return r;
+        return new MailRule
+        {
+            Id = r.Id, Name = r.Name, Enabled = r.Enabled, Priority = r.Priority,
+            CategoryPath = r.CategoryPath, HitCount = r.HitCount,
+            Conditions = r.Conditions.Select(c =>
+                string.IsNullOrEmpty(c.ValueListRef) || !lists.TryGetValue(c.ValueListRef!, out var extra) || extra.Count == 0
+                    ? c
+                    : new MailRuleCondition
+                    {
+                        Signal = c.Signal, Operator = c.Operator, MinMatches = c.MinMatches, ValueListRef = c.ValueListRef,
+                        Values = c.Values.Concat(extra).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    }).ToList(),
+        };
     }
 
     /// <summary>True when EVERY condition of the rule matches the signals (AND). An empty rule never
@@ -54,7 +79,8 @@ public static class MailRuleEngine
         MailRuleSignal.Subject           => s.Subject,
         MailRuleSignal.Body              => s.Body,
         MailRuleSignal.AttachmentName    => string.Join("\n", s.AttachmentNames),
-        MailRuleSignal.AttachmentContent => s.AttachmentContent,
+        MailRuleSignal.AttachmentContent     => s.AttachmentContent,
+        MailRuleSignal.SenderIsKnownSupplier => s.SenderIsKnownSupplier ? "true" : "false",
         _ => "",
     };
 

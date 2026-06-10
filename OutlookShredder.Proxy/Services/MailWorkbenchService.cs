@@ -26,6 +26,7 @@ public sealed class MailWorkbenchService
     private readonly ConfirmationExtractionService _confirm;
     private readonly MailRuleService _rules;
     private readonly double _confidenceThreshold;
+    private readonly bool _needsReviewEnabled;
     private readonly IConfiguration _config;
     private readonly ILogger<MailWorkbenchService> _log;
     private readonly SeedProgress _seed = new();
@@ -46,6 +47,9 @@ public sealed class MailWorkbenchService
         _bill = bill; _confirm = confirm; _rules = rules; _poMatcher = poMatcher; _billMatcher = billMatcher;
         _config = config; _log = log;
         _confidenceThreshold = config.GetValue<double?>("MailClassifier:ConfidenceThreshold") ?? 0.80;
+        // Opt-in: the Needs-Review quarantine stays OFF until deterministic rules protect the
+        // workflow-critical categories, so turning it on doesn't flood the queue / stall fulfillment.
+        _needsReviewEnabled  = config.GetValue("MailClassifier:NeedsReviewEnabled", false);
 
         // Storage root = the OneDrive-synced "Shredder" folder, sibling to the publish directory
         // (…\Metal Supermarkets Hackensack - Documents\Shredder). Files are written locally; OneDrive
@@ -193,7 +197,7 @@ public sealed class MailWorkbenchService
         else
         {
             result = await _classifier.ClassifyAsync(input, ct);
-            if (result is not null && result.Confidence < _confidenceThreshold
+            if (_needsReviewEnabled && result is not null && result.Confidence < _confidenceThreshold
                 && !string.Equals(result.Category, MailTaxonomy.NeedsReviewPath, StringComparison.OrdinalIgnoreCase))
             {
                 _log.LogInformation("[MailWB] low confidence {Conf:P0} < {Thr:P0} -> Needs Review ({Id}, was {Cat})",
@@ -316,20 +320,30 @@ public sealed class MailWorkbenchService
 
     /// <summary>Extracts the signals a rule evaluates from an email. AttachmentContent is left empty
     /// until Phase 2 wires PDF-text / OCR attachment extraction.</summary>
-    private static MailRuleSignals BuildRuleSignals(MailboxMessageBody body, List<string> attachmentNames)
+    private MailRuleSignals BuildRuleSignals(MailboxMessageBody body, List<string> attachmentNames)
     {
         var from   = (body.FromAddress ?? "").Trim();
         var at     = from.LastIndexOf('@');
         var domain = at >= 0 && at < from.Length - 1 ? from[(at + 1)..].Trim() : "";
         return new MailRuleSignals
         {
-            SenderAddress     = from,
-            SenderDomain      = domain,
-            Subject           = body.Subject ?? "",
-            Body              = body.BodyText ?? "",
-            AttachmentNames   = attachmentNames,
-            AttachmentContent = "",
+            SenderAddress         = from,
+            SenderDomain          = domain,
+            Subject               = body.Subject ?? "",
+            Body                  = body.BodyText ?? "",
+            AttachmentNames       = attachmentNames,
+            AttachmentContent     = "",
+            SenderIsKnownSupplier = IsKnownSupplierDomain(domain),
         };
+    }
+
+    /// <summary>The sender's domain is a known supplier (Suppliers table) — incl. subdomains via
+    /// ResolveByDomainSubstring. Drives the SenderIsKnownSupplier rule signal.</summary>
+    private bool IsKnownSupplierDomain(string domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return false;
+        if (_suppliers.DomainMap.TryGetValue(domain, out var nm) && !string.IsNullOrWhiteSpace(nm)) return true;
+        return _suppliers.ResolveByDomainSubstring(domain) is not null;
     }
 
     private static MailClassRow ToClassRow(string mailItemId, MailClassificationResult r, int version) => new()
