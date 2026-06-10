@@ -702,6 +702,12 @@ public sealed class MailWorkbenchService
             AiModel     = "manual-amend",
             RawResponse = JsonSerializer.Serialize(new { correctedCategory, reason }),
         };
+        // Re-run the targeted PDF enrichment so a corrected/confirmed financial or order-confirmation
+        // item still gets its amount / ETA extracted (closing the Needs-Review re-trigger gap). The
+        // enrichers self-gate to the relevant leaves + a remaining gap, so this no-ops otherwise.
+        await EnrichFromBillPdfAsync(mailItemId, result, input?.AttachmentNames ?? [], ct);
+        await EnrichFromConfirmationPdfAsync(mailItemId, result, input?.AttachmentNames ?? [], ct);
+
         var version = await _sp.WriteClassificationAsync(mailItemId, result, ct);
         await MoveItemFilesAsync(mailItemId, prior?.CategoryPath ?? "", category, ct);
         CacheAndPublishClass("Amended", mailItemId, result, version);
