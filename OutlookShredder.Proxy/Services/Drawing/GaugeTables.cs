@@ -59,6 +59,24 @@ public static class GaugeTables
     public static IReadOnlyList<(int Gauge, double Thickness)> GaugesFor(MaterialFamily family)
         => TableFor(family).OrderBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value)).ToList();
 
+    /// <summary>
+    /// The nearest tabulated gauge to a decimal thickness for the given family, or null when the
+    /// closest gauge is farther than <paramref name="tolerance"/> (e.g. plate stock above the gauge
+    /// range). A gauge-entered thickness matches a table value exactly; a decimal close to a standard
+    /// gauge snaps to it.
+    /// </summary>
+    public static int? NearestGauge(MaterialFamily family, double thickness, double tolerance = 0.006)
+    {
+        int? best = null;
+        double bestDiff = double.MaxValue;
+        foreach (var (g, t) in GaugesFor(family))
+        {
+            double diff = Math.Abs(t - thickness);
+            if (diff < bestDiff) { bestDiff = diff; best = g; }
+        }
+        return bestDiff <= tolerance ? best : null;
+    }
+
     private static IReadOnlyDictionary<int, double> TableFor(MaterialFamily family) => family switch
     {
         MaterialFamily.Galvanized => Galv,

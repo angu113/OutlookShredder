@@ -50,12 +50,27 @@ internal static class Bi
         ["dia"]                  = ("dia",                       "diám"),
         ["toEnd"]                = ("to end",                    "al extremo"),
 
+        // ── spec table (attribute labels) ───────────────────────────────────
+        ["spec.web"]             = ("Web",                       "Alma"),
+        ["spec.flanges"]         = ("Flanges",                   "Alas"),
+        ["spec.legs"]            = ("Legs",                       "Patas"),
+        ["spec.length"]          = ("Length",                    "Largo"),
+        ["spec.width"]           = ("Width",                     "Ancho"),
+        ["spec.depth"]           = ("Depth",                     "Profundidad"),
+        ["spec.material"]        = ("Material",                  "Material"),
+        ["spec.od"]              = ("OD",                        "DE"),
+        ["spec.nps"]             = ("NPS",                       "NPS"),
+        ["spec.class"]           = ("Class",                     "Clase"),
+        ["spec.height"]          = ("Height",                    "Altura"),
+        ["spec.section"]         = ("Section",                   "Sección"),
+        ["spec.wall"]            = ("Wall",                      "Pared"),
+
         // ── footnote legend tokens ──────────────────────────────────────────
         ["legend.solidCut"]      = ("solid = cut",               "sólido = corte"),
         ["legend.dashedBend"]    = ("dashed = bend up",          "discontinuo = doblez"),
         ["legend.boldSpec"]      = ("highlighted = as specified","resaltado = según especificación"),
         ["legend.insideRadius"]  = ("inside radius Ri",          "radio interior Ri"),
-        ["legend.decimalInches"] = ("dimensions in decimal inches","dimensiones en pulgadas decimales"),
+        ["legend.fracInches"]    = ("dimensions in fractional inches","dimensiones en pulgadas fraccionarias"),
     };
 
     /// <summary>"English / Spanish" for a label id (falls back to the id if unknown).</summary>
@@ -82,6 +97,17 @@ internal static class Bi
 
     /// <summary>Spanish display name for a material token (e.g. "CRS" → "Acero laminado en frío").</summary>
     public static string MaterialEs(string token) => MaterialEsMap.TryGetValue(token, out var v) ? v : token;
+
+    private static readonly Dictionary<string, string> MaterialEnMap = new()
+    {
+        ["alum"]  = "Aluminum",          ["CRS"]  = "Cold Rolled Steel",
+        ["HRS"]   = "Hot Rolled Steel",  ["galv"] = "Galvanized Steel",
+        ["HRPO"]  = "HRPO Steel",        ["SS"]   = "Stainless Steel",
+        ["Brass"] = "Brass",             ["Copper"] = "Copper",
+    };
+
+    /// <summary>English display name for a material token (e.g. "CRS" → "Cold Rolled Steel").</summary>
+    public static string MaterialEn(string token) => MaterialEnMap.TryGetValue(token, out var v) ? v : token;
 
     /// <summary>Spanish part-type word for the title-bar subtitle.</summary>
     public static string TypeEs(PartType t) => t switch

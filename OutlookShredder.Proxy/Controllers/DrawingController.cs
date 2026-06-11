@@ -110,6 +110,7 @@ public class DrawingController : ControllerBase
                     flatHeight = fp.FlatHeight,
                     bendLinesX = fp.BendLinesX,
                 },
+                title = fp.Title,
                 summary = fp.Summary,
                 cut = fp.Cut,
             });

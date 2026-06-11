@@ -174,8 +174,8 @@ public static class FlatPattern
     {
         string col = s.ColumnLabel.Length > 0
             ? s.ColumnLabel
-            : ColShapeName(s.ColumnShape) + " " + ColDimText(s);
-        return $"{MaterialPlain(s.Material)} Column — {N(s.ColumnFullHeight)}\" overall  ({col})".Trim();
+            : ColShapeName(s.ColumnShape) + " " + ColDimText(s, DrawFormat.FracInch);
+        return $"{MaterialPlain(s.Material)} Column — {DrawFormat.FracInch(s.ColumnFullHeight)} overall  ({col})".Trim();
     }
 
     private static string ColShapeName(string shape) => shape switch
@@ -185,12 +185,16 @@ public static class FlatPattern
         _       => "Square Tube",
     };
 
-    private static string ColDimText(PartSpec s) => s.ColumnShape switch
+    private static string ColDimText(PartSpec s, Func<double, string>? fmt = null)
     {
-        "round" => $"{N(s.ColumnOuterWidth)}\" OD",
-        "rect"  => $"{N(s.ColumnOuterWidth)}\" x {N(s.ColumnOuterDepth)}\"",
-        _       => $"{N(s.ColumnOuterWidth)}\" x {N(s.ColumnOuterWidth)}\"",
-    };
+        fmt ??= v => N(v) + "\"";
+        return s.ColumnShape switch
+        {
+            "round" => $"{fmt(s.ColumnOuterWidth)} OD",
+            "rect"  => $"{fmt(s.ColumnOuterWidth)} x {fmt(s.ColumnOuterDepth)}",
+            _       => $"{fmt(s.ColumnOuterWidth)} x {fmt(s.ColumnOuterWidth)}",
+        };
+    }
 
     private static string ColumnSummary(PartSpec s, double tubeLen)
     {
@@ -903,18 +907,21 @@ public static class FlatPattern
     // ── Title / summary ──────────────────────────────────────────────────────
     private static string PlainTitle(PartSpec s)
     {
+        string mat = MaterialPlain(s.Material);
+        string thk = DrawFormat.ThicknessLabel(s.Material, s.Thickness);   // gauge for steel/SS, decimal for alum
+        static string D(double v) => DrawFormat.FracInch(v);              // dims in fractional inches
+
         if (s.Type is PartType.FlitchPlate or PartType.BasePlate)
         {
             string plate = s.Type == PartType.FlitchPlate ? "Flitch Plate" : "Base Plate";
-            // Product-standard order: [metal] [drawing of] [thickness] x [width] x [length].
-            return $"{MaterialPlain(s.Material)} {plate} {F3(s.Thickness)}\" x {N(s.Width)}\" x {N(s.Length)}\"".Trim();
+            return $"{mat} {plate} — {thk} thickness x {D(s.Width)} wide x {D(s.Length)} long".Trim();
         }
 
         if (s.Type == PartType.Pan)
-            return $"{MaterialPlain(s.Material)} Pan {N(s.Length)}\" x {N(s.Width)}\" x {N(s.Depth)}\" deep x {F3(s.Thickness)}\"".Trim();
+            return $"{mat} Pan — {D(s.Length)} x {D(s.Width)} x {D(s.Depth)} deep x {thk} thickness".Trim();
 
         if (s.Type == PartType.PaddleBlind)
-            return $"{MaterialPlain(s.Material)} Paddle Blind {s.PaddleNps}\" #{s.PaddleClass} x {F3(s.Thickness)}\"".Trim();
+            return $"{mat} Paddle Blind — {s.PaddleNps}\" NPS #{s.PaddleClass} x {thk} thickness".Trim();
 
         string shape = s.Type switch
         {
@@ -923,27 +930,20 @@ public static class FlatPattern
             PartType.ZChannel => "Z Channel",
             _ => s.Type.ToString(),
         };
-        string profileDims = s.Type == PartType.LAngle
-            ? $"{N(s.FlangeLeft.Value)}\" x {N(s.FlangeRight.Value)}\""
-            : $"{N(s.Web.Value)}\" x {N(s.FlangeLeft.Value)}\"";
-        return $"{MaterialPlain(s.Material)} {shape} {profileDims} x {F3(s.Thickness)}\" x {N(s.Length)}\"".Trim();
+
+        if (s.Type == PartType.LAngle)
+            return $"{mat} {shape} — {D(s.FlangeLeft.Value)} x {D(s.FlangeRight.Value)} Legs x {thk} thickness x {D(s.Length)} long".Trim();
+
+        // U / Z — web + flanges; collapse equal flanges to one value, else show both.
+        bool sym = Math.Abs(s.FlangeLeft.Value - s.FlangeRight.Value) < 1e-6;
+        string flanges = sym ? $"{D(s.FlangeLeft.Value)} Flanges"
+                             : $"{D(s.FlangeLeft.Value)}/{D(s.FlangeRight.Value)} Flanges";
+        return $"{mat} {shape} — {D(s.Web.Value)} Web x {flanges} x {thk} thickness x {D(s.Length)} long".Trim();
     }
 
-    private static string MaterialPlain(string m) => m switch
-    {
-        "alum"   => "Aluminum",
-        "CRS"    => "Cold Rolled Steel",
-        "HRS"    => "Hot Rolled Steel",
-        "galv"   => "Galvanized Steel",
-        "HRPO"   => "HRPO Steel",
-        "SS"     => "Stainless Steel",
-        "Brass"  => "Brass",
-        "Copper" => "Copper",
-        _ => m,
-    };
+    private static string MaterialPlain(string m) => Bi.MaterialEn(m);
 
     private static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
-    private static string F3(double v) => v.ToString("0.000", CultureInfo.InvariantCulture);   // fixed 3-dp (thickness)
     // Inch dims read as 2" in the footnote summary; non-inch units keep their literal suffix (e.g. 50mm).
     private static string U(string units) => units.Equals("in", StringComparison.OrdinalIgnoreCase) ? "\"" : units;
 

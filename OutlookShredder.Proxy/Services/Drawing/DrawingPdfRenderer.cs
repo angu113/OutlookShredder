@@ -50,38 +50,18 @@ public static class DrawingPdfRenderer
             const double M = 36;
 
             var titleFont = new XFont("Arial", 16, XFontStyleEx.Bold);
-            var subFont   = new XFont("Arial", 10, XFontStyleEx.Regular);
-            var blankFont = new XFont("Arial", 11, XFontStyleEx.Bold);
-            var subBrush  = new XSolidBrush(XColor.FromArgb(90, 90, 90));
 
+            // Title — descriptive + gauge-aware; shrink only if it would overflow the page width.
+            double maxTitleW = pw - 2 * M;
+            double titleW = gfx.MeasureString(fp.Title, titleFont).Width;
+            if (titleW > maxTitleW)
+                titleFont = new XFont("Arial", Math.Max(11.0, 16.0 * maxTitleW / titleW), XFontStyleEx.Bold);
             gfx.DrawString(fp.Title, titleFont, XBrushes.Black,
-                new XRect(M, M - 10, pw - 2 * M, 22), XStringFormats.TopLeft);
+                new XRect(M, M - 10, maxTitleW, 22), XStringFormats.TopLeft);
 
-            // Spanish identity subtitle (the bilingual half of the title bar) + thickness in the
-            // header details — thickness is no longer called out on the geometry.
-            string sub = $"{Bi.MaterialEs(fp.Spec.Material)}  ·  {Bi.TypeEs(fp.Spec.Type)}  ·  Espesor / Thickness {F(fp.Spec.Thickness)}\"";
-            gfx.DrawString(sub, subFont, subBrush, new XRect(M, M + 13, pw - 2 * M, 13), XStringFormats.TopLeft);
-
-            // Plates carry the product-standard order (thickness x width x length); formed parts
-            // keep the 2D blank extent (cut width x cut length). Prefix label is bilingual.
-            string blankLabel = fp.IsColumn
-                ? $"{Bi.T("cutTo")}:  pipe/tube {F(fp.ColumnTubeLength)}\"  +  base & bearing plate flat patterns (one DXF)"
-                : fp.IsPlate
-                ? $"{Bi.T("flatBlank")}:  {F(fp.Spec.Thickness)}\" × {F(fp.FlatHeight)}\" × {F(fp.FlatWidth)}\""
-                : fp.IsPaddle
-                    ? $"{Bi.T("plateToCut")}:  {F(fp.Spec.Thickness)}\" × {F(fp.FlatHeight)}\" × {F(fp.FlatWidth)}\"  (rectangular blank, incl. handle, for quoting)"
-                    : $"{Bi.T("flatBlank")}:  {F(fp.FlatWidth)}\" × {F(fp.FlatHeight)}\"";
-            gfx.DrawString(blankLabel,
-                blankFont, XBrushes.Black, new XRect(M, M + 29, pw - 2 * M, 14), XStringFormats.TopLeft);
-
-            double top = M + 48;
-            if (fp.IsPlate && fp.Spec.Holes is { } h0 && fp.Holes.Count > 0)
-            {
-                gfx.DrawString($"{fp.Holes.Count} {Bi.T("holes")},  {F(h0.Diameter)}\" {Bi.T("dia")}",
-                    new XFont("Arial", 10, XFontStyleEx.Bold), XBrushes.Black,
-                    new XRect(M, M + 44, pw - 2 * M, 12), XStringFormats.TopLeft);
-                top = M + 58;
-            }
+            // Bilingual spec table (English / Spanish label + value) under the title.
+            double tableBottom = DrawSpecTable(gfx, fp, M, M + 16, maxTitleW);
+            double top = tableBottom + 10;
             double usable = pw - 2 * M;
             const double gap = 16;
             // L / U / Z three-panel split: flat 1/5, section 2/5, iso 2/5 (the iso gets the most room).
@@ -90,8 +70,9 @@ public static class DrawingPdfRenderer
             double wIso  = (usable - 2 * gap) * 0.36;
 
             // Box grows with the summary (+1 line for the "solid = cut …" legend).
-            int footLines = fp.Summary.Split('\n').Length + 1;
-            double footH = footLines * 10 + 6;
+            int footLines = fp.Summary.Split('\n').Length;
+            // Height = summary lines + a few wrapped legend lines; min leaves room for the info/logo box.
+            double footH = Math.Max(footLines * 10 + 28, 92);
             double footTop = ph - M - footH;
             double h = footTop - top - 8;
 
@@ -141,12 +122,17 @@ public static class DrawingPdfRenderer
                 // drop the floating Section-cuts box and let the iso use the full panel height.
                 DrawIsometric(gfx, fp, new XRect(isoX, top, wIso, h));
             }
-            DrawFootnote(gfx, fp, new XRect(M, footTop, usable, footH));
+            // Split the footnote band: left 2/3 = technics (summary + legend), right 1/3 = info + logo.
+            double infoGap = 6;
+            double infoW = (usable - infoGap) / 3.0;
+            double techW = (usable - infoGap) * 2.0 / 3.0;
+            DrawFootnote(gfx, fp, new XRect(M, footTop, techW, footH));
+            DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH));
 
             // Copyright line under the details box (current year).
             var copyFont = new XFont("Arial", 7, XFontStyleEx.Regular);
-            gfx.DrawString($"© Mithril Metals Corp, {System.DateTime.Now.Year}", copyFont, DimBrush,
-                new XRect(M, footTop + footH + 2, usable, 10), XStringFormats.TopLeft);
+            gfx.DrawString($"Copyright © Mithril Metals Corp., Authorized Metal Supermarkets Franchisee (Hackensack), {System.DateTime.Now.Year}",
+                copyFont, DimBrush, new XRect(M, footTop + footH + 2, usable, 10), XStringFormats.TopLeft);
         }
 
         using var ms = new MemoryStream();
@@ -182,15 +168,17 @@ public static class DrawingPdfRenderer
         foreach (var bx in fp.BendLinesX)
             gfx.DrawLine(bendPen, P(bx, 0), P(bx, mh));
 
-        DimH(gfx, labelFont, P(0, 0).X, P(mw, 0).X, oy + drawH, oy + drawH + 22, Fq(mw), false);
-        DimV(gfx, labelFont, ox, ox - 24, oy, oy + drawH, Fq(mh), false);
+        // Flat-blank dimensions are cut dimensions — always decimal inches (developed lengths rarely
+        // land on a clean fraction, and the shop cuts to the precise value).
+        DimH(gfx, labelFont, P(0, 0).X, P(mw, 0).X, oy + drawH, oy + drawH + 22, DrawFormat.DecInch(mw), false);
+        DimV(gfx, labelFont, ox, ox - 24, oy, oy + drawH, DrawFormat.DecInch(mh), false);
 
         double prev = 0;
         int idx = 0;
         foreach (var bx in fp.BendLinesX)
         {
             double dimY = oy - 16 - (idx % 2) * 14;   // stagger so labels don't collide on narrow blanks
-            DimH(gfx, labelFont, P(prev, 0).X, P(bx, 0).X, oy, dimY, Fq(bx - prev), false);
+            DimH(gfx, labelFont, P(prev, 0).X, P(bx, 0).X, oy, dimY, DrawFormat.DecInch(bx - prev), false);
             prev = bx;
             idx++;
         }
@@ -230,45 +218,22 @@ public static class DrawingPdfRenderer
 
         gfx.DrawPolygon(matPen, prof.Select(p => P(p.x, p.y)).ToArray());
 
-        double sBottom = oy + drawH, sLeft = ox, sRight = ox + drawW;
         double webO = fp.WebOutside, flL = fp.FlangeLeftOutside, flR = fp.FlangeRightOutside;
-        bool wIn = fp.Spec.Web.Basis == DimBasis.Inside;
-        bool flIn = fp.Spec.FlangeLeft.Basis == DimBasis.Inside;
-        bool frIn = fp.Spec.FlangeRight.Basis == DimBasis.Inside;
-
-        // Basis label: value + the Spanish basis word (Interior / Exterior). No thickness callout on
-        // the geometry — thickness lives in the header details.
+        // Value + the Spanish basis word (Adentro / Afuera). No thickness callout on the geometry.
         string BL(double v, bool inside) => $"{Fq(v)} {Bi.Basis(inside ? DimBasis.Inside : DimBasis.Outside)}";
 
-        switch (fp.Spec.Type)
+        // Page-space part bbox + centroid drive outward dim/label placement and collision avoidance.
+        var ptsPage = prof.Select(p => P(p.x, p.y)).ToArray();
+        var centroid = new XPoint(ptsPage.Average(p => p.X), ptsPage.Average(p => p.Y));
+        var placed = new List<XRect> { BBox(ptsPage) };
+
+        // Aligned dimensions anchored to the TRUE outer/inner sharp corners (intersection of the offset
+        // faces), so the witness lines land exactly on the material edges even on thick stock. Lips are
+        // pushed a little further out so they don't crash into the flange dimension.
+        foreach (var d in ComputeCrossSectionDims(fp))
         {
-            case PartType.UChannel:
-                // Web below (faces at y=0/outer or y=t/inner); left flange on the left.
-                if (wIn) DimH(gfx, dimFont, P(t, 0).X, P(webO - t, 0).X, P(t, t).Y, sBottom + 22, BL(webO - 2 * t, true), true);
-                else     DimH(gfx, dimFont, P(0, 0).X, P(webO, 0).X, P(0, 0).Y, sBottom + 22, BL(webO, false), true);
-                if (flIn) DimV(gfx, dimFont, P(t, 0).X, sLeft - 24, P(0, t).Y, P(0, flL).Y, BL(flL - t, true), true);
-                else      DimV(gfx, dimFont, P(0, 0).X, sLeft - 24, P(0, 0).Y, P(0, flL).Y, BL(flL, false), true);
-                break;
-
-            case PartType.LAngle:
-                // legA (FlangeLeft) horizontal at the bottom; legB (FlangeRight) vertical at the left.
-                // Walker frame: centreline legA along y=0 (faces ±t/2), legB along x=0.
-                if (flIn) DimH(gfx, dimFont, P(t2, t2).X, P(flL, t2).X, P(0, t2).Y, sBottom + 22, BL(flL - t, true), true);
-                else      DimH(gfx, dimFont, P(0, -t2).X, P(flL, -t2).X, P(0, -t2).Y, sBottom + 22, BL(flL, false), true);
-                if (frIn) DimV(gfx, dimFont, P(t2, 0).X, sLeft - 24, P(t2, t2).Y, P(t2, flR).Y, BL(flR - t, true), true);
-                else      DimV(gfx, dimFont, P(-t2, 0).X, sLeft - 24, P(-t2, 0).Y, P(-t2, flR).Y, BL(flR, false), true);
-                break;
-
-            case PartType.ZChannel:
-                // Walker frame: web centreline y=0 (x 0..webO), left flange up x=0 (y 0..flL),
-                // right flange down x=webO (y 0..-flR). Web dim below the whole part.
-                DimH(gfx, dimFont, P(0, -t2).X, P(webO, -t2).X, P(0, -t2).Y, sBottom + 22,
-                     wIn ? BL(webO - 2 * t, true) : BL(webO, false), true);
-                DimV(gfx, dimFont, P(-t2, 0).X, sLeft - 24, P(-t2, 0).Y, P(-t2, flL).Y,
-                     flIn ? BL(flL - t, true) : BL(flL, false), true);
-                DimV(gfx, dimFont, P(webO + t2, 0).X, sRight + 24, P(webO + t2, 0).Y, P(webO + t2, -flR).Y,
-                     frIn ? BL(flR - t, true) : BL(flR, false), true);
-                break;
+            double off = d.Kind == DimKind.Lip ? 30 : 24;
+            DimAligned(gfx, dimFont, P(d.X1, d.Y1), P(d.X2, d.Y2), off, centroid, BL(d.Value, d.Inside), true, placed, area);
         }
 
         // ── "Finish" callout: boxed, highlighted label + leader to the finished face ──
@@ -321,60 +286,45 @@ public static class DrawingPdfRenderer
                 FinishCallout(webO * 0.38, -t2, 0, 1); break;
         }
 
-        // ── Per-bend callouts: arc at the bend + label carried outside the part. Flange bends show
-        //    the actual included angle (angle mode only); returns are always labelled (90° / HEM). ──
+        // ── Per-bend callouts: a right-angle mark for 90° bends, a degree arc + leader (arrow on the
+        //    arc) for other angles. Returns/hems carry no callout — the drawn lip makes them plain. ──
         if (fp.SectionBends.Count > 0)
         {
             var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
-            // Part centroid (page space) — the label is pushed outward, away from this, so it clears the part.
-            double cxs = 0, cys = 0;
-            foreach (var p in prof) { var pp = P(p.x, p.y); cxs += pp.X; cys += pp.Y; }
-            var centroid = new XPoint(cxs / prof.Count, cys / prof.Count);
+            var arcPen = new XPen(DimColor, 0.8);
+            const double r = 12;
 
             foreach (var b in fp.SectionBends)
             {
-                // Flange bends are only called out in angle mode; returns always (they're a real feature).
-                if (!b.IsReturn && !fp.Spec.AnglesAnnotated) continue;
+                if (b.IsReturn) continue;
 
                 var apex = P(b.X, b.Y);
-
                 // Face rays from the apex (page space — y points down, so negate model hy).
                 double inx = b.InHx, iny = -b.InHy, outx = b.OutHx, outy = -b.OutHy;
                 double il = Math.Sqrt(inx * inx + iny * iny); if (il < 1e-6) il = 1; inx /= il; iny /= il;
                 double ol = Math.Sqrt(outx * outx + outy * outy); if (ol < 1e-6) ol = 1; outx /= ol; outy /= ol;
                 double a1 = Math.Atan2(-iny, -inx), a2 = Math.Atan2(outy, outx);
                 double da = a2 - a1; while (da <= -Math.PI) da += 2 * Math.PI; while (da > Math.PI) da -= 2 * Math.PI;
-
-                // Callout text: the ACTUAL angle between the faces (what the arc spans). A 180° hem's
-                // faces are parallel (≈0° between them) — label it "HEM" and skip the degenerate arc.
                 double shownDeg = Math.Abs(da) * 180.0 / Math.PI;
-                bool hem = b.IsReturn && b.AngleDeg >= 170;
-                var txt = hem ? Bi.T("hem") : (b.IsReturn ? $"{shownDeg:0.#}° ret" : $"{shownDeg:0.#}°");
 
-                // Small arc spanning the two faces at the bend (skip for a hem).
-                double r = 12;
-                var arcPen = new XPen(DimColor, 0.8);
-                if (!hem)
+                if (Math.Abs(shownDeg - 90) < 1.5)
                 {
-                    XPoint Prev = new(apex.X + r * Math.Cos(a1), apex.Y + r * Math.Sin(a1));
-                    for (int i = 1; i <= 10; i++)
-                    {
-                        double a = a1 + da * i / 10.0;
-                        var cur = new XPoint(apex.X + r * Math.Cos(a), apex.Y + r * Math.Sin(a));
-                        gfx.DrawLine(arcPen, Prev, cur); Prev = cur;
-                    }
+                    // Right-angle mark in the corner (no degree text). Faces from the apex: -in and +out.
+                    RightAngleMark(gfx, arcPen, apex, new XPoint(-inx, -iny), new XPoint(outx, outy), 7);
+                    continue;
                 }
 
-                // Label pushed outward (apex away from centroid), clamped inside the panel; short leader.
-                double odx = apex.X - centroid.X, ody = apex.Y - centroid.Y;
-                double ol2 = Math.Sqrt(odx * odx + ody * ody); if (ol2 < 1e-6) { odx = 0; ody = -1; ol2 = 1; }
-                odx /= ol2; ody /= ol2;
-                var sz = gfx.MeasureString(txt, angFont);
-                double lx = apex.X + odx * (r + 14), ly = apex.Y + ody * (r + 14);
-                double bx = Math.Max(area.X + 1, Math.Min(lx - sz.Width / 2, area.X + area.Width - sz.Width - 1));
-                double by = Math.Max(area.Y + 1, Math.Min(ly - sz.Height / 2, area.Y + area.Height - sz.Height - 1));
-                gfx.DrawLine(arcPen, new XPoint(apex.X + odx * r, apex.Y + ody * r), new XPoint(bx + sz.Width / 2, by + sz.Height / 2));
-                gfx.DrawString(txt, angFont, TextBrush, new XRect(bx, by, sz.Width + 2, sz.Height + 1), XStringFormats.TopLeft);
+                // Angled bend: arc spanning the two faces + a degree leader whose arrow touches the arc.
+                XPoint Prev = new(apex.X + r * Math.Cos(a1), apex.Y + r * Math.Sin(a1));
+                for (int i = 1; i <= 10; i++)
+                {
+                    double a = a1 + da * i / 10.0;
+                    var cur = new XPoint(apex.X + r * Math.Cos(a), apex.Y + r * Math.Sin(a));
+                    gfx.DrawLine(arcPen, Prev, cur); Prev = cur;
+                }
+                double amid = a1 + da / 2.0;
+                var arcMid = new XPoint(apex.X + r * Math.Cos(amid), apex.Y + r * Math.Sin(amid));
+                LeaderLabel(gfx, angFont, arcMid, Unit(arcMid.X - centroid.X, arcMid.Y - centroid.Y), $"{shownDeg:0.#}°", false, placed, area);
             }
         }
     }
@@ -445,7 +395,7 @@ public static class DrawingPdfRenderer
         Ext(gfx, dimPen, A, Ao); Ext(gfx, dimPen, B, Bo);
         gfx.DrawLine(dimPen, Ao, Bo);
         Arrow(gfx, Ao, -ux, -uy); Arrow(gfx, Bo, ux, uy);
-        RotText(gfx, dimFont, $"L {Fq(len)}", new XPoint((Ao.X + Bo.X) / 2, (Ao.Y + Bo.Y) / 2), Math.Atan2(Bo.Y - Ao.Y, Bo.X - Ao.X));
+        RotText(gfx, dimFont, $"Largo {Fq(len)}", new XPoint((Ao.X + Bo.X) / 2, (Ao.Y + Bo.Y) / 2), Math.Atan2(Bo.Y - Ao.Y, Bo.X - Ao.X));
     }
 
     // ── Flat plate: single dimensioned top view with bolt holes ──────────────
@@ -950,21 +900,200 @@ public static class DrawingPdfRenderer
     }
 
     // ── Footnote box ─────────────────────────────────────────────────────────
+    // Bilingual spec table under the header: "English / Spanish" attribute label + value column.
+    // Rows vary by part type; Material + Flat-blank rows are always present. Returns the table's
+    // bottom Y so the drawing panels start below it.
+    private static double DrawSpecTable(XGraphics gfx, FlatPatternResult fp, double x, double y, double maxWidth)
+    {
+        var s = fp.Spec;
+        string Frac(double v) => DrawFormat.FracInch(v);
+        string thk = DrawFormat.ThicknessLabel(s.Material, s.Thickness);
+
+        var rows = new List<(string Label, string Value)>();
+        switch (s.Type)
+        {
+            case PartType.UChannel:
+            case PartType.ZChannel:
+            {
+                bool sym = Math.Abs(s.FlangeLeft.Value - s.FlangeRight.Value) < 1e-6;
+                rows.Add((Bi.T("spec.web"), Frac(s.Web.Value)));
+                rows.Add((Bi.T("spec.flanges"),
+                    sym ? Frac(s.FlangeLeft.Value) : $"{Frac(s.FlangeLeft.Value)} / {Frac(s.FlangeRight.Value)}"));
+                rows.Add((Bi.T("thickness"), thk));
+                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
+                break;
+            }
+            case PartType.LAngle:
+                rows.Add((Bi.T("spec.legs"), $"{Frac(s.FlangeLeft.Value)} x {Frac(s.FlangeRight.Value)}"));
+                rows.Add((Bi.T("thickness"), thk));
+                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
+                break;
+            case PartType.Pan:
+                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
+                rows.Add((Bi.T("spec.width"), Frac(s.Width)));
+                rows.Add((Bi.T("spec.depth"), Frac(s.Depth)));
+                rows.Add((Bi.T("thickness"), thk));
+                break;
+            case PartType.FlitchPlate:
+            case PartType.BasePlate:
+                rows.Add((Bi.T("thickness"), thk));
+                rows.Add((Bi.T("spec.width"), Frac(s.Width)));
+                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
+                if (fp.Holes is { Count: > 0 } && s.Holes is { } hp)
+                    rows.Add((Bi.T("holes"), $"{fp.Holes.Count} x {Frac(hp.Diameter)} {Bi.En("dia")}"));
+                break;
+            case PartType.PaddleBlind:
+                rows.Add((Bi.T("spec.nps"), $"{s.PaddleNps}\" #{s.PaddleClass}"));
+                rows.Add((Bi.T("spec.od"), Frac(s.PaddleOd)));
+                rows.Add((Bi.T("thickness"), thk));
+                break;
+            case PartType.Column:
+            {
+                string section = s.ColumnShape == "round" ? $"{Frac(s.ColumnOuterWidth)} OD"
+                    : s.ColumnShape == "rect" ? $"{Frac(s.ColumnOuterWidth)} x {Frac(s.ColumnOuterDepth)}"
+                    : $"{Frac(s.ColumnOuterWidth)} x {Frac(s.ColumnOuterWidth)}";
+                rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
+                rows.Add((Bi.T("spec.section"), section));
+                rows.Add((Bi.T("spec.wall"), Frac(s.ColumnWall)));
+                break;
+            }
+        }
+
+        // Material (always) — both language names; wraps at " / " if it overflows the value column.
+        rows.Add((Bi.T("spec.material"), $"{Bi.MaterialEn(s.Material)} / {Bi.MaterialEs(s.Material)}"));
+
+        // Flat blank / cut-to (always) — cut dimensions in decimal inches.
+        string Dec(double v) => DrawFormat.DecInch(v);
+        string blankLabel = fp.IsColumn ? Bi.T("cutTo") : fp.IsPaddle ? Bi.T("plateToCut") : Bi.T("flatBlank");
+        string blankValue = fp.IsColumn ? $"tube {Dec(fp.ColumnTubeLength)} + plates"
+            : (fp.IsPlate || fp.IsPaddle) ? $"{thk} x {Dec(fp.FlatHeight)} x {Dec(fp.FlatWidth)}"
+            : $"{Dec(fp.FlatWidth)} x {Dec(fp.FlatHeight)}";
+        rows.Add((blankLabel, blankValue));
+
+        // ── layout ──
+        var labelFont = new XFont("Arial", 8.5, XFontStyleEx.Regular);
+        var valueFont = new XFont("Arial", 8.5, XFontStyleEx.Bold);
+        var labelBrush = new XSolidBrush(XColor.FromArgb(90, 90, 90));
+        var rulePen = new XPen(XColor.FromArgb(210, 210, 210), 0.6);
+        const double labelColW = 150, pad = 5, rowH = 13;
+        double valueColW = Math.Min(240, Math.Max(120, maxWidth - labelColW));
+        double tableW = labelColW + valueColW;
+
+        double ry = y;
+        gfx.DrawLine(rulePen, x, ry, x + tableW, ry);                       // top rule
+        foreach (var (label, value) in rows)
+        {
+            string[] vlines = { value };
+            if (gfx.MeasureString(value, valueFont).Width > valueColW - pad && value.Contains(" / "))
+            {
+                int i = value.IndexOf(" / ", StringComparison.Ordinal);
+                vlines = new[] { value.Substring(0, i + 2), value.Substring(i + 3) };
+            }
+            gfx.DrawString(label, labelFont, labelBrush,
+                new XRect(x + pad, ry + 2, labelColW - pad, rowH), XStringFormats.TopLeft);
+            for (int li = 0; li < vlines.Length; li++)
+                gfx.DrawString(vlines[li], valueFont, XBrushes.Black,
+                    new XRect(x + labelColW + pad, ry + 2 + li * rowH, valueColW - pad, rowH), XStringFormats.TopLeft);
+            ry += rowH * vlines.Length;
+            gfx.DrawLine(rulePen, x, ry, x + tableW, ry);                   // row rule
+        }
+        gfx.DrawLine(rulePen, x, y, x, ry);                                 // left border
+        gfx.DrawLine(rulePen, x + labelColW, y, x + labelColW, ry);         // column separator
+        gfx.DrawLine(rulePen, x + tableW, y, x + tableW, ry);              // right border
+        return ry;
+    }
+
+    /// <summary>Path to the franchise logo (env vars expanded) shown in the drawing info box; blank = none.</summary>
+    public static string? LogoPath { get; set; } = @"%OneDriveCommercial%\MS_Primary_Logo_C100_M44_Flattened_Preview.png";
+
+    // Right 1/3 of the footnote band: Created By / Created Date / NOT TO SCALE, then the franchise logo.
+    private static void DrawInfoBox(XGraphics gfx, XRect box)
+    {
+        gfx.DrawRectangle(new XPen(XColor.FromArgb(205, 205, 205), 0.8), box);
+        var clip = gfx.Save();
+        gfx.IntersectClip(box);
+        var lblFont = new XFont("Arial", 7.5, XFontStyleEx.Regular);
+        var valFont = new XFont("Arial", 7.5, XFontStyleEx.Bold);
+        var lblBrush = new XSolidBrush(XColor.FromArgb(90, 90, 90));
+        double x = box.X + 6, y = box.Y + 4, labelW = 56, innerW = box.Width - 12;
+
+        void Row(string label, string val)
+        {
+            gfx.DrawString(label, lblFont, lblBrush, new XRect(x, y, labelW, 11), XStringFormats.TopLeft);
+            gfx.DrawString(val, valFont, XBrushes.Black, new XRect(x + labelW, y, innerW - labelW, 11), XStringFormats.TopLeft);
+            y += 11;
+        }
+        Row("Created By:", Capitalize(Environment.UserName));
+        Row("Created Date:", DateTime.Now.ToString("MMM d, yyyy", CultureInfo.InvariantCulture));
+        gfx.DrawString("NOT TO SCALE", valFont, XBrushes.Black, new XRect(x, y, innerW, 11), XStringFormats.TopLeft);
+        y += 13;
+
+        // Franchise logo anchored bottom-right of the box (same file the statement generator uses).
+        // Skipped silently if the file is absent or can't be decoded.
+        var path = LogoPath;
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            try
+            {
+                path = Environment.ExpandEnvironmentVariables(path);
+                if (File.Exists(path))
+                {
+                    var img = XImage.FromFile(path);
+                    double availW = innerW, availH = box.Y + box.Height - y - 4;
+                    if (availW > 6 && availH > 6)
+                    {
+                        double sc = Math.Min(availW / img.PixelWidth, availH / img.PixelHeight);
+                        double w = img.PixelWidth * sc, h = img.PixelHeight * sc;
+                        gfx.DrawImage(img, box.X + box.Width - w - 5, box.Y + box.Height - h - 4, w, h);
+                    }
+                }
+            }
+            catch { /* missing / unsupported logo image — keep the info text */ }
+        }
+        gfx.Restore(clip);
+    }
+
+    private static string Capitalize(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpper(s[0]) + s[1..];
+
     private static void DrawFootnote(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
         gfx.DrawRectangle(new XPen(XColor.FromArgb(205, 205, 205), 0.8), box);
+        var clip = gfx.Save();
+        gfx.IntersectClip(box);                       // keep all text inside the 2/3 box — no spill-over
         var font = new XFont("Arial", 8, XFontStyleEx.Regular);
-        double y = box.Y + 3;
+        double y = box.Y + 3, innerW = box.Width - 16;
         foreach (var line in fp.Summary.Split('\n'))
         {
-            gfx.DrawString(line, font, XBrushes.Black, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
+            gfx.DrawString(line, font, XBrushes.Black, new XRect(box.X + 8, y, innerW, 10), XStringFormats.TopLeft);
             y += 10;
         }
         // Paddle blinds and columns have no bends — drop the bend/Ri legend bits that don't apply.
         string legend = fp.IsPaddle || fp.IsColumn
-            ? $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.decimalInches")}"
-            : $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.dashedBend")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.insideRadius")} {F(fp.Spec.InsideRadius)}\"  |  {Bi.T("legend.decimalInches")}";
-        gfx.DrawString(legend, new XFont("Arial", 6, XFontStyleEx.Regular), DimBrush, new XRect(box.X + 8, y, box.Width - 16, 10), XStringFormats.TopLeft);
+            ? $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.fracInches")}"
+            : $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.dashedBend")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.insideRadius")} {F(fp.Spec.InsideRadius)}\"  |  {Bi.T("legend.fracInches")}";
+        var legFont = new XFont("Arial", 6, XFontStyleEx.Regular);
+        foreach (var wline in WrapBySegments(gfx, legend, "  |  ", legFont, innerW))
+        {
+            gfx.DrawString(wline, legFont, DimBrush, new XRect(box.X + 8, y, innerW, 9), XStringFormats.TopLeft);
+            y += 8;
+        }
+        gfx.Restore(clip);
+    }
+
+    // Greedily pack segment-separated text into lines no wider than maxW (keeps the bilingual legend
+    // inside its box instead of overflowing).
+    private static List<string> WrapBySegments(XGraphics gfx, string text, string sep, XFont font, double maxW)
+    {
+        var lines = new List<string>();
+        string cur = "";
+        foreach (var seg in text.Split(new[] { sep }, StringSplitOptions.None))
+        {
+            string trial = cur.Length == 0 ? seg : cur + sep + seg;
+            if (cur.Length > 0 && gfx.MeasureString(trial, font).Width > maxW) { lines.Add(cur); cur = seg; }
+            else cur = trial;
+        }
+        if (cur.Length > 0) lines.Add(cur);
+        return lines;
     }
 
     // ── Key for the formed-part section-cut planes (Side = dashed, End = dash-dot) ──────────────
@@ -1071,10 +1200,269 @@ public static class DrawingPdfRenderer
         gfx.DrawPolygon(brush ?? DimBrush, new[] { tip, b1, b2 }, XFillMode.Winding);
     }
 
+    // ── Dimension / label primitives (aligned dims, leaders, a greedy non-overlap placer) ──
+
+    public enum DimKind { Web, Flange, Lip }
+
+    /// <summary>A cross-section dimension anchored to the two true material corners (model coords).</summary>
+    public readonly record struct CsDim(double X1, double Y1, double X2, double Y2, double Value, bool Inside, DimKind Kind);
+
+    /// <summary>
+    /// Cross-section dimensions for U/L/Z, anchored to the TRUE outer/inner sharp corners (each the
+    /// intersection of the two adjacent faces offset by ±T/2). A dim therefore spans the exact outside
+    /// (or inside) measurement regardless of bend radius or thickness — the witness lines land on the
+    /// real edges. Exposed for numeric verification.
+    /// </summary>
+    public static List<CsDim> ComputeCrossSectionDims(FlatPatternResult fp)
+    {
+        var dims = new List<CsDim>();
+        var prof = fp.Profile;
+        if (prof.Count < 3) return dims;
+        var s = fp.Spec;
+        double t = s.Thickness;
+        double cx = prof.Average(p => p.x), cy = prof.Average(p => p.y);
+        double webO = fp.WebOutside, flL = fp.FlangeLeftOutside, flR = fp.FlangeRightOutside;
+        var flanges = fp.SectionBends.Where(b => !b.IsReturn).ToList();
+
+        (double x, double y) Um(double dx, double dy) { double l = Math.Sqrt(dx * dx + dy * dy); if (l < 1e-9) l = 1; return (dx / l, dy / l); }
+        (double x, double y) Nout(double atx, double aty, double dx, double dy)   // outward normal (away from centroid)
+        {
+            var (ux, uy) = Um(dx, dy);
+            double nx = -uy, ny = ux;
+            if (nx * (atx - cx) + ny * (aty - cy) < 0) { nx = -nx; ny = -ny; }
+            return (nx, ny);
+        }
+        // Sharp corner where the two faces meeting at a bend intersect, offset to outer(+1)/inner(-1).
+        (double x, double y) Corner(SectionBend b, double sign)
+        {
+            var (a1x, a1y) = Um(-b.InHx, -b.InHy);
+            var (a2x, a2y) = Um(b.OutHx, b.OutHy);
+            var (n1x, n1y) = Nout(b.X, b.Y, a1x, a1y);
+            var (n2x, n2y) = Nout(b.X, b.Y, a2x, a2y);
+            return LineX(b.X + n1x * sign * t / 2, b.Y + n1y * sign * t / 2, a1x, a1y,
+                         b.X + n2x * sign * t / 2, b.Y + n2y * sign * t / 2, a2x, a2y);
+        }
+        void AddFlange(SectionBend b, double dx, double dy, double outsideLen, bool inside)
+        {
+            var (ux, uy) = Um(dx, dy);
+            var c = Corner(b, inside ? -1 : 1);
+            double len = inside ? outsideLen - t : outsideLen;
+            dims.Add(new CsDim(c.x, c.y, c.x + ux * len, c.y + uy * len, len, inside, DimKind.Flange));
+        }
+
+        // Plain default U (BuildRadiusedU) carries no section bends — dimension it from the known
+        // web-at-bottom / flanges-up model frame, anchored at the true outer/inner corners.
+        if (s.Type == PartType.UChannel && flanges.Count < 2)
+        {
+            bool pwIn = s.Web.Basis == DimBasis.Inside, pflIn = s.FlangeLeft.Basis == DimBasis.Inside, pfrIn = s.FlangeRight.Basis == DimBasis.Inside;
+            dims.Add(pwIn ? new CsDim(t, t, webO - t, t, webO - 2 * t, true, DimKind.Web)
+                          : new CsDim(0, 0, webO, 0, webO, false, DimKind.Web));
+            dims.Add(pflIn ? new CsDim(t, t, t, flL, flL - t, true, DimKind.Flange)
+                           : new CsDim(0, 0, 0, flL, flL, false, DimKind.Flange));
+            dims.Add(pfrIn ? new CsDim(webO - t, t, webO - t, flR, flR - t, true, DimKind.Flange)
+                           : new CsDim(webO, 0, webO, flR, flR, false, DimKind.Flange));
+            return dims;
+        }
+
+        if (s.Type is PartType.UChannel or PartType.ZChannel && flanges.Count >= 2)
+        {
+            var b0 = flanges[0]; var b1 = flanges[1];
+            bool wIn = s.Web.Basis == DimBasis.Inside;
+            var c0 = Corner(b0, wIn ? -1 : 1); var c1 = Corner(b1, wIn ? -1 : 1);
+            dims.Add(new CsDim(c0.x, c0.y, c1.x, c1.y, wIn ? webO - 2 * t : webO, wIn, DimKind.Web));
+            AddFlange(b0, -b0.InHx, -b0.InHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
+            AddFlange(b1, b1.OutHx, b1.OutHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
+        }
+        else if (s.Type == PartType.LAngle && flanges.Count >= 1)
+        {
+            var b = flanges[0];
+            AddFlange(b, -b.InHx, -b.InHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
+            AddFlange(b, b.OutHx, b.OutHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
+        }
+
+        // Return lips — dimension the lip face (the one leaving the bend away from the part body).
+        foreach (var rb in fp.SectionBends.Where(b => b.IsReturn))
+        {
+            var rs = rb.X < cx ? s.ReturnLeft : s.ReturnRight;
+            rs ??= s.ReturnLeft ?? s.ReturnRight;
+            if (rs is null) continue;
+            var (a1x, a1y) = Um(-rb.InHx, -rb.InHy);
+            var (a2x, a2y) = Um(rb.OutHx, rb.OutHy);
+            double dd1 = a1x * (rb.X - cx) + a1y * (rb.Y - cy), dd2 = a2x * (rb.X - cx) + a2y * (rb.Y - cy);
+            var (ux, uy) = dd1 >= dd2 ? (a1x, a1y) : (a2x, a2y);
+            bool inside = rs.Basis == DimBasis.Inside;
+            var c = Corner(rb, inside ? -1 : 1);
+            dims.Add(new CsDim(c.x, c.y, c.x + ux * rs.Length, c.y + uy * rs.Length, rs.Length, inside, DimKind.Lip));
+        }
+        return dims;
+    }
+
+    private static (double x, double y) LineX(double px, double py, double dx, double dy, double qx, double qy, double ex, double ey)
+    {
+        double denom = dx * ey - dy * ex;
+        if (Math.Abs(denom) < 1e-9) return (px, py);
+        double a = ((qx - px) * ey - (qy - py) * ex) / denom;
+        return (px + a * dx, py + a * dy);
+    }
+
+    // An aligned (rotated) dimension parallel to the face p1→p2, offset outward (away from
+    // <paramref name="awayFrom"/>): witness lines, a parallel dim line + arrowheads, and a label
+    // placed clear of the part + other labels. Keeps the accent (as-specified) vs muted styling.
+    private static void DimAligned(XGraphics gfx, XFont font, XPoint p1, XPoint p2, double offset,
+        XPoint awayFrom, string label, bool accent, List<XRect> placed, XRect panel)
+    {
+        double dx = p2.X - p1.X, dy = p2.Y - p1.Y, l = Math.Sqrt(dx * dx + dy * dy);
+        if (l < 1e-6) return;
+        double ux = dx / l, uy = dy / l;        // along the face
+        double nx = -uy, ny = ux;               // face normal
+        double mx = (p1.X + p2.X) / 2, my = (p1.Y + p2.Y) / 2;
+        if (nx * (mx - awayFrom.X) + ny * (my - awayFrom.Y) < 0) { nx = -nx; ny = -ny; }   // point outward
+
+        var col = accent ? AccentColor : DimColor;
+        var brush = accent ? AccentBrush : DimBrush;
+        var pen = new XPen(col, accent ? 0.9 : 0.6);
+        var o1 = new XPoint(p1.X + nx * offset, p1.Y + ny * offset);
+        var o2 = new XPoint(p2.X + nx * offset, p2.Y + ny * offset);
+        // p1/p2 ARE the exact material corners; a short stub past the edge (into the material) marks
+        // which edge we're leading from, then the witness runs out to the dimension line.
+        const double stub = 4;
+        gfx.DrawLine(pen, new XPoint(p1.X - nx * stub, p1.Y - ny * stub), new XPoint(o1.X + nx * ExtOver, o1.Y + ny * ExtOver));
+        gfx.DrawLine(pen, new XPoint(p2.X - nx * stub, p2.Y - ny * stub), new XPoint(o2.X + nx * ExtOver, o2.Y + ny * ExtOver));
+        gfx.DrawLine(pen, o1, o2);
+        Arrow(gfx, o1, -ux, -uy, brush);
+        Arrow(gfx, o2, ux, uy, brush);
+
+        var lblFont = accent ? new XFont("Arial", font.Size, XFontStyleEx.Bold) : font;
+        var lblBrush = accent ? AccentBrush : TextBrush;
+        var sz = gfx.MeasureString(label, lblFont);
+        var anchor = new XPoint((o1.X + o2.X) / 2 + nx * 8, (o1.Y + o2.Y) / 2 + ny * 8);
+        var rect = PlaceLabel(placed, panel, anchor, new XSize(sz.Width + 3, sz.Height + 1), new XPoint(nx, ny));
+        var dimMid = new XPoint((o1.X + o2.X) / 2, (o1.Y + o2.Y) / 2);
+        var lc = new XPoint(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+        if (Dist(lc, dimMid) > sz.Height + 12) gfx.DrawLine(pen, dimMid, lc);   // connector only if displaced
+        gfx.DrawString(label, lblFont, lblBrush, rect, XStringFormats.Center);
+    }
+
+    // A label carried off a feature point by a leader, placed clear of the part + other labels.
+    private static void LeaderLabel(XGraphics gfx, XFont font, XPoint tip, XPoint pushDir, string label,
+        bool accent, List<XRect> placed, XRect panel)
+    {
+        var pen = new XPen(accent ? AccentColor : DimColor, accent ? 0.9 : 0.7);
+        var brush = accent ? AccentBrush : TextBrush;
+        var lblFont = accent ? new XFont("Arial", font.Size, XFontStyleEx.Bold) : font;
+        var m = gfx.MeasureString(label, lblFont);
+        var sz = new XSize(m.Width + 4, m.Height + 2);
+
+        // Try the preferred direction, then alternatives, choosing one whose LEADER doesn't run through
+        // an existing label (so the angle leader never crosses the flange dimension, etc.).
+        var dirs = new[] { Unit(pushDir.X, pushDir.Y), new XPoint(0, -1), new XPoint(-1, 0), new XPoint(1, 0), new XPoint(0, 1) };
+        XRect chosen = default; bool ok = false;
+        foreach (var d in dirs)
+        {
+            var cand = TryPlace(placed, panel, new XPoint(tip.X + d.X * 20, tip.Y + d.Y * 20), sz, d);
+            var cc = new XPoint(cand.X + cand.Width / 2, cand.Y + cand.Height / 2);
+            if (!LeaderCrosses(tip, cc, placed)) { chosen = cand; ok = true; break; }
+        }
+        if (!ok) chosen = TryPlace(placed, panel, new XPoint(tip.X + pushDir.X * 20, tip.Y + pushDir.Y * 20), sz, pushDir);
+        placed.Add(chosen);
+
+        var lc = new XPoint(chosen.X + chosen.Width / 2, chosen.Y + chosen.Height / 2);
+        gfx.DrawLine(pen, lc, tip);
+        var dir = Unit(tip.X - lc.X, tip.Y - lc.Y);
+        Arrow(gfx, tip, dir.X, dir.Y, accent ? AccentBrush : DimBrush);
+        gfx.DrawString(label, lblFont, brush, chosen, XStringFormats.Center);
+    }
+
+    // A small square right-angle symbol in the corner where faces d1 and d2 meet at the apex.
+    private static void RightAngleMark(XGraphics gfx, XPen pen, XPoint apex, XPoint d1, XPoint d2, double size)
+    {
+        var u1 = Unit(d1.X, d1.Y);
+        var u2 = Unit(d2.X, d2.Y);
+        var p1 = new XPoint(apex.X + u1.X * size, apex.Y + u1.Y * size);
+        var p2 = new XPoint(apex.X + (u1.X + u2.X) * size, apex.Y + (u1.Y + u2.Y) * size);
+        var p3 = new XPoint(apex.X + u2.X * size, apex.Y + u2.Y * size);
+        gfx.DrawLine(pen, p1, p2);
+        gfx.DrawLine(pen, p2, p3);
+    }
+
+    // Greedy placement: step the rect outward along pushDir until it clears every placed rect (with
+    // clearance) and stays inside the panel; record + return it. Falls back to the clamped anchor.
+    // Greedy placement that does NOT commit — returns the candidate rect (for trying alternatives).
+    private static XRect TryPlace(List<XRect> placed, XRect panel, XPoint anchor, XSize size, XPoint pushDir)
+    {
+        const double clr = 3, stepLen = 4;
+        var u = Unit(pushDir.X, pushDir.Y);
+        for (int step = 0; step <= 48; step++)
+        {
+            double cx = anchor.X + u.X * step * stepLen, cy = anchor.Y + u.Y * step * stepLen;
+            double rx = Math.Max(panel.X + 1, Math.Min(cx - size.Width / 2, panel.X + panel.Width - size.Width - 1));
+            double ry = Math.Max(panel.Y + 1, Math.Min(cy - size.Height / 2, panel.Y + panel.Height - size.Height - 1));
+            var r = new XRect(rx, ry, size.Width, size.Height);
+            bool clash = false;
+            foreach (var q in placed) if (Overlaps(r, q, clr)) { clash = true; break; }
+            if (!clash) return r;
+        }
+        double fx = Math.Max(panel.X + 1, Math.Min(anchor.X - size.Width / 2, panel.X + panel.Width - size.Width - 1));
+        double fy = Math.Max(panel.Y + 1, Math.Min(anchor.Y - size.Height / 2, panel.Y + panel.Height - size.Height - 1));
+        return new XRect(fx, fy, size.Width, size.Height);
+    }
+
+    // Greedy placement that commits the chosen rect to <paramref name="placed"/>.
+    private static XRect PlaceLabel(List<XRect> placed, XRect panel, XPoint anchor, XSize size, XPoint pushDir)
+    {
+        var r = TryPlace(placed, panel, anchor, size, pushDir);
+        placed.Add(r);
+        return r;
+    }
+
+    // Does the leader segment a→b cross any already-placed LABEL rect? (Skips placed[0] = the part bbox.)
+    private static bool LeaderCrosses(XPoint a, XPoint b, List<XRect> placed)
+    {
+        for (int i = 1; i < placed.Count; i++)
+            if (SegIntersectsRect(a, b, placed[i])) return true;
+        return false;
+    }
+
+    private static bool SegIntersectsRect(XPoint p, XPoint q, XRect r)
+    {
+        bool In(XPoint pt) => pt.X >= r.X && pt.X <= r.X + r.Width && pt.Y >= r.Y && pt.Y <= r.Y + r.Height;
+        if (In(p) || In(q)) return true;
+        var tl = new XPoint(r.X, r.Y); var tr = new XPoint(r.X + r.Width, r.Y);
+        var br = new XPoint(r.X + r.Width, r.Y + r.Height); var bl = new XPoint(r.X, r.Y + r.Height);
+        return SegSeg(p, q, tl, tr) || SegSeg(p, q, tr, br) || SegSeg(p, q, br, bl) || SegSeg(p, q, bl, tl);
+    }
+
+    private static bool SegSeg(XPoint a, XPoint b, XPoint c, XPoint d)
+    {
+        double o1 = Orient(a, b, c), o2 = Orient(a, b, d), o3 = Orient(c, d, a), o4 = Orient(c, d, b);
+        return (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0);
+    }
+
+    private static double Orient(XPoint p, XPoint q, XPoint r) => (q.X - p.X) * (r.Y - p.Y) - (q.Y - p.Y) * (r.X - p.X);
+
+    private static bool Overlaps(XRect a, XRect b, double clr)
+        => a.X < b.X + b.Width + clr && a.X + a.Width + clr > b.X
+        && a.Y < b.Y + b.Height + clr && a.Y + a.Height + clr > b.Y;
+
+    private static XRect BBox(XPoint[] pts)
+    {
+        double minx = pts.Min(p => p.X), maxx = pts.Max(p => p.X);
+        double miny = pts.Min(p => p.Y), maxy = pts.Max(p => p.Y);
+        return new XRect(minx, miny, maxx - minx, maxy - miny);
+    }
+
+    private static XPoint Unit(double dx, double dy)
+    {
+        double l = Math.Sqrt(dx * dx + dy * dy);
+        return l < 1e-6 ? new XPoint(0, -1) : new XPoint(dx / l, dy / l);
+    }
+
+    private static double Dist(XPoint a, XPoint b) { double dx = a.X - b.X, dy = a.Y - b.Y; return Math.Sqrt(dx * dx + dy * dy); }
+
     private static string F(double v) => v.ToString("0.000", CultureInfo.InvariantCulture);
 
-    /// <summary>Dimension label: value with the inch sign, e.g. 4.000".</summary>
-    private static string Fq(double v) => F(v) + "\"";
+    /// <summary>Dimension label in fractional inches with the inch sign (to 1/16; decimal below that), e.g. 2-3/16".</summary>
+    private static string Fq(double v) => DrawFormat.FracInch(v);
 
     /// <summary>Best-fit scale (model→points) for a section profile inside <paramref name="box"/>.</summary>
     private static double SectionFitScale(XRect box, List<(double x, double y)> prof)
