@@ -33,18 +33,19 @@ public class MailPollerService : BackgroundService
     private readonly CatalogAnalysisService     _analysis;
     private readonly ILogger<MailPollerService> _log;
 
-    // Accepts two formats:
-    //   HQ:     HQ + 6 alphanumeric (e.g. HQBX9EWM) — 8 chars
-    //   Legacy: 6 alphanumeric (e.g. UA2ZJC or AW0001) — new initials+Crockford4 IDs fit here
-    // HQ alt is listed first so 8-char matches aren't truncated to 6.
+    // Job-reference ID: 2-letter user initials + 4 Crockford Base32 chars, 6 chars total
+    // (e.g. AW0001). The first two characters are ALWAYS letters — this is what distinguishes
+    // our IDs from a supplier's own job number such as Eastern Metal's "J06601" (single letter
+    // then digits), which the retired generic [A-Z0-9]{6} rule used to mis-capture as ours.
     private static readonly Regex JobRefRegex =
-        new(@"\[(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        new(@"\[([A-Z]{2}[A-Z0-9]{4})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // Fallback: bare ID appearing after "RFQ" or "Job Ref" (no brackets). Same two formats.
+    // Fallback: bare ID appearing after "RFQ" or "Job Ref" (no brackets). Same format.
     // Used only when JobRefRegex finds nothing, to catch supplier replies that strip brackets.
     //
     // "Ref" is required (not optional) to prevent "job number" matching "number" as an ID.
-    // Two false-positive classes fixed via atomic groups:
+    // Two false-positive classes fixed via atomic groups (still needed — "Number"/"erence" are
+    // 6 letters and the new 2-letter-prefix pattern would otherwise match them):
     //   ERENCE — "JOB REFERENCE" (no ID follows): (?:erence|\b) forces the engine to consume
     //     the full "erence" suffix or stop at a word boundary; neither path lets it un-consume
     //     "erence" and re-offer it as a 6-char ID.
@@ -52,7 +53,7 @@ public class MailPollerService : BackgroundService
     //     (?>(?:Number\b\s*)?) and (?>(?:\s+Number\b)?\s*...) atomically absorb the optional
     //     "Number" label so it can never fall through into the ID capture group.
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)([A-Z]{2}[A-Z0-9]{4})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)([A-Z]{2}[A-Z0-9]{4})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // SHR tracking token ([SHR:{rfqId}]) routing lives in ShrConvInRouter so the

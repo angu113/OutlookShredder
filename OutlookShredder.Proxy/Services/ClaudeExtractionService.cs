@@ -53,15 +53,15 @@ public class ClaudeExtractionService : IAiExtractionService
         Example: "316L Stainless Round Tube 2\" OD x 0.120\" wall x 20' ERW"
 
         ── JOB REFERENCE ──────────────────────────────────────────────────────────
-        Metal Supermarkets' internal job number. Three formats are valid:
-          - Initials: IIXXXXX — 2-letter user initials + 5 Crockford Base32 digits (e.g. AW00001)
-          - HQ:       HQXXXXXX — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy:   XXXXXX — exactly 6 alphanumeric chars
+        Metal Supermarkets' internal job number. The format is:
+          - IIXXXX — 2-letter user initials + 4 Crockford Base32 chars, 6 chars total (e.g. AW0001)
+        The first two characters are ALWAYS letters. A token like J06601 (single letter then
+        digits) is a supplier's own job number, NEVER ours — do not extract it.
         It appears in three specific ways — extract the ID in all cases, return without brackets:
-          1. In email subject: [AW00001] or [HQXXXXXX] or [XXXXXX] inside square brackets
-          2. In supplier PDFs: labelled "JOB: AW00001", "JOB #: XXXXXX", "JOB REF: XXXXXX",
-             "STATION: XXXXXX", "STATION NO: XXXXXX", or similar label followed by the bare ID (no brackets)
-          3. Pre-identified: the prompt may provide a hint like "Job reference(s): AW00001"
+          1. In email subject: [AW0001] inside square brackets
+          2. In supplier PDFs: labelled "JOB: AW0001", "JOB #: AW0001", "JOB REF: AW0001",
+             "STATION: AW0001", "STATION NO: AW0001", or similar label followed by the bare ID (no brackets)
+          3. Pre-identified: the prompt may provide a hint like "Job reference(s): AW0001"
         If none of the above apply, return null. Do NOT extract a job reference from regular
         prose — a word appearing in a sentence (e.g. "Please confirm...", "Thanks for your
         order") is never a job reference, even if it happens to be 6 alphanumeric characters.
@@ -72,7 +72,7 @@ public class ClaudeExtractionService : IAiExtractionService
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number assigned to this quote — NOT the
-        [HQXXXXXX] / [XXXXXX] job reference which belongs to Metal Supermarkets.
+        [IIXXXX] job reference (e.g. [AW0001]) which belongs to Metal Supermarkets.
         This is any code, number, or alphanumeric identifier that the supplier uses to
         track this specific quote in their own system. It may appear anywhere in the
         document or subject line and can be labelled in any way the supplier chooses
@@ -613,7 +613,7 @@ public class ClaudeExtractionService : IAiExtractionService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference": { "type": ["string","null"], "description": "Metal Supermarkets job ref from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQ4RCAPR), or 6-char legacy; no brackets" },
+              "jobReference": { "type": ["string","null"], "description": "Metal Supermarkets job ref from [...] pattern — 6 chars: 2-letter initials + 4 Crockford Base32 chars (e.g. AW0001). Always starts with 2 letters; a token like 'J06601' (one letter + digits) is a supplier's own number, NOT ours; no brackets" },
               "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
               "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
               "lineItems": {

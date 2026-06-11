@@ -29,11 +29,13 @@ public class HackensackPollerService : BackgroundService
     private readonly ILogger<HackensackPollerService> _log;
     private const string MailboxAddress = "hackensack@metalsupermarkets.com";
 
+    // Job-reference ID: 2-letter initials + 4 Crockford Base32 chars, 6 chars total (e.g. AW0001).
+    // First two characters are always letters — excludes supplier job numbers like "J06601".
     private static readonly Regex JobRefRegex =
-        new(@"\[(HQ[A-Z0-9]{6}|[A-Z0-9]{6})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        new(@"\[([A-Z]{2}[A-Z0-9]{4})\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex JobRefBareRegex =
-        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)(HQ[A-Z0-9]{6}|(?!\d{6})[A-Z0-9]{6})\b",
+        new(@"\bRFQ\s+(?>(?:Number\b\s*)?)([A-Z]{2}[A-Z0-9]{4})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)([A-Z]{2}[A-Z0-9]{4})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex HtmlLineBreakRegex =

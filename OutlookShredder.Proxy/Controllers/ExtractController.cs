@@ -1116,8 +1116,8 @@ public class ExtractController : ControllerBase
     public async Task<IActionResult> ReparentSr(string srId, [FromBody] ReparentSrRequest request)
     {
         if (string.IsNullOrWhiteSpace(request?.RfqId) ||
-            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^([Hh][Qq][A-Za-z0-9]{6}|[A-Za-z0-9]{6})$"))
-            return BadRequest(new { error = "rfqId must be 'HQ'+6 alphanumeric (new) or 6 alphanumeric (legacy)" });
+            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^[A-Za-z]{2}[A-Za-z0-9]{4}$"))
+            return BadRequest(new { error = "rfqId must be 6 chars: 2 letters + 4 alphanumeric (e.g. AW0001)" });
 
         try
         {
@@ -1142,8 +1142,8 @@ public class ExtractController : ControllerBase
     public async Task<IActionResult> ReparentSli(string sliItemId, [FromBody] ReparentSrRequest request)
     {
         if (string.IsNullOrWhiteSpace(request?.RfqId) ||
-            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^([Hh][Qq][A-Za-z0-9]{6}|[A-Za-z0-9]{6})$"))
-            return BadRequest(new { error = "rfqId must be 'HQ'+6 alphanumeric (new) or 6 alphanumeric (legacy)" });
+            !System.Text.RegularExpressions.Regex.IsMatch(request.RfqId.Trim(), @"^[A-Za-z]{2}[A-Za-z0-9]{4}$"))
+            return BadRequest(new { error = "rfqId must be 6 chars: 2 letters + 4 alphanumeric (e.g. AW0001)" });
 
         var rfqId = request.RfqId.Trim();
         try

@@ -2192,15 +2192,15 @@ public partial class SharePointService
                 aiRef = null;
             }
 
-            // RFQ IDs — two valid lengths:
-            //   6 chars — legacy alphanumeric (e.g. BX9EWM) or new initials+Crockford4 (e.g. AW0001)
-            //   8 chars — "HQ" + 6 alphanumeric (e.g. HQ4RCAPR)
-            // Reject AI-extracted values that don't match either format.
+            // RFQ IDs are 6 chars: 2-letter initials + 4 Crockford Base32 chars (e.g. AW0001).
+            // The first two chars are always letters — this excludes a supplier's own job number
+            // such as Eastern Metal's "J06601" (single letter then digits), which the retired
+            // generic 6-char rule used to mis-capture as ours. HQ+6 is likewise retired.
             static bool IsValidRfqId(string? s)
             {
-                if (string.IsNullOrEmpty(s)) return false;
+                if (string.IsNullOrEmpty(s) || s.Length != 6) return false;
+                if (!char.IsLetter(s[0]) || !char.IsLetter(s[1])) return false;
                 if (!s.All(char.IsLetterOrDigit)) return false;
-                if (s.Length != 6 && !(s.Length == 8 && s.StartsWith("HQ", StringComparison.OrdinalIgnoreCase))) return false;
                 // Reject common English words that AI may infer from prose
                 var upper = s.ToUpperInvariant();
                 return upper is not ("PLEASE" or "THANKS" or "QUOTES" or "URGENT" or "ATTACH" or

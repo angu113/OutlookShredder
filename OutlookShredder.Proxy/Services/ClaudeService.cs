@@ -58,7 +58,7 @@ public class ClaudeService
 
         ── QUOTE REFERENCE ────────────────────────────────────────────────────────
         The supplier's own internal reference number assigned to this quote — NOT the
-        [HQXXXXXX] or [XXXXXX] job reference which belongs to Metal Supermarkets.
+        [IIXXXX] job reference (e.g. [AW0001]) which belongs to Metal Supermarkets.
         This is any code, number, or alphanumeric identifier that the supplier uses to
         track this specific quote in their own system. It may appear anywhere in the
         document or subject line and can be labelled in any way the supplier chooses
@@ -181,7 +181,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "Job reference from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQABC123), or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
+              "jobReference":   { "type": ["string","null"], "description": "Job reference from [...] pattern — 6 chars: 2-letter initials + 4 Crockford Base32 chars (e.g. AW0001). Always starts with 2 letters; a token like 'J06601' (one letter + digits) is a supplier's own number, NOT ours. Return without brackets" },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },
@@ -486,12 +486,11 @@ public class ClaudeService
         sent by Metal Supermarkets to a supplier.
 
         ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
-        Look for a bracketed alphanumeric job reference anywhere in the document
-        (subject line, PO header, line item descriptions, or email body context). Three
-        formats are valid:
-          - Initials: [IIXXXXX]  — 2-letter initials + 5 Crockford Base32 digits (e.g. [AW00001])
-          - HQ:       [HQXXXXXX] — literal "HQ" prefix followed by 6 alphanumeric chars
-          - Legacy:   [XXXXXX]   — exactly 6 alphanumeric chars
+        Look for a bracketed job reference anywhere in the document (subject line, PO
+        header, line item descriptions, or email body context). The format is:
+          - [IIXXXX] — 2-letter user initials + 4 Crockford Base32 chars, 6 chars total (e.g. [AW0001])
+        The first two characters are ALWAYS letters. A token like J06601 (single letter then
+        digits) is a supplier's own job number, NEVER ours — do not extract it.
         Extract the content inside the brackets, without the brackets themselves.
 
         ── SUPPLIER NAME ──────────────────────────────────────────────────────────
@@ -523,7 +522,7 @@ public class ClaudeService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference": { "type": ["string","null"], "description": "Job reference from [...] pattern — 7-char initials+base32 (e.g. AW00001), HQ+6 alphanumeric (e.g. HQABC123), or legacy 6 alphanumeric (e.g. ABC123); return without brackets" },
+              "jobReference": { "type": ["string","null"], "description": "Job reference from [...] pattern — 6 chars: 2-letter initials + 4 Crockford Base32 chars (e.g. AW0001). Always starts with 2 letters; a token like 'J06601' (one letter + digits) is a supplier's own number, NOT ours. Return without brackets" },
               "supplierName": { "type": ["string","null"], "description": "Company receiving this purchase order" },
               "poNumber":     { "type": ["string","null"], "description": "PO number as printed, e.g. HSK-PO-12345" },
               "lineItems": {
