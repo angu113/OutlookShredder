@@ -2339,6 +2339,15 @@ public class ExtractController : ControllerBase
             PoConfirmationMonitor.EnrichAck(records, monitorOpts, nowUtc);
             PoConfirmationMonitor.EnrichPay(records, monitorOpts, nowUtc);
 
+            // Map each RFQ id -> its Requester so Ordered cards can show the owning rep (PO -> RFQ).
+            var requesterByRfq = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rf in await _sp.ReadRfqReferencesAsync())
+            {
+                var rid = rf.TryGetValue("RFQ_ID", out var ridv) ? ridv?.ToString() : null;
+                if (string.IsNullOrWhiteSpace(rid)) continue;
+                requesterByRfq[rid] = rf.TryGetValue("Requester", out var rqv) ? rqv?.ToString() : null;
+            }
+
             int lookbackDays = _config.GetValue("WaitingBoard:LookbackDays", 45);
             var cutoff = nowUtc.AddDays(-lookbackDays);
             var today  = nowUtc.Date;
@@ -2379,7 +2388,8 @@ public class ExtractController : ControllerBase
                     CardState: state, ConfirmStatus: r.ConfirmStatus ?? "Pending",
                     PaymentStatus: r.PaymentStatus ?? "None", AckLevel: r.AckLevel, PayLevel: r.PayLevel,
                     Notes: r.WaitingNotes, Products: SummarizeProducts(r.LineItems, out var n), LineItemCount: n,
-                    HasPaymentEmail: hasPayEmail));
+                    HasPaymentEmail: hasPayEmail,
+                    Requester: !string.IsNullOrWhiteSpace(r.RfqId) && requesterByRfq.TryGetValue(r.RfqId, out var rq) ? rq : null));
             }
 
             // Dedup duplicate PO rows (same PoNumber): keep the most-progressed card.
@@ -2452,7 +2462,7 @@ public class ExtractController : ControllerBase
     public record PoWaitingCard(string SpItemId, string PoNumber, string Supplier, string RfqId,
         string? AssignedDate, string? EtaDate, bool Rescheduled, string CardState,
         string ConfirmStatus, string PaymentStatus, string? AckLevel, string? PayLevel,
-        string? Notes, string Products, int LineItemCount, bool HasPaymentEmail);
+        string? Notes, string Products, int LineItemCount, bool HasPaymentEmail, string? Requester);
 
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>

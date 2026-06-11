@@ -19,6 +19,11 @@ public class ErpExtraction
     [JsonPropertyName("customer_reference")]
     public string? CustomerReference { get; set; }
 
+    /// <summary>The sales rep printed on the doc: "Customer Rep:" on most ERP docs, "Requested By:" on POs.
+    /// Used to attribute an auto-created workflow card to its rep. Null if not present.</summary>
+    [JsonPropertyName("sales_rep")]
+    public string? SalesRep { get; set; }
+
     [JsonPropertyName("document_date")]
     public string? DocumentDate { get; set; }
 

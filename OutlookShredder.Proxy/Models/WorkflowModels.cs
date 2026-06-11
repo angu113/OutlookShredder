@@ -18,6 +18,9 @@ public class WorkflowCard
     public string? RagStatus         { get; set; }
     public string? DeliveryService   { get; set; }
     public bool    WasAutoCreated    { get; set; }
+    /// <summary>The user this card belongs to (full name). Focus-chip cards: the creating Shredder
+    /// user; auto-created cards: the doc's sales rep ("Customer Rep:") or the importer. Null = none.</summary>
+    public string? OwnerUser         { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -34,6 +37,7 @@ public class CreateWorkflowCardRequest
     public string? RagStatus       { get; set; }
     public string? DeliveryService { get; set; }
     public bool    WasAutoCreated  { get; set; }
+    public string? OwnerUser       { get; set; }
 }
 
 public class UpdateWorkflowCardRequest

@@ -117,6 +117,7 @@ public class WorkflowCardService : IHostedService
                 RagStatus       = req.RagStatus,
                 DeliveryService = req.DeliveryService,
                 WasAutoCreated  = req.WasAutoCreated,
+                OwnerUser       = req.OwnerUser,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -187,6 +188,12 @@ public class WorkflowCardService : IHostedService
         var docNum = extraction.DocumentNumber ?? "";
         if (string.IsNullOrEmpty(docNum)) return;
 
+        // Owner = the doc's sales rep ("Customer Rep:" / "Requested By:"), else the importer
+        // (the proxy host user that scanned the slip — mirrors ErpDocumentRecord.SourceUser).
+        var owner = !string.IsNullOrWhiteSpace(extraction.SalesRep)
+            ? extraction.SalesRep!.Trim()
+            : Environment.UserName;
+
         // Guard: skip if a non-completed card already exists for this doc + tab (in any column, incl. Prioritize)
         bool hasProcessing, hasDelivery;
         await _lock.WaitAsync(ct);
@@ -209,6 +216,7 @@ public class WorkflowCardService : IHostedService
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
                 WasAutoCreated  = true,
+                OwnerUser       = owner,
             }, ct);
 
         var dm = extraction.DeliveryMethod?.Trim();
@@ -227,6 +235,7 @@ public class WorkflowCardService : IHostedService
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
                 WasAutoCreated  = true,
+                OwnerUser       = owner,
             }, ct);
         }
     }

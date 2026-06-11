@@ -42,6 +42,9 @@ public class ErpAiService
         customer_reference: Any PO or reference number assigned BY the customer, e.g. fields labelled
                             "Customer PO", "Your Ref", "Cust. Order", "Customer Reference", "PO #".
                             Leave null if not present. NEVER put our own ERP reference here.
+        sales_rep:          The name of our sales rep / order taker printed on the document, taken from
+                            the field labelled "Customer Rep:" (most ERP docs) or "Requested By:" (on
+                            purchase orders). Return the name exactly as printed. Leave null if absent.
 
         DATE
         document_date: The date printed on the document (invoice date, order date, quotation date).
@@ -92,6 +95,7 @@ public class ErpAiService
               "document_number":    { "type": ["string","null"],   "description": "Our ERP reference (HSK-... or 020803-...). Leave null for most documents — set from filename. Only populate if the filename did not contain a record number (e.g. a bare PurchaseOrder.pdf)." },
               "customer_name":      { "type": ["string","null"],   "description": "Company the document is addressed to. On picking slips: the company name on the line BELOW 'Ship To:' (not the text to the right of it on the same line). Not the Customer Rep or store name." },
               "customer_reference": { "type": ["string","null"],   "description": "Customer's own PO or reference number. Never our own ERP reference." },
+              "sales_rep":          { "type": ["string","null"],   "description": "Our sales rep / order taker, from the 'Customer Rep:' field (most docs) or 'Requested By:' (purchase orders). Name as printed; null if absent." },
               "document_date":      { "type": ["string","null"],   "description": "Date as printed on the document." },
               "total_amount":       { "type": ["string","null"],   "description": "Grand total as a plain numeric string, e.g. '1234.56'. Null for documents with no pricing (picking slips, shipping notes)." },
               "currency":           { "type": ["string","null"],   "description": "Currency code, e.g. USD. Default USD." },
@@ -128,6 +132,7 @@ public class ErpAiService
             "document_number":    { "type": "string",  "nullable": true },
             "customer_name":      { "type": "string",  "nullable": true },
             "customer_reference": { "type": "string",  "nullable": true },
+            "sales_rep":          { "type": "string",  "nullable": true },
             "document_date":      { "type": "string",  "nullable": true },
             "total_amount":       { "type": "string",  "nullable": true },
             "currency":           { "type": "string",  "nullable": true },

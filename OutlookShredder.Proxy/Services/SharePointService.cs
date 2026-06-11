@@ -11160,6 +11160,7 @@ public partial class SharePointService
             ("RagStatus",         "text"),
             ("DeliveryService",   "text"),
             ("WasAutoCreated",    "boolean"),
+            ("OwnerUser",         "text"),
         };
 
         foreach (var (name, type) in schema)
@@ -11235,6 +11236,7 @@ public partial class SharePointService
                                    (wa is System.Text.Json.JsonElement waEl
                                        ? waEl.ValueKind == System.Text.Json.JsonValueKind.True
                                        : wa is bool wb && wb),
+                OwnerUser        = d.TryGetValue("OwnerUser",        out var ou) ? (ou?.ToString() is string ov && ov.Length > 0 ? ov : null) : null,
             });
         }
         return cards;
@@ -11273,6 +11275,7 @@ public partial class SharePointService
                         ["RagStatus"]       = card.RagStatus,
                         ["DeliveryService"] = card.DeliveryService,
                         ["WasAutoCreated"]  = card.WasAutoCreated,
+                        ["OwnerUser"]       = card.OwnerUser,
                     }
                 }
             }, cancellationToken: ct);
