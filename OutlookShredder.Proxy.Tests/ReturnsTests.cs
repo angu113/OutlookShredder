@@ -49,6 +49,32 @@ public class ReturnsTests
     }
 
     [Fact]
+    public void Hem_section_stays_within_the_flange_OD()
+    {
+        // A 180° hem folds back DOWN within the flange — fully executed it must leave the OD at the
+        // user-set value, not poke above it. The cross-section profile's top must sit at the flange OD.
+        var fp = FlatPattern.Develop(DrawingTextParser.Parse(
+            "U flange 2 return 0.5 @ 180 up flange 2 web 4 length 36, 16ga CRS"));
+        double od = fp.FlangeLeftOutside;                       // 2.0, the user-set flange OD
+        double maxY = fp.Profile.Max(p => p.y);
+        Assert.True(maxY <= od + 0.01, $"hem top {maxY:0.###} exceeds flange OD {od:0.###}");
+        Assert.True(maxY >= od - 0.05, $"hem fold {maxY:0.###} should reach the OD {od:0.###}, not fall short");
+    }
+
+    [Fact]
+    public void Pan_hem_section_stays_within_the_wall_depth()
+    {
+        // Same rule for pans: the hem must fold down within the wall, leaving the depth (OD) intact.
+        var fp = FlatPattern.Develop(DrawingTextParser.Parse(
+            "Pan 24 x 18 x 2, 2 long flanges 2 short flanges, 16ga, returns 0.5 @ 180 up"));
+        double depth = fp.PanDepth;                             // 2.0, the wall depth OD
+        double maxYside = fp.PanSideProfile.Max(p => p.y);
+        double maxYend  = fp.PanEndProfile.Max(p => p.y);
+        Assert.True(maxYside <= depth + 0.01, $"pan side hem {maxYside:0.###} exceeds wall depth {depth:0.###}");
+        Assert.True(maxYend  <= depth + 0.01, $"pan end hem {maxYend:0.###} exceeds wall depth {depth:0.###}");
+    }
+
+    [Fact]
     public void NoReturn_is_unchanged()
     {
         var spec = DrawingTextParser.Parse("U 4 x 2 x 36, 16ga CRS");

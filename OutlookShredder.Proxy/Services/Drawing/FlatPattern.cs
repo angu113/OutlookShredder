@@ -825,6 +825,22 @@ public static class FlatPattern
         double px = sx, py = sy;
         double hn = Math.Sqrt(hx * hx + hy * hy); hx /= hn; hy /= hn;
         c.Add((px, py, -hy, hx));
+
+        // A 180° hem is a hairpin whose outer arc bulges PAST the wall's straight end by (rc + t/2). If we
+        // lay the wall to its full outer length and then add the hairpin on top, the formed flange/wall
+        // reads TALLER than its OD in the section + iso (the fold pokes outside the OD dimension). Pull the
+        // wall's straight run back by that bulge so the fold apex lands exactly on the OD — matching the
+        // pan iso (which folds the hem down from the wall top). The lip is the chain-extremity segment; the
+        // wall is the hem bend's interior neighbour. This is a section/iso-display correction only — the
+        // flat blank (UnrollChain) is untouched, so the lip's developed length is still fully added there.
+        var hemPull = new double[segs.Length];
+        for (int b = 0; b < bends.Length; b++)
+        {
+            if (!bends[b].IsReturn || bends[b].AngleDeg < 170) continue;
+            int wall = b == 0 ? b + 1 : (b + 1 == segs.Length - 1 ? b : b + 1);
+            hemPull[wall] += rc + t / 2.0;
+        }
+
         // Centreline tangent consumed by the fillet at each adjacent bend. A hem (≈180°) is a hairpin —
         // the arc bulges perpendicular, so the inset along the face is ~0 (TanHalf handles this).
         double TanCut(int bendIdx) => bendIdx >= 0 && bendIdx < bends.Length
@@ -832,7 +848,7 @@ public static class FlatPattern
         for (int i = 0; i < segs.Length; i++)
         {
             double cut = TanCut(i - 1) + TanCut(i);
-            double straight = Math.Max(0.001, segs[i] - cut);
+            double straight = Math.Max(0.001, segs[i] - cut - hemPull[i]);
             px += hx * straight; py += hy * straight;
             c.Add((px, py, -hy, hx));
             if (i < segs.Length - 1)
