@@ -194,7 +194,7 @@ public static class FlatPattern
 
     private static string ColumnSummary(PartSpec s, double tubeLen)
     {
-        string u = s.Units;
+        string u = U(s.Units);
         string shapeName = s.ColumnShape switch { "round" => "pipe", "rect" => "rectangular tube", _ => "square tube" };
         string HoleNote(HoleSpec? h) =>
             h is { Diameter: > 0 } ? $"  ({(h.Count <= 0 ? 4 : h.Count)} holes {F(h.Diameter)}{u} dia, edge {F(h.EdgeDistance)}{u})" : "";
@@ -366,7 +366,7 @@ public static class FlatPattern
 
     private static string PanSummary(PartSpec s, double Lo, double Wo, double Do)
     {
-        string u = s.Units;
+        string u = U(s.Units);
         int longN = (s.PanBottom ? 1 : 0) + (s.PanTop ? 1 : 0);
         int shortN = (s.PanLeft ? 1 : 0) + (s.PanRight ? 1 : 0);
         bool anyInside = s.LengthBasis == DimBasis.Inside || s.WidthBasis == DimBasis.Inside || s.DepthBasis == DimBasis.Inside;
@@ -384,7 +384,7 @@ public static class FlatPattern
         if (s.PanReturn is { } rp)
             lines.Add(rp.AngleDeg >= 170
                 ? $"Return (all walls): hem {F(rp.Length)}{u} {rp.Direction.ToString().ToLowerInvariant()}, mitered corners"
-                : $"Return (all walls): {F(rp.Length)}{u} @ {rp.AngleDeg:0.#}°{rp.Direction.ToString().ToLowerInvariant()}, mitered corners");
+                : $"Return (all walls): {F(rp.Length)}{u} @ {rp.AngleDeg:0.#}° {rp.Direction.ToString().ToLowerInvariant()}, mitered corners");
         if (s.Finish is FinishSide.Outside or FinishSide.Inside)
             lines.Add($"Finish on {s.Finish.ToString().ToLowerInvariant()} face");
         return string.Join("\n", lines);
@@ -444,7 +444,7 @@ public static class FlatPattern
 
     private static string PaddleSummary(PartSpec s)
     {
-        string u = s.Units;
+        string u = U(s.Units);
         return string.Join("\n", new[]
         {
             $"Paddle blind (spade / \"frying pan\")  {s.Material}  (T={F(s.Thickness)}{u})",
@@ -560,7 +560,7 @@ public static class FlatPattern
     private static string PlateSummary(PartSpec s, double L, double W, int holeCount)
     {
         string shape = s.Type == PartType.FlitchPlate ? "Flitch plate" : "Base plate";
-        string u = s.Units;
+        string u = U(s.Units);
         var lines = new List<string>
         {
             $"{shape}  {s.Material}  (T={F(s.Thickness)}{u})",
@@ -944,12 +944,14 @@ public static class FlatPattern
 
     private static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
     private static string F3(double v) => v.ToString("0.000", CultureInfo.InvariantCulture);   // fixed 3-dp (thickness)
+    // Inch dims read as 2" in the footnote summary; non-inch units keep their literal suffix (e.g. 50mm).
+    private static string U(string units) => units.Equals("in", StringComparison.OrdinalIgnoreCase) ? "\"" : units;
 
     private static string BuildSummary(PartSpec s, double webO, double flLO, double flRO, BendSpec[] bends, double[] bdEach)
     {
         string basis = (s.Web.Basis == s.FlangeLeft.Basis && s.FlangeLeft.Basis == s.FlangeRight.Basis)
             ? s.Web.Basis.ToString().ToLowerInvariant() : "mixed";
-        string u = s.Units;
+        string u = U(s.Units);
         string shape = s.Type switch
         {
             PartType.UChannel => "U-channel", PartType.LAngle => "L-angle",
@@ -968,11 +970,11 @@ public static class FlatPattern
             lines.Add($"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}");
             for (int i = 0; i < bends.Length; i++)
                 // Show the ACTUAL angle between the faces (180 − bend-from-flat), matching the drawn callout.
-                lines.Add($"  bend {i + 1}: {(180.0 - bends[i].AngleDeg):0.#}°{bends[i].Direction.ToString().ToLowerInvariant()}, BD {F(bdEach[i])}{u}");
+                lines.Add($"  bend {i + 1}: {(180.0 - bends[i].AngleDeg):0.#}° {bends[i].Direction.ToString().ToLowerInvariant()}, BD {F(bdEach[i])}{u}");
         }
         else
         {
-            lines.Add($"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {bends[0].AngleDeg:0.#}°,  BD {F(bdEach[0])}{u}/bend (x{bends.Length})");
+            lines.Add($"Bend: Ri {F(s.InsideRadius)}{u}, K {s.KFactor:0.##}, {bends[0].AngleDeg:0.#}°,  BD {F(bdEach[0])}{u}/bend (×{bends.Length})");
         }
         string? finishNote = s.Finish switch
         {
@@ -987,7 +989,7 @@ public static class FlatPattern
         // Returns (lip / hem).
         string RetNote(string where, ReturnSpec r) => r.AngleDeg >= 170
             ? $"Return ({where}): hem {F(r.Length)}{u} {r.Direction.ToString().ToLowerInvariant()}"
-            : $"Return ({where}): {F(r.Length)}{u} @ {r.AngleDeg:0.#}°{r.Direction.ToString().ToLowerInvariant()}";
+            : $"Return ({where}): {F(r.Length)}{u} @ {r.AngleDeg:0.#}° {r.Direction.ToString().ToLowerInvariant()}";
         if (s.ReturnLeft is { } rL)  lines.Add(RetNote(s.Type == PartType.LAngle ? "leg A" : "flange 1", rL));
         if (s.ReturnRight is { } rR) lines.Add(RetNote(s.Type == PartType.LAngle ? "leg B" : "flange 2", rR));
         if (s.PanReturn is { } rP)   lines.Add(RetNote("all walls", rP));
