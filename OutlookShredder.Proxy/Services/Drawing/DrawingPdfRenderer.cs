@@ -924,60 +924,18 @@ public static class DrawingPdfRenderer
         string Frac(double v) => DrawFormat.FracInch(v);
         string thk = DrawFormat.ThicknessLabel(s.Material, s.Thickness);
 
+        // Just the three at-a-glance attributes — length, thickness, flat blank. Everything else
+        // (web/flanges/legs/section/holes/material) is already labelled on the drawing itself.
         var rows = new List<(string Label, string Value)>();
-        switch (s.Type)
-        {
-            case PartType.UChannel:
-            case PartType.ZChannel:
-            {
-                bool sym = Math.Abs(s.FlangeLeft.Value - s.FlangeRight.Value) < 1e-6;
-                rows.Add((Bi.T("spec.web"), Frac(s.Web.Value)));
-                rows.Add((Bi.T("spec.flanges"),
-                    sym ? Frac(s.FlangeLeft.Value) : $"{Frac(s.FlangeLeft.Value)} / {Frac(s.FlangeRight.Value)}"));
-                rows.Add((Bi.T("thickness"), thk));
-                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
-                break;
-            }
-            case PartType.LAngle:
-                rows.Add((Bi.T("spec.legs"), $"{Frac(s.FlangeLeft.Value)} x {Frac(s.FlangeRight.Value)}"));
-                rows.Add((Bi.T("thickness"), thk));
-                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
-                break;
-            case PartType.Pan:
-                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
-                rows.Add((Bi.T("spec.width"), Frac(s.Width)));
-                rows.Add((Bi.T("spec.depth"), Frac(s.Depth)));
-                rows.Add((Bi.T("thickness"), thk));
-                break;
-            case PartType.FlitchPlate:
-            case PartType.BasePlate:
-                rows.Add((Bi.T("thickness"), thk));
-                rows.Add((Bi.T("spec.width"), Frac(s.Width)));
-                rows.Add((Bi.T("spec.length"), Frac(s.Length)));
-                if (fp.Holes is { Count: > 0 } && s.Holes is { } hp)
-                    rows.Add((Bi.T("holes"), $"{fp.Holes.Count} x {Frac(hp.Diameter)} {Bi.En("dia")}"));
-                break;
-            case PartType.PaddleBlind:
-                rows.Add((Bi.T("spec.nps"), $"{s.PaddleNps}\" #{s.PaddleClass}"));
-                rows.Add((Bi.T("spec.od"), Frac(s.PaddleOd)));
-                rows.Add((Bi.T("thickness"), thk));
-                break;
-            case PartType.Column:
-            {
-                string section = s.ColumnShape == "round" ? $"{Frac(s.ColumnOuterWidth)} OD"
-                    : s.ColumnShape == "rect" ? $"{Frac(s.ColumnOuterWidth)} x {Frac(s.ColumnOuterDepth)}"
-                    : $"{Frac(s.ColumnOuterWidth)} x {Frac(s.ColumnOuterWidth)}";
-                rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
-                rows.Add((Bi.T("spec.section"), section));
-                rows.Add((Bi.T("spec.wall"), Frac(s.ColumnWall)));
-                break;
-            }
-        }
 
-        // Material (always) — both language names; wraps at " / " if it overflows the value column.
-        rows.Add((Bi.T("spec.material"), $"{Bi.MaterialEn(s.Material)} / {Bi.MaterialEs(s.Material)}"));
+        // Length (or a column's overall height); paddle blinds have no length.
+        if (fp.IsColumn)        rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
+        else if (!fp.IsPaddle)  rows.Add((Bi.T("spec.length"), Frac(s.Length)));
 
-        // Flat blank / cut-to (always) — cut dimensions in decimal inches.
+        // Thickness — single-sheet parts; a column carries several (its plates/wall are on the drawing).
+        if (!fp.IsColumn) rows.Add((Bi.T("thickness"), thk));
+
+        // Flat blank / cut-to — cut dimensions in decimal inches.
         string Dec(double v) => DrawFormat.DecInch(v);
         string blankLabel = fp.IsColumn ? Bi.T("cutTo") : fp.IsPaddle ? Bi.T("plateToCut") : Bi.T("flatBlank");
         string blankValue = fp.IsColumn ? $"tube {Dec(fp.ColumnTubeLength)} + plates"
@@ -1019,7 +977,9 @@ public static class DrawingPdfRenderer
     }
 
     /// <summary>Path to the franchise logo (env vars expanded) shown in the drawing info box; blank = none.</summary>
-    public static string? LogoPath { get; set; } = @"%OneDriveCommercial%\MS_Primary_Logo_C100_M44_Flattened_Preview.png";
+    // The logo lives in the synced SharePoint library (same %USERPROFILE%\Mithril Metals Corp\… root the
+    // publish + secrets use). %OneDriveCommercial% points at the *personal* OneDrive, which doesn't hold it.
+    public static string? LogoPath { get; set; } = @"%USERPROFILE%\Mithril Metals Corp\Metal Supermarkets Hackensack - Documents\MS_Primary_Logo_C100_M44_Flattened_Preview.png";
 
     // Right 1/3 of the footnote band: Created By / Created Date / NOT TO SCALE, then the franchise logo.
     private static void DrawInfoBox(XGraphics gfx, XRect box)
@@ -1043,24 +1003,29 @@ public static class DrawingPdfRenderer
         gfx.DrawString("NOT TO SCALE", valFont, XBrushes.Black, new XRect(x, y, innerW, 11), XStringFormats.TopLeft);
         y += 13;
 
-        // Franchise logo anchored bottom-right of the box (same file the statement generator uses).
-        // Skipped silently if the file is absent or can't be decoded.
-        var path = LogoPath;
-        if (!string.IsNullOrWhiteSpace(path))
+        // Franchise logo anchored bottom-right of the box. Resolve across known locations (the configured
+        // path can point at a OneDrive root that doesn't hold the file); skipped silently if none decode.
+        string? path = new[]
+        {
+            LogoPath,
+            @"%USERPROFILE%\Mithril Metals Corp\Metal Supermarkets Hackensack - Documents\MS_Primary_Logo_C100_M44_Flattened_Preview.png",
+            @"%OneDriveCommercial%\MS_Primary_Logo_C100_M44_Flattened_Preview.png",
+        }
+        .Where(c => !string.IsNullOrWhiteSpace(c))
+        .Select(c => Environment.ExpandEnvironmentVariables(c!))
+        .FirstOrDefault(File.Exists);
+
+        if (path is not null)
         {
             try
             {
-                path = Environment.ExpandEnvironmentVariables(path);
-                if (File.Exists(path))
+                var img = XImage.FromFile(path);
+                double availW = innerW, availH = box.Y + box.Height - y - 4;
+                if (availW > 6 && availH > 6)
                 {
-                    var img = XImage.FromFile(path);
-                    double availW = innerW, availH = box.Y + box.Height - y - 4;
-                    if (availW > 6 && availH > 6)
-                    {
-                        double sc = Math.Min(availW / img.PixelWidth, availH / img.PixelHeight);
-                        double w = img.PixelWidth * sc, h = img.PixelHeight * sc;
-                        gfx.DrawImage(img, box.X + box.Width - w - 5, box.Y + box.Height - h - 4, w, h);
-                    }
+                    double sc = Math.Min(availW / img.PixelWidth, availH / img.PixelHeight);
+                    double w = img.PixelWidth * sc, h = img.PixelHeight * sc;
+                    gfx.DrawImage(img, box.X + box.Width - w - 5, box.Y + box.Height - h - 4, w, h);
                 }
             }
             catch { /* missing / unsupported logo image — keep the info text */ }
