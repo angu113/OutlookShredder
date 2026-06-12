@@ -20,7 +20,21 @@ public static class FlatPattern
     /// <summary>ACI colour for the BEND / MARK layer — blue (5), matching NcStudio's "Mid Graph".</summary>
     public const short BendColor = 5;
 
-    public static FlatPatternResult Develop(PartSpec spec) => spec.Type switch
+    /// <summary>
+    /// Develops a part and bakes a shop cutting-aid label (quantity, material, thickness) onto its cut
+    /// geometry on the no-cut <see cref="PartLabel.LayerName"/> layer — so every DXF the engine emits
+    /// carries it. <paramref name="quantity"/> defaults to 1 (the "xN" line is shown only for N &gt; 1);
+    /// callers with an order quantity (e.g. a picking-slip FAB note) pass it through (null = no "xN"
+    /// line, for the design wizard). The PDF renderer ignores text entities, so the drawing is unaffected.
+    /// </summary>
+    public static FlatPatternResult Develop(PartSpec spec, int? quantity = null)
+    {
+        var fp = DevelopShape(spec);
+        PartLabel.AddTo(fp.Cut, quantity, spec.Material, spec.Thickness);
+        return fp;
+    }
+
+    private static FlatPatternResult DevelopShape(PartSpec spec) => spec.Type switch
     {
         PartType.UChannel    => DevelopChannel(spec, isZ: false),
         PartType.ZChannel    => DevelopChannel(spec, isZ: true),

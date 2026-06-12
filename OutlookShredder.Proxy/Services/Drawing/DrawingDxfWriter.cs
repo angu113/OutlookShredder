@@ -52,6 +52,10 @@ public static class DrawingDxfWriter
                 case "circle":
                     doc.Entities.Add(new Circle(new Vector2(e.Cx, e.Cy), e.R) { Layer = lyr, Color = col });
                     break;
+                case "text":
+                    doc.Entities.Add(new Text(e.Text ?? "", new Vector2(e.Cx, e.Cy), e.Height)
+                    { Layer = lyr, Color = col, Alignment = TextAlignment.BottomCenter });
+                    break;
                 default:
                     throw new NotSupportedException($"Unknown cut entity type '{e.Type}'.");
             }

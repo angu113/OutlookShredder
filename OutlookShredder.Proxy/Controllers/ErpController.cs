@@ -311,10 +311,10 @@ public class ErpController : ControllerBase
             var bytes = await _sp.DownloadSpFileAsync(url, ct);
             PickingSlipEnricher.EnsureFontResolver();   // FlatPattern.Develop is geometry-only, but keep parity
 
-            var descs = PickingSlipFabAppender.GetFabDescs(bytes, _log);
-            if (descs.Count == 0) return Ok(new { ok = false, reason = "no FAB notes" });
+            var notes = PickingSlipFabAppender.GetFabNotes(bytes, _log);
+            if (notes.Count == 0) return Ok(new { ok = false, reason = "no FAB notes" });
 
-            var built = FabDxfBuilder.Build(descs, _log);
+            var built = FabDxfBuilder.Build(notes, _log);
             if (built is null) return Ok(new { ok = false, reason = "no developable parts" });
 
             _log.LogInformation("[FAB-DXF] built combined DXF for {Url}: {N} part(s) [{Parts}]",

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using OutlookShredder.Proxy.Services;
 
 namespace OutlookShredder.Proxy.Services.Drawing;
 
@@ -19,9 +20,9 @@ public static class FabDxfBuilder
     /// Builds the combined DXF. Notes that fail to parse/develop are skipped (logged) rather than
     /// failing the whole file. Returns null when nothing developable was produced.
     /// </summary>
-    public static Result? Build(IEnumerable<string> descs, ILogger? log = null)
+    public static Result? Build(IEnumerable<FabNote> notes, ILogger? log = null)
     {
-        var (geo, parts) = Combine(descs, log);
+        var (geo, parts) = Combine(notes, log);
         return geo is null ? null : new Result(DrawingDxfWriter.Write(geo), parts);
     }
 
@@ -31,27 +32,29 @@ public static class FabDxfBuilder
     /// note developed. Separated from <see cref="Build"/> so the layout can be asserted without
     /// re-reading the serialized DXF.
     /// </summary>
-    internal static (CutGeometry? Geo, List<string> Parts) Combine(IEnumerable<string> descs, ILogger? log = null)
+    internal static (CutGeometry? Geo, List<string> Parts) Combine(IEnumerable<FabNote> notes, ILogger? log = null)
     {
         var combined  = new CutGeometry { Units = "in", Part = "fab" };
         var layerSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var parts     = new List<string>();
         double cursorX = 0;
 
-        foreach (var desc in descs)
+        foreach (var note in notes)
         {
             CutGeometry geo;
-            try { geo = FlatPattern.Develop(DrawingTextParser.Parse(desc)).Cut; }
+            // Develop with the note's quantity so the engine bakes the "xN / material / thickness" label
+            // (on the no-cut Notes layer) into each part; merged + translated below like any other entity.
+            try { geo = FlatPattern.Develop(DrawingTextParser.Parse(note.Desc), note.Qty).Cut; }
             catch (Exception ex)
             {
-                log?.LogWarning(ex, "[FAB-DXF] skipped un-developable note '{Desc}'", desc);
+                log?.LogWarning(ex, "[FAB-DXF] skipped un-developable note '{Desc}'", note.Desc);
                 continue;
             }
 
             if (geo.Entities.Count == 0) continue;
 
-            // Merge layers by name (CUT="Big Graph"/yellow, BEND="Mid Graph"/blue) so all parts share
-            // the same two layers in the combined file.
+            // Merge layers by name (cut="Big Graph"/yellow, bend="Mid Graph"/blue, notes="Notes") so all
+            // parts share the same layers in the combined file.
             foreach (var ly in geo.Layers)
                 if (layerSeen.Add(ly.Name))
                     combined.Layers.Add(new CutLayer { Name = ly.Name, Color = ly.Color });
@@ -104,6 +107,7 @@ public static class FabDxfBuilder
                           (e.Vertices ?? new()).Select(v => new CutVertex(v.X + dx, v.Y + dy, v.Bulge))),
         "line"     => CutEntity.Line(e.Layer, e.X1 + dx, e.Y1 + dy, e.X2 + dx, e.Y2 + dy),
         "circle"   => CutEntity.Circle(e.Layer, e.Cx + dx, e.Cy + dy, e.R),
+        "text"     => CutEntity.Label(e.Layer, e.Text ?? "", e.Cx + dx, e.Cy + dy, e.Height),
         _          => e,
     };
 }

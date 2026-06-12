@@ -8,6 +8,9 @@ using PigDoc = UglyToad.PdfPig.PdfDocument;
 
 namespace OutlookShredder.Proxy.Services;
 
+/// <summary>A FAB note's order quantity (the <c>(N)</c> prefix, default 1) plus its description text.</summary>
+public sealed record FabNote(int Qty, string Desc);
+
 /// <summary>
 /// Display-time enrichment: scans a picking slip for <c>FAB:</c> shop notes, turns the canonical
 /// text after the anchor into a dimensioned drawing (the same engine as the Drawing tab), and
@@ -90,6 +93,62 @@ internal static class PickingSlipFabAppender
         }
     }
 
+    /// <summary>
+    /// As <see cref="GetFabDescs"/>, but each surviving note keeps its order quantity (the <c>(N)</c>
+    /// prefix). Used by the DXF endpoint so each part can be labelled "xN". Empty on read failure / no
+    /// notes.
+    /// </summary>
+    public static List<FabNote> GetFabNotes(byte[] slipBytes, ILogger? log = null)
+    {
+        try
+        {
+            using var pig = PigDoc.Open(slipBytes);
+            var notes = ExtractFabNotes(ExtractRows(pig));
+            return DedupeNotesBySlug(DedupeNotes(notes), log);
+        }
+        catch (Exception ex)
+        {
+            log?.LogWarning(ex, "[FAB] text scan failed");
+            return new List<FabNote>();
+        }
+    }
+
+    /// <summary>Quantity-aware twin of <see cref="DedupeDescs"/> — collapses whitespace-identical notes.</summary>
+    internal static List<FabNote> DedupeNotes(IEnumerable<FabNote> notes)
+    {
+        var seen   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<FabNote>();
+        foreach (var n in notes)
+            if (seen.Add(_wsRx.Replace(n.Desc, " ").Trim()))
+                result.Add(n);
+        return result;
+    }
+
+    /// <summary>Quantity-aware twin of <see cref="DedupeBySlug"/> — one note per part slug, keeping the
+    /// longest (least-clipped) description and its quantity.</summary>
+    internal static List<FabNote> DedupeNotesBySlug(List<FabNote> notes, ILogger? log = null)
+    {
+        var best  = new Dictionary<string, FabNote>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+        var loose = new List<FabNote>();
+        foreach (var n in notes)
+        {
+            string? slug = null;
+            try { slug = FlatPattern.Develop(DrawingTextParser.Parse(n.Desc)).Cut.Part; } catch { }
+            if (string.IsNullOrEmpty(slug)) { loose.Add(n); continue; }
+
+            if (!best.TryGetValue(slug, out var cur)) { best[slug] = n; order.Add(slug); }
+            else
+            {
+                if (n.Desc.Length > cur.Desc.Length) best[slug] = n;
+                log?.LogInformation("[FAB] dedup: collapsed duplicate echo for slug '{Slug}'", slug);
+            }
+        }
+        var result = order.Select(s => best[s]).ToList();
+        result.AddRange(loose);
+        return result;
+    }
+
     private static byte[]? RenderFab(string desc, ILogger? log)
     {
         if (_cache.TryGetValue(desc, out var cached)) return cached;
@@ -120,12 +179,18 @@ internal static class PickingSlipFabAppender
     /// or a new line-item (which reaches the far-left MSPC column).
     /// </summary>
     internal static List<string> ExtractFabDescs(List<(string Text, double Left)> rows)
+        => ExtractFabNotes(rows).Select(n => n.Desc).ToList();
+
+    /// <summary>As <see cref="ExtractFabDescs"/>, but also captures the order quantity from the note's
+    /// <c>(N)</c> prefix (defaults to 1) so the DXF can label each part "xN".</summary>
+    internal static List<FabNote> ExtractFabNotes(List<(string Text, double Left)> rows)
     {
-        var descs = new List<string>();
+        var notes = new List<FabNote>();
         for (int i = 0; i < rows.Count; i++)
         {
             var m = FabRx.Match(rows[i].Text);
             if (!m.Success) continue;
+            int qty  = int.TryParse(m.Groups[1].Value, out var q) && q > 0 ? q : 1;
             var desc = m.Groups[2].Value.Trim();
 
             if (desc.StartsWith("["))
@@ -162,9 +227,9 @@ internal static class PickingSlipFabAppender
                 }
             }
 
-            if (desc.Length >= 3) descs.Add(desc);
+            if (desc.Length >= 3) notes.Add(new FabNote(qty, desc));
         }
-        return descs;
+        return notes;
     }
 
     /// <summary>

@@ -23,7 +23,7 @@ public readonly record struct CutVertex(double X, double Y, double Bulge = 0.0);
 
 public sealed class CutEntity
 {
-    public string Type { get; set; } = "";   // polyline | line | circle
+    public string Type { get; set; } = "";   // polyline | line | circle | text
     public string Layer { get; set; } = "CUT";
 
     // polyline
@@ -36,10 +36,14 @@ public sealed class CutEntity
     public double X2 { get; set; }
     public double Y2 { get; set; }
 
-    // circle
+    // circle (Cx/Cy also serve as the insertion point for text)
     public double Cx { get; set; }
     public double Cy { get; set; }
     public double R { get; set; }
+
+    // text (annotation): content + height; position reuses Cx/Cy
+    public string? Text { get; set; }
+    public double Height { get; set; }
 
     public static CutEntity Polyline(string layer, bool closed, IEnumerable<CutVertex> verts)
         => new() { Type = "polyline", Layer = layer, Closed = closed, Vertices = verts.ToList() };
@@ -49,4 +53,8 @@ public sealed class CutEntity
 
     public static CutEntity Circle(string layer, double cx, double cy, double r)
         => new() { Type = "circle", Layer = layer, Cx = cx, Cy = cy, R = r };
+
+    /// <summary>A single line of annotation text, bottom-centered at (x, y).</summary>
+    public static CutEntity Label(string layer, string text, double x, double y, double height)
+        => new() { Type = "text", Layer = layer, Text = text, Cx = x, Cy = y, Height = height };
 }

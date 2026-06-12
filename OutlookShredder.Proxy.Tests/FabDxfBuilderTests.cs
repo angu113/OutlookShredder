@@ -1,4 +1,5 @@
 using System.Linq;
+using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Drawing;
 using Xunit;
 
@@ -10,6 +11,9 @@ public class FabDxfBuilderTests
 {
     private const string FlitchA = "Flitch 109 x 7.25, 0.625 HRS, holes 0.75 paired @ 16, lhs 2 rhs 2, edge 1.5/1.5";
     private const string FlitchB = "Flitch 79 x 7.25, 0.625 HRS, holes 0.75 paired @ 16, lhs 2 rhs 2, edge 1.5/1.5";
+
+    // Default quantity 1 unless a note carries its own.
+    private static FabNote[] Notes(params string[] descs) => descs.Select(d => new FabNote(1, d)).ToArray();
 
     private static (double MinX, double MinY, double MaxX, double MaxY) Bounds(CutGeometry geo)
     {
@@ -24,6 +28,7 @@ public class FabDxfBuilderTests
             if (e.Type == "polyline") foreach (var v in e.Vertices!) Acc(v.X, v.Y);
             else if (e.Type == "line") { Acc(e.X1, e.Y1); Acc(e.X2, e.Y2); }
             else if (e.Type == "circle") { Acc(e.Cx - e.R, e.Cy - e.R); Acc(e.Cx + e.R, e.Cy + e.R); }
+            // "text" excluded — the label must not affect the measured part bounds.
         }
         return (minX, minY, maxX, maxY);
     }
@@ -31,7 +36,7 @@ public class FabDxfBuilderTests
     [Fact]
     public void Single_part_is_anchored_at_origin()
     {
-        var (geo, parts) = FabDxfBuilder.Combine(new[] { FlitchA });
+        var (geo, parts) = FabDxfBuilder.Combine(Notes(FlitchA));
         Assert.NotNull(geo);
         Assert.Single(parts);
         var b = Bounds(geo!);
@@ -42,13 +47,13 @@ public class FabDxfBuilderTests
     [Fact]
     public void Two_parts_combine_into_one_geometry_offset_to_the_right()
     {
-        var oneWidth = Bounds(FabDxfBuilder.Combine(new[] { FlitchA }).Geo!).MaxX;
+        var oneWidth = Bounds(FabDxfBuilder.Combine(Notes(FlitchA)).Geo!).MaxX;
 
-        var (geo, parts) = FabDxfBuilder.Combine(new[] { FlitchA, FlitchB });
+        var (geo, parts) = FabDxfBuilder.Combine(Notes(FlitchA, FlitchB));
         Assert.NotNull(geo);
         Assert.Equal(2, parts.Count);
 
-        // One CUT + one BEND layer shared across both parts, not duplicated.
+        // Layers are merged by name (cut / bend / notes), not duplicated per part.
         Assert.Equal(geo!.Layers.Select(l => l.Name).Distinct().Count(), geo.Layers.Count);
 
         // The second part sits to the right of the first with a >= 1" gap: total width exceeds a single
@@ -60,15 +65,36 @@ public class FabDxfBuilderTests
     [Fact]
     public void Both_distinct_flitch_slugs_are_reported()
     {
-        var (_, parts) = FabDxfBuilder.Combine(new[] { FlitchA, FlitchB });
+        var (_, parts) = FabDxfBuilder.Combine(Notes(FlitchA, FlitchB));
         Assert.Contains("flitch_109x7.25", parts);
         Assert.Contains("flitch_79x7.25", parts);
     }
 
     [Fact]
+    public void Each_part_gets_a_no_cut_label_with_qty_material_thickness()
+    {
+        var (geo, _) = FabDxfBuilder.Combine(new[] { new FabNote(2, FlitchA) });
+        Assert.NotNull(geo);
+
+        var texts = geo!.Entities.Where(e => e.Type == "text").ToList();
+        Assert.NotEmpty(texts);
+        Assert.All(texts, t => Assert.Equal(PartLabel.LayerName, t.Layer));
+        Assert.Contains(texts, t => t.Text == "x2");                                   // quantity
+        Assert.Contains(texts, t => (t.Text ?? "").Contains("HRS") && (t.Text ?? "").Contains("0.625")); // material + thickness
+        Assert.Contains(geo.Layers, l => l.Name == PartLabel.LayerName && l.Color == PartLabel.LayerColor);
+    }
+
+    [Fact]
+    public void Quantity_is_always_shown_for_fab_notes_including_one()
+    {
+        var (geo, _) = FabDxfBuilder.Combine(new[] { new FabNote(1, FlitchA) });
+        Assert.Contains(geo!.Entities.Where(e => e.Type == "text"), t => t.Text == "x1");
+    }
+
+    [Fact]
     public void Undevelopable_notes_are_skipped_not_fatal()
     {
-        var (geo, parts) = FabDxfBuilder.Combine(new[] { "this is not a part", FlitchA });
+        var (geo, parts) = FabDxfBuilder.Combine(Notes("this is not a part", FlitchA));
         Assert.NotNull(geo);
         Assert.Single(parts);
         Assert.Equal("flitch_109x7.25", parts[0]);
@@ -77,33 +103,27 @@ public class FabDxfBuilderTests
     [Fact]
     public void Nothing_developable_yields_null_geometry()
     {
-        var (geo, _) = FabDxfBuilder.Combine(new[] { "not a part", "also not a part" });
+        var (geo, _) = FabDxfBuilder.Combine(Notes("not a part", "also not a part"));
         Assert.Null(geo);
-        Assert.Null(FabDxfBuilder.Build(new[] { "not a part" }));
+        Assert.Null(FabDxfBuilder.Build(Notes("not a part")));
     }
 
     [Fact]
-    public void Build_emits_non_empty_dxf_bytes()
+    public void Build_output_loads_back_as_a_valid_dxf_with_both_parts_and_labels()
     {
-        var result = FabDxfBuilder.Build(new[] { FlitchA, FlitchB });
-        Assert.NotNull(result);
-        Assert.Equal(2, result!.Parts.Count);
-        Assert.True(result.Dxf.Length > 0);
-    }
-
-    [Fact]
-    public void Build_output_loads_back_as_a_valid_dxf_with_both_parts()
-    {
-        var result = FabDxfBuilder.Build(new[] { FlitchA, FlitchB })!;
+        var result = FabDxfBuilder.Build(new[] { new FabNote(2, FlitchA), new FabNote(3, FlitchB) })!;
+        Assert.Equal(2, result.Parts.Count);
 
         using var ms = new System.IO.MemoryStream(result.Dxf);
         var doc = netDxf.DxfDocument.Load(ms);
         Assert.NotNull(doc);
 
-        // Two flitch outlines (one closed polyline each) survive the round-trip on the cut layer.
+        // Two flitch outlines survive the round-trip on the cut layer.
         Assert.True(doc.Entities.Polylines2D.Count() >= 2,
             $"expected >= 2 outline polylines, got {doc.Entities.Polylines2D.Count()}");
-        // Both the cut ("Big Graph") and bend/mark ("Mid Graph") layers are present.
         Assert.Contains(doc.Layers, l => l.Name == FlatPattern.CutLayer);
+        // The labels survive too, on the no-cut Notes layer.
+        Assert.Contains(doc.Layers, l => l.Name == PartLabel.LayerName);
+        Assert.True(doc.Entities.Texts.Count() >= 2, $"expected label text, got {doc.Entities.Texts.Count()}");
     }
 }

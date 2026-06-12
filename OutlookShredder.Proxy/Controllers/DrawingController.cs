@@ -21,6 +21,10 @@ public class DrawingController : ControllerBase
         /// <summary>Calibration mode: letters each cross-section dimension (A, B, C…) on the drawing and
         /// returns the letter→geometry mapping in <c>dims</c>, so the dimension anchoring can be calibrated.</summary>
         public bool Calibrate { get; set; }
+
+        /// <summary>Order quantity from the wizard's Qty box — printed as the "xN" line on the DXF's
+        /// no-cut Notes label. Null ⇒ no quantity line.</summary>
+        public int? Quantity { get; set; }
     }
 
     // Material display name + the token the canonical text uses + its gauge-table family.
@@ -76,7 +80,7 @@ public class DrawingController : ControllerBase
         try
         {
             var spec = DrawingTextParser.Parse(req.Text);
-            var fp = FlatPattern.Develop(spec);
+            var fp = FlatPattern.Develop(spec, req.Quantity);
 
             byte[] pdf = DrawingPdfRenderer.Render(fp, req.Calibrate);
             byte[] dxf = DrawingDxfWriter.Write(fp.Cut);
