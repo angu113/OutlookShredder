@@ -46,9 +46,9 @@ public class PartLabelTests
     // ── Font fit ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public void Wide_part_keeps_the_full_one_inch_font()
+    public void Wide_part_keeps_the_full_three_quarter_inch_font()
     {
-        Assert.Equal(1.0, PartLabel.ChooseHeight(100, new[] { "X2", "HRS 0.625\"" }), 6);
+        Assert.Equal(0.75, PartLabel.ChooseHeight(100, new[] { "X2", "HRS 0.625\"" }), 6);
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public class PartLabelTests
     {
         var lines = new[] { "X2", "HRS 0.625\"" };
         double h = PartLabel.ChooseHeight(3.0, lines);
-        Assert.True(h < 1.0, $"narrow part should shrink the font, got {h}");
+        Assert.True(h < 0.75, $"narrow part should shrink the font, got {h}");
 
         // The widest line, at the chosen height, stays within the 3" part width.
         double widestIn = lines.Max(StrokeFontWidth) * h / StrokeFont.CapH;
@@ -68,7 +68,7 @@ public class PartLabelTests
     // ── Geometry placement ────────────────────────────────────────────────────
 
     [Fact]
-    public void Label_is_stroked_polylines_on_the_white_notes_layer_above_and_centered()
+    public void Label_is_stroked_polylines_on_the_L1_layer_above_and_centered()
     {
         var geo = Rect(20, 6);
         PartLabel.AddTo(geo, 4, "CRS", 0.075);

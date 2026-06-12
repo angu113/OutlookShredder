@@ -53,7 +53,7 @@ public static class FabDxfBuilder
 
             if (geo.Entities.Count == 0) continue;
 
-            // Merge layers by name (cut="Big Graph"/yellow, bend="Mid Graph"/blue, notes="Notes") so all
+            // Merge layers by name (cut="Big Graph"/yellow, bend="Mid Graph"/blue, text="L1"/pink) so all
             // parts share the same layers in the combined file.
             foreach (var ly in geo.Layers)
                 if (layerSeen.Add(ly.Name))

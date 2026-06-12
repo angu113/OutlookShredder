@@ -9,19 +9,19 @@ namespace OutlookShredder.Proxy.Services.Drawing;
 ///
 /// The label is drawn as SINGLE-STROKE GEOMETRY (<see cref="StrokeFont"/> polylines), NOT DXF TEXT:
 /// NcStudio's NcEditor (and most CAM DXF importers) silently drop TEXT/MTEXT on import, so a text label
-/// would be invisible to the operator. Geometry on a dedicated non-cut layer (<see cref="LayerName"/>,
-/// ACI 7 = white — the shop's "do not cut" colour, outside NcStudio's cut/mark/small map) shows in the
-/// importer AND is ignored for machining. The font starts <see cref="StartHeight"/>" tall and shrinks
-/// only so the widest line fits within the part's width.
+/// would be invisible to the operator. Geometry on the shop's dedicated text process layer
+/// (<see cref="LayerName"/> = "L1", ACI 11 = pink/salmon) shows in the importer and is mapped to the
+/// non-cut L1 graph — alongside cut = yellow/"Big Graph" and mark = blue/"Mid Graph". The font starts
+/// <see cref="StartHeight"/>" tall and shrinks only so the widest line fits within the part's width.
 /// </summary>
 public static class PartLabel
 {
-    /// <summary>No-cut annotation layer.</summary>
-    public const string LayerName = "Notes";
-    /// <summary>ACI 7 (white) — the shop's non-cut colour; outside the yellow/blue/cyan cut/mark/small map.</summary>
-    public const short LayerColor = 7;
+    /// <summary>The shop's text process layer (NcStudio "L1" custom graph).</summary>
+    public const string LayerName = "L1";
+    /// <summary>ACI 11 (pink/salmon) — the colour the shop maps to the non-cut L1 graph in NcEditor.</summary>
+    public const short LayerColor = 11;
 
-    private const double StartHeight = 1.0;   // inches — the starting (max) cap height
+    private const double StartHeight = 0.75;  // inches — the starting (max) cap height
     private const double MinHeight   = 0.1;   // floor so a tiny part still gets a (small) label
     private const double GapFactor   = 0.6;   // clear space above the part, as a fraction of the height
     private const double LineFactor  = 1.5;   // line-to-line pitch, as a fraction of the height
