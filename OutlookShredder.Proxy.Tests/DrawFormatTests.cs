@@ -52,6 +52,8 @@ public class DrawFormatTests
     [InlineData("U 4 x 2 x 36, 0.375 steel")]   // thick stock — where the old centreline approximation drifted
     [InlineData("U 4 x 2 x 36, 16ga CRS")]
     [InlineData("L 3 x 2 x 36, 0.25 steel")]
+    [InlineData("Z flange 2 @ 90 up web 4 flange 2 @ 90 down length 36, 16ga CRS")]   // Z web (opposing bends)
+    [InlineData("U flange 1 return 0.5 @ 90 up flange 1 web 2 length 36, 16ga CRS")]  // web with return flanges
     public void CrossSectionDims_anchors_span_the_dim_value(string text)
     {
         var fp = FlatPattern.Develop(DrawingTextParser.Parse(text));

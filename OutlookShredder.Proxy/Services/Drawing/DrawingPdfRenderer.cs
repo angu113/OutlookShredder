@@ -35,7 +35,7 @@ public static class DrawingPdfRenderer
     // Section-view panel margins (shared so the pan's two sections render at one common scale).
     private const double SecBandL = 46, SecBandB = 42, SecBandT = 12, SecBandR = 18;
 
-    public static byte[] Render(FlatPatternResult fp)
+    public static byte[] Render(FlatPatternResult fp, bool calibrate = false)
     {
         PickingSlipEnricher.EnsureFontResolver();
 
@@ -116,7 +116,7 @@ public static class DrawingPdfRenderer
             else
             {
                 DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
-                DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h));
+                DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h), calibrate);
                 double isoX = M + wFlat + wSect + 2 * gap;
                 // Single-section views: the "End section" header already carries the dash key, so we
                 // drop the floating Section-cuts box and let the iso use the full panel height.
@@ -185,7 +185,7 @@ public static class DrawingPdfRenderer
     }
 
     // ── 2. Dimensioned end-section (any shape, primary dims only) ─────────────
-    private static void DrawCrossSection(XGraphics gfx, FlatPatternResult fp, XRect box)
+    private static void DrawCrossSection(XGraphics gfx, FlatPatternResult fp, XRect box, bool calibrate = false)
     {
         var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
         var dimFont   = new XFont("Arial", 8, XFontStyleEx.Bold);
@@ -230,10 +230,25 @@ public static class DrawingPdfRenderer
         // Aligned dimensions anchored to the TRUE outer/inner sharp corners (intersection of the offset
         // faces), so the witness lines land exactly on the material edges even on thick stock. Lips are
         // pushed a little further out so they don't crash into the flange dimension.
-        foreach (var d in ComputeCrossSectionDims(fp))
+        var csDims = ComputeCrossSectionDims(fp);
+        for (int di = 0; di < csDims.Count; di++)
         {
+            var d = csDims[di];
             double off = d.Kind == DimKind.Lip ? 30 : 24;
-            DimAligned(gfx, dimFont, P(d.X1, d.Y1), P(d.X2, d.Y2), off, centroid, BL(d.Value, d.Inside), true, placed, area);
+            // The lip dim runs along the lip's own face (set in ComputeCrossSectionDims). A 90° return's
+            // label sits on its outer face (the default away-from-centroid offset). A 180° hem runs back
+            // alongside the flange, where away-from-centroid would crash the flange dim — push it to the
+            // opposite (interior) side instead.
+            (double x, double y)? forceDir = null;
+            if (d.Kind == DimKind.Lip && d.Hem)
+            {
+                var p1 = P(d.X1, d.Y1); var p2 = P(d.X2, d.Y2);
+                var mid = new XPoint((p1.X + p2.X) / 2, (p1.Y + p2.Y) / 2);
+                forceDir = (centroid.X - mid.X, centroid.Y - mid.Y);   // toward centroid (mirror of flange dim)
+            }
+            // Calibration: tag each dimension with a letter (A, B, C…) so the user can map it to geometry.
+            string? tag = calibrate ? ((char)('A' + di)).ToString() : null;
+            DimAligned(gfx, dimFont, P(d.X1, d.Y1), P(d.X2, d.Y2), off, centroid, BL(d.Value, d.Inside), true, placed, area, forceDir, tag);
         }
 
         // ── "Finish" callout: boxed, highlighted label + leader to the finished face ──
@@ -1204,8 +1219,10 @@ public static class DrawingPdfRenderer
 
     public enum DimKind { Web, Flange, Lip }
 
-    /// <summary>A cross-section dimension anchored to the two true material corners (model coords).</summary>
-    public readonly record struct CsDim(double X1, double Y1, double X2, double Y2, double Value, bool Inside, DimKind Kind);
+    /// <summary>A cross-section dimension anchored to the two true material corners (model coords).
+    /// <paramref name="Hem"/> distinguishes a 180° hem lip (dim mirrored from the flange dim) from a
+    /// 90° return lip (dim placed vertically above the material).</summary>
+    public readonly record struct CsDim(double X1, double Y1, double X2, double Y2, double Value, bool Inside, DimKind Kind, bool Hem = false);
 
     /// <summary>
     /// Cross-section dimensions for U/L/Z, anchored to the TRUE outer/inner sharp corners (each the
@@ -1242,57 +1259,57 @@ public static class DrawingPdfRenderer
             return LineX(b.X + n1x * sign * t / 2, b.Y + n1y * sign * t / 2, a1x, a1y,
                          b.X + n2x * sign * t / 2, b.Y + n2y * sign * t / 2, a2x, a2y);
         }
-        void AddFlange(SectionBend b, double dx, double dy, double outsideLen, bool inside)
+        (double x, double y) AddFlange(SectionBend b, double dx, double dy, double outsideLen, bool inside)
         {
             var (ux, uy) = Um(dx, dy);
             var c = Corner(b, inside ? -1 : 1);
             double len = inside ? outsideLen - t : outsideLen;
-            dims.Add(new CsDim(c.x, c.y, c.x + ux * len, c.y + uy * len, len, inside, DimKind.Flange));
+            var top = (x: c.x + ux * len, y: c.y + uy * len);
+            dims.Add(new CsDim(c.x, c.y, top.x, top.y, len, inside, DimKind.Flange));
+            return top;   // flange free-edge corner — a hem on this flange dimensions from here
         }
 
-        // Plain default U (BuildRadiusedU) carries no section bends — dimension it from the known
-        // web-at-bottom / flanges-up model frame, anchored at the true outer/inner corners.
-        if (s.Type == PartType.UChannel && flanges.Count < 2)
-        {
-            bool pwIn = s.Web.Basis == DimBasis.Inside, pflIn = s.FlangeLeft.Basis == DimBasis.Inside, pfrIn = s.FlangeRight.Basis == DimBasis.Inside;
-            dims.Add(pwIn ? new CsDim(t, t, webO - t, t, webO - 2 * t, true, DimKind.Web)
-                          : new CsDim(0, 0, webO, 0, webO, false, DimKind.Web));
-            dims.Add(pflIn ? new CsDim(t, t, t, flL, flL - t, true, DimKind.Flange)
-                           : new CsDim(0, 0, 0, flL, flL, false, DimKind.Flange));
-            dims.Add(pfrIn ? new CsDim(webO - t, t, webO - t, flR, flR - t, true, DimKind.Flange)
-                           : new CsDim(webO, 0, webO, flR, flR, false, DimKind.Flange));
-            return dims;
-        }
-
+        (double x, double y)? leftFlangeTop = null, rightFlangeTop = null;
         if (s.Type is PartType.UChannel or PartType.ZChannel && flanges.Count >= 2)
         {
             var b0 = flanges[0]; var b1 = flanges[1];
             bool wIn = s.Web.Basis == DimBasis.Inside;
             var c0 = Corner(b0, wIn ? -1 : 1); var c1 = Corner(b1, wIn ? -1 : 1);
             dims.Add(new CsDim(c0.x, c0.y, c1.x, c1.y, wIn ? webO - 2 * t : webO, wIn, DimKind.Web));
-            AddFlange(b0, -b0.InHx, -b0.InHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
-            AddFlange(b1, b1.OutHx, b1.OutHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
+            leftFlangeTop  = AddFlange(b0, -b0.InHx, -b0.InHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
+            rightFlangeTop = AddFlange(b1, b1.OutHx, b1.OutHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
         }
         else if (s.Type == PartType.LAngle && flanges.Count >= 1)
         {
+            // The single L bend joins legB (FlangeRight) on its incoming/-InH side and legA (FlangeLeft)
+            // on its outgoing/OutH side — so the -InH leg carries the FlangeRight length, the OutH leg the
+            // FlangeLeft length (the channel pairs each side with its own bend, the L shares one).
             var b = flanges[0];
-            AddFlange(b, -b.InHx, -b.InHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
-            AddFlange(b, b.OutHx, b.OutHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
+            leftFlangeTop  = AddFlange(b, -b.InHx, -b.InHy, flR, s.FlangeRight.Basis == DimBasis.Inside);
+            rightFlangeTop = AddFlange(b, b.OutHx, b.OutHy, flL, s.FlangeLeft.Basis == DimBasis.Inside);
         }
 
-        // Return lips — dimension the lip face (the one leaving the bend away from the part body).
+        // Return lips — dimension ALONG the lip's own face, from the bend's outer corner to the lip's
+        // free edge. The lip is the free-edge segment adjacent to the return bend: on the LEFT it precedes
+        // the bend (incoming side → lip heading = -InH), on the RIGHT it follows it (outgoing side → OutH).
+        // (Using the chain side, not an away-from-centroid guess, so an inward-folded lip is dimensioned
+        // along the lip rather than down the flange.)
         foreach (var rb in fp.SectionBends.Where(b => b.IsReturn))
         {
-            var rs = rb.X < cx ? s.ReturnLeft : s.ReturnRight;
+            bool leftReturn = rb.X < cx;
+            var rs = leftReturn ? s.ReturnLeft : s.ReturnRight;
             rs ??= s.ReturnLeft ?? s.ReturnRight;
             if (rs is null) continue;
-            var (a1x, a1y) = Um(-rb.InHx, -rb.InHy);
-            var (a2x, a2y) = Um(rb.OutHx, rb.OutHy);
-            double dd1 = a1x * (rb.X - cx) + a1y * (rb.Y - cy), dd2 = a2x * (rb.X - cx) + a2y * (rb.Y - cy);
-            var (ux, uy) = dd1 >= dd2 ? (a1x, a1y) : (a2x, a2y);
+            var (ux, uy) = leftReturn ? Um(-rb.InHx, -rb.InHy) : Um(rb.OutHx, rb.OutHy);
             bool inside = rs.Basis == DimBasis.Inside;
-            var c = Corner(rb, inside ? -1 : 1);
-            dims.Add(new CsDim(c.x, c.y, c.x + ux * rs.Length, c.y + uy * rs.Length, rs.Length, inside, DimKind.Lip));
+            bool hem = rb.AngleDeg >= 170;
+            // A 180° hem folds back alongside its flange, so Corner() is degenerate (the two faces are
+            // parallel). Start the hem lip from the flange's free-edge corner — the same point as that
+            // flange's dimension top. A 90° return has a real outer corner.
+            var c = hem
+                ? ((leftReturn ? leftFlangeTop : rightFlangeTop) ?? Corner(rb, inside ? -1 : 1))
+                : Corner(rb, inside ? -1 : 1);
+            dims.Add(new CsDim(c.x, c.y, c.x + ux * rs.Length, c.y + uy * rs.Length, rs.Length, inside, DimKind.Lip, hem));
         }
         return dims;
     }
@@ -1309,14 +1326,21 @@ public static class DrawingPdfRenderer
     // <paramref name="awayFrom"/>): witness lines, a parallel dim line + arrowheads, and a label
     // placed clear of the part + other labels. Keeps the accent (as-specified) vs muted styling.
     private static void DimAligned(XGraphics gfx, XFont font, XPoint p1, XPoint p2, double offset,
-        XPoint awayFrom, string label, bool accent, List<XRect> placed, XRect panel)
+        XPoint awayFrom, string label, bool accent, List<XRect> placed, XRect panel,
+        (double x, double y)? forceDir = null, string? tag = null)
     {
         double dx = p2.X - p1.X, dy = p2.Y - p1.Y, l = Math.Sqrt(dx * dx + dy * dy);
         if (l < 1e-6) return;
         double ux = dx / l, uy = dy / l;        // along the face
         double nx = -uy, ny = ux;               // face normal
         double mx = (p1.X + p2.X) / 2, my = (p1.Y + p2.Y) / 2;
-        if (nx * (mx - awayFrom.X) + ny * (my - awayFrom.Y) < 0) { nx = -nx; ny = -ny; }   // point outward
+        // Pick the perpendicular SIDE: either an explicit direction (lips force this) or away from the
+        // part centroid (the default for web/flange dims).
+        if (forceDir is { } fd && (fd.x * fd.x + fd.y * fd.y) > 1e-12)
+        {
+            if (nx * fd.x + ny * fd.y < 0) { nx = -nx; ny = -ny; }
+        }
+        else if (nx * (mx - awayFrom.X) + ny * (my - awayFrom.Y) < 0) { nx = -nx; ny = -ny; }   // point outward
 
         var col = accent ? AccentColor : DimColor;
         var brush = accent ? AccentBrush : DimBrush;
@@ -1341,6 +1365,16 @@ public static class DrawingPdfRenderer
         var lc = new XPoint(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
         if (Dist(lc, dimMid) > sz.Height + 12) gfx.DrawLine(pen, dimMid, lc);   // connector only if displaced
         gfx.DrawString(label, lblFont, lblBrush, rect, XStringFormats.Center);
+
+        // Calibration tag: a red circled letter just left of the value label, keyed to the `dims` map.
+        if (tag is not null)
+        {
+            const double r = 8;
+            var c = new XPoint(rect.X - r - 2, rect.Y + rect.Height / 2);
+            gfx.DrawEllipse(new XPen(XColors.Red, 1.1), new XRect(c.X - r, c.Y - r, 2 * r, 2 * r));
+            gfx.DrawString(tag, new XFont("Arial", 9, XFontStyleEx.Bold), new XSolidBrush(XColors.Red),
+                new XRect(c.X - r, c.Y - r, 2 * r, 2 * r), XStringFormats.Center);
+        }
     }
 
     // A label carried off a feature point by a leader, placed clear of the part + other labels.

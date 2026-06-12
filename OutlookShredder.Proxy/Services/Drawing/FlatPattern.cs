@@ -598,23 +598,26 @@ public static class FlatPattern
     // Outside dev-length of a return lip (inside basis runs to a free edge ⇒ +1T).
     private static double RetOuter(ReturnSpec r, double t) => r.Basis == DimBasis.Inside ? r.Length + t : r.Length;
 
-    // Pan cross-section (a U whose two walls fold up) with optional return lips — so the section view
-    // shows the lip too. Falls back to the plain radiused-U when there are no returns.
+    // Pan cross-section (a U whose two walls fold up) with optional return lips — developed through the
+    // same centreline engine as the channels (no special radiused-U path). The base is a between-bends
+    // segment, so it gets the same outer-face shrink as a channel web.
     private static List<(double x, double y)> BuildPanSection(
         double web, double wall1, bool ret1, double wall2, bool ret2, ReturnSpec? r, double t, double ri)
     {
-        if (r is null || (!ret1 && !ret2)) return BuildRadiusedU(web, wall1, wall2, t, ri);
-        double ro = RetOuter(r, t);
+        bool hasR1 = ret1 && r is not null;
+        bool hasR2 = ret2 && r is not null;
+        double ro  = r is not null ? RetOuter(r, t) : 0;
         var segs = new List<double>();
         var bends = new List<(double, BendDir, bool)>();
         void Seg(double len, (double, BendDir, bool)? b) { if (b is { } bb) bends.Add(bb); segs.Add(len); }
-        if (ret1) { Seg(ro, null); Seg(wall1, (r.AngleDeg, r.Direction, true)); }
+        if (hasR1) { Seg(ro, null); Seg(wall1, (r!.AngleDeg, r.Direction, true)); }
         else Seg(wall1, null);
         Seg(web, (90, BendDir.Up, false));
         int webIdx = segs.Count - 1;
         Seg(wall2, (90, BendDir.Up, false));
-        if (ret2) Seg(ro, (r.AngleDeg, r.Direction, true));
-        var (loop, _) = BuildOffsetProfile(segs.ToArray(), bends.ToArray(), t, ri, 0, segs[0], 0, -1, webIdx - 1);
+        if (hasR2) Seg(ro, (r!.AngleDeg, r.Direction, true));
+        var sectionSegs = SectionSegs(segs.ToArray(), bends.Select(b => b.Item1).ToArray(), t);
+        var (loop, _) = BuildOffsetProfile(sectionSegs, bends.ToArray(), t, ri, 0, sectionSegs[0], 0, -1, webIdx - 1);
         return loop;
     }
 
@@ -627,6 +630,24 @@ public static class FlatPattern
 
     // OSSB built on TanHalf so 90° returns are exact and 180° hems add (not consume) the lip in the flat.
     private static double OssbClamped(double ri, double t, double angleDeg) => (ri + t) * TanHalf(angleDeg);
+
+    // Section-view segment spans. Every segment's OUTER faces sit (t/2)·tan(θ/2) PAST the centreline apex
+    // at each BOUNDING bend (the sharp outer corner is outboard of the apex). Shrink each section span by
+    // that per bounding bend so the FORMED outer dimensions equal the spec: a web (two bends) loses t, a
+    // flange (one bend + free edge) loses t/2, a free edge loses nothing. The flat blank (UnrollChain)
+    // keeps the full outer dev lengths — this only affects the drawn section + its dimension anchors.
+    private static double[] SectionSegs(double[] segs, double[] bendAngles, double t)
+    {
+        var outv = (double[])segs.Clone();
+        for (int i = 0; i < outv.Length; i++)
+        {
+            double shrink = 0;
+            if (i >= 1)               shrink += 0.5 * t * TanHalf(bendAngles[i - 1]);   // bend before this segment
+            if (i <= outv.Length - 2) shrink += 0.5 * t * TanHalf(bendAngles[i]);       // bend after this segment
+            outv[i] = Math.Max(0.01, outv[i] - shrink);
+        }
+        return outv;
+    }
 
     // Unrolls a segment chain to its flat width + each bend line's X (developed length).
     private static (double FlatWidth, double[] BendX) UnrollChain(double[] segOuter, double[] angles, double ri, double t, double k)
@@ -674,18 +695,11 @@ public static class FlatPattern
         double flatHeight = spec.Length;
         int anchorBendIdx = webIdx - 1;   // the flange↔web bend — keeps the web horizontal
 
-        bool hasReturn = spec.ReturnLeft != null || spec.ReturnRight != null;
-        List<(double x, double y)> profile;
-        List<SectionBend> sb;
-        if (!isZ && !spec.AnglesAnnotated && !hasReturn)
-        {
-            profile = BuildRadiusedU(webO, flLO, flRO, t, ri);   // unchanged default-U section
-            sb = new();
-        }
-        else
-        {
-            (profile, sb) = BuildOffsetProfile(segs.ToArray(), bends.ToArray(), t, ri, 0, segs[0], 0, -1, anchorBendIdx);
-        }
+        // One engine for every shape: develop the section by walking the bend centreline (offset ±t/2 to
+        // the two faces), shrinking each span by its bounding-bend outer-corner offsets (see SectionSegs)
+        // so every formed OUTER dimension equals the spec.
+        var sectionSegs = SectionSegs(segs.ToArray(), angles, t);
+        var (profile, sb) = BuildOffsetProfile(sectionSegs, bends.ToArray(), t, ri, 0, sectionSegs[0], 0, -1, anchorBendIdx);
 
         // Representative flange values for the summary.
         double bd0 = BendMath.BendDeduction(ri, t, k, bs[0].AngleDeg, spec.MeasuredBendDeduction);
@@ -722,7 +736,8 @@ public static class FlatPattern
         double flatHeight = spec.Length;
         int anchorBendIdx = baseIdx - 1;
 
-        var (profile, sb) = BuildOffsetProfile(segs.ToArray(), bends.ToArray(), t, ri, 0, segs[0], 0, -1, anchorBendIdx);
+        var sectionSegs = SectionSegs(segs.ToArray(), angles, t);
+        var (profile, sb) = BuildOffsetProfile(sectionSegs, bends.ToArray(), t, ri, 0, sectionSegs[0], 0, -1, anchorBendIdx);
 
         double bd = BendMath.BendDeduction(ri, t, k, bs[0].AngleDeg, spec.MeasuredBendDeduction);
         double ossb = BendMath.Ossb(ri, t, bs[0].AngleDeg), ba = BendMath.BendAllowance(ri, t, k, bs[0].AngleDeg);
@@ -779,39 +794,6 @@ public static class FlatPattern
     }
 
     // ── Cross-section profiles ───────────────────────────────────────────────
-
-    private static double RoOf(double ri, double t, double a, double b, double c)
-    {
-        double maxR = Math.Min(Math.Min(b, c) * 0.9, Math.Max(a, 0.001) / 2.0 * 0.9);
-        return Math.Min(ri + t, Math.Max(t, maxR));
-    }
-
-    /// <summary>U-channel material loop (web at bottom, flanges up) with radiused bend corners.</summary>
-    private static List<(double x, double y)> BuildRadiusedU(double webO, double flL, double flR, double t, double ri)
-    {
-        double ro = RoOf(ri, t, webO, flL, flR);
-        double riA = Math.Max(0.0, ro - t);
-        const int seg = 8;
-        var pts = new List<(double x, double y)>();
-        void Arc(double cx, double cy, double r, double a0, double a1)
-        {
-            for (int i = 1; i <= seg; i++)
-            {
-                double a = (a0 + (a1 - a0) * i / seg) * Math.PI / 180.0;
-                pts.Add((cx + r * Math.Cos(a), cy + r * Math.Sin(a)));
-            }
-        }
-        pts.Add((0, flL)); pts.Add((0, ro));
-        Arc(ro, ro, ro, 180, 270);
-        pts.Add((webO - ro, 0));
-        Arc(webO - ro, ro, ro, 270, 360);
-        pts.Add((webO, flR)); pts.Add((webO - t, flR)); pts.Add((webO - t, t + riA));
-        Arc(webO - t - riA, t + riA, riA, 0, -90);
-        pts.Add((t + riA, t));
-        Arc(t + riA, t + riA, riA, 270, 180);
-        pts.Add((t, flL));
-        return pts;
-    }
 
     /// <summary>
     /// General radiused material loop for a segment chain. Walks the centreline (straight runs +

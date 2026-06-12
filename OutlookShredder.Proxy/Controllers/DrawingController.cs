@@ -17,6 +17,10 @@ public class DrawingController : ControllerBase
     {
         /// <summary>Plain-text part description, e.g. "U 4 x 2 x 36, 16ga CRS, inside".</summary>
         public string? Text { get; set; }
+
+        /// <summary>Calibration mode: letters each cross-section dimension (A, B, C…) on the drawing and
+        /// returns the letter→geometry mapping in <c>dims</c>, so the dimension anchoring can be calibrated.</summary>
+        public bool Calibrate { get; set; }
     }
 
     // Material display name + the token the canonical text uses + its gauge-table family.
@@ -74,8 +78,23 @@ public class DrawingController : ControllerBase
             var spec = DrawingTextParser.Parse(req.Text);
             var fp = FlatPattern.Develop(spec);
 
-            byte[] pdf = DrawingPdfRenderer.Render(fp);
+            byte[] pdf = DrawingPdfRenderer.Render(fp, req.Calibrate);
             byte[] dxf = DrawingDxfWriter.Write(fp.Cut);
+
+            // Calibration: the cross-section dimensions in draw order, each keyed to its drawing letter,
+            // so the user can say "letter B should be the return lip OD" and we fix that anchor.
+            object? dims = null;
+            if (req.Calibrate)
+                dims = DrawingPdfRenderer.ComputeCrossSectionDims(fp)
+                    .Select((d, i) => new
+                    {
+                        label = ((char)('A' + i)).ToString(),
+                        kind  = d.Kind.ToString(),
+                        value = d.Value,
+                        basis = d.Inside ? "ID" : "OD",
+                        hem   = d.Hem,
+                        x1 = d.X1, y1 = d.Y1, x2 = d.X2, y2 = d.Y2,
+                    }).ToList();
 
             return Ok(new
             {
@@ -113,6 +132,14 @@ public class DrawingController : ControllerBase
                 title = fp.Title,
                 summary = fp.Summary,
                 cut = fp.Cut,
+                dims,
+                bends = req.Calibrate
+                    ? fp.SectionBends.Select(b => new
+                    {
+                        x = b.X, y = b.Y, inHx = b.InHx, inHy = b.InHy, outHx = b.OutHx, outHy = b.OutHy,
+                        angle = b.AngleDeg, dir = b.Dir.ToString(), isReturn = b.IsReturn,
+                    }).ToList()
+                    : null,
             });
         }
         catch (DrawingParseException ex)
