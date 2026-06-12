@@ -37,6 +37,7 @@ Also installs:
 | `RfqSummaryController` | `/api/rfq` | `POST /api/rfq/summarize` — turns a client-assembled RFQ text input into ≤3 AI bullet points (Claude); empty bullets on failure so the client falls back to its deterministic summary |
 | `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts, list contacts |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
+| `ErpController` | `/api/erp` | Proxy SP PDFs (with FAB-drawing append), build a slip's combined DXF, ERP document records + stamp annotations |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -44,6 +45,11 @@ Also installs:
 - `PATCH /api/sr/{srId}/rfq-id` body: `{ rfqId }` — reparents a SupplierResponse and all its child SupplierLineItems to a new RFQ ID; rfqId must be 6 chars: 2 letters + 4 alphanumeric (e.g. `AW0001`)
 - `PATCH /api/sli/{sliItemId}/rfq-id` body: `{ rfqId }` — reparents a single SupplierLineItem to a new RFQ ID; if the source SR has no remaining SLI children it is deleted
 - `GET /api/version` → `{ version }` — returns the running assembly's `InformationalVersion` (distinct from `/api/publish/version`, which reads SharePoint's version.txt)
+
+**ErpController endpoints (`/api/erp`):**
+- `GET /api/erp/pdf?url=&appendFabs=` — downloads an SP PDF with app-only creds (clients can't fetch SP WebUrls directly). `appendFabs=true` runs `PickingSlipFabAppender.AppendFabDrawings` — one rendered drawing page per **deduped** `FAB:` note (dedup is by part slug, so OpenBravo's double-printed echoes collapse to one). Append is per-request, not persisted.
+- `GET /api/erp/fab-dxf?url=` → `{ ok, partCount, parts[], dxfBase64 }` — downloads the slip, develops its **deduped** `FAB:` notes (`PickingSlipFabAppender.GetFabDescs`), and lays every flat pattern into ONE DXF via `FabDxfBuilder` (parts left-to-right **1" apart**, bottom-aligned, shared cut/bend layers). `ok=false` (200) when the slip has no developable FAB notes; 502 on download/build error. The Shredder client (`ErpView.EnsureCadDrawingStampAsync`) calls this when no `.ncex`/`.dxf` for the HSK# exists in the OneDrive CAD folder, saves the bytes as `{HSK#}.dxf` (overwrite — OneDrive versions older copies), stamps `DIBUJO: {file}`, and shows a header notice. Un-developable notes are skipped (logged), never fatal.
+- `GET /api/erp/documents[/{spItemId}]`, `POST /api/erp/setup`, `PATCH /api/erp/documents/{id}/annotations`, `DELETE /api/erp/clean-by-type?types=` — ERP document records + stamp-annotation persistence (full-list replace).
 
 **HealthController endpoints:**
 - `GET /api/health` → `{ services: [ { id, label, status, detail } ] }` — lightweight snapshot of SharePoint (catalog cache state), Mailbox (config), Service Bus (config), Claude (key configured), Gemini (key configured), and AI Routing (current `IAiExtractionService.ProviderName`). `status` is one of `ok` | `degraded` | `fail` | `disabled`. Reads cached state only — does not hit Graph live.
