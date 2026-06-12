@@ -3,71 +3,84 @@ using System.Globalization;
 namespace OutlookShredder.Proxy.Services.Drawing;
 
 /// <summary>
-/// Shop cutting-aid label baked into a part's cut geometry: quantity (when &gt; 1), material, and
-/// thickness, as no-cut TEXT centered above the part. Added by <see cref="FlatPattern.Develop"/> so
-/// EVERY part the engine develops — and therefore every DXF it emits, single or combined — carries the
-/// label. The text lives on a dedicated <see cref="LayerName"/> layer in a colour outside NcStudio's
-/// cut/mark/small map, so the CNC ignores it. The font starts <see cref="StartHeight"/>" tall and only
-/// shrinks so the widest line fits within the part's width.
+/// Shop cutting-aid label baked into a part's cut geometry: quantity (when supplied), material, and
+/// thickness, centered above the part. Added by <see cref="FlatPattern.Develop"/> so EVERY part the
+/// engine develops — and every DXF it emits, single or combined — carries it.
+///
+/// The label is drawn as SINGLE-STROKE GEOMETRY (<see cref="StrokeFont"/> polylines), NOT DXF TEXT:
+/// NcStudio's NcEditor (and most CAM DXF importers) silently drop TEXT/MTEXT on import, so a text label
+/// would be invisible to the operator. Geometry on a dedicated non-cut layer (<see cref="LayerName"/>,
+/// ACI 7 = white — the shop's "do not cut" colour, outside NcStudio's cut/mark/small map) shows in the
+/// importer AND is ignored for machining. The font starts <see cref="StartHeight"/>" tall and shrinks
+/// only so the widest line fits within the part's width.
 /// </summary>
 public static class PartLabel
 {
     /// <summary>No-cut annotation layer.</summary>
     public const string LayerName = "Notes";
-    /// <summary>ACI 7 (white) — outside the yellow/blue/cyan cut/mark/small map, so NcStudio ignores it.</summary>
+    /// <summary>ACI 7 (white) — the shop's non-cut colour; outside the yellow/blue/cyan cut/mark/small map.</summary>
     public const short LayerColor = 7;
 
-    private const double StartHeight = 1.0;   // inches — the starting (max) font height
+    private const double StartHeight = 1.0;   // inches — the starting (max) cap height
     private const double MinHeight   = 0.1;   // floor so a tiny part still gets a (small) label
-    private const double CharWidth   = 0.72;  // glyph width as a fraction of height (netDxf default txt style)
     private const double GapFactor   = 0.6;   // clear space above the part, as a fraction of the height
-    private const double LineFactor  = 1.4;   // line-to-line spacing, as a fraction of the height
+    private const double LineFactor  = 1.5;   // line-to-line pitch, as a fraction of the height
 
-    /// <summary>
-    /// Adds the label to <paramref name="geo"/> in place. <paramref name="quantity"/> is null when the
-    /// caller has no order quantity (e.g. the design wizard) — then no "xN" line is shown; a supplied
-    /// quantity (e.g. a picking-slip FAB note) always prints, including "x1". No-op when there is
-    /// nothing to say.
-    /// </summary>
+    /// <summary>Adds the label to <paramref name="geo"/> in place. No-op when there is nothing to say.</summary>
     public static void AddTo(CutGeometry geo, int? quantity, string? material, double thickness)
     {
         var lines = BuildLines(quantity, material, thickness);
         if (lines.Count == 0) return;
 
-        var (minX, minY, maxX, maxY) = Bounds(geo);
+        var (minX, _, maxX, maxY) = Bounds(geo);
         double partW = maxX - minX;
         if (partW <= 0) return;
         double centerX = (minX + maxX) / 2.0;
 
-        // Start at 1" tall; shrink only so the widest line fits within the part's width.
-        int widest = lines.Max(l => l.Length);
-        double height = StartHeight;
-        double widthAtStart = widest * CharWidth * height;
-        if (widthAtStart > partW) height = Math.Max(MinHeight, partW / (widest * CharWidth));
+        double height = ChooseHeight(partW, lines);
+        double u      = height / StrokeFont.CapH;   // one cell unit in inches
 
         if (!geo.Layers.Any(l => l.Name.Equals(LayerName, StringComparison.OrdinalIgnoreCase)))
             geo.Layers.Add(new CutLayer { Name = LayerName, Color = LayerColor });
 
         // Stack above the part: the LAST line sits nearest the part, earlier lines above it.
-        double y = maxY + GapFactor * height;
+        double baselineY = maxY + GapFactor * height;
         for (int i = lines.Count - 1; i >= 0; i--)
         {
-            geo.Entities.Add(CutEntity.Label(LayerName, lines[i], centerX, y, height));
-            y += LineFactor * height;
+            var line   = lines[i];
+            double startX = centerX - StrokeFont.WidthUnits(line) * u / 2.0;
+            foreach (var stroke in StrokeFont.Strokes(line))
+                geo.Entities.Add(CutEntity.Polyline(LayerName, closed: false,
+                    stroke.Select(p => new CutVertex(startX + p.X * u, baselineY + p.Y * u))));
+            baselineY += LineFactor * height;
         }
     }
 
-    private static List<string> BuildLines(int? quantity, string? material, double thickness)
+    /// <summary>Start at 1"; shrink only so the widest line fits within the part's width.</summary>
+    internal static double ChooseHeight(double partW, IReadOnlyList<string> lines)
+    {
+        double widestUnits = lines.Count == 0 ? 0 : lines.Max(StrokeFont.WidthUnits);
+        if (widestUnits <= 0) return StartHeight;
+        // width(in) = widestUnits * (height / CapH) must be <= partW
+        double maxByWidth = partW * StrokeFont.CapH / widestUnits;
+        return Math.Max(MinHeight, Math.Min(StartHeight, maxByWidth));
+    }
+
+    /// <summary>The label lines (upper-cased for the stroke font): "XN" (quantity, when supplied) over
+    /// "MATERIAL THICKNESS". Empty when there's nothing to say.</summary>
+    internal static List<string> BuildLines(int? quantity, string? material, double thickness)
     {
         var lines = new List<string>();
-        if (quantity is { } q && q >= 1) lines.Add($"x{q}");
-        var mat = (material ?? "").Trim();
+        if (quantity is { } q && q >= 1) lines.Add($"X{q}");
+        var mat = (material ?? "").Trim().ToUpperInvariant();
         var thk = thickness > 0 ? thickness.ToString("0.####", CultureInfo.InvariantCulture) + "\"" : "";
         var matThk = string.Join(" ", new[] { mat, thk }.Where(s => s.Length > 0));
         if (matThk.Length > 0) lines.Add(matThk);
         return lines;
     }
 
+    /// <summary>Cut-geometry bounds, ignoring anything already on the no-cut Notes layer (so a label
+    /// never measures itself).</summary>
     private static (double MinX, double MinY, double MaxX, double MaxY) Bounds(CutGeometry geo)
     {
         double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
@@ -78,12 +91,12 @@ public static class PartLabel
         }
         foreach (var e in geo.Entities)
         {
+            if (e.Layer.Equals(LayerName, StringComparison.OrdinalIgnoreCase)) continue;
             switch (e.Type)
             {
                 case "polyline": if (e.Vertices != null) foreach (var v in e.Vertices) Acc(v.X, v.Y); break;
                 case "line":     Acc(e.X1, e.Y1); Acc(e.X2, e.Y2); break;
                 case "circle":   Acc(e.Cx - e.R, e.Cy - e.R); Acc(e.Cx + e.R, e.Cy + e.R); break;
-                // "text" excluded — a label must not inflate the part's measured bounds.
             }
         }
         if (minX > maxX) return (0, 0, 0, 0);

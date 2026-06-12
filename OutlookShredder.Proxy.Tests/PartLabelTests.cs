@@ -4,8 +4,8 @@ using Xunit;
 
 namespace OutlookShredder.Proxy.Tests;
 
-// PartLabel adds the shop cutting-aid text (qty / material / thickness) on a no-cut layer, centered
-// above the part, starting at 1" tall and shrinking only so the widest line fits the part's width.
+// PartLabel draws the shop cutting-aid (qty / material / thickness) as single-stroke polylines on the
+// no-cut white "Notes" layer, centered above the part, starting 1" tall and shrinking to fit the width.
 public class PartLabelTests
 {
     private static CutGeometry Rect(double w, double h)
@@ -19,57 +19,86 @@ public class PartLabelTests
         return geo;
     }
 
-    private static double LabelHeight(CutGeometry g) => g.Entities.Where(e => e.Type == "text").Max(e => e.Height);
+    private static List<CutEntity> Label(CutGeometry g) =>
+        g.Entities.Where(e => e.Layer == PartLabel.LayerName).ToList();
+
+    // ── Content (BuildLines) ──────────────────────────────────────────────────
+
+    [Fact]
+    public void Quantity_is_shown_when_supplied_including_one()
+    {
+        Assert.Equal(new[] { "X2", "HRS 0.625\"" }, PartLabel.BuildLines(2, "HRS", 0.625));
+        Assert.Equal(new[] { "X1", "HRS 0.625\"" }, PartLabel.BuildLines(1, "HRS", 0.625));
+    }
+
+    [Fact]
+    public void No_quantity_omits_the_xN_line_and_material_is_upper_cased()
+    {
+        Assert.Equal(new[] { "GALV 0.075\"" }, PartLabel.BuildLines(null, "galv", 0.075));
+    }
+
+    [Fact]
+    public void Nothing_to_say_is_empty()
+    {
+        Assert.Empty(PartLabel.BuildLines(null, "", 0));
+    }
+
+    // ── Font fit ──────────────────────────────────────────────────────────────
 
     [Fact]
     public void Wide_part_keeps_the_full_one_inch_font()
     {
-        var geo = Rect(100, 10);
-        PartLabel.AddTo(geo, 2, "HRS", 0.625);
-        Assert.Equal(1.0, LabelHeight(geo), 6);   // never grows past the 1" start
+        Assert.Equal(1.0, PartLabel.ChooseHeight(100, new[] { "X2", "HRS 0.625\"" }), 6);
     }
 
     [Fact]
     public void Narrow_part_shrinks_the_font_to_fit_its_width()
     {
-        var geo = Rect(3.0, 4.0);
-        PartLabel.AddTo(geo, 2, "HRS", 0.625);
-
-        double h = LabelHeight(geo);
+        var lines = new[] { "X2", "HRS 0.625\"" };
+        double h = PartLabel.ChooseHeight(3.0, lines);
         Assert.True(h < 1.0, $"narrow part should shrink the font, got {h}");
 
         // The widest line, at the chosen height, stays within the 3" part width.
-        int widest = geo.Entities.Where(e => e.Type == "text").Max(e => (e.Text ?? "").Length);
-        Assert.True(widest * 0.72 * h <= 3.0 + 1e-6, "label wider than the part");
+        double widestIn = lines.Max(StrokeFontWidth) * h / StrokeFont.CapH;
+        Assert.True(widestIn <= 3.0 + 1e-6, $"label width {widestIn} exceeds the 3\" part");
     }
 
+    private static double StrokeFontWidth(string s) => StrokeFont.WidthUnits(s);
+
+    // ── Geometry placement ────────────────────────────────────────────────────
+
     [Fact]
-    public void Label_is_centered_above_the_part_on_the_notes_layer()
+    public void Label_is_stroked_polylines_on_the_white_notes_layer_above_and_centered()
     {
         var geo = Rect(20, 6);
         PartLabel.AddTo(geo, 4, "CRS", 0.075);
 
-        var texts = geo.Entities.Where(e => e.Type == "text").ToList();
-        Assert.NotEmpty(texts);
-        Assert.All(texts, t => Assert.Equal(PartLabel.LayerName, t.Layer));
-        Assert.All(texts, t => Assert.Equal(10.0, t.Cx, 6));   // centered on the 20-wide part
-        Assert.All(texts, t => Assert.True(t.Cy >= 6.0, "label sits above the part top (y=6)"));
+        var label = Label(geo);
+        Assert.NotEmpty(label);
+        Assert.All(label, e => Assert.Equal("polyline", e.Type));          // geometry, not text
         Assert.Contains(geo.Layers, l => l.Name == PartLabel.LayerName && l.Color == PartLabel.LayerColor);
+
+        var pts = label.SelectMany(e => e.Vertices!).ToList();
+        Assert.All(pts, p => Assert.True(p.Y >= 6.0 - 1e-6, "label sits above the part top (y=6)"));
+        // Centered on the 20-wide part (within half a glyph cell — narrow trailing glyphs shift the ink
+        // centre slightly off the advance-box centre, which is expected).
+        double cx = (pts.Min(p => p.X) + pts.Max(p => p.X)) / 2.0;
+        Assert.InRange(cx, 9.5, 10.5);
     }
 
     [Fact]
-    public void Supplied_quantity_of_one_still_prints()
+    public void Adding_the_quantity_line_adds_more_strokes()
     {
-        var geo = Rect(20, 6);
-        PartLabel.AddTo(geo, 1, "HRS", 0.625);
-        Assert.Contains(geo.Entities.Where(e => e.Type == "text"), t => t.Text == "x1");
+        var withQty = Rect(40, 6); PartLabel.AddTo(withQty, 3, "HRS", 0.625);
+        var noQty   = Rect(40, 6); PartLabel.AddTo(noQty,  null, "HRS", 0.625);
+        Assert.True(Label(withQty).Count > Label(noQty).Count, "the xN line should add strokes");
     }
 
     [Fact]
-    public void Nothing_to_say_adds_nothing()
+    public void Nothing_to_say_adds_no_geometry()
     {
         var geo = Rect(10, 5);
-        PartLabel.AddTo(geo, null, "", 0);   // no quantity, no material, no thickness
-        Assert.DoesNotContain(geo.Entities, e => e.Type == "text");
+        PartLabel.AddTo(geo, null, "", 0);
+        Assert.Empty(Label(geo));
     }
 }

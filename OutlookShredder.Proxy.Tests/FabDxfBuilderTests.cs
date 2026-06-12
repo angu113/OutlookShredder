@@ -25,10 +25,10 @@ public class FabDxfBuilderTests
         }
         foreach (var e in geo.Entities)
         {
+            if (e.Layer == PartLabel.LayerName) continue;   // the no-cut label must not affect part bounds
             if (e.Type == "polyline") foreach (var v in e.Vertices!) Acc(v.X, v.Y);
             else if (e.Type == "line") { Acc(e.X1, e.Y1); Acc(e.X2, e.Y2); }
             else if (e.Type == "circle") { Acc(e.Cx - e.R, e.Cy - e.R); Acc(e.Cx + e.R, e.Cy + e.R); }
-            // "text" excluded — the label must not affect the measured part bounds.
         }
         return (minX, minY, maxX, maxY);
     }
@@ -71,24 +71,16 @@ public class FabDxfBuilderTests
     }
 
     [Fact]
-    public void Each_part_gets_a_no_cut_label_with_qty_material_thickness()
+    public void Each_part_gets_a_no_cut_stroked_label()
     {
         var (geo, _) = FabDxfBuilder.Combine(new[] { new FabNote(2, FlitchA) });
         Assert.NotNull(geo);
 
-        var texts = geo!.Entities.Where(e => e.Type == "text").ToList();
-        Assert.NotEmpty(texts);
-        Assert.All(texts, t => Assert.Equal(PartLabel.LayerName, t.Layer));
-        Assert.Contains(texts, t => t.Text == "x2");                                   // quantity
-        Assert.Contains(texts, t => (t.Text ?? "").Contains("HRS") && (t.Text ?? "").Contains("0.625")); // material + thickness
-        Assert.Contains(geo.Layers, l => l.Name == PartLabel.LayerName && l.Color == PartLabel.LayerColor);
-    }
-
-    [Fact]
-    public void Quantity_is_always_shown_for_fab_notes_including_one()
-    {
-        var (geo, _) = FabDxfBuilder.Combine(new[] { new FabNote(1, FlitchA) });
-        Assert.Contains(geo!.Entities.Where(e => e.Type == "text"), t => t.Text == "x1");
+        // The label is GEOMETRY (single-stroke polylines) on the no-cut white Notes layer — not DXF
+        // TEXT (NcStudio drops text on import).
+        Assert.Contains(geo!.Layers, l => l.Name == PartLabel.LayerName && l.Color == PartLabel.LayerColor);
+        Assert.Contains(geo.Entities, e => e.Type == "polyline" && e.Layer == PartLabel.LayerName);
+        Assert.DoesNotContain(geo.Entities, e => e.Type == "text");
     }
 
     [Fact]
@@ -122,8 +114,10 @@ public class FabDxfBuilderTests
         Assert.True(doc.Entities.Polylines2D.Count() >= 2,
             $"expected >= 2 outline polylines, got {doc.Entities.Polylines2D.Count()}");
         Assert.Contains(doc.Layers, l => l.Name == FlatPattern.CutLayer);
-        // The labels survive too, on the no-cut Notes layer.
+        // The stroked labels survive too, as polylines on the no-cut Notes layer (no DXF text).
         Assert.Contains(doc.Layers, l => l.Name == PartLabel.LayerName);
-        Assert.True(doc.Entities.Texts.Count() >= 2, $"expected label text, got {doc.Entities.Texts.Count()}");
+        Assert.True(doc.Entities.Polylines2D.Count(p => p.Layer.Name == PartLabel.LayerName) >= 2,
+            "expected stroked label polylines on the Notes layer");
+        Assert.Empty(doc.Entities.Texts);
     }
 }
