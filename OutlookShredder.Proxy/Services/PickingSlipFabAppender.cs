@@ -33,19 +33,7 @@ internal static class PickingSlipFabAppender
     /// </summary>
     public static byte[] AppendFabDrawings(byte[] slipBytes, ILogger? log = null)
     {
-        List<string> descs;
-        try
-        {
-            using var pig = PigDoc.Open(slipBytes);
-            descs = ExtractFabDescs(ExtractRows(pig));
-        }
-        catch (Exception ex)
-        {
-            log?.LogWarning(ex, "[FAB] text scan failed — returning slip unchanged");
-            return slipBytes;
-        }
-
-        var distinct = DedupeBySlug(DedupeDescs(descs), log);
+        var distinct = GetFabDescs(slipBytes, log);
         if (distinct.Count == 0) return slipBytes;
 
         PickingSlipEnricher.EnsureFontResolver();   // drawings embed Arial, same as enrichment
@@ -78,6 +66,27 @@ internal static class PickingSlipFabAppender
         {
             log?.LogWarning(ex, "[FAB] append failed — returning slip unchanged");
             return slipBytes;
+        }
+    }
+
+    /// <summary>
+    /// Scans a slip and returns its distinct FAB note descriptions, deduped the same way the drawing
+    /// append uses (bracket/column stitch → whitespace-norm → by-part-slug). Returns an empty list on
+    /// any read failure or when the slip carries no FAB notes. Shared by the drawing-append path and
+    /// the DXF-generation endpoint so both see exactly one entry per distinct part.
+    /// </summary>
+    public static List<string> GetFabDescs(byte[] slipBytes, ILogger? log = null)
+    {
+        try
+        {
+            using var pig = PigDoc.Open(slipBytes);
+            var descs = ExtractFabDescs(ExtractRows(pig));
+            return DedupeBySlug(DedupeDescs(descs), log);
+        }
+        catch (Exception ex)
+        {
+            log?.LogWarning(ex, "[FAB] text scan failed");
+            return new List<string>();
         }
     }
 

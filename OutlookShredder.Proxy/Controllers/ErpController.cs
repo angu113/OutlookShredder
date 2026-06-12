@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using OutlookShredder.Proxy.Services;
+using OutlookShredder.Proxy.Services.Drawing;
 
 namespace OutlookShredder.Proxy.Controllers;
 
@@ -288,6 +289,47 @@ public class ErpController : ControllerBase
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[ERP] PDF proxy download failed for {Url}", url);
+            return StatusCode(502, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Develops the slip's deduped <c>FAB:</c> notes into ONE combined DXF (parts laid out left-to-right,
+    /// 1" apart, bottom-aligned) and returns the bytes (base64) plus the part slugs. The client saves
+    /// this as <c>{HSK#}.dxf</c> in the OneDrive CAD folder and stamps the slip. Returns
+    /// <c>ok=false</c> (200) when the slip has no developable FAB notes so the client just skips
+    /// generation; 502 only on a download/build error.
+    /// </summary>
+    [HttpGet("/api/erp/fab-dxf")]
+    public async Task<IActionResult> GetFabDxf([FromQuery] string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return BadRequest(new { error = "url query parameter is required" });
+
+        try
+        {
+            var bytes = await _sp.DownloadSpFileAsync(url, ct);
+            PickingSlipEnricher.EnsureFontResolver();   // FlatPattern.Develop is geometry-only, but keep parity
+
+            var descs = PickingSlipFabAppender.GetFabDescs(bytes, _log);
+            if (descs.Count == 0) return Ok(new { ok = false, reason = "no FAB notes" });
+
+            var built = FabDxfBuilder.Build(descs, _log);
+            if (built is null) return Ok(new { ok = false, reason = "no developable parts" });
+
+            _log.LogInformation("[FAB-DXF] built combined DXF for {Url}: {N} part(s) [{Parts}]",
+                url, built.Parts.Count, string.Join(", ", built.Parts));
+            return Ok(new
+            {
+                ok        = true,
+                partCount = built.Parts.Count,
+                parts     = built.Parts,
+                dxfBase64 = Convert.ToBase64String(built.Dxf),
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[FAB-DXF] generation failed for {Url}", url);
             return StatusCode(502, new { error = ex.Message });
         }
     }
