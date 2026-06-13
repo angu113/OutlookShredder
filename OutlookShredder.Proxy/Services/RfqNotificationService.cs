@@ -35,6 +35,7 @@ public class RfqNotificationService
     private readonly ServiceBusSender?                           _sbSender;
     private readonly SliCacheService                             _sliCache;
     private readonly MailCacheService                            _mailCache;
+    private readonly Lazy<ForgeTaskService>                      _forgeTasks;
     private readonly IConfiguration                              _config;
     private readonly ILogger<RfqNotificationService>             _log;
 
@@ -50,12 +51,14 @@ public class RfqNotificationService
         IConfiguration config,
         SliCacheService sliCache,
         MailCacheService mailCache,
+        Lazy<ForgeTaskService> forgeTasks,
         ILogger<RfqNotificationService> log)
     {
-        _config    = config;
-        _sliCache  = sliCache;
-        _mailCache = mailCache;
-        _log       = log;
+        _config     = config;
+        _sliCache   = sliCache;
+        _mailCache  = mailCache;
+        _forgeTasks = forgeTasks;
+        _log        = log;
 
         var connStr   = config["ServiceBus:ConnectionString"];
         var topicName = config["ServiceBus:TopicName"] ?? "rfq-updates";
@@ -157,6 +160,14 @@ public class RfqNotificationService
                         "[ServiceBus] Proxy received SR from {PeerId} — invalidated cache for {RfqId}",
                         msg.ProxyId, msg.RfqId);
                 }
+            }
+
+            // Refresh the in-memory statements cache when a peer proxy completes the OB export.
+            if (msg is { EventType: "TASK_COMPLETE" } && !string.IsNullOrEmpty(msg.TaskName) && msg.ProxyId != ProxyId)
+            {
+                _ = Task.Run(() => _forgeTasks.Value.HandleTaskCompleteAsync(msg.TaskName!));
+                _log.LogDebug("[ServiceBus] Proxy received TASK_COMPLETE '{Task}' from {PeerId}",
+                    msg.TaskName, msg.ProxyId);
             }
 
             // Keep the local MailCache coherent with peer proxies' workbench writes.
@@ -286,6 +297,15 @@ public class RfqNotificationService
     /// state-of-play after a queue worker (re)generates it for that RFQ.</summary>
     public void NotifyRfqSummary(string rfqId) =>
         NotifyRfqProcessed(new RfqProcessedNotification { EventType = "RFQ_SUMMARY", RfqId = rfqId });
+
+    /// <summary>Publishes a "TASK_COMPLETE" event so peer proxies refresh their statements cache
+    /// from SP without waiting for a manual trigger or the next startup.</summary>
+    public void NotifyTaskComplete(string taskName) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType = "TASK_COMPLETE",
+            TaskName  = taskName,
+        });
 
     /// <summary>Publishes a "PO_STATUS" event so Trigger Ordered cards re-colour live the moment a
     /// PO's confirm/payment status changes (manual dropdown, auto-confirm, bill match, or receipt).</summary>

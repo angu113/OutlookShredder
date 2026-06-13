@@ -166,6 +166,10 @@ try
     builder.Services.AddSingleton<RfqStateOfPlayService>();
     builder.Services.AddSingleton<RfqSummaryQueue>();
     builder.Services.AddHostedService<RfqSummaryQueueProcessor>();
+    builder.Services.AddSingleton<ForgeSchedulerQueue>();
+    builder.Services.AddSingleton<ForgeTaskService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ForgeTaskService>());
+    builder.Services.AddSingleton(sp => new Lazy<ForgeTaskService>(() => sp.GetRequiredService<ForgeTaskService>()));
     builder.Services.AddSingleton<CatalogAnalysisService>();
     builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();

@@ -51,6 +51,7 @@ public partial class SharePointService
     private string? _leaseListId;            // ProxyLease
     private string? _todoListId;             // ShredderTodos
     private string? _stockNeededListId;      // StockNeeded
+    private string? _forgeTasksListId;      // ForgeTasks (scheduled task registry + result store)
 
     // Per-SR next SliVersion cache — set at rowIndex==0 after soft-deleting stale rows;
     // looked up for all subsequent rows in the same batch so all rows share one version number.
@@ -7605,6 +7606,173 @@ public partial class SharePointService
                 GetStr(f, "FeedbackBy"), GetStr(f, "FeedbackAt"), GetStr(f, "Summary"), GetStr(f, "GeneratedAt")));
         }
         return result.OrderByDescending(r => r.At ?? "").ToList();
+    }
+
+    // ── ForgeTasks (scheduled task registry + result store) ──────────────────
+
+    private async Task<string> GetForgeTasksListIdAsync()
+    {
+        if (_forgeTasksListId is not null) return _forgeTasksListId;
+        _forgeTasksListId = await ResolveListIdAsync("ForgeTasks");
+        return _forgeTasksListId;
+    }
+
+    /// <summary>
+    /// Idempotently provisions the ForgeTasks SP list with all required columns and seeds
+    /// the customer-statements-export task record if it does not already exist.
+    /// Call from POST /api/statements/setup.
+    /// </summary>
+    public async Task EnsureForgeTasksListAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var results = await EnsureListColumnsAsync(siteId, "ForgeTasks",
+        [
+            ("TaskType",        "text"),
+            ("ScheduleTime",    "text"),
+            ("ScheduleFreq",    "text"),
+            ("TaskEnabled",     "boolean"),
+            ("LastRunAt",       "text"),
+            ("LastRunStatus",   "text"),
+            ("LastRunMessage",  "note"),
+            ("LastRunBy",       "text"),
+            ("ResultData",      "note"),
+            ("ResultCustomers", "note"),
+        ]);
+
+        // Cache the newly-resolved list ID.
+        var lists = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'ForgeTasks'", ct);
+        _forgeTasksListId = lists?.Value?.FirstOrDefault()?.Id ?? _forgeTasksListId;
+
+        _log.LogInformation("[SP] ForgeTasks list ensured: {Results}",
+            string.Join(", ", results.Select(kv => $"{kv.Key}={kv.Value}")));
+
+        // Seed the customer-statements-export task record if absent.
+        var existing = await GetForgeTaskAsync("customer-statements-export", ct);
+        if (existing is null)
+        {
+            var listId = await GetForgeTasksListIdAsync();
+            await GetGraph().Sites[siteId].Lists[listId].Items
+                .PostAsync(new Microsoft.Graph.Models.ListItem
+                {
+                    Fields = new Microsoft.Graph.Models.FieldValueSet
+                    {
+                        AdditionalData = new Dictionary<string, object?>
+                        {
+                            ["Title"]         = "customer-statements-export",
+                            ["TaskType"]      = "customer-statements-export",
+                            ["ScheduleTime"]  = "19:00",
+                            ["ScheduleFreq"]  = "daily",
+                            ["TaskEnabled"]   = true,
+                            ["LastRunStatus"] = "none",
+                        }
+                    }
+                }, cancellationToken: ct);
+            _log.LogInformation("[SP] Seeded 'customer-statements-export' task record");
+        }
+    }
+
+    /// <summary>Reads a ForgeTasks item by task name (Title field).  Fetches all rows and filters
+    /// client-side — the list is tiny and Title is not indexed on a fresh SharePoint list.</summary>
+    public async Task<Models.ForgeTaskRecord?> GetForgeTaskAsync(string taskName, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetForgeTasksListIdAsync();
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,Title,TaskType,ScheduleTime,TaskEnabled,LastRunAt,LastRunStatus,LastRunMessage,LastRunBy,ResultData,ResultCustomers)"];
+                r.QueryParameters.Top    = 100;
+            }, ct);
+
+        var item = page?.Value?.FirstOrDefault(i =>
+            string.Equals(GetStr(i.Fields?.AdditionalData ?? new Dictionary<string, object?>(), "Title"), taskName,
+                StringComparison.OrdinalIgnoreCase));
+        if (item is null) return null;
+        var f = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+
+        DateTime? lastRunAt = null;
+        if (DateTime.TryParse(GetStr(f, "LastRunAt"), out var dt))
+            lastRunAt = dt.ToUniversalTime();
+
+        return new Models.ForgeTaskRecord(
+            SpItemId:       item.Id ?? "",
+            TaskName:       GetStr(f, "Title") ?? taskName,
+            TaskType:       GetStr(f, "TaskType"),
+            ScheduleTime:   GetStr(f, "ScheduleTime"),
+            Enabled:        string.Equals(GetStr(f, "TaskEnabled"), "true", StringComparison.OrdinalIgnoreCase)
+                                || GetStr(f, "TaskEnabled") == "1",
+            LastRunAt:      lastRunAt,
+            LastRunStatus:  GetStr(f, "LastRunStatus"),
+            LastRunMessage: GetStr(f, "LastRunMessage"),
+            LastRunBy:      GetStr(f, "LastRunBy"),
+            ResultData:     GetStr(f, "ResultData"),
+            ResultCustomers: GetStr(f, "ResultCustomers")
+        );
+    }
+
+    /// <summary>Updates the task status fields on the ForgeTasks record for <paramref name="taskName"/>.</summary>
+    public async Task UpdateForgeTaskStatusAsync(
+        string taskName, string status, string? message, string? runBy,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetForgeTasksListIdAsync();
+
+        var record = await GetForgeTaskAsync(taskName, ct);
+        if (record is null)
+        {
+            _log.LogWarning("[SP] ForgeTasks record '{Task}' not found — cannot update status", taskName);
+            return;
+        }
+
+        var data = new Dictionary<string, object?>
+        {
+            ["LastRunStatus"]  = status,
+            ["LastRunMessage"] = message ?? "",
+            ["LastRunBy"]      = runBy ?? "",
+            ["LastRunAt"]      = DateTimeOffset.UtcNow.ToString("o"),
+        };
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[record.SpItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }, cancellationToken: ct);
+        _log.LogInformation("[SP] ForgeTasks '{Task}' status -> {Status}", taskName, status);
+    }
+
+    /// <summary>
+    /// Atomically replaces the stored result for <paramref name="taskName"/>:
+    /// writes the new JSON result and customer list. The old data is simply overwritten in-place.
+    /// </summary>
+    public async Task StoreForgeTaskResultAsync(
+        string taskName, string resultJson, string customersJson,
+        CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetForgeTasksListIdAsync();
+
+        var record = await GetForgeTaskAsync(taskName, ct);
+        if (record is null)
+        {
+            _log.LogWarning("[SP] ForgeTasks record '{Task}' not found — cannot store result", taskName);
+            return;
+        }
+
+        var data = new Dictionary<string, object?>
+        {
+            ["ResultData"]      = resultJson,
+            ["ResultCustomers"] = customersJson,
+        };
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[record.SpItemId].Fields
+            .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = data }, cancellationToken: ct);
+        _log.LogInformation("[SP] ForgeTasks '{Task}' result stored ({Bytes} bytes)", taskName, resultJson.Length);
+    }
+
+    /// <summary>Returns the raw ResultData JSON for <paramref name="taskName"/>, or null if absent.</summary>
+    public async Task<string?> GetForgeTaskResultAsync(string taskName, CancellationToken ct = default)
+    {
+        var record = await GetForgeTaskAsync(taskName, ct);
+        return record?.ResultData;
     }
 
     private async Task<string> GetSynonymListIdAsync()

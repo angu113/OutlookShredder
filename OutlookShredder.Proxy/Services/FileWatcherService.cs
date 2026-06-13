@@ -153,6 +153,19 @@ public class FileWatcherService : BackgroundService
                 EnqueueFile(e.FullPath);
         };
 
+        // Steve CSV watcher — detects ExportedData*.csv (OB grid export) dropped by the extension.
+        using var csvFsw = new FileSystemWatcher(watchPath, "*.csv")
+        {
+            NotifyFilter        = NotifyFilters.FileName | NotifyFilters.LastWrite,
+            EnableRaisingEvents = true
+        };
+        csvFsw.Created += (_, e) => OnExportCsvDetected(e.FullPath);
+        csvFsw.Renamed += (_, e) =>
+        {
+            if (e.FullPath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                OnExportCsvDetected(e.FullPath);
+        };
+
         // Drain channel — process up to 3 files concurrently so two simultaneous ERP
         // documents don't stall behind each other's AI calls.
         using var sem = new SemaphoreSlim(3);
@@ -201,6 +214,36 @@ public class FileWatcherService : BackgroundService
         {
             _processedKeys.Clear();
             SaveProcessedLog();
+        }
+    }
+
+    // ── Steve: invoice CSV detection ──────────────────────────────────────────
+
+    private static readonly System.Text.RegularExpressions.Regex _exportCsvRx =
+        new(@"^ExportedData(\s*\(\d+\))?\.csv$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private void OnExportCsvDetected(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (!_exportCsvRx.IsMatch(name)) return;
+
+        try
+        {
+            var steveDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Shredder", "steve-exports");
+            Directory.CreateDirectory(steveDir);
+            var dest = Path.Combine(steveDir,
+                $"invoices-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
+            File.Copy(path, dest, overwrite: true);
+            SteveState.SetExportResult(dest);
+            _log.LogInformation("[Steve] Invoice export detected and copied to {Dest}", dest);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Steve] Failed to copy invoice export from {Path}", path);
         }
     }
 

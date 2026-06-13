@@ -99,6 +99,8 @@ public class RfqProcessedNotification
     public bool    HasPaymentEmail  { get; set; }
     /// <summary>True once the material is received — the client removes the card from the board.</summary>
     public bool    MaterialReceived { get; set; }
+    /// <summary>Populated when EventType = "TASK_COMPLETE". Name of the completed forge task.</summary>
+    public string? TaskName { get; set; }
 }
 
 /// <summary>
