@@ -36,7 +36,9 @@ public class ForgeTaskService : BackgroundService
     private List<string>?               _customerNames;
     private DateTime?                   _asOf;
     private string                      _status    = "none";
+    private string?                    _lastRunMessage;
     private DateTime?                   _lastRunEstDate;   // EST date of last successful run
+    private int                        _running;          // 0 = idle, 1 = a manual/queued run is in progress
 
     public ForgeTaskService(
         ForgeSchedulerQueue      queue,
@@ -52,10 +54,35 @@ public class ForgeTaskService : BackgroundService
 
     // ── Public accessors for StatementsController ─────────────────────────────
 
-    public string                      Status       => _status;
-    public DateTime?                   AsOf         => _asOf;
+    public string                      Status         => _status;
+    public DateTime?                   AsOf           => _asOf;
+    public string?                     LastRunMessage => _lastRunMessage;
+    public bool                        IsRunning      => Volatile.Read(ref _running) == 1;
     public List<string>?               GetCustomerNames()  => _customerNames;
     public List<CustomerStatementDto>? GetStatements()     => _statements;
+
+    /// <summary>
+    /// Manually runs the statements export on THIS proxy immediately, bypassing the Service Bus
+    /// queue and the 7pm schedule/dedup guards.  Intended for admin/testing/recovery — e.g. after a
+    /// failed nightly run, where the queue's 25h duplicate-detection window would otherwise swallow a
+    /// re-enqueue of the same <c>task:yyyyMMdd</c> message.  Runs in the background and returns
+    /// immediately; poll <see cref="Status"/> for the outcome.  Returns false if a run is already
+    /// in progress (manual or queued).
+    /// </summary>
+    public bool TryTriggerNow(string? taskName = null)
+    {
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            return false;
+
+        var task = taskName ?? TaskName;
+        _ = Task.Run(async () =>
+        {
+            try { await ExecuteTaskAsync(task, CancellationToken.None); }
+            catch { /* ExecuteTaskAsync already logged + set _status = "failed" */ }
+            finally { Volatile.Write(ref _running, 0); }
+        });
+        return true;
+    }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
 
@@ -127,6 +154,15 @@ public class ForgeTaskService : BackgroundService
 
     private async Task OnQueueMessageAsync(Azure.Messaging.ServiceBus.ProcessMessageEventArgs args)
     {
+        // Mutual exclusion with a manual TriggerNow run on this proxy — abandon so SB redelivers
+        // once the in-flight run finishes (rather than starting two concurrent Steve exports).
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+        {
+            _log.LogInformation("[ForgeTask] Queue message arrived while a run is in progress — abandoning for redelivery");
+            await args.AbandonMessageAsync(args.Message);
+            return;
+        }
+
         try
         {
             var json = args.Message.Body.ToString();
@@ -140,11 +176,18 @@ public class ForgeTaskService : BackgroundService
             _log.LogError(ex, "[ForgeTask] Queue message handler failed");
             await args.AbandonMessageAsync(args.Message);
         }
+        finally
+        {
+            Volatile.Write(ref _running, 0);
+        }
     }
 
     private async Task ExecuteTaskAsync(string taskName, CancellationToken ct)
     {
         _log.LogInformation("[ForgeTask] Starting '{Task}' on {Machine}", taskName, Environment.MachineName);
+
+        _status         = "running";
+        _lastRunMessage = "Export in progress…";
 
         try
         {
@@ -195,6 +238,7 @@ public class ForgeTaskService : BackgroundService
             _customerNames  = statements.Select(s => s.CustomerName).ToList();
             _asOf           = DateTime.UtcNow;
             _status         = "success";
+            _lastRunMessage = $"{statements.Count} customers";
             _lastRunEstDate = estNow;
 
             // Notify peer proxies to refresh their caches.
@@ -205,7 +249,8 @@ public class ForgeTaskService : BackgroundService
         catch (Exception ex)
         {
             _log.LogError(ex, "[ForgeTask] Task '{Task}' failed", taskName);
-            _status = "failed";
+            _status         = "failed";
+            _lastRunMessage = ex.Message;
             try
             {
                 await _sp.UpdateForgeTaskStatusAsync(
@@ -256,7 +301,10 @@ public class ForgeTaskService : BackgroundService
             return;
         }
 
-        _status = record.LastRunStatus ?? "none";
+        _status         = record.LastRunStatus ?? "none";
+        _lastRunMessage = record.LastRunMessage;
+        // NB: _asOf stays success-only (set in the success path below) — CheckScheduleAsync's 12h
+        // guard treats it as "last successful run", so a failed/running record must not populate it.
 
         if (_status != "success" || record.LastRunAt is null || string.IsNullOrEmpty(record.ResultData))
             return;

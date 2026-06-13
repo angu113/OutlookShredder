@@ -24,7 +24,24 @@ public class StatementsController(ForgeTaskService forgeTask, SharePointService 
         status         = forgeTask.Status,
         asOf           = forgeTask.AsOf,
         customerCount  = forgeTask.GetCustomerNames()?.Count ?? 0,
+        running        = forgeTask.IsRunning,
+        lastRunMessage = forgeTask.LastRunMessage,
     });
+
+    /// <summary>
+    /// Manually triggers the customer-statements export on this proxy, bypassing the 7pm schedule
+    /// and the Service Bus dedup window.  For admin/testing/recovery (e.g. re-running after a failed
+    /// nightly export).  Returns 202 immediately; the run continues in the background — poll
+    /// <c>GET /api/statements/status</c> for completion.  Returns 409 if a run is already in progress.
+    /// Requires OpenBravo to be open in a browser with the Shredder extension active.
+    /// </summary>
+    [HttpPost("trigger")]
+    public IActionResult Trigger()
+    {
+        if (!forgeTask.TryTriggerNow())
+            return Conflict(new { started = false, message = "A statements run is already in progress." });
+        return Accepted(new { started = true, message = "Statements export triggered. Poll /api/statements/status for completion." });
+    }
 
     /// <summary>Returns the sorted list of customer names with outstanding balances.</summary>
     [HttpGet("customers")]
