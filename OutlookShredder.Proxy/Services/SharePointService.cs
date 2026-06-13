@@ -5258,7 +5258,7 @@ public partial class SharePointService
                 ("PriceUnitDefault",    "text"),    // expected price unit form ("UM column", "per foot", "per cwt", "per piece")
                 ("WeightIsLineTotal",   "boolean"), // weight column is the LINE TOTAL (÷ pcs for per-unit)
                 ("MinimumOrderLbs",     "number"),
-                ("DeliveryDays",        "number"),
+                ("DeliveryDays",        "text"),    // a day-count (e.g. "5") OR a weekday schedule (e.g. "MWF") — text, not number
                 ("DeliveredDefault",    "boolean"), // almost always delivered
                 ("FuelSurchargePerCwt", "number"),  // stated standing surcharge to add to landed cost
                 ("OrderCutoffTime",     "text"),
