@@ -39,6 +39,7 @@ public class HealthController : ControllerBase
     {
         var services = new List<ServiceHealth>
         {
+            CheckSecrets(),
             CheckSharePoint(),
             CheckMail(),
             CheckServiceBus(),
@@ -51,6 +52,12 @@ public class HealthController : ControllerBase
         };
         return Ok(new HealthReport(services));
     }
+
+    // WS1 — where the proxy's secrets came from this launch (Key Vault vs the cleartext file fallback).
+    private ServiceHealth CheckSecrets()
+        => SecretsBootstrap.Source == "keyvault"
+            ? new("secrets", "Secrets", "ok", $"Key Vault ({SecretsBootstrap.Detail})")
+            : new("secrets", "Secrets", "degraded", $"Local file — {SecretsBootstrap.Detail}");
 
     private ServiceHealth CheckSharePoint()
     {

@@ -54,6 +54,12 @@ try
         "ShredderData", "Secrets", "appsettings.secrets.json");
     builder.Configuration.AddJsonFile(persistentSecretsPath, optional: true, reloadOnChange: false);
 
+    // WS1 — overlay secrets from Azure Key Vault (signed-in user's WAM token, silent), added AFTER the
+    // JSON files so it wins, and BEFORE the host is built so DI-time config readers see vault values.
+    // Vault-first, file fallback: never throws — on any failure the file secrets above remain in effect.
+    if (builder.Configuration.GetValue("KeyVault:Enabled", true))
+        SecretsBootstrap.LoadInto(builder.Configuration, Log.Logger);
+
     // Replace the default Microsoft.Extensions.Logging with Serilog so all
     // ILogger<T> calls (including from third-party libraries) go through Serilog.
     builder.Host.UseSerilog((ctx, _, config) => config
