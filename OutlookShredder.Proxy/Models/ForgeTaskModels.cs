@@ -16,6 +16,25 @@ public record ForgeTaskRecord(
 
 public record ForgeTaskQueueMessage(string TaskName);
 
+/// <summary>
+/// Health snapshot for a Forge scheduled task — the durable SharePoint record merged with the
+/// serving proxy's in-memory state.  <see cref="Health"/> is derived: <c>ok</c> (success today),
+/// <c>stale</c> (success but from a prior day), <c>fail</c>, <c>running</c>, or <c>unknown</c>.
+/// </summary>
+public record ForgeTaskStatus(
+    string    TaskName,
+    bool      Enabled,
+    string?   ScheduleTime,
+    string?   TaskType,
+    string?   LastRunStatus,
+    DateTime? LastRunAt,
+    string?   LastRunMessage,
+    string?   LastRunBy,
+    bool      Running,
+    bool      CacheLoaded,
+    string    Health
+);
+
 public class CustomerStatementDto
 {
     public string              CustomerName { get; init; } = "";

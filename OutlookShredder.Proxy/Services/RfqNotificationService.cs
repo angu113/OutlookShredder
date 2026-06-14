@@ -121,7 +121,13 @@ public class RfqNotificationService
                 new ServiceBusProcessorOptions { AutoCompleteMessages = false });
 
             _sbProcessor.ProcessMessageAsync += OnProxyBusMessageAsync;
-            _sbProcessor.ProcessErrorAsync   += (args) => Task.CompletedTask;
+            _sbProcessor.ProcessErrorAsync   += args =>
+            {
+                _log.LogWarning(args.Exception,
+                    "[ServiceBus] Proxy listener error ({Source}) on '{Entity}'",
+                    args.ErrorSource, args.EntityPath);
+                return Task.CompletedTask;
+            };
 
             await _sbProcessor.StartProcessingAsync(ct);
             _log.LogInformation(

@@ -35,7 +35,13 @@ public sealed class RfqSummaryQueueProcessor : IHostedService, IAsyncDisposable
         _processor = _queue.CreateProcessor();
         if (_processor is null) return;
         _processor.ProcessMessageAsync += OnMessageAsync;
-        _processor.ProcessErrorAsync   += _ => Task.CompletedTask;
+        _processor.ProcessErrorAsync   += args =>
+        {
+            _log.LogWarning(args.Exception,
+                "[StateOfPlay] queue processor error ({Source}) on '{Entity}'",
+                args.ErrorSource, args.EntityPath);
+            return Task.CompletedTask;
+        };
         await _processor.StartProcessingAsync(ct);
         _log.LogInformation("[StateOfPlay] queue processor listening on '{Queue}'", _queue.QueueName);
     }

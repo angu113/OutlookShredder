@@ -62,6 +62,53 @@ public class ForgeTaskService : BackgroundService
     public List<CustomerStatementDto>? GetStatements()     => _statements;
 
     /// <summary>
+    /// Durable health of the statements task: the SharePoint record (truthful across proxies — a
+    /// peer's failed nightly run is visible here, since failures don't broadcast on the bus) merged
+    /// with this proxy's in-memory running flag + cache state.  Falls back to in-memory if SP is
+    /// unreachable.  For a home/system health badge — distinct from the hot-path in-memory-only
+    /// <c>GET /api/statements/status</c>.
+    /// </summary>
+    public async Task<ForgeTaskStatus> GetTaskStatusAsync(CancellationToken ct = default)
+    {
+        ForgeTaskRecord? record = null;
+        try { record = await _sp.GetForgeTaskAsync(TaskName, ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "[ForgeTask] task-status SP read failed — using in-memory"); }
+
+        var running = IsRunning;
+        var status  = record?.LastRunStatus  ?? _status;
+        var lastAt  = record?.LastRunAt       ?? _asOf;
+        var lastMsg = record?.LastRunMessage  ?? _lastRunMessage;
+
+        // Was the last run from today (EST)?  Drives the "stale" health for a prior-day success.
+        var freshToday = false;
+        if (lastAt.HasValue)
+        {
+            var estRun = TimeZoneInfo.ConvertTimeFromUtc(lastAt.Value, _est);
+            var estNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est);
+            freshToday = estRun.Date == estNow.Date;
+        }
+
+        var health =
+            running             ? "running" :
+            status == "success" ? (freshToday ? "ok" : "stale") :
+            status == "failed"  ? "fail" :
+                                  "unknown";
+
+        return new ForgeTaskStatus(
+            TaskName,
+            record?.Enabled ?? true,
+            record?.ScheduleTime,
+            record?.TaskType,
+            status,
+            lastAt,
+            lastMsg,
+            record?.LastRunBy,
+            running,
+            _statements is not null,
+            health);
+    }
+
+    /// <summary>
     /// Manually runs the statements export on THIS proxy immediately, bypassing the Service Bus
     /// queue and the 7pm schedule/dedup guards.  Intended for admin/testing/recovery — e.g. after a
     /// failed nightly run, where the queue's 25h duplicate-detection window would otherwise swallow a
