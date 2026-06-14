@@ -54,4 +54,12 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Franchise logo for drawing PDFs — deployed next to the exe so DrawingPdfRenderer
+         resolves it without depending on a per-machine OneDrive path. -->
+    <Content Include="Assets\ms-primary-logo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

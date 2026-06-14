@@ -1010,6 +1010,8 @@ public static class DrawingPdfRenderer
             LogoPath,
             @"%USERPROFILE%\Mithril Metals Corp\Metal Supermarkets Hackensack - Documents\MS_Primary_Logo_C100_M44_Flattened_Preview.png",
             @"%OneDriveCommercial%\MS_Primary_Logo_C100_M44_Flattened_Preview.png",
+            // Reliable bundled fallback — deployed next to the proxy exe; works without OneDrive.
+            Path.Combine(AppContext.BaseDirectory, "Assets", "ms-primary-logo.png"),
         }
         .Where(c => !string.IsNullOrWhiteSpace(c))
         .Select(c => Environment.ExpandEnvironmentVariables(c!))
