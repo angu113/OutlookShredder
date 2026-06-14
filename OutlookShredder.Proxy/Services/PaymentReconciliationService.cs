@@ -1,3 +1,4 @@
+using System.IO;
 using OutlookShredder.Proxy.Models;
 
 namespace OutlookShredder.Proxy.Services;
@@ -11,10 +12,61 @@ namespace OutlookShredder.Proxy.Services;
 public class PaymentReconciliationService(IConfiguration config, ILogger<PaymentReconciliationService> log)
 {
     private volatile ReconRunResult? _last;
+    private volatile string? _stagedObCsv;   // OB CSV fetched via Steve, awaiting a run
 
-    public string         Status    => _last is null ? "none" : "success";
-    public DateTime?      LastRunAt => _last?.RunAt;
+    public string         Status      => _last is null ? "none" : "success";
+    public DateTime?      LastRunAt   => _last?.RunAt;
     public ReconRunResult? GetLastResult() => _last;
+    public string?        StagedObCsv => _stagedObCsv;
+
+    /// <summary>
+    /// Triggers the Steve OB Payment-In export and captures the resulting CSV as the staged OB side.
+    /// Validates by CONTENT that the captured file is a Payment-In export (the Downloads folder has
+    /// overlapping <c>ExportedData*.csv</c> files), so a stray invoice export is never used. Requires
+    /// OpenBravo open with the Shredder extension. Returns (ok, message, rowCount).
+    /// </summary>
+    public async Task<(bool Ok, string Message, int Rows)> FetchObViaSteveAsync(CancellationToken ct = default)
+    {
+        var timeoutSec = config.GetValue("ShadowRecon:ObExportTimeoutSeconds", 90);
+        SteveState.ClearExportResult();
+        SteveState.SetPending("ob-payments-export");
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+            while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(2000, ct);
+                var path = SteveState.GetExportResult();
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+
+                var csv = ReadShared(path);
+                if (CsvClassifier.Classify(csv) != CsvKind.PaymentIn)
+                {
+                    // A non-payments ExportedData (e.g. a stale invoice export) was captured — ignore
+                    // it and keep waiting for the payments file.
+                    SteveState.ClearExportResult();
+                    continue;
+                }
+                _stagedObCsv = csv;
+                var rows = ObPaymentsCsvParser.Parse(csv).Count;
+                log.LogInformation("[Recon] OB payments fetched via Steve — {Rows} rows", rows);
+                return (true, $"OB payments fetched ({rows} rows). Now pick the Heartland file and Reconcile.", rows);
+            }
+            return (false, "Timed out waiting for the OB export — is OpenBravo open with the Shredder extension?", 0);
+        }
+        finally
+        {
+            SteveState.ClearPending();
+            SteveState.ClearExportResult();
+        }
+    }
+
+    private static string ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var sr = new StreamReader(fs);
+        return sr.ReadToEnd();
+    }
 
     /// <summary>
     /// Parse + match the two exports for a SINGLE business day. This is a daily rec: the OB export
@@ -24,6 +76,15 @@ public class PaymentReconciliationService(IConfiguration config, ILogger<Payment
     /// </summary>
     public ReconRunResult Run(string obCsv, string heartlandCsv, string? obName = null, string? hlName = null, DateTime? targetDate = null)
     {
+        // Identify both files by content so the wrong export is never processed (overlapping
+        // ExportedData*.csv files in Downloads).
+        var obKind = CsvClassifier.Classify(obCsv);
+        if (obKind != CsvKind.PaymentIn)
+            throw new Exception($"The OB file isn't a Payment In export (detected: {obKind}). Pick the OB payments ExportedData CSV.");
+        var hlKind = CsvClassifier.Classify(heartlandCsv);
+        if (hlKind != CsvKind.Heartland)
+            throw new Exception($"The Heartland file isn't a Heartland transaction export (detected: {hlKind}).");
+
         var obAll = ObPaymentsCsvParser.Parse(obCsv);
         var hlAll = HeartlandCsvParser.Parse(heartlandCsv, LoadColumnMap());
 

@@ -21,18 +21,34 @@ public class ReconciliationController(PaymentReconciliationService recon) : Cont
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> Run([FromForm] IFormFile? obFile, [FromForm] IFormFile? heartlandFile, CancellationToken ct)
     {
-        if (obFile is null || heartlandFile is null)
-            return BadRequest(new { error = "Both obFile and heartlandFile are required." });
+        if (heartlandFile is null)
+            return BadRequest(new { error = "heartlandFile is required." });
+        // OB side: an uploaded file, else the CSV staged by a prior OB-export fetch (via Steve).
+        var obCsv   = obFile is not null ? await ReadAsync(obFile, ct) : recon.StagedObCsv;
+        var obName  = obFile?.FileName ?? "OpenBravo (fetched)";
+        if (obCsv is null)
+            return BadRequest(new { error = "No OB payments — upload an OB file or use Fetch from OpenBravo first." });
         try
         {
-            var obCsv = await ReadAsync(obFile, ct);
             var hlCsv = await ReadAsync(heartlandFile, ct);
-            return Ok(recon.Run(obCsv, hlCsv, obFile.FileName, heartlandFile.FileName));
+            return Ok(recon.Run(obCsv, hlCsv, obName, heartlandFile.FileName));
         }
         catch (Exception ex)
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Fetches the OB Payment-In export via the Steve OB automation and stages it as the OB side
+    /// (content-validated as a Payment-In file). Requires OpenBravo open with the Shredder extension.
+    /// Then call <c>run</c> with just the Heartland file.
+    /// </summary>
+    [HttpPost("ob-export/fetch")]
+    public async Task<IActionResult> FetchObExport(CancellationToken ct)
+    {
+        var (ok, message, rows) = await recon.FetchObViaSteveAsync(ct);
+        return ok ? Ok(new { ok, message, rows }) : StatusCode(504, new { ok, message });
     }
 
     /// <summary>Last reconciliation result (in-memory cache), for re-opening the tool without re-running.</summary>

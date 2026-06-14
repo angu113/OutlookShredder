@@ -111,6 +111,21 @@ public class PaymentReconTests
     public void Parser_throws_when_required_columns_absent()
         => Assert.Throws<Exception>(() => HeartlandCsvParser.Parse("Foo,Bar\n1,2\n", Map));
 
+    [Fact]
+    public void Classifier_identifies_file_kinds_by_content()
+    {
+        var ob = "Organization,Document No.,Description,Payment Date,Received From,Payment Method,Deposit To,Amount,Card Number,Status\n" +
+                 "x,P1,d,06-13-2026,Cust,Credit & Debit Cards,Bank,10,,ok\n";
+        var hl = "Merchantnumber_1,MerchantName,BatchNumber,CardType,CardNum,Expirationdate,TerminalID,TerminalDescription,SaleReturn,Trandate,AuthNumber,POSEntrySource,Dbt_Ind,Tran_time,Close_date,Amount,Textbox17\n" +
+                 "1,M,000184,V,4111******1111,0531,,,S,06/13/2026,A1,O, ,10:00:00,06/13/2026,10.00,100\n";
+        var si = "Invoice Date,Document No.,Business Partner,Total Gross Amount,Total Paid,Payment Terms\n06/13/2026,INV1,ACME,100,0,Net 30\n";
+
+        Assert.Equal(CsvKind.PaymentIn,    CsvClassifier.Classify(ob));
+        Assert.Equal(CsvKind.Heartland,    CsvClassifier.Classify(hl));
+        Assert.Equal(CsvKind.SalesInvoice, CsvClassifier.Classify(si));
+        Assert.Equal(CsvKind.Unknown,      CsvClassifier.Classify("a,b,c\n1,2,3\n"));
+    }
+
     // ── matcher ────────────────────────────────────────────────────────────────
 
     [Fact]
