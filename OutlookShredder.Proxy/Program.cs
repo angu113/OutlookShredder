@@ -93,6 +93,9 @@ try
 
     builder.Services.AddControllers();
 
+    // WS2 — local REST auth: mints + verifies the per-launch token / per-request HMAC.
+    builder.Services.AddSingleton<ProxyAuthService>();
+
     // Rate limit tracker — shared across both AI providers
     builder.Services.AddSingleton<AiRateLimitTracker>();
     builder.Services.AddHttpClient("gemini")
@@ -189,6 +192,10 @@ try
 
     var app = builder.Build();
 
+    // WS2 — mint + write the launch token BEFORE Kestrel starts listening, so the file is on disk
+    // before the first connection can be accepted (closes the startup token-less race).
+    app.Services.GetRequiredService<ProxyAuthService>().EnsureTokenWritten();
+
     // ── Global unhandled-exception handler ───────────────────────────────────
     app.UseExceptionHandler(errorApp => errorApp.Run(async ctx =>
     {
@@ -204,6 +211,64 @@ try
     }));
 
     app.UseCors();
+
+    // WS2 — local REST auth (DENY-BY-DEFAULT for /api/* except the exempt allowlist).
+    // Inserted before the HTTP-log middleware so the log line still records the final status
+    // (including a 401 this produces). Warn-only this release: would-rejects are logged, not blocked.
+    app.Use(async (ctx, next) =>
+    {
+        if (!ctx.Request.Path.StartsWithSegments("/api") || ProxyAuthService.IsExempt(ctx))
+        {
+            await next();
+            return;
+        }
+
+        var auth   = ctx.RequestServices.GetRequiredService<ProxyAuthService>();
+        var logger = ctx.RequestServices.GetRequiredService<ILogger<Program>>();
+        var pid    = ctx.Request.Headers[ProxyAuthService.PidHeader].ToString();
+        if (pid.Length == 0) pid = "-";
+
+        // Per-second rate cap on non-exempt traffic (blunts a runaway/abusive loop).
+        if (!auth.CheckRate())
+        {
+            if (auth.Enforce)
+            {
+                ctx.Response.StatusCode  = 429;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("{\"success\":false,\"error\":\"rate limited\"}");
+                logger.LogWarning("[Auth] rate-limited {Method} {Path} pid={Pid}", ctx.Request.Method, ctx.Request.Path, pid);
+                return;
+            }
+            logger.LogWarning("[Auth] rate-warn {Method} {Path} pid={Pid}", ctx.Request.Method, ctx.Request.Path, pid);
+        }
+
+        var result = auth.Verify(ctx);
+        if (result != ProxyAuthService.AuthResult.Ok)
+        {
+            if (auth.Enforce)
+            {
+                ctx.Response.StatusCode  = 401;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("{\"success\":false,\"error\":\"unauthorized\"}");
+                logger.LogWarning("[Auth] reject {Method} {Path} reason={Reason} pid={Pid}",
+                    ctx.Request.Method, ctx.Request.Path, result, pid);
+                return;
+            }
+            logger.LogWarning("[Auth] would-reject {Method} {Path} reason={Reason} pid={Pid}",
+                ctx.Request.Method, ctx.Request.Path, result, pid);
+        }
+
+        // Audit every mutating call that passed (or warn-passed) — caller + intent recorded before dispatch.
+        var method = ctx.Request.Method;
+        if (HttpMethods.IsPost(method) || HttpMethods.IsPut(method)
+            || HttpMethods.IsPatch(method) || HttpMethods.IsDelete(method))
+        {
+            logger.LogInformation("[Audit] {Method} {Path} caller-pid={Pid} result={Result}",
+                method, ctx.Request.Path, pid, result == ProxyAuthService.AuthResult.Ok ? "allow" : "warn-pass");
+        }
+
+        await next();
+    });
 
     // Per-request duration log for /api/* — helps diagnose UI lag. Logs only
     // method + path + status + ms, so noise stays low while still making slow
