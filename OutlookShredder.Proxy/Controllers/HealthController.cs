@@ -16,19 +16,22 @@ public class HealthController : ControllerBase
     private readonly AiServiceFactory _aiFactory;
     private readonly FileWatcherService _fileWatcher;
     private readonly MailboxBridgeService _mailboxBridge;
+    private readonly ForgeTaskService _forgeTask;
 
     public HealthController(
         IConfiguration config,
         ProductCatalogService catalog,
         AiServiceFactory aiFactory,
         FileWatcherService fileWatcher,
-        MailboxBridgeService mailboxBridge)
+        MailboxBridgeService mailboxBridge,
+        ForgeTaskService forgeTask)
     {
         _config = config;
         _catalog = catalog;
         _aiFactory = aiFactory;
         _fileWatcher = fileWatcher;
         _mailboxBridge = mailboxBridge;
+        _forgeTask = forgeTask;
     }
 
     [HttpGet]
@@ -44,6 +47,7 @@ public class HealthController : ControllerBase
             CheckAiRouting(),
             CheckFileWatcher(),
             CheckMailboxBridge(),
+            CheckStatementsTask(),
         };
         return Ok(new HealthReport(services));
     }
@@ -170,6 +174,26 @@ public class HealthController : ControllerBase
         var total = statuses.Sum(m => m.MessageCount);
         return new("mailboxBridge", "Mailbox Bridge", "ok",
             $"{statuses.Count} mailbox(es), {total} message(s) cached");
+    }
+
+    private ServiceHealth CheckStatementsTask()
+    {
+        // In-memory only — /api/health must not hit Graph live (see class summary).  The richer
+        // cross-proxy-truthful read is GET /api/forge/task-status.
+        var s = _forgeTask.GetTaskStatusInMemory();
+        return s.Health switch
+        {
+            "ok"      => new("statements", "Statements", "ok",
+                             $"{s.LastRunMessage} (exported {FormatAge(DateTime.UtcNow - s.LastRunAt!.Value)})"),
+            "running" => new("statements", "Statements", "degraded", "Export in progress…"),
+            "stale"   => new("statements", "Statements", "degraded",
+                             s.LastRunAt.HasValue
+                                ? $"Last success {FormatAge(DateTime.UtcNow - s.LastRunAt.Value)} — not today; use Fetch"
+                                : "Last success was not today; use Fetch"),
+            "fail"    => new("statements", "Statements", "fail",
+                             $"Last export failed: {s.LastRunMessage}"),
+            _         => new("statements", "Statements", "disabled", "No export yet today"),
+        };
     }
 
     private static string FormatAge(TimeSpan age)

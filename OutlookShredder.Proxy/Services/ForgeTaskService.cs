@@ -79,21 +79,6 @@ public class ForgeTaskService : BackgroundService
         var lastAt  = record?.LastRunAt       ?? _asOf;
         var lastMsg = record?.LastRunMessage  ?? _lastRunMessage;
 
-        // Was the last run from today (EST)?  Drives the "stale" health for a prior-day success.
-        var freshToday = false;
-        if (lastAt.HasValue)
-        {
-            var estRun = TimeZoneInfo.ConvertTimeFromUtc(lastAt.Value, _est);
-            var estNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est);
-            freshToday = estRun.Date == estNow.Date;
-        }
-
-        var health =
-            running             ? "running" :
-            status == "success" ? (freshToday ? "ok" : "stale") :
-            status == "failed"  ? "fail" :
-                                  "unknown";
-
         return new ForgeTaskStatus(
             TaskName,
             record?.Enabled ?? true,
@@ -105,7 +90,44 @@ public class ForgeTaskService : BackgroundService
             record?.LastRunBy,
             running,
             _statements is not null,
-            health);
+            DeriveHealth(status, lastAt, running));
+    }
+
+    /// <summary>
+    /// In-memory-only health snapshot (no SharePoint read) for the cheap, frequently-polled
+    /// <c>GET /api/health</c> dashboard aggregation.  Reflects this proxy's last run + peer
+    /// successes (refreshed via TASK_COMPLETE) + the startup SP load — but not a peer's *failure*
+    /// (those don't broadcast).  Use <see cref="GetTaskStatusAsync"/> for the cross-proxy-truthful read.
+    /// </summary>
+    public ForgeTaskStatus GetTaskStatusInMemory() => new(
+        TaskName,
+        Enabled:        true,
+        ScheduleTime:   null,
+        TaskType:       null,
+        LastRunStatus:  _status,
+        LastRunAt:      _asOf,
+        LastRunMessage: _lastRunMessage,
+        LastRunBy:      null,
+        Running:        IsRunning,
+        CacheLoaded:    _statements is not null,
+        Health:         DeriveHealth(_status, _asOf, IsRunning));
+
+    /// <summary>Derives the badge health: ok (success today) / stale (prior-day success) / fail / running / unknown.</summary>
+    private string DeriveHealth(string? status, DateTime? lastAt, bool running)
+    {
+        if (running) return "running";
+        if (status == "success")
+        {
+            var fresh = false;
+            if (lastAt.HasValue)
+            {
+                var estRun = TimeZoneInfo.ConvertTimeFromUtc(lastAt.Value, _est);
+                var estNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est);
+                fresh = estRun.Date == estNow.Date;
+            }
+            return fresh ? "ok" : "stale";
+        }
+        return status == "failed" ? "fail" : "unknown";
     }
 
     /// <summary>
