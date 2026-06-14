@@ -170,6 +170,8 @@ try
     builder.Services.AddSingleton<ForgeTaskService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ForgeTaskService>());
     builder.Services.AddSingleton(sp => new Lazy<ForgeTaskService>(() => sp.GetRequiredService<ForgeTaskService>()));
+    // ShadowCat — Payment Reconciliation (on-demand; no hosted service in v1).
+    builder.Services.AddSingleton<PaymentReconciliationService>();
     builder.Services.AddSingleton<CatalogAnalysisService>();
     builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();

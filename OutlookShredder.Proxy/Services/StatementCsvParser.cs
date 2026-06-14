@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
 using OutlookShredder.Proxy.Models;
 
@@ -17,16 +16,16 @@ public static class StatementCsvParser
 
     public static List<CustomerStatementDto> Parse(string csvContent)
     {
-        var lines = csvContent.Split('\n');
+        var lines = CsvRowReader.SplitLines(csvContent);
         if (lines.Length < 2) return [];
 
-        var headers = ParseRow(lines[0]);
-        int idxDate  = IndexOf(headers, "Invoice Date");
-        int idxDoc   = IndexOf(headers, "Document No.");
-        int idxBp    = IndexOf(headers, "Business Partner");
-        int idxGross = IndexOf(headers, "Total Gross Amount");
-        int idxPaid  = IndexOf(headers, "Total Paid");
-        int idxTerms = IndexOf(headers, "Payment Terms");
+        var headers = CsvRowReader.ParseRow(lines[0]);
+        int idxDate  = CsvRowReader.IndexOf(headers, "Invoice Date");
+        int idxDoc   = CsvRowReader.IndexOf(headers, "Document No.");
+        int idxBp    = CsvRowReader.IndexOf(headers, "Business Partner");
+        int idxGross = CsvRowReader.IndexOf(headers, "Total Gross Amount");
+        int idxPaid  = CsvRowReader.IndexOf(headers, "Total Paid");
+        int idxTerms = CsvRowReader.IndexOf(headers, "Payment Terms");
 
         if (idxDate < 0 || idxDoc < 0 || idxBp < 0 || idxGross < 0 || idxPaid < 0)
             throw new Exception(
@@ -39,22 +38,22 @@ public static class StatementCsvParser
         {
             var line = lines[i].Trim('\r', ' ');
             if (string.IsNullOrEmpty(line)) continue;
-            var cols = ParseRow(line);
+            var cols = CsvRowReader.ParseRow(line);
 
-            if (!decimal.TryParse(Col(cols, idxGross), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal gross)) continue;
+            if (!decimal.TryParse(CsvRowReader.Col(cols, idxGross), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal gross)) continue;
             if (gross <= 0) continue; // exclude credit memos
 
-            if (!DateTime.TryParse(Col(cols, idxDate), out DateTime date)) continue;
+            if (!DateTime.TryParse(CsvRowReader.Col(cols, idxDate), out DateTime date)) continue;
 
-            decimal.TryParse(Col(cols, idxPaid), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal paid);
+            decimal.TryParse(CsvRowReader.Col(cols, idxPaid), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal paid);
 
             raw.Add((
-                Bp:    Col(cols, idxBp).Trim(),
+                Bp:    CsvRowReader.Col(cols, idxBp).Trim(),
                 Date:  date,
-                DocNo: Col(cols, idxDoc).Trim(),
+                DocNo: CsvRowReader.Col(cols, idxDoc).Trim(),
                 Gross: gross,
                 Paid:  paid,
-                Terms: idxTerms >= 0 ? Col(cols, idxTerms).Trim() : ""
+                Terms: idxTerms >= 0 ? CsvRowReader.Col(cols, idxTerms).Trim() : ""
             ));
         }
 
@@ -99,47 +98,5 @@ public static class StatementCsvParser
         if (m.Success && int.TryParse(m.Groups[1].Value, out int days))
             return invoiceDate.AddDays(days);
         return null;
-    }
-
-    private static int IndexOf(string[] headers, string name) =>
-        Array.FindIndex(headers, h => h.Trim().Equals(name, StringComparison.OrdinalIgnoreCase));
-
-    private static string Col(string[] cols, int idx) =>
-        idx >= 0 && idx < cols.Length ? cols[idx] : "";
-
-    // RFC 4180 CSV row parser — handles quoted fields containing commas and escaped quotes.
-    private static string[] ParseRow(string line)
-    {
-        var result = new List<string>();
-        int i = 0;
-        while (i <= line.Length)
-        {
-            if (i == line.Length) { result.Add(""); break; }
-
-            if (line[i] == '"')
-            {
-                i++;
-                var sb = new StringBuilder();
-                while (i < line.Length)
-                {
-                    if (line[i] == '"' && i + 1 < line.Length && line[i + 1] == '"')
-                    { sb.Append('"'); i += 2; }
-                    else if (line[i] == '"')
-                    { i++; break; }
-                    else
-                    { sb.Append(line[i++]); }
-                }
-                result.Add(sb.ToString());
-                if (i < line.Length && line[i] == ',') i++;
-            }
-            else
-            {
-                int start = i;
-                while (i < line.Length && line[i] != ',') i++;
-                result.Add(line[start..i].TrimEnd('\r'));
-                if (i < line.Length) i++;
-            }
-        }
-        return [.. result];
     }
 }
