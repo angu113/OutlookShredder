@@ -12,12 +12,14 @@ namespace OutlookShredder.Proxy.Services;
 public class PaymentReconciliationService(IConfiguration config, ILogger<PaymentReconciliationService> log)
 {
     private volatile ReconRunResult? _last;
-    private volatile string? _stagedObCsv;   // OB CSV fetched via Steve, awaiting a run
+    private volatile string? _stagedObCsv;         // OB CSV fetched via Steve, awaiting a run
+    private volatile string? _stagedHeartlandCsv;  // Heartland CSV fetched via the GP portal, awaiting a run
 
-    public string         Status      => _last is null ? "none" : "success";
-    public DateTime?      LastRunAt   => _last?.RunAt;
-    public ReconRunResult? GetLastResult() => _last;
-    public string?        StagedObCsv => _stagedObCsv;
+    public string         Status             => _last is null ? "none" : "success";
+    public DateTime?      LastRunAt          => _last?.RunAt;
+    public ReconRunResult? GetLastResult()   => _last;
+    public string?        StagedObCsv        => _stagedObCsv;
+    public string?        StagedHeartlandCsv => _stagedHeartlandCsv;
 
     /// <summary>
     /// Triggers the Steve OB Payment-In export and captures the resulting CSV as the staged OB side.
@@ -53,6 +55,46 @@ public class PaymentReconciliationService(IConfiguration config, ILogger<Payment
                 return (true, $"OB payments fetched ({rows} rows). Now pick the Heartland file and Reconcile.", rows);
             }
             return (false, "Timed out waiting for the OB export — is OpenBravo open with the Shredder extension?", 0);
+        }
+        finally
+        {
+            SteveState.ClearPending();
+            SteveState.ClearExportResult();
+        }
+    }
+
+    /// <summary>
+    /// Triggers the Heartland/GP InfoCentral "Merchant Batch Download" report export via the portal
+    /// (SSRS URL access driven by the heartland.js content script) and captures the resulting CSV as
+    /// the staged processor side. Content-validated as a Heartland export. Requires the GP portal open
+    /// and freshly 2FA-authenticated (short timeout). Returns (ok, message, rowCount).
+    /// </summary>
+    public async Task<(bool Ok, string Message, int Rows)> FetchHeartlandViaPortalAsync(CancellationToken ct = default)
+    {
+        var timeoutSec = config.GetValue("ShadowRecon:HeartlandFetchTimeoutSeconds", 90);
+        SteveState.ClearExportResult();
+        SteveState.SetPending("heartland-batch-download");
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+            while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(2000, ct);
+                var path = SteveState.GetExportResult();
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+
+                var csv = ReadShared(path);
+                if (CsvClassifier.Classify(csv) != CsvKind.Heartland)
+                {
+                    SteveState.ClearExportResult();   // a non-Heartland capture — keep waiting
+                    continue;
+                }
+                _stagedHeartlandCsv = csv;
+                var rows = HeartlandCsvParser.Parse(csv, LoadColumnMap()).Count;
+                log.LogInformation("[Recon] Heartland report fetched via GP portal — {Rows} rows", rows);
+                return (true, $"Heartland fetched ({rows} transactions). Now Reconcile.", rows);
+            }
+            return (false, "Timed out waiting for the Heartland export — is the GP portal open and freshly 2FA-authenticated?", 0);
         }
         finally
         {

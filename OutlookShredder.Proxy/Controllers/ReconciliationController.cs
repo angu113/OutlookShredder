@@ -21,17 +21,18 @@ public class ReconciliationController(PaymentReconciliationService recon) : Cont
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> Run([FromForm] IFormFile? obFile, [FromForm] IFormFile? heartlandFile, CancellationToken ct)
     {
-        if (heartlandFile is null)
-            return BadRequest(new { error = "heartlandFile is required." });
-        // OB side: an uploaded file, else the CSV staged by a prior OB-export fetch (via Steve).
-        var obCsv   = obFile is not null ? await ReadAsync(obFile, ct) : recon.StagedObCsv;
-        var obName  = obFile?.FileName ?? "OpenBravo (fetched)";
+        // Each side: an uploaded file, else the CSV staged by a prior fetch (OB via Steve / Heartland via the GP portal).
+        var obCsv  = obFile is not null        ? await ReadAsync(obFile, ct)        : recon.StagedObCsv;
+        var hlCsv  = heartlandFile is not null  ? await ReadAsync(heartlandFile, ct) : recon.StagedHeartlandCsv;
+        var obName = obFile?.FileName        ?? "OpenBravo (fetched)";
+        var hlName = heartlandFile?.FileName ?? "Heartland (fetched)";
         if (obCsv is null)
             return BadRequest(new { error = "No OB payments — upload an OB file or use Fetch from OpenBravo first." });
+        if (hlCsv is null)
+            return BadRequest(new { error = "No Heartland data — upload a Heartland file or use Fetch Heartland first." });
         try
         {
-            var hlCsv = await ReadAsync(heartlandFile, ct);
-            return Ok(recon.Run(obCsv, hlCsv, obName, heartlandFile.FileName));
+            return Ok(recon.Run(obCsv, hlCsv, obName, hlName));
         }
         catch (Exception ex)
         {
@@ -48,6 +49,18 @@ public class ReconciliationController(PaymentReconciliationService recon) : Cont
     public async Task<IActionResult> FetchObExport(CancellationToken ct)
     {
         var (ok, message, rows) = await recon.FetchObViaSteveAsync(ct);
+        return ok ? Ok(new { ok, message, rows }) : StatusCode(504, new { ok, message });
+    }
+
+    /// <summary>
+    /// Fetches the Heartland/GP "Merchant Batch Download" report via the GP portal (SSRS URL access,
+    /// driven by the heartland.js content script) and stages it as the processor side. Requires the GP
+    /// portal open and freshly 2FA-authenticated — the portal times out fast.
+    /// </summary>
+    [HttpPost("heartland/fetch")]
+    public async Task<IActionResult> FetchHeartland(CancellationToken ct)
+    {
+        var (ok, message, rows) = await recon.FetchHeartlandViaPortalAsync(ct);
         return ok ? Ok(new { ok, message, rows }) : StatusCode(504, new { ok, message });
     }
 

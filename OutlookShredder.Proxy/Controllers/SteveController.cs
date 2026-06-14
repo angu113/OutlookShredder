@@ -55,6 +55,32 @@ public class SteveController : ControllerBase
         return Ok(new { task });
     }
 
+    // Diagnostic sink — content scripts post DOM details here so they land in the proxy log
+    // (avoids fiddly browser-console copying during portal automation bring-up).
+    [HttpGet("diag")]
+    [HttpPost("diag")]
+    [HttpOptions("diag")]
+    public IActionResult Diag([FromQuery] string? info)
+    {
+        _log.LogInformation("[Steve][diag] {Info}", info);
+        return Ok(new { ok = true });
+    }
+
+    // Served as a &lt;script src&gt; into the Heartland SSRS page. The portal's CSP blocks inline
+    // handlers / javascript: links, but its script-src whitelists http://localhost:*, so a script
+    // loaded from the proxy runs in the page context and can call the ReportViewer's own export
+    // ($find(...).exportReport('CSV')) — the CSV download is then captured by FileWatcherService.
+    [HttpGet("export-script.js")]
+    public ContentResult ExportScript()
+    {
+        const string js =
+            "(function(){var n=0;function go(){try{var rv=(typeof $find==='function')&&$find('ReportViewerControl');" +
+            "if(rv&&rv.exportReport){rv.exportReport('CSV');console.log('[Heartland EXPORT] exportReport(CSV) ok');return;}}" +
+            "catch(e){console.warn('[Heartland EXPORT] error',e);}" +
+            "if(++n<10){setTimeout(go,1000);}else{console.warn('[Heartland EXPORT] $find/exportReport not ready');}}go();})();";
+        return Content(js, "text/javascript");
+    }
+
     [HttpPost("consume")]
     public IActionResult Consume()
     {

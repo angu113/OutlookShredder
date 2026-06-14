@@ -138,6 +138,7 @@ public class FileWatcherService : BackgroundService
         // On startup, mark every existing PDF as already processed so they are silently
         // ignored. Only PDFs that arrive after this point will be sent through the AI pipeline.
         SeedExistingFilesAsProcessed(watchPath);
+        ArchiveOldCaptures(watchPath);   // tidy export cruft >5 business days old into an Archive folder
 
         // Real-time FileSystemWatcher
         _fswActive = true;
@@ -219,8 +220,11 @@ public class FileWatcherService : BackgroundService
 
     // ── Steve: invoice CSV detection ──────────────────────────────────────────
 
+    // Captured Steve/GP export filenames: OB grid exports (ExportedData*.csv) and the Heartland
+    // "Merchant Batch Download*.csv". The recon consumer classifies by content, so matching either
+    // filename here is safe.
     private static readonly System.Text.RegularExpressions.Regex _exportCsvRx =
-        new(@"^ExportedData(\s*\(\d+\))?\.csv$",
+        new(@"^(ExportedData(\s*\(\d+\))?|Merchant Batch Download.*)\.csv$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase |
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
@@ -236,15 +240,84 @@ public class FileWatcherService : BackgroundService
                 "Shredder", "steve-exports");
             Directory.CreateDirectory(steveDir);
             var dest = Path.Combine(steveDir,
-                $"invoices-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
+                $"export-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
             File.Copy(path, dest, overwrite: true);
             SteveState.SetExportResult(dest);
-            _log.LogInformation("[Steve] Invoice export detected and copied to {Dest}", dest);
+            _log.LogInformation("[Steve] Export detected ({Name}) and copied to {Dest}", name, dest);
+            ArchiveOldCaptures(Path.GetDirectoryName(path));
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "[Steve] Failed to copy invoice export from {Path}", path);
+            _log.LogWarning(ex, "[Steve] Failed to copy export from {Path}", path);
         }
+    }
+
+    // ── Archive: tidy captured export cruft (>N business days) ────────────────
+
+    private const int ArchiveAfterBusinessDays = 5;
+
+    /// <summary>
+    /// Moves captured export files older than <see cref="ArchiveAfterBusinessDays"/> business days into a
+    /// "Shredder Archive" folder (created if absent) so cruft doesn't accumulate. Covers the export
+    /// originals our watcher captures in the watched folder (our filename patterns only — never the
+    /// user's unrelated files) and our own copies in steve-exports. The user can review/delete Archive.
+    /// </summary>
+    private void ArchiveOldCaptures(string? watchPath)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(watchPath) || !Directory.Exists(watchPath)) return;
+            var archiveDir = Path.Combine(watchPath, "Shredder Archive");
+            int moved = 0;
+
+            // Export originals (our patterns) sitting in the watched folder.
+            foreach (var f in Directory.EnumerateFiles(watchPath, "*.csv"))
+                if (_exportCsvRx.IsMatch(Path.GetFileName(f)) && IsOlderThanBusinessDays(f, ArchiveAfterBusinessDays))
+                    moved += MoveToArchive(f, archiveDir) ? 1 : 0;
+
+            // Our captured copies in steve-exports.
+            var steveDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Shredder", "steve-exports");
+            if (Directory.Exists(steveDir))
+                foreach (var f in Directory.EnumerateFiles(steveDir, "*.csv"))
+                    if (IsOlderThanBusinessDays(f, ArchiveAfterBusinessDays))
+                        moved += MoveToArchive(f, archiveDir) ? 1 : 0;
+
+            if (moved > 0)
+                _log.LogInformation("[FW] Archived {N} captured export file(s) >{D} business days old to {Dir}",
+                    moved, ArchiveAfterBusinessDays, archiveDir);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[FW] Archive sweep failed"); }
+    }
+
+    private static bool IsOlderThanBusinessDays(string path, int businessDays)
+    {
+        try { return BusinessDaysBetween(File.GetLastWriteTime(path), DateTime.Now) > businessDays; }
+        catch { return false; }
+    }
+
+    private static int BusinessDaysBetween(DateTime from, DateTime to)
+    {
+        if (to <= from) return 0;
+        int days = 0;
+        for (var d = from.Date.AddDays(1); d <= to.Date; d = d.AddDays(1))
+            if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday) days++;
+        return days;
+    }
+
+    private bool MoveToArchive(string file, string archiveDir)
+    {
+        try
+        {
+            Directory.CreateDirectory(archiveDir);
+            var dest = Path.Combine(archiveDir, Path.GetFileName(file));
+            if (File.Exists(dest))
+                dest = Path.Combine(archiveDir,
+                    $"{Path.GetFileNameWithoutExtension(file)}-{DateTime.Now:yyyyMMddHHmmss}{Path.GetExtension(file)}");
+            File.Move(file, dest);
+            return true;
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[FW] Could not archive {File}", file); return false; }
     }
 
     /// <summary>
