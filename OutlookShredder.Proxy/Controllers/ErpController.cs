@@ -270,11 +270,21 @@ public class ErpController : ControllerBase
     /// Proxies a SharePoint PDF download using app-only credentials.
     /// Clients cannot fetch SharePoint WebUrls directly (no auth); this endpoint adds the Bearer token.
     /// </summary>
+    // Short-TTL cache of the assembled (downloaded + optionally FAB-appended) PDF, keyed by url+appendFabs.
+    // Re-opens (and the upload/enrich follow-up re-renders) skip the SharePoint download AND the FAB render
+    // — the dominant cost for FAB-heavy / multi-page slips (#4). Bounded by lazy eviction.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Bytes, DateTimeOffset At)> _pdfCache = new();
+    private static readonly TimeSpan _pdfCacheTtl = TimeSpan.FromMinutes(10);
+
     [HttpGet("/api/erp/pdf")]
     public async Task<IActionResult> GetPdf([FromQuery] string url, [FromQuery] bool appendFabs, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url))
             return BadRequest(new { error = "url query parameter is required" });
+
+        var cacheKey = $"{url}|{appendFabs}";
+        if (_pdfCache.TryGetValue(cacheKey, out var hit) && DateTimeOffset.UtcNow - hit.At <= _pdfCacheTtl)
+            return File(hit.Bytes, "application/pdf");
 
         try
         {
@@ -284,6 +294,10 @@ public class ErpController : ControllerBase
                 try { bytes = PickingSlipFabAppender.AppendFabDrawings(bytes, _log); }
                 catch (Exception ex) { _log.LogWarning(ex, "[ERP] FAB drawing append failed for {Url}", url); }
             }
+            var now = DateTimeOffset.UtcNow;
+            _pdfCache[cacheKey] = (bytes, now);
+            foreach (var kv in _pdfCache)
+                if (now - kv.Value.At > _pdfCacheTtl) _pdfCache.TryRemove(kv.Key, out _);
             return File(bytes, "application/pdf");
         }
         catch (Exception ex)

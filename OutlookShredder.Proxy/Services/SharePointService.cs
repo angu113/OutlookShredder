@@ -64,6 +64,12 @@ public partial class SharePointService
     private readonly ConcurrentDictionary<string, (byte[] Bytes, DateTimeOffset At)> _recentUploads = new();
     private static readonly TimeSpan RecentUploadTtl = TimeSpan.FromMinutes(15);
 
+    // Short-TTL cache of downloaded SP file bytes, keyed by drive-relative path. Lets the ERP endpoints
+    // (pdf / stamp-bounds / product-boxes / fab-dxf) share ONE download per file within the window, and
+    // makes re-opens skip the SharePoint round-trip. Bounded by lazy eviction. (#4)
+    private readonly ConcurrentDictionary<string, (byte[] Bytes, DateTimeOffset At)> _downloadCache = new();
+    private static readonly TimeSpan DownloadCacheTtl = TimeSpan.FromMinutes(10);
+
     // SR row cache  --  SupplierResponses rows change only on email writes.
     // Caching for 5 min eliminates repeated full-table fetches during paginated loads
     // and concurrent startup requests. Write paths call InvalidateSrCache().
@@ -9869,6 +9875,12 @@ public partial class SharePointService
             if (DateTimeOffset.UtcNow - recent.At <= RecentUploadTtl) return recent.Bytes;
             _recentUploads.TryRemove(recentKey, out _);
         }
+        // Short-TTL download cache: re-opens + the other ERP endpoints reuse one download (#4).
+        if (recentKey is not null && _downloadCache.TryGetValue(recentKey, out var cachedDl))
+        {
+            if (DateTimeOffset.UtcNow - cachedDl.At <= DownloadCacheTtl) return cachedDl.Bytes;
+            _downloadCache.TryRemove(recentKey, out _);
+        }
 
         var uri      = new Uri(webUrl);
         var segments = uri.AbsolutePath.Split('/');
@@ -9886,7 +9898,15 @@ public partial class SharePointService
         if (stream is null) throw new InvalidOperationException("File content stream was null.");
         using var ms = new MemoryStream();
         await stream.CopyToAsync(ms, ct);
-        return ms.ToArray();
+        var bytes = ms.ToArray();
+        if (recentKey is not null)
+        {
+            var now = DateTimeOffset.UtcNow;
+            _downloadCache[recentKey] = (bytes, now);
+            foreach (var kv in _downloadCache)
+                if (now - kv.Value.At > DownloadCacheTtl) _downloadCache.TryRemove(kv.Key, out _);
+        }
+        return bytes;
     }
 
     /// <summary>
