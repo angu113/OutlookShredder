@@ -67,7 +67,9 @@ public class ForgeSchedulerQueue
                 {
                     RequiresDuplicateDetection          = true,
                     DuplicateDetectionHistoryTimeWindow = TimeSpan.FromHours(25), // one per calendar day
-                    LockDuration                        = TimeSpan.FromMinutes(10),
+                    // 5 min is the Service Bus hard maximum (a higher value makes CreateQueue 400).
+                    // The processor auto-renews the lock up to 15 min, so long task runs are still covered.
+                    LockDuration                        = TimeSpan.FromMinutes(5),
                     MaxDeliveryCount                    = 2,
                     DefaultMessageTimeToLive            = TimeSpan.FromHours(3),
                     AutoDeleteOnIdle                    = TimeSpan.MaxValue,
