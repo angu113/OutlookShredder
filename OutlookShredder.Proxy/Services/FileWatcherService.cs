@@ -529,50 +529,29 @@ public class FileWatcherService : BackgroundService
         _log.LogInformation("[FW] ERP filename matched: {Type} {DocNum} in {File}",
             erpInfo.DocumentType, erpInfo.DocumentNumber ?? "(no record id)", fileName);
 
+        // base64 of the ORIGINAL bytes — the AI reads the unmodified PDF (enrichment / footer stamping
+        // below may rewrite `bytes`, but the extractor should see what the user printed).
         var base64 = Convert.ToBase64String(bytes);
 
-        // For PickingSlips: fire PDF enrichment on a background thread concurrently with the AI
-        // call. Enrichment only needs raw bytes — PdfPig extracts the ship-to name independently.
+        // For PickingSlips: enrich (ship-to name, delivery method, process ops) from the raw PDF via
+        // PdfPig — fast and deterministic, independent of the slow AI call.
         Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod)>? enrichTask = null;
         if (erpInfo.DocumentType == "PickingSlip")
             enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
-        // Call AI to extract detail fields (CustomerName, TotalAmount, DocumentDate, LineItems).
-        // Filename already provides DocumentType and DocumentNumber — AI output for those is ignored.
-        var extraction = await _ai.ExtractAsync(base64, fileName, ct);
-
-        _log.LogInformation("[FW] Timing {File}: ai={Ms}ms", fileName, sw.ElapsedMilliseconds);
-        sw.Restart();
-
-        // Mark processed after the AI call so re-scans don't repeat the work.
-        if (key is not null) MarkProcessed(key);
-
-        if (extraction is null)
+        // ── Notify BEFORE the AI call ───────────────────────────────────────────────────────────────
+        // The AI extraction takes seconds; the Focus window should pop as soon as the PDF can render.
+        // Write a preliminary record (filename + enrichment), notify, THEN run the AI and patch the
+        // AI-derived fields in via a follow-up notification. EnrichmentPending=true on the first notify
+        // tells the client to show "Processing..." and keep AI-dependent actions disabled meanwhile.
+        var extraction = new OutlookShredder.Proxy.Models.ErpExtraction
         {
-            _log.LogWarning("[FW] {File} — AI returned null; recording with filename data only", fileName);
-            extraction = new OutlookShredder.Proxy.Models.ErpExtraction { IsErpDocument = true };
-        }
+            IsErpDocument  = true,
+            DocumentType   = erpInfo.DocumentType,
+            DocumentNumber = erpInfo.HasDocNumber ? erpInfo.DocumentNumber : null,
+        };
 
-        // Always override with filename-derived identity (more reliable than AI for these fields).
-        extraction.IsErpDocument = true;
-        extraction.DocumentType  = erpInfo.DocumentType;
-        if (erpInfo.HasDocNumber)
-        {
-            extraction.DocumentNumber = erpInfo.DocumentNumber;
-        }
-        else if (!string.IsNullOrEmpty(extraction.DocumentNumber) &&
-                 !extraction.DocumentNumber.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) &&
-                 !extraction.DocumentNumber.StartsWith("020803-", StringComparison.OrdinalIgnoreCase))
-        {
-            _log.LogWarning("[FW] {File} — AI returned DocumentNumber '{Num}' without HSK-/020803- prefix; discarding",
-                fileName, extraction.DocumentNumber);
-            extraction.DocumentNumber = null;
-        }
-
-        _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
-            extraction.DocumentType, extraction.DocumentNumber, fileName);
-
-        // Await enrichment (already running in parallel with the AI call above).
+        // Await enrichment (started above) — gives ship-to customer + delivery method before the notify.
         bool bytesModified = false;
         IReadOnlyList<string> processOps = [];
         if (enrichTask is not null)
@@ -580,15 +559,15 @@ public class FileWatcherService : BackgroundService
             try
             {
                 var (enriched, shipToName, ops, deliveryMethod) = await enrichTask;
-                _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms (ran parallel with AI)", fileName, sw.ElapsedMilliseconds);
+                _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms", fileName, sw.ElapsedMilliseconds);
                 sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
                 {
                     _log.LogInformation("[FW] Ship-to name from PDF: '{Name}'", shipToName);
                     extraction.CustomerName = shipToName;
                 }
-                // The AI extractor never fills DeliveryMethod, so take the deterministic "Delivery Method:"
-                // parse from the slip — this is what the Trigger auto-create Delivery rule keys on.
+                // The AI extractor never fills DeliveryMethod — take the deterministic "Delivery Method:"
+                // parse from the slip (the Trigger auto-create Delivery rule keys on it).
                 if (!string.IsNullOrWhiteSpace(deliveryMethod))
                 {
                     _log.LogInformation("[FW] Delivery method from PDF: '{Method}'", deliveryMethod);
@@ -607,8 +586,8 @@ public class FileWatcherService : BackgroundService
             }
         }
 
-        // Sales Orders / Quotations: stamp the configurable T&C footer (white box blocks the
-        // existing page-bottom boilerplate). Reuses the modified-bytes → temp-file → SP path below.
+        // Sales Orders / Quotations: stamp the configurable T&C footer (white box blocks the existing
+        // page-bottom boilerplate). Reuses the modified-bytes → temp-file → SP path below.
         if (_footerOptions is not null && _footerDocTypes.Contains(extraction.DocumentType ?? ""))
         {
             try
@@ -649,7 +628,7 @@ public class FileWatcherService : BackgroundService
             }
         }
 
-        // Write SP record immediately (no PDF URL yet — upload happens in background)
+        // Preliminary SP write (no AI fields, no PDF URL yet — both patched below / in background).
         string? spItemId;
         try
         {
@@ -664,14 +643,79 @@ public class FileWatcherService : BackgroundService
             return false;
         }
 
-        _log.LogInformation("[FW] Timing {File}: sp-write={Ms}ms → notifying", fileName, sw.ElapsedMilliseconds);
+        // Mark processed once the record exists, so a re-scan can't create a duplicate.
+        if (key is not null) MarkProcessed(key);
 
-        // Notify immediately — notifyPath is the stamped temp file (or original path when no stamping).
-        // Other machines that reload later get the SP URL from the follow-up notification below.
-        var receivedAt    = DateTimeOffset.UtcNow.ToString("o");
+        var receivedAt = DateTimeOffset.UtcNow.ToString("o");
+        _log.LogInformation("[FW] Timing {File}: sp-write={Ms}ms → notifying (enrichment pending)", fileName, sw.ElapsedMilliseconds);
+        sw.Restart();
+
+        // Notify #1 — pop the Focus window now (it renders the local PDF immediately).
+        _notify.NotifyErpDocument(new ErpBusRecord
+        {
+            SpItemId          = spItemId,
+            DocumentNumber    = extraction.DocumentNumber,
+            DocumentType      = extraction.DocumentType,
+            CustomerName      = extraction.CustomerName,
+            FileName          = fileName,
+            PdfUrl            = notifyPath,
+            ReceivedAt        = receivedAt,
+            IsArchived        = false,
+            IsNew             = true,
+            SourceMachine     = Environment.MachineName,
+            SourceUser        = Environment.UserName,
+            DeliveryAddress   = extraction.DeliveryAddress,
+            DeliveryMethod    = extraction.DeliveryMethod,
+            EnrichmentPending = true,
+        });
+        _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (enrichment pending, upload pending)",
+            extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);
+
+        // ── AI extraction (now OFF the window-pop critical path) ────────────────────────────────────
+        var aiResult = await _ai.ExtractAsync(base64, fileName, ct);
+        _log.LogInformation("[FW] Timing {File}: ai={Ms}ms (background — window already popped)", fileName, sw.ElapsedMilliseconds);
+        sw.Restart();
+
+        if (aiResult is null)
+        {
+            _log.LogWarning("[FW] {File} — AI returned null; keeping filename + enrichment data only", fileName);
+        }
+        else
+        {
+            // Merge AI-derived fields. Identity stays filename-derived; customer prefers the enrichment
+            // ship-to name (already set) and falls back to the AI's customer.
+            extraction.CustomerReference = aiResult.CustomerReference;
+            extraction.DocumentDate      = aiResult.DocumentDate;
+            extraction.TotalAmount       = aiResult.TotalAmount;
+            extraction.Currency          = aiResult.Currency;
+            extraction.SalesRep          = aiResult.SalesRep;
+            extraction.Notes             = aiResult.Notes;
+            extraction.LineItems         = aiResult.LineItems;
+            if (string.IsNullOrWhiteSpace(extraction.CustomerName))
+                extraction.CustomerName = aiResult.CustomerName;
+            if (string.IsNullOrWhiteSpace(extraction.DeliveryAddress))
+                extraction.DeliveryAddress = aiResult.DeliveryAddress;
+            // Take the AI's DocumentNumber only when the filename had none AND it has the expected prefix.
+            if (!erpInfo.HasDocNumber && !string.IsNullOrEmpty(aiResult.DocumentNumber) &&
+                (aiResult.DocumentNumber.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) ||
+                 aiResult.DocumentNumber.StartsWith("020803-", StringComparison.OrdinalIgnoreCase)))
+            {
+                extraction.DocumentNumber = aiResult.DocumentNumber;
+            }
+        }
+
+        _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
+            extraction.DocumentType, extraction.DocumentNumber, fileName);
+
         var lineItemsJson = extraction.LineItems.Count > 0
             ? System.Text.Json.JsonSerializer.Serialize(extraction.LineItems)
             : null;
+
+        // Patch the AI-derived fields onto the preliminary SP record.
+        try { await _sp.PatchErpDocumentFieldsAsync(spItemId!, extraction, ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "[FW] SP field patch (AI data) failed for {File}", fileName); }
+
+        // Notify #2 — enrichment complete. EnrichmentPending=false re-enables the gated client actions.
         _notify.NotifyErpDocument(new ErpBusRecord
         {
             SpItemId          = spItemId,
@@ -686,16 +730,14 @@ public class FileWatcherService : BackgroundService
             PdfUrl            = notifyPath,
             ReceivedAt        = receivedAt,
             IsArchived        = false,
-            IsNew             = true,
+            IsNew             = false,
             SourceMachine     = Environment.MachineName,
             SourceUser        = Environment.UserName,
             DeliveryAddress   = extraction.DeliveryAddress,
             DeliveryMethod    = extraction.DeliveryMethod,
             LineItemsJson     = lineItemsJson,
+            EnrichmentPending = false,
         });
-
-        _log.LogInformation("[FW] Recorded {Type} {Number} ({File}) → SP {Id} (upload pending)",
-            extraction.DocumentType, extraction.DocumentNumber, fileName, spItemId);
 
         // Background: upload PDF, patch SP URL, re-notify with SP URL, archive older duplicates.
         // Also deletes the temp file once the upload succeeds (SP now owns the stamped copy).

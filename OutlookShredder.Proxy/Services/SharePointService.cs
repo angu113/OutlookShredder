@@ -9741,6 +9741,42 @@ public partial class SharePointService
         _log.LogInformation("[SP] Patched PdfUrl on ErpDocument item {Id}", spItemId);
     }
 
+    /// <summary>
+    /// Patches the AI-derived fields onto an existing ErpDocuments item. Called once the AI extraction
+    /// completes, after the preliminary (filename + enrichment) record was written and notified. Leaves
+    /// DeliveryMethod (already written from the deterministic enrichment parse) untouched.
+    /// </summary>
+    public async Task PatchErpDocumentFieldsAsync(
+        string spItemId, OutlookShredder.Proxy.Models.ErpExtraction extraction, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+
+        var lineItemsJson = extraction.LineItems.Count > 0
+            ? System.Text.Json.JsonSerializer.Serialize(extraction.LineItems)
+            : null;
+
+        var fields = new Dictionary<string, object?>
+        {
+            ["CustomerName"]    = extraction.CustomerName,
+            ["CustomerRef"]     = extraction.CustomerReference,
+            ["DocumentDate"]    = extraction.DocumentDate,
+            ["TotalAmount"]     = extraction.TotalAmount,
+            ["Currency"]        = extraction.Currency ?? "USD",
+            ["LineItemsJson"]   = lineItemsJson,
+            ["ExtractionLog"]   = System.Text.Json.JsonSerializer.Serialize(extraction),
+            ["DeliveryAddress"] = extraction.DeliveryAddress,
+        };
+        // Only (re)set the Title when we actually have a document number — otherwise keep the
+        // preliminary filename-based Title written by WriteErpDocumentAsync.
+        if (!string.IsNullOrEmpty(extraction.DocumentNumber))
+            fields["Title"] = extraction.DocumentNumber;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields.PatchAsync(
+            new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+        _log.LogInformation("[SP] Patched AI fields on ErpDocument item {Id}", spItemId);
+    }
+
     public async Task PatchErpAnnotationsAsync(string spItemId, string annotationsJson, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();

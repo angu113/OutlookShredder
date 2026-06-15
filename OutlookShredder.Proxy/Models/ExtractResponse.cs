@@ -172,6 +172,10 @@ public class ErpBusRecord
     public string? DeliveryAddress   { get; set; }
     /// <summary>JSON array of ErpLineItem — carried so Order Products can read line items on fresh bus arrivals without an SP re-fetch.</summary>
     public string? LineItemsJson     { get; set; }
+    /// <summary>True on the FIRST (pre-AI) notify — the record carries filename + enrichment data only.
+    /// The client shows a "Processing..." indicator and keeps AI-dependent actions (Order Products,
+    /// workflow chips) disabled until a follow-up notify arrives with EnrichmentPending=false.</summary>
+    public bool    EnrichmentPending { get; set; }
 }
 
 public class RfqNotificationProduct
