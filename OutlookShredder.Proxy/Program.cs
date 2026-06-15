@@ -54,6 +54,11 @@ try
         "ShredderData", "Secrets", "appsettings.secrets.json");
     builder.Configuration.AddJsonFile(persistentSecretsPath, optional: true, reloadOnChange: false);
 
+    // Register the local cleartext copies so the post-startup WS1 cleanup can delete them once the vault
+    // is proven healthy (see SecretsBootstrap.CleanupLocalSecretsIfVaultHealthy after PrewarmAsync).
+    SecretsBootstrap.RegisterLocalSecretFile(Path.Combine(AppContext.BaseDirectory, "appsettings.secrets.json"));
+    SecretsBootstrap.RegisterLocalSecretFile(persistentSecretsPath);
+
     // WS1 — overlay secrets from Azure Key Vault (signed-in user's WAM token, silent), added AFTER the
     // JSON files so it wins, and BEFORE the host is built so DI-time config readers see vault values.
     // Vault-first, file fallback: never throws — on any failure the file secrets above remain in effect.
@@ -311,6 +316,11 @@ try
             {
                 var sp = app.Services.GetRequiredService<SharePointService>();
                 await sp.PrewarmAsync();
+
+                // WS1 cleanup: SharePoint app-only auth (using the vault's ClientSecret) just succeeded, so
+                // the vault credentials are proven healthy — delete the local cleartext secret copies. No-op
+                // unless the vault supplied every secret. The central OneDrive copy is kept for now.
+                SecretsBootstrap.CleanupLocalSecretsIfVaultHealthy(Log.Logger);
 
                 // Load synonym dictionary from SP into the AI extraction cache.
                 // Seeds from product-synonyms.json on first run if SP list is empty.

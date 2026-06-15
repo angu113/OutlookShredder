@@ -1,3 +1,4 @@
+using System.IO;
 using Azure;
 using Azure.Core;
 using Azure.Identity;
@@ -38,6 +39,18 @@ public static class SecretsBootstrap
     public static string Source { get; private set; } = "file";
     /// <summary>Human-readable detail (count / reason) — surfaced by HealthController.</summary>
     public static string Detail { get; private set; } = "Key Vault not attempted";
+    /// <summary>True when the vault supplied EVERY expected secret (no key fell back to the local file) —
+    /// the precondition for deleting the local cleartext copies.</summary>
+    public static bool Complete { get; private set; }
+
+    // Local cleartext secret files this overlay supersedes — deleted once the vault is proven healthy.
+    private static readonly List<string> _localSecretFiles = new();
+    /// <summary>Registered from Program.cs for each local appsettings.secrets.json config source so the
+    /// post-startup cleanup knows which files to remove once the vault is healthy.</summary>
+    public static void RegisterLocalSecretFile(string path)
+    {
+        if (!string.IsNullOrWhiteSpace(path) && !_localSecretFiles.Contains(path)) _localSecretFiles.Add(path);
+    }
 
     public static string ConfigKeyToVaultName(string configKey) => configKey.Replace(":", "--");
     public static string VaultNameToConfigKey(string vaultName) => vaultName.Replace("--", ":");
@@ -91,6 +104,7 @@ public static class SecretsBootstrap
 
             config.AddInMemoryCollection(overlay);   // added last -> overrides the file sources
             Source = "keyvault";
+            Complete = missing.Count == 0;
             Detail = missing.Count == 0
                 ? $"{overlay.Count} secrets"
                 : $"{overlay.Count} secrets, {missing.Count} missing ({string.Join(", ", missing)}) fell back to file";
@@ -101,6 +115,41 @@ public static class SecretsBootstrap
             Source = "file";
             Detail = $"vault unreachable: {ex.Message}";
             log.Warning("[Secrets] source=file ({Detail})", Detail);
+        }
+    }
+
+    /// <summary>
+    /// WS1 cleanup: once the vault has supplied EVERY secret (<see cref="Complete"/>) AND the proxy has
+    /// proven those credentials work at runtime (the caller invokes this only after a successful SharePoint
+    /// prewarm), delete the local cleartext secret files registered via <see cref="RegisterLocalSecretFile"/>.
+    /// The central OneDrive copy is intentionally left in place for now. Never throws.
+    /// </summary>
+    public static void CleanupLocalSecretsIfVaultHealthy(Serilog.ILogger log)
+    {
+        if (Source != "keyvault")
+        {
+            log.Information("[Secrets] cleanup skipped — source={Source}", Source);
+            return;
+        }
+        if (!Complete)
+        {
+            log.Information("[Secrets] cleanup skipped — vault incomplete ({Detail}); add the missing secrets to the vault to enable cleanup", Detail);
+            return;
+        }
+        foreach (var path in _localSecretFiles)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                    log.Information("[Secrets] deleted local cleartext copy (vault healthy): {Path}", path);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Warning("[Secrets] could not delete local copy {Path}: {Err}", path, ex.Message);
+            }
         }
     }
 
