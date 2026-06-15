@@ -46,6 +46,7 @@ public class InvoiceLineDto
 {
     public string  InvoiceDate   { get; init; } = "";   // yyyy-MM-dd
     public string  InvoiceNumber { get; init; } = "";
+    public string  CustomerPO    { get; init; } = "";   // customer's PO number ("" when none)
     public string? DueDate       { get; init; }          // yyyy-MM-dd or null
     public decimal Amount        { get; init; }
 }

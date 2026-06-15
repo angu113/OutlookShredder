@@ -26,13 +26,14 @@ public static class StatementCsvParser
         int idxGross = CsvRowReader.IndexOf(headers, "Total Gross Amount");
         int idxPaid  = CsvRowReader.IndexOf(headers, "Total Paid");
         int idxTerms = CsvRowReader.IndexOf(headers, "Payment Terms");
+        int idxPo    = CsvRowReader.IndexOf(headers, "Customer PO Number");
 
         if (idxDate < 0 || idxDoc < 0 || idxBp < 0 || idxGross < 0 || idxPaid < 0)
             throw new Exception(
                 $"CSV missing required columns (found: {string.Join(", ", headers)}). " +
                 "Expected: Invoice Date, Document No., Business Partner, Total Gross Amount, Total Paid.");
 
-        var raw = new List<(string Bp, DateTime Date, string DocNo, decimal Gross, decimal Paid, string Terms)>();
+        var raw = new List<(string Bp, DateTime Date, string DocNo, string Po, decimal Gross, decimal Paid, string Terms)>();
 
         for (int i = 1; i < lines.Length; i++)
         {
@@ -51,6 +52,7 @@ public static class StatementCsvParser
                 Bp:    CsvRowReader.Col(cols, idxBp).Trim(),
                 Date:  date,
                 DocNo: CsvRowReader.Col(cols, idxDoc).Trim(),
+                Po:    idxPo >= 0 ? CsvRowReader.Col(cols, idxPo).Trim() : "",
                 Gross: gross,
                 Paid:  paid,
                 Terms: idxTerms >= 0 ? CsvRowReader.Col(cols, idxTerms).Trim() : ""
@@ -67,6 +69,7 @@ public static class StatementCsvParser
                     {
                         InvoiceDate   = r.Date.ToString("yyyy-MM-dd"),
                         InvoiceNumber = r.DocNo,
+                        CustomerPO    = r.Po,
                         DueDate       = ParseDueDate(r.Date, r.Terms)?.ToString("yyyy-MM-dd"),
                         Amount        = r.Gross - r.Paid,
                     })
