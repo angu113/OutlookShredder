@@ -174,8 +174,11 @@ public class WorkflowCardService : IHostedService
     /// <summary>
     /// Called by FileWatcherService after a PickingSlip is written to SP.
     /// Routes into the Trigger "Prioritize" intake (AssignedDate="") so the user can schedule it.
-    ///   Processing: created only when one or more configured shop-operation keywords matched in B: comments.
-    ///   Delivery:   created only when DeliveryMethod is literally "Delivery" (case-insensitive).
+    ///   Processing (Fabrication lane): created for EVERY picking slip so nothing is missed; any matched
+    ///     shop-operation keywords ride along on the card's Notes for context.
+    ///   Delivery: created for any delivery method that isn't a customer pickup / will-call
+    ///     (see <see cref="IsDeliveryMethod"/>) — e.g. "Our Truck", "UPS Ground", "Delivery".
+    /// Both are deduped against existing non-completed cards for the same doc + tab.
     /// </summary>
     public async Task AutoCreateFromPickingSlipAsync(
         ErpExtraction extraction,
@@ -204,7 +207,9 @@ public class WorkflowCardService : IHostedService
         }
         finally { _lock.Release(); }
 
-        if (processOps.Count > 0 && !hasProcessing)
+        // Fabrication lane: every picking slip lands in Prioritize so nothing is missed. Any matched
+        // shop ops ride along on Notes for context (previously these gated whether the card was created).
+        if (!hasProcessing)
             await CreateAsync(new CreateWorkflowCardRequest
             {
                 DocumentNumber  = docNum,
@@ -215,15 +220,14 @@ public class WorkflowCardService : IHostedService
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
+                Notes           = processOps.Count > 0 ? string.Join(", ", processOps) : null,
                 WasAutoCreated  = true,
                 OwnerUser       = owner,
             }, ct);
 
-        var dm = extraction.DeliveryMethod?.Trim();
-        bool isLiteralDelivery = !string.IsNullOrEmpty(dm) &&
-                                 dm.Equals("Delivery", StringComparison.OrdinalIgnoreCase);
-        if (isLiteralDelivery && !hasDelivery)
-        {
+        // Delivery lane: any non-pickup delivery method (Our Truck / a carrier / plain "Delivery").
+        bool createDelivery = IsDeliveryMethod(extraction.DeliveryMethod) && !hasDelivery;
+        if (createDelivery)
             await CreateAsync(new CreateWorkflowCardRequest
             {
                 DocumentNumber  = docNum,
@@ -237,7 +241,26 @@ public class WorkflowCardService : IHostedService
                 WasAutoCreated  = true,
                 OwnerUser       = owner,
             }, ct);
-        }
+
+        _log.LogInformation(
+            "[WF] Auto-create {Doc}: fabrication={Fab} delivery={Del} (method='{Method}', ops={Ops})",
+            docNum, !hasProcessing, createDelivery, extraction.DeliveryMethod ?? "", processOps.Count);
+    }
+
+    /// <summary>
+    /// True when a slip's "Delivery Method:" means it leaves on a vehicle (our truck, a carrier, or a
+    /// plain "Delivery") rather than a customer pickup. The ERP free-texts this field ("Our Truck",
+    /// "UPS Ground", "Pickup", "Will Call", "Delivery", …), so we exclude the pickup / will-call variants
+    /// and treat everything else non-empty as a delivery — keying only on the literal word "Delivery"
+    /// missed "Our Truck", the most common real delivery value. Empty/unknown → not a delivery.
+    /// </summary>
+    internal static bool IsDeliveryMethod(string? deliveryMethod)
+    {
+        var dm = deliveryMethod?.Trim();
+        if (string.IsNullOrEmpty(dm)) return false;
+        var lower = dm.ToLowerInvariant();
+        string[] pickupMarkers = ["pickup", "pick up", "pick-up", "will call", "will-call", "willcall"];
+        return !pickupMarkers.Any(m => lower.Contains(m));
     }
 
     private void Publish(string action, WorkflowCard card) =>

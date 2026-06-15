@@ -533,7 +533,7 @@ public class FileWatcherService : BackgroundService
 
         // For PickingSlips: fire PDF enrichment on a background thread concurrently with the AI
         // call. Enrichment only needs raw bytes — PdfPig extracts the ship-to name independently.
-        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps)>? enrichTask = null;
+        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod)>? enrichTask = null;
         if (erpInfo.DocumentType == "PickingSlip")
             enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
@@ -579,13 +579,20 @@ public class FileWatcherService : BackgroundService
         {
             try
             {
-                var (enriched, shipToName, ops) = await enrichTask;
+                var (enriched, shipToName, ops, deliveryMethod) = await enrichTask;
                 _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms (ran parallel with AI)", fileName, sw.ElapsedMilliseconds);
                 sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
                 {
                     _log.LogInformation("[FW] Ship-to name from PDF: '{Name}'", shipToName);
                     extraction.CustomerName = shipToName;
+                }
+                // The AI extractor never fills DeliveryMethod, so take the deterministic "Delivery Method:"
+                // parse from the slip — this is what the Trigger auto-create Delivery rule keys on.
+                if (!string.IsNullOrWhiteSpace(deliveryMethod))
+                {
+                    _log.LogInformation("[FW] Delivery method from PDF: '{Method}'", deliveryMethod);
+                    extraction.DeliveryMethod = deliveryMethod;
                 }
                 if (!ReferenceEquals(enriched, bytes))
                 {

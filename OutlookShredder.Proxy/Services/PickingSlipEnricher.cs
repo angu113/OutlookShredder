@@ -119,10 +119,13 @@ internal static class PickingSlipEnricher
     /// <summary>
     /// Applies all picking-slip enrichments in two PDF passes (one read, one write).
     /// Returns the enriched bytes, the ship-to customer name extracted from the PDF
-    /// (null when the Ship To label is not found), and any matched processing-operation
-    /// keywords found in B: shop-comment lines (used by the Trigger Prioritize auto-add rule).
+    /// (null when the Ship To label is not found), any matched processing-operation
+    /// keywords found in B: shop-comment lines (used by the Trigger Prioritize auto-add rule),
+    /// and the slip's parsed "Delivery Method:" value (null when the label is absent) — the
+    /// AI extractor doesn't capture this field, so the deterministic parse is the only source
+    /// the auto-create Delivery rule has.
     /// </summary>
-    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps) EnrichPickingSlip(
+    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod) EnrichPickingSlip(
         byte[] pdfBytes,
         string? knownCustomerName = null,
         ILogger? log = null,
@@ -187,7 +190,7 @@ internal static class PickingSlipEnricher
         var processOps = ScanProcessingKeywords(allLinesAcrossPages, processingKeywords, log);
 
         if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
-            return (pdfBytes, shipToName, processOps);
+            return (pdfBytes, shipToName, processOps, header.DeliveryMethod);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
         using var ms  = new MemoryStream(pdfBytes);
@@ -212,7 +215,7 @@ internal static class PickingSlipEnricher
 
         using var outMs = new MemoryStream();
         doc.Save(outMs);
-        return (outMs.ToArray(), shipToName, processOps);
+        return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod);
     }
 
     private static IReadOnlyList<string> ScanProcessingKeywords(
