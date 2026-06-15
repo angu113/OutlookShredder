@@ -203,11 +203,13 @@ public class ForgeTaskService : BackgroundService
         var estNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est);
         if (estNow.Hour != 19 || estNow.Minute != 0) return;
 
-        // Guard: skip if the last successful load was within 12 hours (e.g. manual trigger earlier today).
-        if (_asOf.HasValue && (DateTime.UtcNow - _asOf.Value).TotalHours < 12)
+        // Guard: skip if the last successful load was within 23 hours (e.g. manual trigger earlier today).
+        // 23 (not 24) leaves margin so a run completing a few minutes after 19:00 doesn't skip the next
+        // night's 19:00 run (_asOf is the completion time).
+        if (_asOf.HasValue && (DateTime.UtcNow - _asOf.Value).TotalHours < 23)
         {
             _log.LogInformation(
-                "[ForgeTask] Skipping 7pm enqueue — last run was {Hours:F1}h ago (< 12h threshold)",
+                "[ForgeTask] Skipping 7pm enqueue — last run was {Hours:F1}h ago (< 23h threshold)",
                 (DateTime.UtcNow - _asOf.Value).TotalHours);
             return;
         }
@@ -372,7 +374,7 @@ public class ForgeTaskService : BackgroundService
 
         _status         = record.LastRunStatus ?? "none";
         _lastRunMessage = record.LastRunMessage;
-        // NB: _asOf stays success-only (set in the success path below) — CheckScheduleAsync's 12h
+        // NB: _asOf stays success-only (set in the success path below) — CheckScheduleAsync's 23h
         // guard treats it as "last successful run", so a failed/running record must not populate it.
 
         if (_status != "success" || record.LastRunAt is null || string.IsNullOrEmpty(record.ResultData))
