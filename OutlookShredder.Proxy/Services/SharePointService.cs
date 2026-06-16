@@ -2178,6 +2178,9 @@ public partial class SharePointService
         string?        messageId = null)
     {
         var result = new SpWriteResult { ProductName = product.ProductName };
+        // A regret / no-price line means an attached PDF isn't a usable quote for this RFQ (e.g. a
+        // stray PDF on a regret reply) — so it must not be stored as this response's quote.
+        bool lineIsRegret = !HasPrice(product) && (product.IsRegret || HasRegretPhrase(product.SupplierProductComments));
         try
         {
             var siteId = await GetSiteIdAsync();
@@ -2270,10 +2273,16 @@ public partial class SharePointService
                 result.Updated  = !srNew2;
                 result.RfqId    = jobRef;
 
+                if (result.SpItemId is not null && !srNew2 && rowIndex == 0 && emailMeta.SourceType == "attachment")
+                {
+                    try { await DeleteSpItemAttachmentsAsync(srId2); }
+                    catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId2); }
+                }
                 if (result.SpItemId is not null &&
                     emailMeta.SourceType == "attachment" &&
                     !string.IsNullOrEmpty(emailMeta.FileName) &&
-                    !string.IsNullOrEmpty(emailMeta.Base64Data))
+                    !string.IsNullOrEmpty(emailMeta.Base64Data) &&
+                    !lineIsRegret)
                 {
                     try { await UpsertItemAttachmentAsync(srId2, srListId2, emailMeta.FileName, Convert.FromBase64String(emailMeta.Base64Data)); }
                     catch (Exception ex) { _log.LogError(ex, "[SP] Attachment upload FAILED for SR {Id} ('{File}')", srId2, emailMeta.FileName); }
@@ -2399,11 +2408,22 @@ public partial class SharePointService
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
             result.RfqId    = jobRef;   // resolved RFQ ID  -- may differ from req.JobRefs when email subject has no bracket ref
 
-            // Upload the source attachment as a SharePoint list item attachment.
+            // On a re-extraction from an attachment, clear any previously stored quote PDF first — a
+            // clean slate so a stale/wrong attachment can't survive (it's re-stored below only for a
+            // priced line). Gated to attachment re-extractions so a body reprocess never drops a valid
+            // stored quote.
+            if (result.SpItemId is not null && !srNew && rowIndex == 0 && emailMeta.SourceType == "attachment")
+            {
+                try { await DeleteSpItemAttachmentsAsync(srId); }
+                catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId); }
+            }
+
+            // Store the source attachment as the quote PDF — only for a real (non-regret) line.
             if (result.SpItemId is not null &&
                 emailMeta.SourceType == "attachment" &&
                 !string.IsNullOrEmpty(emailMeta.FileName) &&
-                !string.IsNullOrEmpty(emailMeta.Base64Data))
+                !string.IsNullOrEmpty(emailMeta.Base64Data) &&
+                !lineIsRegret)
             {
                 try
                 {
@@ -3510,6 +3530,24 @@ public partial class SharePointService
 
         _log.LogInformation("[SP] Uploaded attachment '{File}' ({Bytes} bytes) to drive for SR item {Id}",
             fileName, bytes.Length, spItemId);
+    }
+
+    /// <summary>Deletes the stored quote attachment(s) for an SR (the QuoteAttachments/{srItemId} folder
+    /// and everything under it). No-op when nothing is stored. Used to reset a stale/wrong attachment
+    /// before re-extracting a response from an attachment.</summary>
+    private async Task DeleteSpItemAttachmentsAsync(string srItemId)
+    {
+        var driveId   = await GetRfqDriveIdAsync();
+        var folderKey = $"root:/QuoteAttachments/{srItemId}:";
+        try
+        {
+            await GetGraph().Drives[driveId].Items[folderKey].DeleteAsync();
+            _log.LogInformation("[SP] Cleared stored attachment(s) for SR item {Id}", srItemId);
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+        {
+            /* nothing stored — fine */
+        }
     }
 
     // ??"?????"??? Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows ??"?????"?????"?????"?????"???
