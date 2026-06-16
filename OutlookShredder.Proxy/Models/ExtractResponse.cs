@@ -244,6 +244,9 @@ public class PurchaseOrderRecord
     /// <summary>Comma-separated customer sales orders (HSK-SO…) referenced in the PO body, captured from
     /// the "Sales Order #" column at ingestion. Empty for stock-replenishment POs (no linked order).</summary>
     public string? SalesOrders  { get; set; }
+    /// <summary>Comma-separated HSK-SO that a user explicitly rejected as a suggested MSPC-based link to
+    /// this PO — excluded from future suggestions so the pair isn't re-asked.</summary>
+    public string? RejectedLinks { get; set; }
 
     // ── Supplier-confirmation tracking (Fulfillment loop) ────────────────────
     /// <summary>"Pending" until a supplier confirmation is matched (manual or AI), then "Confirmed".</summary>

@@ -5157,6 +5157,7 @@ public partial class SharePointService
                 ("LineItems",    "note"),
                 ("PdfUrl",       "text"),
                 ("SalesOrders",  "text"),       // CSV of HSK-SO… this PO fulfils (procure-to-order)
+                ("RejectedLinks","text"),       // CSV of HSK-SO rejected as suggested MSPC links
                 // Supplier-confirmation tracking (Fulfillment loop): Pending until a confirmation is
                 // matched (manual one-tap or AI email match). Pointers + thin state, ETA from the SOC.
                 ("ConfirmStatus", "text"),     // Pending | Confirmed
@@ -8131,6 +8132,20 @@ public partial class SharePointService
             });
     }
 
+    /// <summary>Patches the RejectedLinks (CSV of HSK-SO) field on an existing PurchaseOrders row —
+    /// the sales orders a user rejected as suggested MSPC-based links to this PO.</summary>
+    public async Task UpdatePurchaseOrderRejectedLinksAsync(string spItemId, string rejectedLinks)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["RejectedLinks"] = rejectedLinks }
+            });
+    }
+
     /// <summary>
     /// Deletes all rows from the PurchaseOrders SharePoint list.
     /// </summary>
@@ -8153,7 +8168,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,SalesOrders,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,ReceiptMailItemId,WaitingNotes,BoardDate,MaterialReceivedAt)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,SalesOrders,RejectedLinks,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,ReceiptMailItemId,WaitingNotes,BoardDate,MaterialReceivedAt)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -8178,6 +8193,7 @@ public partial class SharePointService
                     LineItems    = GetStr(f, "LineItems") ?? "[]",
                     PdfUrl       = GetStr(f, "PdfUrl"),
                     SalesOrders  = GetStr(f, "SalesOrders"),
+                    RejectedLinks = GetStr(f, "RejectedLinks"),
                     ConfirmStatus = GetStr(f, "ConfirmStatus") ?? "Pending",
                     ConfirmedAt   = GetStr(f, "ConfirmedAt"),
                     ConfirmedVia  = GetStr(f, "ConfirmedVia"),

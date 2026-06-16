@@ -142,6 +142,7 @@ try
     builder.Services.AddSingleton<CustomerImportService>();
     builder.Services.AddSingleton<WorkflowCardService>();
     builder.Services.AddSingleton<PoSlipDependencyResolver>();
+    builder.Services.AddSingleton<TransferLinkSuggestionService>();
     builder.Services.AddSingleton<StockNeededService>();
     builder.Services.AddSingleton<FileWatcherService>();
     builder.Services.AddSingleton<TodoService>();

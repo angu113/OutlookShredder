@@ -2481,6 +2481,58 @@ public class ExtractController : ControllerBase
         string? Notes, string Products, int LineItemCount, bool HasPaymentEmail, string? Requester,
         string? SalesOrders);
 
+    // ── Transfer board MSPC-based link suggestions (fallback when no HSK-SO link) ─────────────
+    /// <summary>Suggested PO&lt;-&gt;SO links for cards with no direct HSK-SO link, by shared MSPC.</summary>
+    [HttpGet("transfer/link-suggestions")]
+    public async Task<IActionResult> GetLinkSuggestions([FromServices] TransferLinkSuggestionService svc)
+        => Ok(await svc.GetSuggestionsAsync());
+
+    public record LinkActionRequest(string PoSpItemId, string SoNumber);
+
+    /// <summary>Confirm a suggested link: add the SO to the PO's SalesOrders (full dependency — the slip
+    /// then pins to the PO's receipt date), re-pin, and refresh suggestions.</summary>
+    [HttpPost("transfer/links")]
+    public async Task<IActionResult> CreateLink([FromBody] LinkActionRequest? req,
+        [FromServices] TransferLinkSuggestionService svc, [FromServices] PoSlipDependencyResolver dep)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.PoSpItemId) || string.IsNullOrWhiteSpace(req.SoNumber))
+            return BadRequest(new { error = "poSpItemId and soNumber are required" });
+        try
+        {
+            var po = (await _sp.ReadPurchaseOrdersAsync()).FirstOrDefault(p => p.SpItemId == req.PoSpItemId);
+            if (po is null) return NotFound();
+            var set = TransferLinkSuggestionService.SplitSet(po.SalesOrders);
+            set.Add(req.SoNumber.Trim());
+            await _sp.UpdatePurchaseOrderSalesOrdersAsync(req.PoSpItemId, string.Join(", ", set));
+            svc.Invalidate();
+            await dep.ReconcileAsync();   // pin the now-linked slip to the PO's receipt date
+            _log.LogInformation("[LINK] Confirmed {So} -> {Po}", req.SoNumber, po.PoNumber);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex) { _log.LogError(ex, "CreateLink failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Reject a suggested link: remember the (PO,SO) pair so it isn't suggested again.</summary>
+    [HttpPost("transfer/links/reject")]
+    public async Task<IActionResult> RejectLink([FromBody] LinkActionRequest? req,
+        [FromServices] TransferLinkSuggestionService svc)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.PoSpItemId) || string.IsNullOrWhiteSpace(req.SoNumber))
+            return BadRequest(new { error = "poSpItemId and soNumber are required" });
+        try
+        {
+            var po = (await _sp.ReadPurchaseOrdersAsync()).FirstOrDefault(p => p.SpItemId == req.PoSpItemId);
+            if (po is null) return NotFound();
+            var set = TransferLinkSuggestionService.SplitSet(po.RejectedLinks);
+            set.Add(req.SoNumber.Trim());
+            await _sp.UpdatePurchaseOrderRejectedLinksAsync(req.PoSpItemId, string.Join(", ", set));
+            svc.Invalidate();
+            _log.LogInformation("[LINK] Rejected {So} <-> {Po}", req.SoNumber, po.PoNumber);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex) { _log.LogError(ex, "RejectLink failed"); return StatusCode(500, new { error = ex.Message }); }
+    }
+
     // ── POST /api/purchase-orders/backfill-sales-orders ──────────────────────
     /// <summary>
     /// One-shot backfill for POs ingested before sales-order capture existed: downloads each PO PDF,
