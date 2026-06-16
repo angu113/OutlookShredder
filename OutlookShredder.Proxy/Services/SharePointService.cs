@@ -2687,11 +2687,16 @@ public partial class SharePointService
 
                 // Strongest match: same Graph MessageId — unique per email, survives name
                 // variations and eventual-consistency duplicate SR creation (poller race).
+                // Compare case-SENSITIVELY: Graph immutable IDs are case-sensitive base64, so two
+                // IDs differing only in case are DIFFERENT emails. An OrdinalIgnoreCase compare here
+                // collapsed two distinct supplier emails (whose IDs differed by one char's case) onto
+                // a single SupplierResponse, letting whichever was processed last overwrite the other's
+                // RFQ / attachment / line items.
                 if (!string.IsNullOrEmpty(messageId))
                 {
                     var itemMsgId = d.TryGetValue("MessageId", out var mv) ? mv?.ToString() : null;
                     if (!string.IsNullOrEmpty(itemMsgId)
-                        && string.Equals(itemMsgId, messageId, StringComparison.OrdinalIgnoreCase))
+                        && string.Equals(itemMsgId, messageId, StringComparison.Ordinal))
                     {
                         msgIdMatch = i.Id;
                         break;
@@ -3551,7 +3556,9 @@ public partial class SharePointService
     {
         var siteId    = await GetSiteIdAsync();
         var sliListId = await GetSupplierLineItemsListIdAsync();
-        var messageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Case-sensitive: Graph IDs are case-sensitive base32/64 — two IDs differing only by case are
+        // distinct emails and must both be collected for reprocessing.
+        var messageIds = new HashSet<string>(StringComparer.Ordinal);
         int total = 0, skippedSentinel = 0, skippedNoMsgId = 0;
 
         var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
@@ -9610,10 +9617,12 @@ public partial class SharePointService
             if (string.IsNullOrWhiteSpace(msgId))
                 toDelete.Add(spId);
 
-        // 2. For rows sharing a MessageId, keep the highest-scoring one
+        // 2. For rows sharing a MessageId, keep the highest-scoring one.
+        // Case-SENSITIVE grouping: Graph immutable IDs are case-sensitive base64 — two IDs differing
+        // only in case are different emails and must NOT be collapsed (would delete a real SR as a dup).
         foreach (var grp in allSr
             .Where(r => !string.IsNullOrWhiteSpace(r.MessageId))
-            .GroupBy(r => r.MessageId!, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(r => r.MessageId!, StringComparer.Ordinal)
             .Where(g => g.Count() > 1))
         {
             var keep = grp.OrderByDescending(r => r.Score).First();
