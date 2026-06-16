@@ -241,6 +241,9 @@ public class PurchaseOrderRecord
     public string  LineItems    { get; set; } = "[]";
     /// <summary>SharePoint web URL of the uploaded PO PDF attachment, if available.</summary>
     public string? PdfUrl       { get; set; }
+    /// <summary>Comma-separated customer sales orders (HSK-SO…) referenced in the PO body, captured from
+    /// the "Sales Order #" column at ingestion. Empty for stock-replenishment POs (no linked order).</summary>
+    public string? SalesOrders  { get; set; }
 
     // ── Supplier-confirmation tracking (Fulfillment loop) ────────────────────
     /// <summary>"Pending" until a supplier confirmation is matched (manual or AI), then "Confirmed".</summary>

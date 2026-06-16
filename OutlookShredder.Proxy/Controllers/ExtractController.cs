@@ -2389,7 +2389,8 @@ public class ExtractController : ControllerBase
                     PaymentStatus: r.PaymentStatus ?? "None", AckLevel: r.AckLevel, PayLevel: r.PayLevel,
                     Notes: r.WaitingNotes, Products: SummarizeProducts(r.LineItems, out var n), LineItemCount: n,
                     HasPaymentEmail: hasPayEmail,
-                    Requester: !string.IsNullOrWhiteSpace(r.RfqId) && requesterByRfq.TryGetValue(r.RfqId, out var rq) ? rq : null));
+                    Requester: !string.IsNullOrWhiteSpace(r.RfqId) && requesterByRfq.TryGetValue(r.RfqId, out var rq) ? rq : null,
+                    SalesOrders: r.SalesOrders));
             }
 
             // Dedup duplicate PO rows (same PoNumber): keep the most-progressed card.
@@ -2462,7 +2463,54 @@ public class ExtractController : ControllerBase
     public record PoWaitingCard(string SpItemId, string PoNumber, string Supplier, string RfqId,
         string? AssignedDate, string? EtaDate, bool Rescheduled, string CardState,
         string ConfirmStatus, string PaymentStatus, string? AckLevel, string? PayLevel,
-        string? Notes, string Products, int LineItemCount, bool HasPaymentEmail, string? Requester);
+        string? Notes, string Products, int LineItemCount, bool HasPaymentEmail, string? Requester,
+        string? SalesOrders);
+
+    // ── POST /api/purchase-orders/backfill-sales-orders ──────────────────────
+    /// <summary>
+    /// One-shot backfill for POs ingested before sales-order capture existed: downloads each PO PDF,
+    /// extracts the customer sales orders (HSK-SO…) from the "Sales Order #" column, and patches the
+    /// SalesOrders column. Idempotent — only rows without SalesOrders are scanned unless force=true.
+    /// Logs progress every 10 rows.
+    /// </summary>
+    [HttpPost("purchase-orders/backfill-sales-orders")]
+    public async Task<IActionResult> BackfillSalesOrders([FromQuery] bool force = false, CancellationToken ct = default)
+    {
+        var records = await _sp.ReadPurchaseOrdersAsync();
+        var candidates = records
+            .Where(r => !string.IsNullOrWhiteSpace(r.PdfUrl))
+            .Where(r => force || string.IsNullOrWhiteSpace(r.SalesOrders))
+            .ToList();
+
+        int scanned = 0, withSo = 0, patched = 0, errors = 0;
+        foreach (var r in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            scanned++;
+            try
+            {
+                var bytes = await _sp.DownloadSpFileAsync(r.PdfUrl!, ct);
+                var sos   = PoSalesOrderExtractor.FromPdf(bytes, _log);
+                if (sos.Count > 0)
+                {
+                    withSo++;
+                    var csv = string.Join(", ", sos);
+                    await _sp.UpdatePurchaseOrderSalesOrdersAsync(r.SpItemId, csv);
+                    patched++;
+                    _log.LogInformation("[PO-SO] backfill {Po}: {SOs}", r.PoNumber, csv);
+                }
+            }
+            catch (Exception ex) { errors++; _log.LogWarning(ex, "[PO-SO] backfill failed for {Po}", r.PoNumber); }
+
+            if (scanned % 10 == 0)
+                _log.LogInformation("[PO-SO] backfill progress: {Scanned}/{Total} ({WithSo} with SO)",
+                    scanned, candidates.Count, withSo);
+        }
+
+        _log.LogInformation("[PO-SO] backfill done: scanned={Scanned} withSo={WithSo} patched={Patched} errors={Errors}",
+            scanned, withSo, patched, errors);
+        return Ok(new { totalPos = records.Count, candidates = candidates.Count, scanned, withSo, patched, errors });
+    }
 
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
     /// <summary>

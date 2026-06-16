@@ -5156,6 +5156,7 @@ public partial class SharePointService
                 ("MessageId",    "text"),
                 ("LineItems",    "note"),
                 ("PdfUrl",       "text"),
+                ("SalesOrders",  "text"),       // CSV of HSK-SO… this PO fulfils (procure-to-order)
                 // Supplier-confirmation tracking (Fulfillment loop): Pending until a confirmation is
                 // matched (manual one-tap or AI email match). Pointers + thin state, ETA from the SOC.
                 ("ConfirmStatus", "text"),     // Pending | Confirmed
@@ -7889,7 +7890,8 @@ public partial class SharePointService
     /// </summary>
     public async Task<string?> WritePurchaseOrderAsync(
         string rfqId, string supplierName, string? poNumber,
-        string receivedAt, string? messageId, string lineItemsJson)
+        string receivedAt, string? messageId, string lineItemsJson,
+        string? salesOrders = null)
     {
         var siteId  = await GetSiteIdAsync();
         var listId  = await GetPurchaseOrdersListIdAsync();
@@ -7945,6 +7947,10 @@ public partial class SharePointService
             ["LineItems"]     = lineItemsJson,
             ["ConfirmStatus"] = "Pending",   // until a supplier confirmation is matched
         };
+        // Customer sales orders this PO fulfils (HSK-SO…), captured from the PO body at ingestion.
+        // Only written when present so stock POs don't depend on the column existing.
+        if (!string.IsNullOrWhiteSpace(salesOrders))
+            data["SalesOrders"] = salesOrders;
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } });
@@ -8098,6 +8104,20 @@ public partial class SharePointService
             });
     }
 
+    /// <summary>Patches the SalesOrders (CSV of HSK-SO…) field on an existing PurchaseOrders row.
+    /// Used by the backfill pass over POs ingested before sales-order capture existed.</summary>
+    public async Task UpdatePurchaseOrderSalesOrdersAsync(string spItemId, string salesOrders)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetPurchaseOrdersListIdAsync();
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId].Fields
+            .PatchAsync(new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?> { ["SalesOrders"] = salesOrders }
+            });
+    }
+
     /// <summary>
     /// Deletes all rows from the PurchaseOrders SharePoint list.
     /// </summary>
@@ -8120,7 +8140,7 @@ public partial class SharePointService
         var page    = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,ReceiptMailItemId,WaitingNotes,BoardDate,MaterialReceivedAt)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,PoNumber,ReceivedAt,MessageId,LineItems,PdfUrl,SalesOrders,ConfirmStatus,ConfirmedAt,ConfirmedVia,ExpectedDate,ConfirmNote,PaymentStatus,PaymentRequiredAt,PaidAt,PaymentNote,BillMailItemId,BillAmount,BillSupplierRef,BillMatchedAt,ReceiptMailItemId,WaitingNotes,BoardDate,MaterialReceivedAt)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -8144,6 +8164,7 @@ public partial class SharePointService
                     MessageId    = GetStr(f, "MessageId"),
                     LineItems    = GetStr(f, "LineItems") ?? "[]",
                     PdfUrl       = GetStr(f, "PdfUrl"),
+                    SalesOrders  = GetStr(f, "SalesOrders"),
                     ConfirmStatus = GetStr(f, "ConfirmStatus") ?? "Pending",
                     ConfirmedAt   = GetStr(f, "ConfirmedAt"),
                     ConfirmedVia  = GetStr(f, "ConfirmedVia"),

@@ -798,7 +798,15 @@ public class FileWatcherService : BackgroundService
         // For PurchaseOrders, also run the RFQ purchase-matching pipeline
         if (extraction.DocumentType == "PurchaseOrder" && !string.IsNullOrEmpty(extraction.CustomerName))
         {
-            try { await TriggerPoMatchingAsync(extraction, fileName, ct); }
+            // Capture the customer sales orders (HSK-SO…) this PO fulfils, from the ORIGINAL PDF text
+            // (base64 was taken before any enrichment/footer rewrite). Deterministic regex on the
+            // fixed "Sales Order #" column — empty for stock POs.
+            var salesOrders = PoSalesOrderExtractor.FromPdf(Convert.FromBase64String(base64), _log);
+            if (salesOrders.Count > 0)
+                _log.LogInformation("[FW] PO {Num}: {Count} linked sales order(s) [{SOs}]",
+                    extraction.DocumentNumber, salesOrders.Count, string.Join(", ", salesOrders));
+
+            try { await TriggerPoMatchingAsync(extraction, fileName, string.Join(", ", salesOrders), ct); }
             catch (Exception ex) { _log.LogWarning(ex, "[FW] PO matching failed for {File}", fileName); }
         }
 
@@ -875,7 +883,7 @@ public class FileWatcherService : BackgroundService
     /// so the RFQ tab updates its purchase markers.
     /// </summary>
     private async Task TriggerPoMatchingAsync(
-        ErpExtraction extraction, string fileName, CancellationToken ct)
+        ErpExtraction extraction, string fileName, string salesOrdersCsv, CancellationToken ct)
     {
         var supplierName = extraction.CustomerName!;
         var poNumber     = extraction.DocumentNumber;
@@ -905,7 +913,8 @@ public class FileWatcherService : BackgroundService
         // Write the PurchaseOrders SP record (deduped by PoNumber)
         var poSpItemId = await _sp.WritePurchaseOrderAsync(
             rfqId ?? "UNKNOWN", supplierName, poNumber,
-            DateTimeOffset.UtcNow.ToString("o"), messageId: null, lineItemsJson);
+            DateTimeOffset.UtcNow.ToString("o"), messageId: null, lineItemsJson,
+            salesOrders: salesOrdersCsv);
 
         // Mark SLI rows as purchased and check for RFQ completion
         if (poSpItemId is not null && rfqId is not null)
