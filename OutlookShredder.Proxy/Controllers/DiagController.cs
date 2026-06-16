@@ -132,7 +132,13 @@ public class DiagController : ControllerBase
                         emailSubjectRef = emailRef,
                         pdfExtractedRef = pdfRef,
                         finalRfqId      = S(s, "JobReference") ?? rfqId,
-                        mismatch        = !string.IsNullOrWhiteSpace(pdfRef) && !string.Equals(pdfRef, emailRef, StringComparison.OrdinalIgnoreCase),
+                        // A genuine mismatch requires BOTH a bracketed subject ref AND a PDF job ref that
+                        // disagree. A PDF ref with no subject bracket (e.g. a supplier's quote-titled email)
+                        // is normal PDF-led routing, not a conflict — don't flag it. Mirrors the write-path
+                        // jobRefMismatchWarning, which only fires when the subject regex ref is non-empty.
+                        mismatch        = !string.IsNullOrWhiteSpace(pdfRef)
+                                          && !string.IsNullOrWhiteSpace(emailRef)
+                                          && !string.Equals(pdfRef, emailRef, StringComparison.OrdinalIgnoreCase),
                     },
                     storedAttachment,
                     lineItems = grp.Select(r => new
