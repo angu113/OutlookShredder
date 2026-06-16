@@ -2442,9 +2442,16 @@ public class ExtractController : ControllerBase
     /// <summary>Edits a PO's waiting-board note and/or reschedule (board-date) override. A null field is
     /// left unchanged; "" clears it. Body: { notes?, boardDate? } (boardDate as yyyy-MM-dd).</summary>
     [HttpPatch("purchase-orders/{spItemId}/waiting")]
-    public async Task<IActionResult> PatchWaiting(string spItemId, [FromBody] PoWaitingRequest? req)
+    public async Task<IActionResult> PatchWaiting(string spItemId, [FromBody] PoWaitingRequest? req,
+        [FromServices] PoSlipDependencyResolver dep)
     {
-        try { await _sp.UpdatePurchaseOrderWaitingAsync(spItemId, req?.Notes, req?.BoardDate); return Ok(new { ok = true }); }
+        try
+        {
+            await _sp.UpdatePurchaseOrderWaitingAsync(spItemId, req?.Notes, req?.BoardDate);
+            // PO moved between days → pin its dependent sales-order (slip) cards to the new receipt date.
+            if (req?.BoardDate is not null) await dep.ReconcileAsync();
+            return Ok(new { ok = true });
+        }
         catch (Exception ex) { _log.LogError(ex, "PatchWaiting failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 
@@ -2452,9 +2459,17 @@ public class ExtractController : ControllerBase
     /// <summary>Marks the PO's material received (archives it from the waiting board + its ghosts). Body:
     /// { received? } default true; received=false returns it to the board.</summary>
     [HttpPatch("purchase-orders/{spItemId}/received")]
-    public async Task<IActionResult> PatchReceived(string spItemId, [FromBody] PoReceivedRequest? req)
+    public async Task<IActionResult> PatchReceived(string spItemId, [FromBody] PoReceivedRequest? req,
+        [FromServices] PoSlipDependencyResolver dep)
     {
-        try { await _sp.UpdatePurchaseOrderReceivedAsync(spItemId, req?.Received ?? true); await PublishPoStatusAsync(spItemId); return Ok(new { ok = true }); }
+        try
+        {
+            await _sp.UpdatePurchaseOrderReceivedAsync(spItemId, req?.Received ?? true);
+            await PublishPoStatusAsync(spItemId);
+            // Received → the PO stops governing; un-received → it governs again. Re-reconcile either way.
+            await dep.ReconcileAsync();
+            return Ok(new { ok = true });
+        }
         catch (Exception ex) { _log.LogError(ex, "PatchReceived failed"); return StatusCode(500, new { error = ex.Message }); }
     }
 

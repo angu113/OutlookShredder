@@ -36,8 +36,22 @@ public class WorkflowController : ControllerBase
     public async Task<IActionResult> UpdateCard(
         int spItemId,
         [FromBody] UpdateWorkflowCardRequest req,
+        [FromServices] PoSlipDependencyResolver dep,
         CancellationToken ct)
     {
+        // Enforce the PO dependency: a slip scheduled onto a concrete day is pinned to its governing PO's
+        // receipt date. A move to a different day snaps to that date; moving to Prioritize ("") is allowed.
+        if (!string.IsNullOrEmpty(req.AssignedDate))
+        {
+            var slip = (await _wf.GetAllAsync()).FirstOrDefault(c => c.SpItemId == spItemId);
+            if (slip is not null)
+            {
+                var pin = await dep.PinnedDateForSlipAsync(slip.DocumentNumber);
+                if (pin is not null && !string.Equals(pin, req.AssignedDate, StringComparison.Ordinal))
+                    req.AssignedDate = pin;   // snap to the PO receipt date (dependency)
+            }
+        }
+
         var card = await _wf.UpdateAsync(spItemId, req, ct);
         return card is null ? NotFound() : Ok(card);
     }
