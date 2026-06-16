@@ -2477,19 +2477,34 @@ public class ExtractController : ControllerBase
     public async Task<IActionResult> BackfillSalesOrders([FromQuery] bool force = false, CancellationToken ct = default)
     {
         var records = await _sp.ReadPurchaseOrdersAsync();
+
+        // Source the PO PDF from ErpDocuments — the OpenBravo printout that carries the "Sales Order #"
+        // column — keyed by PO number. (PurchaseOrders.PdfUrl is only set for legacy email POs, whose
+        // supplier attachment has no such column, so it's the wrong source here.)
+        var erpDocs = await _sp.ReadErpDocumentsAsync(top: 2000, includeArchived: true, ct: ct);
+        var pdfByPo = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in erpDocs)
+        {
+            if (!string.Equals(d.DocumentType, "PurchaseOrder", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrWhiteSpace(d.DocumentNumber) || string.IsNullOrWhiteSpace(d.PdfUrl)) continue;
+            pdfByPo.TryAdd(d.DocumentNumber!, d.PdfUrl!);   // first (newest) printout per PO# wins
+        }
+
         var candidates = records
-            .Where(r => !string.IsNullOrWhiteSpace(r.PdfUrl))
+            .Where(r => !string.IsNullOrWhiteSpace(r.PoNumber))
             .Where(r => force || string.IsNullOrWhiteSpace(r.SalesOrders))
             .ToList();
 
-        int scanned = 0, withSo = 0, patched = 0, errors = 0;
+        int scanned = 0, matched = 0, withSo = 0, patched = 0, errors = 0;
         foreach (var r in candidates)
         {
             ct.ThrowIfCancellationRequested();
             scanned++;
+            if (!pdfByPo.TryGetValue(r.PoNumber!, out var pdfUrl)) continue;   // no ERP printout on file
+            matched++;
             try
             {
-                var bytes = await _sp.DownloadSpFileAsync(r.PdfUrl!, ct);
+                var bytes = await _sp.DownloadSpFileAsync(pdfUrl, ct);
                 var sos   = PoSalesOrderExtractor.FromPdf(bytes, _log);
                 if (sos.Count > 0)
                 {
@@ -2502,14 +2517,14 @@ public class ExtractController : ControllerBase
             }
             catch (Exception ex) { errors++; _log.LogWarning(ex, "[PO-SO] backfill failed for {Po}", r.PoNumber); }
 
-            if (scanned % 10 == 0)
-                _log.LogInformation("[PO-SO] backfill progress: {Scanned}/{Total} ({WithSo} with SO)",
-                    scanned, candidates.Count, withSo);
+            if (scanned % 25 == 0)
+                _log.LogInformation("[PO-SO] backfill progress: {Scanned}/{Total} (matched {Matched}, {WithSo} with SO)",
+                    scanned, candidates.Count, matched, withSo);
         }
 
-        _log.LogInformation("[PO-SO] backfill done: scanned={Scanned} withSo={WithSo} patched={Patched} errors={Errors}",
-            scanned, withSo, patched, errors);
-        return Ok(new { totalPos = records.Count, candidates = candidates.Count, scanned, withSo, patched, errors });
+        _log.LogInformation("[PO-SO] backfill done: scanned={Scanned} matched={Matched} withSo={WithSo} patched={Patched} errors={Errors}",
+            scanned, matched, withSo, patched, errors);
+        return Ok(new { totalPos = records.Count, candidates = candidates.Count, erpPoPdfs = pdfByPo.Count, scanned, matched, withSo, patched, errors });
     }
 
     // ── DELETE /api/purchase-orders/clean ────────────────────────────────────
