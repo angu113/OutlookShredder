@@ -704,6 +704,20 @@ public class FileWatcherService : BackgroundService
             }
         }
 
+        // When the filename carried no record id (a bare "PurchaseOrder.pdf"), read the PO number
+        // straight from the body — OpenBravo prints "PURCHASE ORDER - MATERIAL HSK-PO…" under the
+        // title. Deterministic and exact for this fixed-format field, so it wins over the AI value
+        // (which is unreliable here and otherwise leaves the doc identified only by its filename stem).
+        if (!erpInfo.HasDocNumber)
+        {
+            var bodyPo = PoNumberExtractor.FromPdf(Convert.FromBase64String(base64), _log);
+            if (bodyPo is not null)
+            {
+                extraction.DocumentNumber = bodyPo;
+                _log.LogInformation("[FW] PO number read from body: {Po} ({File})", bodyPo, fileName);
+            }
+        }
+
         _log.LogInformation("[FW] ERP document: {Type} {Number} in {File}",
             extraction.DocumentType, extraction.DocumentNumber, fileName);
 
