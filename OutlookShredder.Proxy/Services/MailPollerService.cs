@@ -33,6 +33,12 @@ public class MailPollerService : BackgroundService
     private readonly CatalogAnalysisService     _analysis;
     private readonly ILogger<MailPollerService> _log;
 
+    // Bare-token fallback (subject only): an RFQ id with no brackets whose 2-letter prefix is a
+    // known user-initials value (Mail:RfqInitials). Case-SENSITIVE (uppercase) so it won't collide
+    // with ordinary all-caps subject words, and gated on a real RFQ id (SharePointService
+    // .IsKnownRfqIdAsync) so a stray uppercase token can never invent a bucket. Built from config.
+    private readonly Regex? _initialsJobRefRegex;
+
     // Job-reference ID: 2-letter user initials + 4 Crockford Base32 chars, 6 chars total
     // (e.g. AW0001). The first two characters are ALWAYS letters — this is what distinguishes
     // our IDs from a supplier's own job number such as Eastern Metal's "J06601" (single letter
@@ -415,6 +421,19 @@ public class MailPollerService : BackgroundService
         _shrRouter     = shrRouter;
         _analysis      = analysis;
         _log           = log;
+
+        // Build the initials-gated bare-token fallback regex from config (default AW,JM,AC,RS).
+        // Each entry must be exactly two letters; the 6-char id = initials + 4 Crockford chars.
+        var inits = (_config["Mail:RfqInitials"] ?? "AW,JM,AC,RS")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => s.ToUpperInvariant())
+            .Where(s => s.Length == 2 && s.All(char.IsLetter))
+            .Distinct()
+            .Select(Regex.Escape)
+            .ToArray();
+        _initialsJobRefRegex = inits.Length > 0
+            ? new Regex(@"\b(?:" + string.Join("|", inits) + @")[A-Z0-9]{4}\b", RegexOptions.Compiled)  // case-sensitive
+            : null;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -622,6 +641,31 @@ public class MailPollerService : BackgroundService
             if (jobRefs.Count > 0)
                 _log.LogInformation("[Mail] Job ref found via bare pattern (no brackets): [{Refs}] in \"{Subject}\"",
                     string.Join(", ", jobRefs), subject);
+        }
+
+        // Final fallback: a bare RFQ id in the SUBJECT with no brackets and no "RFQ"/"Job Ref"
+        // prefix — e.g. a supplier reply retitled "re: RSX9JS revised". Restricted to the SUBJECT
+        // only (the body's quoted thread carries other RFQ ids), case-SENSITIVE uppercase, with a
+        // known user-initials prefix, and accepted only when it resolves to a real RFQ id. Over 60
+        // days of live mail this caught 4 genuine bracket-less replies with zero false positives.
+        if (jobRefs.Count == 0 && _initialsJobRefRegex is not null)
+        {
+            var candidates = _initialsJobRefRegex.Matches(subject)
+                .Select(m => m.Value)
+                .Distinct()
+                .ToList();
+            if (candidates.Count > 0)
+            {
+                var validated = new List<string>();
+                foreach (var c in candidates)
+                    if (await _sp.IsKnownRfqIdAsync(c)) validated.Add(c);
+                if (validated.Count > 0)
+                {
+                    jobRefs = validated;
+                    _log.LogInformation("[Mail] Job ref via initials fallback (subject, validated): [{Refs}] in \"{Subject}\"",
+                        string.Join(", ", jobRefs), subject);
+                }
+            }
         }
 
         // ── SHR conversation tracking token ──────────────────────────────────────

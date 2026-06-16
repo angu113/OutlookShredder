@@ -1605,6 +1605,49 @@ public partial class SharePointService
         return _rfqLineItemsListId;
     }
 
+    // ── Known-RFQ-id cache (poller bare-token fallback gate) ──────────────────
+    // The poller accepts a bare, bracket-less RFQ id in a subject only if it's a REAL RFQ id.
+    // Cache the id set (uppercase, Ordinal) so that check is an in-memory lookup, not a Graph call.
+    private volatile HashSet<string>? _knownRfqIds;
+    private DateTime _knownRfqIdsAt   = DateTime.MinValue;
+    private int      _knownRfqIdsBusy = 0;
+
+    /// <summary>True if <paramref name="id"/> is a real RFQ id (exists in RFQ References).
+    /// Blocks once on cold start to populate the cache, then refreshes in the background every 5 min.</summary>
+    public async Task<bool> IsKnownRfqIdAsync(string id, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(id)) return false;
+        var cache = _knownRfqIds;
+        if (cache is null)
+        {
+            await RefreshKnownRfqIdsAsync();                       // cold start: block once
+            cache = _knownRfqIds;
+        }
+        else if ((DateTime.UtcNow - _knownRfqIdsAt).TotalMinutes >= 5
+                 && System.Threading.Interlocked.CompareExchange(ref _knownRfqIdsBusy, 1, 0) == 0)
+        {
+            _ = Task.Run(async () => { try { await RefreshKnownRfqIdsAsync(); }
+                                       finally { System.Threading.Interlocked.Exchange(ref _knownRfqIdsBusy, 0); } });
+        }
+        return cache?.Contains(id.ToUpperInvariant()) ?? false;
+    }
+
+    private async Task RefreshKnownRfqIdsAsync()
+    {
+        try
+        {
+            var ids = await GetExistingRfqIdsAsync();
+            _knownRfqIds   = new HashSet<string>(ids.Select(i => i.ToUpperInvariant()), StringComparer.Ordinal);
+            _knownRfqIdsAt = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SP] RefreshKnownRfqIds failed");
+            _knownRfqIds ??= new HashSet<string>(StringComparer.Ordinal);  // don't re-block on persistent failure
+            _knownRfqIdsAt = DateTime.UtcNow;
+        }
+    }
+
     /// <summary>Returns all RFQ_ID values that exist in the RFQ References list.</summary>
     public async Task<HashSet<string>> GetExistingRfqIdsAsync()
     {
