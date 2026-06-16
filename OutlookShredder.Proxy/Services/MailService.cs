@@ -457,6 +457,25 @@ public class MailService
         }
     }
 
+    /// <summary>Diagnostic: lists a message's attachment metadata (name / size / contentType — never the
+    /// bytes) so a trace can show what the supplier actually attached without dumping file contents.</summary>
+    public async Task<List<(string Name, long Size, string? ContentType)>> GetAttachmentMetaAsync(string messageId)
+    {
+        var result = new List<(string, long, string?)>();
+        try
+        {
+            var list = await GetGraph().Users[GetMailbox()].Messages[messageId].Attachments
+                .GetAsync(req => req.QueryParameters.Select = ["name", "size", "contentType"]);
+            foreach (var a in list?.Value ?? [])
+                result.Add((a.Name ?? "(unnamed)", a.Size ?? 0, a.ContentType));
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+        {
+            _log.LogWarning("[Mail] Could not list attachments for {Id} (HTTP {Status})", messageId, ex.ResponseStatusCode);
+        }
+        return result;
+    }
+
     /// <summary>
     /// Returns unprocessed messages received at or after <paramref name="since"/> across
     /// inbox and any Mail:ExtraFolders. Filtering is done server-side per folder.

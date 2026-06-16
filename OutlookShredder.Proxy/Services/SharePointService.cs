@@ -1471,6 +1471,24 @@ public partial class SharePointService
         return rows;
     }
 
+    /// <summary>Diagnostic: the ClaudeResponseLog (NDJSON AI-extraction audit) for one SupplierResponses
+    /// row by item id. Null if the row is gone or has no log.</summary>
+    public async Task<string?> ReadClaudeResponseLogAsync(string srItemId)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSupplierResponsesListIdAsync();
+        try
+        {
+            var item = await GetGraph().Sites[siteId].Lists[listId].Items[srItemId]
+                .GetAsync(r => r.QueryParameters.Expand = ["fields($select=ClaudeResponseLog)"]);
+            return item?.Fields?.AdditionalData is { } d ? GetStr(d, "ClaudeResponseLog") : null;
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Looks up the supplier name from the SR cache for a given rfqId, optionally
     /// preferring the row whose EmailFrom domain matches the caller's address.
