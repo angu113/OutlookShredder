@@ -1109,6 +1109,30 @@ public class ExtractController : ControllerBase
         }
     }
 
+    // ── POST /api/sr/{srId}/detach-file ─────────────────────────────────────
+    /// <summary>
+    /// Removes a wrongly-attached quote PDF from a SupplierResponse (job-ref-mismatch cleanup):
+    /// deletes the drive file and clears the stale SourceFile pointer on the SR + its SLI rows.
+    /// Line-item data is left intact.
+    /// </summary>
+    [HttpPost("sr/{srId}/detach-file")]
+    public async Task<IActionResult> DetachSrFile(string srId, [FromBody] DetachFileRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.FileName))
+            return BadRequest(new { error = "fileName is required" });
+        try
+        {
+            var fileName = request.FileName.Trim();
+            var (fileDeleted, sliCleared) = await _sp.DetachQuoteFileAsync(srId, fileName);
+            return Ok(new { srId, fileName, fileDeleted, sliCleared });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "DetachSrFile failed for SR {Id}", srId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     // ── PATCH /api/sr/{srId}/rfq-id ─────────────────────────────────────────────
 
     /// <summary>Re-parents a SupplierResponse (and its child SLI rows) to a different RFQ ID.</summary>
@@ -2851,4 +2875,6 @@ public class ExtractController : ControllerBase
         string? CatalogProductName);
 
     public record ReparentSrRequest(string RfqId);
+
+    public record DetachFileRequest(string FileName);
 }

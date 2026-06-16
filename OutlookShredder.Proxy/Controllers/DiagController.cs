@@ -88,11 +88,17 @@ public class DiagController : ControllerBase
                 // ── Step 3: job-reference resolution ──────────────────────────────────
                 var emailSubject = S(s, "EmailSubject") ?? "";
                 var emailRef     = BracketRef.Match(emailSubject) is { Success: true } m ? m.Groups[1].Value.ToUpperInvariant() : null;
-                string? pdfRef   = null;
+                // The job ref the PDF itself claims comes from the *attachment-sourced* extraction — not a later
+                // body reprocess (which echoes the email subject and would mask a misroute). Track both separately.
+                string? pdfRef = null, bodyRef = null;
                 foreach (var e in aiEntries)
-                    if (e.TryGetProperty("Ext", out var ext) && ext.TryGetProperty("JobReference", out var jr)
-                        && jr.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(jr.GetString()))
-                        pdfRef = jr.GetString();
+                {
+                    if (!(e.TryGetProperty("Ext", out var ext) && ext.TryGetProperty("JobReference", out var jr)
+                          && jr.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(jr.GetString()))) continue;
+                    var entSrc = e.TryGetProperty("Src", out var sp) && sp.ValueKind == JsonValueKind.String ? sp.GetString() : null;
+                    if (string.Equals(entSrc, "attachment", StringComparison.OrdinalIgnoreCase)) pdfRef = jr.GetString();
+                    else bodyRef = jr.GetString();
+                }
 
                 // ── Step 4: stored attachment ─────────────────────────────────────────
                 var sourceFile = S(s, "SourceFile");

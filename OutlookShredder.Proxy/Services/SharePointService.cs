@@ -2496,11 +2496,14 @@ public partial class SharePointService
             ? forwardedSender
             : null;
 
-        // Body-phrase regret does not apply when we are processing an attachment.
-        // The attachment is the authoritative pricing source; the email body is context only.
-        // Per-product isRegret (set by the AI on each ProductLine) still applies.
-        bool blanketRegret = emailMeta.SourceType != "attachment" &&
-            (HasRegretPhrase(emailMeta.EmailBody) || HasRegretPhrase(emailMeta.BodyContext));
+        // Full-regret rule: a response is a FULL regret only when the email body expresses regret
+        // AND there is no priced line in this extraction (no PDF attachment with valid pricing).
+        // A priced attachment means it is a real quote — or, when the body regrets but the PDF
+        // prices items, a substitute/partial — never a full regret. (Per-line IsRegret on each SLI
+        // is computed separately in WriteSupplierLineItemAsync; this is the SR-level rollup.)
+        bool bodyRegret    = HasRegretPhrase(emailMeta.EmailBody) || HasRegretPhrase(emailMeta.BodyContext);
+        bool hasPricedLine = header.Products?.Any(HasPrice) == true;
+        bool blanketRegret = bodyRegret && !hasPricedLine;
 
         var title = $"[{jobRef}] {supplier} {(emailMeta.ReceivedAt is not null ? DateTime.Parse(emailMeta.ReceivedAt).ToString("yyyy-MM-dd") : "unknown")}";
         title = title[..Math.Min(title.Length, 255)];
@@ -3976,6 +3979,77 @@ public partial class SharePointService
 
         InvalidateSrCache();
         _log.LogInformation("[SP] Reparented SR {SrId} and {N} SLI row(s) to RFQ {RfqId}", srId, sliIds.Count, rfqId);
+    }
+
+    /// <summary>
+    /// Removes a wrongly-attached quote PDF from a SupplierResponse (job-ref-mismatch cleanup):
+    /// deletes the drive file at <c>QuoteAttachments/{srId}/{fileName}</c> and clears the stale
+    /// <c>SourceFile</c> pointer on the SR (resetting ProcessingSource to "body") and on every child
+    /// SLI row. Line-item data is left intact — only the foreign attachment + its pointer are removed.
+    /// Returns (fileDeleted, sliCleared).
+    /// </summary>
+    public async Task<(bool FileDeleted, int SliCleared)> DetachQuoteFileAsync(string srId, string fileName)
+    {
+        var siteId    = await GetSiteIdAsync();
+        var sliListId = await GetSupplierLineItemsListIdAsync();
+        var srListId  = await GetSupplierResponsesListIdAsync();
+
+        // 1. Delete the drive file (best-effort — it may already be gone).
+        bool fileDeleted = false;
+        try
+        {
+            var driveId = await GetRfqDriveIdAsync();
+            var itemKey = $"root:/QuoteAttachments/{srId}/{fileName}:";
+            await GetGraph().Drives[driveId].Items[itemKey].DeleteAsync();
+            fileDeleted = true;
+            _log.LogInformation("[SP] Detached quote file '{File}' from SR {SrId}", fileName, srId);
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+        {
+            _log.LogWarning("[SP] DetachQuoteFile: drive delete '{File}' for SR {SrId} returned {Code}",
+                fileName, srId, ex.Error?.Code);
+        }
+
+        // 2. Clear SourceFile + reset ProcessingSource on the SR (no longer attachment-sourced).
+        await GetGraph().Sites[siteId].Lists[srListId].Items[srId].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+                { ["SourceFile"] = null, ["ProcessingSource"] = "body" } });
+
+        // 3. Clear SourceFile on every child SLI of this SR.
+        var page = await GetGraph().Sites[siteId].Lists[sliListId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId)"];
+                r.QueryParameters.Top    = 2000;
+            });
+
+        var sliIds = new List<string>();
+        while (page is not null)
+        {
+            foreach (var item in page.Value ?? [])
+            {
+                var d = item.Fields?.AdditionalData;
+                if (d is null || item.Id is null) continue;
+                var refId = d.TryGetValue("SupplierResponseId", out var v) ? v?.ToString() : null;
+                if (string.Equals(refId, srId, StringComparison.OrdinalIgnoreCase))
+                    sliIds.Add(item.Id);
+            }
+            if (page.OdataNextLink is null) break;
+            var next = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter);
+            page = await next.GetAsync();
+        }
+
+        foreach (var sliId in sliIds)
+        {
+            await GetGraph().Sites[siteId].Lists[sliListId].Items[sliId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["SourceFile"] = null } });
+        }
+
+        InvalidateSrCache();
+        _log.LogInformation("[SP] DetachQuoteFile: SR {SrId} file='{File}' deleted={Del} sliCleared={N}",
+            srId, fileName, fileDeleted, sliIds.Count);
+        return (fileDeleted, sliIds.Count);
     }
 
     /// <summary>
