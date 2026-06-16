@@ -54,6 +54,12 @@ try
         "ShredderData", "Secrets", "appsettings.secrets.json");
     builder.Configuration.AddJsonFile(persistentSecretsPath, optional: true, reloadOnChange: false);
 
+    // Per-machine NON-secret overrides: gitignored, created per machine, and deliberately NOT registered
+    // for the WS1 cleanup below — so config that is not a Key Vault secret (e.g. MailboxBridge:Mailboxes,
+    // SignalWire:SpaceUrl/FromNumber) has a durable home that survives the secrets-file wipe. Loaded after
+    // the secrets files so it can override them; genuine secrets still belong in Key Vault, never here.
+    builder.Configuration.AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: false);
+
     // Register the local cleartext copies so the post-startup WS1 cleanup can delete them once the vault
     // is proven healthy (see SecretsBootstrap.CleanupLocalSecretsIfVaultHealthy after PrewarmAsync).
     SecretsBootstrap.RegisterLocalSecretFile(Path.Combine(AppContext.BaseDirectory, "appsettings.secrets.json"));

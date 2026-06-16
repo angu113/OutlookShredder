@@ -5,3 +5,4 @@ obj/
 publish/
 Logs/
 appsettings.secrets.json
+appsettings.local.json
