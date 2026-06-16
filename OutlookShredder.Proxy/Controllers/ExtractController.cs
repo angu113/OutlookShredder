@@ -2481,7 +2481,9 @@ public class ExtractController : ControllerBase
         // Source the PO PDF from ErpDocuments — the OpenBravo printout that carries the "Sales Order #"
         // column — keyed by PO number. (PurchaseOrders.PdfUrl is only set for legacy email POs, whose
         // supplier attachment has no such column, so it's the wrong source here.)
-        var erpDocs = await _sp.ReadErpDocumentsAsync(top: 2000, includeArchived: true, ct: ct);
+        // top must exceed the total ErpDocuments count — the read is a single non-paged page that
+        // returns oldest-first, so a small cap silently drops the newest (PO) records.
+        var erpDocs = await _sp.ReadErpDocumentsAsync(top: 20000, includeArchived: true, ct: ct);
         var pdfByPo = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var d in erpDocs)
         {

@@ -7919,7 +7919,7 @@ public partial class SharePointService
             var allPos = await GetGraph().Sites[siteId].Lists[listId].Items
                 .GetAsync(r =>
                 {
-                    r.QueryParameters.Expand = ["fields($select=PoNumber)"];
+                    r.QueryParameters.Expand = ["fields($select=PoNumber,SalesOrders)"];
                     r.QueryParameters.Top    = 5000;
                 });
             var dupItem = (allPos?.Value ?? []).FirstOrDefault(i =>
@@ -7930,7 +7930,20 @@ public partial class SharePointService
             });
             if (dupItem is not null)
             {
-                _log.LogInformation("[PO] Skipping duplicate ERP PO — PoNumber {Num} already in SP: {Id}", poNumber, dupItem.Id);
+                // Dedup gap fix: a re-scan / re-ingest of an existing PO still backfills its sales
+                // orders. Patch SalesOrders onto the existing row when we now have them and it doesn't
+                // (or they differ) — otherwise it's a no-op skip.
+                var existingSo = dupItem.Fields?.AdditionalData is { } ad ? GetStr(ad, "SalesOrders") : null;
+                if (!string.IsNullOrWhiteSpace(salesOrders) &&
+                    !string.Equals(existingSo, salesOrders, StringComparison.OrdinalIgnoreCase))
+                {
+                    await UpdatePurchaseOrderSalesOrdersAsync(dupItem.Id!, salesOrders);
+                    _log.LogInformation("[PO] Updated SalesOrders on existing PO {Num} ({Id}): {SOs}", poNumber, dupItem.Id, salesOrders);
+                }
+                else
+                {
+                    _log.LogInformation("[PO] Skipping duplicate ERP PO — PoNumber {Num} already in SP: {Id}", poNumber, dupItem.Id);
+                }
                 return dupItem.Id;
             }
         }
