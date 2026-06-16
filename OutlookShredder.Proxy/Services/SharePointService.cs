@@ -2273,7 +2273,7 @@ public partial class SharePointService
                 result.Updated  = !srNew2;
                 result.RfqId    = jobRef;
 
-                if (result.SpItemId is not null && !srNew2 && rowIndex == 0 && emailMeta.SourceType == "attachment")
+                if (result.SpItemId is not null && !srNew2 && rowIndex == 0 && source == "attachment")
                 {
                     try { await DeleteSpItemAttachmentsAsync(srId2); }
                     catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId2); }
@@ -2412,7 +2412,7 @@ public partial class SharePointService
             // clean slate so a stale/wrong attachment can't survive (it's re-stored below only for a
             // priced line). Gated to attachment re-extractions so a body reprocess never drops a valid
             // stored quote.
-            if (result.SpItemId is not null && !srNew && rowIndex == 0 && emailMeta.SourceType == "attachment")
+            if (result.SpItemId is not null && !srNew && rowIndex == 0 && source == "attachment")
             {
                 try { await DeleteSpItemAttachmentsAsync(srId); }
                 catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId); }
