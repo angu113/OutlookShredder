@@ -38,12 +38,14 @@ Also installs:
 | `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts, list contacts |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 | `ErpController` | `/api/erp` | Proxy SP PDFs (with FAB-drawing append), build a slip's combined DXF, ERP document records + stamp annotations |
+| `DiagController` | `/api/diag` | Read-only extraction-pipeline traces (live email vs extracted/stored), for forensic review |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
 - `POST /api/setup-supplier-lists` — idempotent: creates SupplierResponses + SupplierLineItems SP lists
 - `PATCH /api/sr/{srId}/rfq-id` body: `{ rfqId }` — reparents a SupplierResponse and all its child SupplierLineItems to a new RFQ ID; rfqId must be 6 chars: 2 letters + 4 alphanumeric (e.g. `AW0001`)
 - `PATCH /api/sli/{sliItemId}/rfq-id` body: `{ rfqId }` — reparents a single SupplierLineItem to a new RFQ ID; if the source SR has no remaining SLI children it is deleted
+- `POST /api/sr/{srId}/detach-file` body: `{ fileName }` — removes a wrongly-attached quote PDF (job-ref-mismatch cleanup): deletes the drive file at `QuoteAttachments/{srId}/{fileName}` and clears the stale `SourceFile` pointer on the SR (resetting `ProcessingSource` to `body`) and all its child SLI rows. Line-item data is left intact. Returns `{ fileDeleted, sliCleared }` (`fileDeleted=false` is normal when the PDF was filed under its own RFQ and only a stale text pointer leaked onto this SR).
 - `GET /api/version` → `{ version }` — returns the running assembly's `InformationalVersion` (distinct from `/api/publish/version`, which reads SharePoint's version.txt)
 
 **ErpController endpoints (`/api/erp`):**
@@ -386,6 +388,8 @@ This approach gives deterministic diagnosis. Inference from code reading alone i
 
 ## Rules
 
+- **Full-regret rule:** a SupplierResponse is a FULL regret (`IsRegret=true` at SR level) only when the email **body expresses regret AND there is no priced line in the extraction** (no PDF attachment with valid pricing — any price counts). A priced attachment means a real quote, or — when the body regrets but the PDF prices items — a substitute/partial; never a full regret. Per-line `IsRegret` on each SLI is computed independently (`!HasPrice(product) && (product.IsRegret || regret phrase)`). Set in `EnsureSupplierResponseAsync` (`blanketRegret`).
+- **Job-ref mismatch:** when a PDF's AI-extracted JobReference is a valid RFQ id that differs from the email-subject ref, the priced data files under the PDF's **own** ref and a `⚠` warning is written to `SupplierProductComments` (visible in the grid). A foreign PDF that leaks a stale `SourceFile` pointer onto the wrong SR is cleaned with `POST /api/sr/{srId}/detach-file`. Diagnose any RFQ with `GET /api/diag/extraction-trace?rfqId=` (live email vs extracted vs stored, each block carries its source).
 - `@mithrilmetals.com` is never a valid supplier — never appear in extraction results or email targets
 - All SharePoint writes go through `SharePointService` — no direct Graph calls from controllers
 - Extraction prompt and JSON schema live in `ClaudeExtractionService.ExtractRfqAsync` and `GeminiExtractionService` — edit there to change extraction behaviour. The system prompt text is a `const string` near the top of each file.
