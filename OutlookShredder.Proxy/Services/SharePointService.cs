@@ -2273,7 +2273,7 @@ public partial class SharePointService
                 result.Updated  = !srNew2;
                 result.RfqId    = jobRef;
 
-                if (result.SpItemId is not null && !srNew2 && rowIndex == 0 && source == "attachment")
+                if (result.SpItemId is not null && !srNew2 && rowIndex == 0 && lineIsRegret)
                 {
                     try { await DeleteSpItemAttachmentsAsync(srId2); }
                     catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId2); }
@@ -2408,11 +2408,10 @@ public partial class SharePointService
             result.Updated  = !srNew;   // true = existing row updated; false = new insert
             result.RfqId    = jobRef;   // resolved RFQ ID  -- may differ from req.JobRefs when email subject has no bracket ref
 
-            // On a re-extraction from an attachment, clear any previously stored quote PDF first — a
-            // clean slate so a stale/wrong attachment can't survive (it's re-stored below only for a
-            // priced line). Gated to attachment re-extractions so a body reprocess never drops a valid
-            // stored quote.
-            if (result.SpItemId is not null && !srNew && rowIndex == 0 && source == "attachment")
+            // When a re-extraction's first line comes back a regret, clear any previously stored quote
+            // PDF for this SR — a regret has no quote, so a stale/wrong attachment (a prior quote, or a
+            // stray PDF on the regret reply) must not survive. A priced line keeps/replaces it below.
+            if (result.SpItemId is not null && !srNew && rowIndex == 0 && lineIsRegret)
             {
                 try { await DeleteSpItemAttachmentsAsync(srId); }
                 catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not clear prior attachment for SR {Id}", srId); }
