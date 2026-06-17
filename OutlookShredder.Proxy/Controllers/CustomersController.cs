@@ -91,8 +91,8 @@ public class CustomersController(
         var r = await sp.EnrichCustomersAsync(parsed.Rows, ct);
         crmCache.Invalidate();
         return Ok(new { parsed = parsed.Rows.Count, matched = r.Matched, updated = r.Updated,
-                        unchanged = r.Unchanged, unmatched = r.Unmatched, unmatchedSample = r.UnmatchedSample,
-                        warnings = parsed.Warnings, oddities = parsed.Skipped });
+                        unchanged = r.Unchanged, unmatched = r.Unmatched, skippedInactive = r.SkippedInactive,
+                        unmatchedSample = r.UnmatchedSample, warnings = parsed.Warnings, oddities = parsed.Skipped });
     }
 
     /// <summary>

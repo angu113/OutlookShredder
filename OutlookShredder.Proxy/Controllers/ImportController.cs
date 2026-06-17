@@ -289,7 +289,8 @@ public class ImportController(
         {
             file = filename, type = "customerinfo", parsed = parsed.Rows.Count,
             matched = r.Matched, updated = r.Updated, unchanged = r.Unchanged,
-            unmatchedCandidates = r.Unmatched, unmatchedSample = r.UnmatchedSample,
+            unmatchedCandidates = r.Unmatched, skippedInactive = r.SkippedInactive,
+            unmatchedSample = r.UnmatchedSample,
             skippedForReview = review.Count, warnings = parsed.Warnings,
         }, review);
     }
@@ -308,7 +309,8 @@ public class ImportController(
         {
             file = filename, type = "customerinfo", dryRun = true, parsed = parsed.Rows.Count,
             matched = diff.Matched, toUpdate = diff.ToUpdate, unchanged = diff.Unchanged,
-            unmatchedCandidates = diff.Unmatched, unmatchedSample = diff.UnmatchedSample,
+            unmatchedCandidates = diff.Unmatched, skippedInactive = diff.SkippedInactive,
+            unmatchedSample = diff.UnmatchedSample,
             infoUpdateSamples = diff.UpdateSamples.Select(s => new { name = s.Name, changedFields = s.ChangedFields }),
             skippedForReview = review.Count, warnings = parsed.Warnings,
         }, review);

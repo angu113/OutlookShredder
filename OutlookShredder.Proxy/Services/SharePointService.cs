@@ -10688,11 +10688,11 @@ public partial class SharePointService
     public sealed record CustomerInfoUpdateSample(string Name, IReadOnlyList<string> ChangedFields);
 
     public sealed record CustomerInfoEnrichResult(
-        int Matched, int Updated, int Unchanged, int Unmatched,
+        int Matched, int Updated, int Unchanged, int Unmatched, int SkippedInactive,
         IReadOnlyList<string> UnmatchedSample);
 
     public sealed record CustomerInfoDiffResult(
-        int Matched, int ToUpdate, int Unchanged, int Unmatched,
+        int Matched, int ToUpdate, int Unchanged, int Unmatched, int SkippedInactive,
         IReadOnlyList<CustomerInfoUpdateSample> UpdateSamples,
         IReadOnlyList<string> UnmatchedSample);
 
@@ -10754,11 +10754,17 @@ public partial class SharePointService
         var existing  = await ReadCustomersForEnrichAsync(ct);
         var samples   = new List<CustomerInfoUpdateSample>();
         var unmatched = new List<string>();
-        int unchanged = 0, toUpdate = 0;
+        int unchanged = 0, toUpdate = 0, skippedInactive = 0;
 
         foreach (var row in rows)
         {
-            if (!existing.TryGetValue(row.Name, out var ex)) { unmatched.Add(row.Name); continue; }
+            if (!existing.TryGetValue(row.Name, out var ex))
+            {
+                // Not in Customers: an inactive row is dead ERP data — don't surface it as a candidate.
+                if (CustomerInfoSchema.IsInactive(row.Fields)) skippedInactive++;
+                else unmatched.Add(row.Name);
+                continue;
+            }
             var patch = ComputeCustomerInfoChanges(row, ex.Vals, out var changed);
             if (patch is null) { unchanged++; continue; }
             toUpdate++;
@@ -10766,8 +10772,9 @@ public partial class SharePointService
         }
 
         return new CustomerInfoDiffResult(
-            Matched: rows.Count - unmatched.Count,
+            Matched: rows.Count - unmatched.Count - skippedInactive,
             ToUpdate: toUpdate, Unchanged: unchanged, Unmatched: unmatched.Count,
+            SkippedInactive: skippedInactive,
             UpdateSamples: samples, UnmatchedSample: unmatched.Take(200).ToList());
     }
 
@@ -10783,18 +10790,24 @@ public partial class SharePointService
 
         var work      = new List<(string Id, Dictionary<string, object?> Patch)>();
         var unmatched = new List<string>();
-        int unchanged = 0;
+        int unchanged = 0, skippedInactive = 0;
 
         foreach (var row in rows)
         {
-            if (!existing.TryGetValue(row.Name, out var ex)) { unmatched.Add(row.Name); continue; }
+            if (!existing.TryGetValue(row.Name, out var ex))
+            {
+                // Not in Customers: an inactive row is dead ERP data — don't add or surface it.
+                if (CustomerInfoSchema.IsInactive(row.Fields)) skippedInactive++;
+                else unmatched.Add(row.Name);
+                continue;
+            }
             var patch = ComputeCustomerInfoChanges(row, ex.Vals, out _);
             if (patch is null) { unchanged++; continue; }
             patch[CustomerInfoSchema.UpdatedAtColumn] = DateTimeOffset.UtcNow;
             work.Add((ex.Id, patch));
         }
 
-        int matched = rows.Count - unmatched.Count;
+        int matched = rows.Count - unmatched.Count - skippedInactive;
         int updated = 0;
 
         await RunBatchedAsync(work, 100, 8, "EnrichCustomers",
@@ -10805,9 +10818,10 @@ public partial class SharePointService
                 if (n % 200 == 0) _log.LogInformation("[SP] EnrichCustomers: {N}/{T} patched", n, work.Count);
             }, ct);
 
-        _log.LogInformation("[SP] EnrichCustomers: matched={M} updated={U} unchanged={C} unmatched={X}",
-            matched, updated, unchanged, unmatched.Count);
-        return new CustomerInfoEnrichResult(matched, updated, unchanged, unmatched.Count,
+        _log.LogInformation(
+            "[SP] EnrichCustomers: matched={M} updated={U} unchanged={C} unmatched={X} skippedInactive={I}",
+            matched, updated, unchanged, unmatched.Count, skippedInactive);
+        return new CustomerInfoEnrichResult(matched, updated, unchanged, unmatched.Count, skippedInactive,
             unmatched.Take(200).ToList());
     }
 

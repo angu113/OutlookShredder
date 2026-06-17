@@ -360,6 +360,15 @@ public static class CustomerInfoSchema
     /// <summary>Timestamp column stamped on each enrichment write (so a stale record is visible).</summary>
     public const string UpdatedAtColumn = "CustomerInfoUpdatedAt";
 
+    /// <summary>The ERP "Active" flag column — a logical-deletion marker: false/NO = inactive (hidden in
+    /// ERP views). Existing records are still enriched (and marked active/inactive); but an *unmatched*
+    /// inactive row is dead data and must NOT be surfaced as a candidate to add.</summary>
+    public const string ActiveColumn = "Active";
+
+    /// <summary>True when the row's Active flag is explicitly false. Blank / missing / true ⇒ treated as active.</summary>
+    public static bool IsInactive(IReadOnlyDictionary<string, string?> fields) =>
+        fields.TryGetValue(ActiveColumn, out var a) && Canon(a, Kind.Boolean) == "false";
+
     /// <summary>SharePoint column kind string consumed by <c>EnsureListColumnsAsync</c>.</summary>
     public static string SpType(Kind k) => k switch
     {

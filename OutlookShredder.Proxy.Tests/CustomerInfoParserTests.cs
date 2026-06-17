@@ -112,6 +112,24 @@ public class CustomerInfoParserTests
             CustomerInfoSchema.Canon("Immediate",   CustomerInfoSchema.Kind.Text));
     }
 
+    [Theory]
+    [InlineData("false", true)]    // explicit NO -> inactive (ERP logical delete)
+    [InlineData("False", true)]
+    [InlineData("true", false)]    // active
+    [InlineData("", false)]        // blank -> treated as active (don't drop unknown)
+    public void IsInactive_flags_only_explicit_false(string activeRaw, bool expectedInactive)
+    {
+        var fields = new Dictionary<string, string?> { [CustomerInfoSchema.ActiveColumn] = activeRaw };
+        Assert.Equal(expectedInactive, CustomerInfoSchema.IsInactive(fields));
+    }
+
+    [Fact]
+    public void IsInactive_is_false_when_active_column_absent()
+    {
+        var fields = new Dictionary<string, string?> { ["PaymentTerms"] = "Net 30 Days" };
+        Assert.False(CustomerInfoSchema.IsInactive(fields));
+    }
+
     [Fact]
     public void ToTyped_produces_the_right_clr_types()
     {
