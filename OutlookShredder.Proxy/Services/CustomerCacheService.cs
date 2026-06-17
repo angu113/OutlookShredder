@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using OutlookShredder.Proxy.Services;
 
 namespace OutlookShredder.Proxy.Services;
@@ -12,16 +13,18 @@ public class CustomerCacheService : IHostedService
 {
     private readonly SharePointService                _sp;
     private readonly ILogger<CustomerCacheService>    _log;
+    private readonly IConfiguration                   _config;
 
     // Atomically-replaced read snapshot — readers never block writers
     private volatile CrmSnapshot _snap = CrmSnapshot.Empty;
 
     private Timer? _timer;
 
-    public CustomerCacheService(SharePointService sp, ILogger<CustomerCacheService> log)
+    public CustomerCacheService(SharePointService sp, ILogger<CustomerCacheService> log, IConfiguration config)
     {
-        _sp  = sp;
-        _log = log;
+        _sp     = sp;
+        _log    = log;
+        _config = config;
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -91,22 +94,40 @@ public class CustomerCacheService : IHostedService
         var contacts = await contactsTask;
         var partners = await partnersTask;
 
-        var phoneIndex = contacts
+        // Honor the ERP Active (logical-delete) flag: by default, inactive customers — AND their contacts
+        // (a contact inherits its customer's active status; there's no per-contact flag) — are excluded
+        // from every lookup, keeping worklists/pickers clutter-free. Flip Customers:IncludeInactive=true to
+        // surface them. Filtering at snapshot-build means all consumers (names, phone lookup, contacts) are
+        // filtered uniformly. The import path reads SP directly, so it still sees/marks inactive records.
+        var includeInactive = _config.GetValue("Customers:IncludeInactive", false);
+        var activePartners  = includeInactive ? partners : partners.Where(p => p.Active).ToList();
+        var activeNames     = new HashSet<string>(activePartners.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+
+        var visibleContacts = includeInactive
+            ? contacts
+            : contacts.Where(c => activeNames.Contains(c.CustomerName)).ToList();
+
+        var phoneIndex = visibleContacts
             .GroupBy(c => CustomerImportService.NormalizePhone(c.Phone) ?? c.Phone,
                      StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
-        var bpPopups = partners.ToDictionary(
+        var bpPopups = activePartners.ToDictionary(
             p => p.Name, p => p.PopupMessage, StringComparer.OrdinalIgnoreCase);
 
-        var partnerNames = partners
+        var partnerNames = activePartners
             .Select(p => p.Name)
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        _snap = new CrmSnapshot(contacts, partnerNames, phoneIndex, bpPopups);
-        _log.LogInformation("[CRM] Cache refreshed — {C} contacts, {B} business partners",
-            contacts.Count, partnerNames.Count);
+        _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups);
+        var hiddenBp = partners.Count - activePartners.Count;
+        _log.LogInformation(
+            "[CRM] Cache refreshed — {C} contacts, {B} business partners{Hidden}",
+            visibleContacts.Count, partnerNames.Count,
+            (hiddenBp > 0 || contacts.Count != visibleContacts.Count)
+                ? $" (hid {hiddenBp} inactive customers, {contacts.Count - visibleContacts.Count} of their contacts)"
+                : "");
     }
 
     // ── Snapshot ──────────────────────────────────────────────────────────────
@@ -126,4 +147,4 @@ public class CustomerCacheService : IHostedService
     }
 }
 
-public sealed record CustomerBpRow(string Name, string? PopupMessage);
+public sealed record CustomerBpRow(string Name, string? PopupMessage, bool Active = true);
