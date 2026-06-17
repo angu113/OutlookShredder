@@ -10493,6 +10493,9 @@ public partial class SharePointService
             ["Customers"] = await EnsureListColumnsAsync(siteId, "Customers",
             [
                 ("PopupMessage", "note"),
+                // Rich "Customer Info" master enrichment columns (single source of truth = CustomerInfoSchema).
+                .. CustomerInfoSchema.Columns.Select(c => (c.Sp, CustomerInfoSchema.SpType(c.Kind))),
+                (CustomerInfoSchema.UpdatedAtColumn, "dateTime"),
             ]),
             ["CustomerContacts"] = await EnsureListColumnsAsync(siteId, "CustomerContacts",
             [
@@ -10678,6 +10681,179 @@ public partial class SharePointService
         _log.LogInformation("[SP] UpsertPartners: {Added} added, {Updated} updated, {Skipped} skipped",
             added, updated, skipped);
         return (added, updated, skipped);
+    }
+
+    // ── Customer Info enrichment (rich BP master — UPDATE existing records only) ─────
+
+    public sealed record CustomerInfoUpdateSample(string Name, IReadOnlyList<string> ChangedFields);
+
+    public sealed record CustomerInfoEnrichResult(
+        int Matched, int Updated, int Unchanged, int Unmatched,
+        IReadOnlyList<string> UnmatchedSample);
+
+    public sealed record CustomerInfoDiffResult(
+        int Matched, int ToUpdate, int Unchanged, int Unmatched,
+        IReadOnlyList<CustomerInfoUpdateSample> UpdateSamples,
+        IReadOnlyList<string> UnmatchedSample);
+
+    /// <summary>Reads every Customers row with its enrichment fields: Title -> (itemId, field values).</summary>
+    private async Task<Dictionary<string, (string Id, Dictionary<string, string?> Vals)>>
+        ReadCustomersForEnrichAsync(CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+        var select = "fields($select=Title," +
+                     string.Join(",", CustomerInfoSchema.Columns.Select(c => c.Sp)) + ")";
+
+        var map  = new Dictionary<string, (string, Dictionary<string, string?>)>(StringComparer.OrdinalIgnoreCase);
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = [select]; r.QueryParameters.Top = 999; }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var vals = new Dictionary<string, string?>(StringComparer.Ordinal);
+                foreach (var c in CustomerInfoSchema.Columns) vals[c.Sp] = GetStr(d, c.Sp);
+                map[name] = (item.Id, vals);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+        return map;
+    }
+
+    /// <summary>Field-level diff for one customer: returns the SP patch dict for changed fields only
+    /// (only provided, differing cells — never blanks an existing value), or null when nothing changed.</summary>
+    private static Dictionary<string, object?>? ComputeCustomerInfoChanges(
+        CustomerImportService.CustomerInfoRow row, Dictionary<string, string?> existing,
+        out List<string> changedFields)
+    {
+        changedFields = new List<string>();
+        var patch = new Dictionary<string, object?>();
+        foreach (var c in CustomerInfoSchema.Columns)
+        {
+            if (!row.Fields.TryGetValue(c.Sp, out var raw) || string.IsNullOrWhiteSpace(raw)) continue;
+            existing.TryGetValue(c.Sp, out var ev);
+            if (CustomerInfoSchema.Canon(raw, c.Kind) == CustomerInfoSchema.Canon(ev, c.Kind)) continue;
+            patch[c.Sp] = CustomerInfoSchema.ToTyped(raw, c.Kind);
+            changedFields.Add(c.Sp);
+        }
+        return patch.Count == 0 ? null : patch;
+    }
+
+    /// <summary>Dry-run: what the Customer Info load WOULD change. No writes. Unmatched = present in the
+    /// file but absent from the Customers list (candidates to add — reported, never auto-added here).</summary>
+    public async Task<CustomerInfoDiffResult> DiffCustomerInfoAsync(
+        IReadOnlyList<CustomerImportService.CustomerInfoRow> rows, CancellationToken ct = default)
+    {
+        var existing  = await ReadCustomersForEnrichAsync(ct);
+        var samples   = new List<CustomerInfoUpdateSample>();
+        var unmatched = new List<string>();
+        int unchanged = 0, toUpdate = 0;
+
+        foreach (var row in rows)
+        {
+            if (!existing.TryGetValue(row.Name, out var ex)) { unmatched.Add(row.Name); continue; }
+            var patch = ComputeCustomerInfoChanges(row, ex.Vals, out var changed);
+            if (patch is null) { unchanged++; continue; }
+            toUpdate++;
+            if (samples.Count < 50) samples.Add(new CustomerInfoUpdateSample(row.Name, changed));
+        }
+
+        return new CustomerInfoDiffResult(
+            Matched: rows.Count - unmatched.Count,
+            ToUpdate: toUpdate, Unchanged: unchanged, Unmatched: unmatched.Count,
+            UpdateSamples: samples, UnmatchedSample: unmatched.Take(200).ToList());
+    }
+
+    /// <summary>Enrichment run: matches each file row to an existing Customers record by name and patches
+    /// only the changed fields, in paced batches to avoid flooding SharePoint. Records are never CREATED
+    /// here (run the partner load first); unmatched names are returned for the review file.</summary>
+    public async Task<CustomerInfoEnrichResult> EnrichCustomersAsync(
+        IReadOnlyList<CustomerImportService.CustomerInfoRow> rows, CancellationToken ct = default)
+    {
+        var siteId   = await GetSiteIdAsync();
+        var listId   = await GetCustomersListIdAsync();
+        var existing = await ReadCustomersForEnrichAsync(ct);
+
+        var work      = new List<(string Id, Dictionary<string, object?> Patch)>();
+        var unmatched = new List<string>();
+        int unchanged = 0;
+
+        foreach (var row in rows)
+        {
+            if (!existing.TryGetValue(row.Name, out var ex)) { unmatched.Add(row.Name); continue; }
+            var patch = ComputeCustomerInfoChanges(row, ex.Vals, out _);
+            if (patch is null) { unchanged++; continue; }
+            patch[CustomerInfoSchema.UpdatedAtColumn] = DateTimeOffset.UtcNow;
+            work.Add((ex.Id, patch));
+        }
+
+        int matched = rows.Count - unmatched.Count;
+        int updated = 0;
+
+        await RunBatchedAsync(work, 100, 8, "EnrichCustomers",
+            async (w, token) =>
+            {
+                await PatchListItemWithRetryAsync(siteId, listId, w.Id, w.Patch, token);
+                var n = Interlocked.Increment(ref updated);
+                if (n % 200 == 0) _log.LogInformation("[SP] EnrichCustomers: {N}/{T} patched", n, work.Count);
+            }, ct);
+
+        _log.LogInformation("[SP] EnrichCustomers: matched={M} updated={U} unchanged={C} unmatched={X}",
+            matched, updated, unchanged, unmatched.Count);
+        return new CustomerInfoEnrichResult(matched, updated, unchanged, unmatched.Count,
+            unmatched.Take(200).ToList());
+    }
+
+    /// <summary>Runs <paramref name="action"/> over <paramref name="items"/> in fixed-size batches with
+    /// bounded concurrency and a short pause between batches — keeps a 12k-row load from flooding Graph/SP.</summary>
+    private async Task RunBatchedAsync<T>(
+        IReadOnlyList<T> items, int batchSize, int concurrency, string label,
+        Func<T, CancellationToken, Task> action, CancellationToken ct)
+    {
+        if (items.Count == 0) return;
+        int done = 0;
+        for (int start = 0; start < items.Count; start += batchSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = new List<T>(items.Skip(start).Take(batchSize));
+            await Parallel.ForEachAsync(batch,
+                new ParallelOptions { MaxDegreeOfParallelism = concurrency, CancellationToken = ct },
+                async (item, token) => await action(item, token));
+            done += batch.Count;
+            if (done < items.Count) await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+        }
+        _log.LogInformation("[SP] {Label}: processed {N} item(s) in batches of {B}", label, items.Count, batchSize);
+    }
+
+    /// <summary>PATCH a list item's fields, retrying on SharePoint throttling (429/503/504) with backoff.</summary>
+    private async Task PatchListItemWithRetryAsync(
+        string siteId, string listId, string itemId, Dictionary<string, object?> fields,
+        CancellationToken ct, int maxAttempts = 5)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
+                    .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+                return;
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+                when (attempt < maxAttempts && ex.ResponseStatusCode is 429 or 503 or 504)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));   // 2s, 4s, 8s, 16s
+                _log.LogWarning("[SP] Enrich PATCH throttled (HTTP {Code}) — retry {A}/{M} in {S}s",
+                    ex.ResponseStatusCode, attempt, maxAttempts, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+            }
+        }
     }
 
     private static string ContactKey(string bp, string contact) =>

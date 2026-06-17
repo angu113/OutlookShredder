@@ -48,22 +48,48 @@ public class ImportController(
         var results    = new List<object>();
         var reviewRows = new List<(string SourceFile, string BpName, string Reason)>();
 
-        foreach (var filePath in files)
+        // Read + classify every file up front so the loads can be ORDERED: business partners, then
+        // contacts, then Customer Info LAST — the Customer Info load only enriches records the partner
+        // load has already created, so it must run after every new record exists.
+        var loaded = new List<(string Path, string Name, string Csv, string Type, string? ReadError)>();
+        foreach (var fp in files)
         {
-            var filename = Path.GetFileName(filePath);
-            log.LogInformation("[Import] {Mode} {File}", dryRun ? "DryRun" : "Processing", filename);
-
-            string csv;
-            try { csv = await System.IO.File.ReadAllTextAsync(filePath, ct); }
+            var fn = Path.GetFileName(fp);
+            try
+            {
+                var text = await System.IO.File.ReadAllTextAsync(fp, ct);
+                loaded.Add((fp, fn, text, DetectFileType(fn, text), null));
+            }
             catch (Exception ex)
             {
-                results.Add(new { file = filename, error = ex.Message });
+                loaded.Add((fp, fn, "", "unknown", ex.Message));
+            }
+        }
+
+        static int LoadOrder(string t) => t switch
+        {
+            "partners"     => 0,
+            "contacts"     => 1,
+            "customerinfo" => 2,   // enrichment — always last
+            _              => 3,
+        };
+        var ordered = loaded
+            .OrderBy(f => LoadOrder(f.Type))
+            .ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var (filePath, filename, csv, fileType, readError) in ordered)
+        {
+            log.LogInformation("[Import] {Mode} {File} ({Type})",
+                dryRun ? "DryRun" : "Processing", filename, fileType);
+
+            if (readError is not null)
+            {
+                results.Add(new { file = filename, error = readError });
                 continue;
             }
 
-            var fileType = DetectFileType(filename, csv);
             object result;
-
             try
             {
                 (result, var skipped) = fileType switch
@@ -74,6 +100,9 @@ public class ImportController(
                     "contacts" => dryRun
                         ? await DiffContactsAsync(filename, csv, ct)
                         : await ProcessContactsAsync(filename, csv, ct),
+                    "customerinfo" => dryRun
+                        ? await DiffCustomerInfoAsync(filename, csv, ct)
+                        : await ProcessCustomerInfoAsync(filename, csv, ct),
                     _ => ((object)new { file = filename, skipped = true,
                                         reason = "Could not detect file type from filename or headers." },
                           Array.Empty<CustomerImportService.SkippedItem>())
@@ -140,12 +169,17 @@ public class ImportController(
     private static string DetectFileType(string filename, string csv)
     {
         var fn = filename.ToLowerInvariant();
+        if (fn.Contains("customer info") || fn.Contains("customerinfo") || fn.Contains("cust info") || fn.Contains("custinfo"))
+            return "customerinfo";
         if (fn.Contains("partner") || fn.Contains(" bp") || fn.StartsWith("bp") || fn.Contains("_bp"))
             return "partners";
         if (fn.Contains("contact"))
             return "contacts";
 
         var firstLine = csv.Split('\n', 2)[0].ToLowerInvariant();
+        // Customer Info master: keyed on "Business Partner" plus the distinctive stats column.
+        if (firstLine.Contains("business partner") && firstLine.Contains("margin type"))
+            return "customerinfo";
         if (firstLine.Contains("popup message"))
             return "partners";
         if (firstLine.Contains("contact name") && firstLine.Contains("customer name"))
@@ -233,6 +267,67 @@ public class ImportController(
             rowsUnchanged = diff.RowsUnchanged,
             warnings     = parsed.Warnings,
         }, parsed.Skipped);
+    }
+
+    // ── Customer Info (enrichment of existing Customers records) ──────────────
+
+    private async Task<(object result, IReadOnlyList<CustomerImportService.SkippedItem> skipped)>
+        ProcessCustomerInfoAsync(string filename, string csv, CancellationToken ct)
+    {
+        var parsed = importer.ParseCustomerInfo(csv);
+        if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
+            return (new { file = filename, type = "customerinfo", parsed = 0,
+                          warnings = parsed.Warnings }, parsed.Skipped);
+
+        var r = await sp.EnrichCustomersAsync(parsed.Rows, ct);
+        log.LogInformation(
+            "[Import] {File} customerinfo: parsed={P} matched={M} updated={U} unchanged={C} unmatched={X}",
+            filename, parsed.Rows.Count, r.Matched, r.Updated, r.Unchanged, r.Unmatched);
+
+        var review = BuildCustomerInfoReview(parsed.Skipped, r.UnmatchedSample, r.Unmatched);
+        return (new
+        {
+            file = filename, type = "customerinfo", parsed = parsed.Rows.Count,
+            matched = r.Matched, updated = r.Updated, unchanged = r.Unchanged,
+            unmatchedCandidates = r.Unmatched, unmatchedSample = r.UnmatchedSample,
+            skippedForReview = review.Count, warnings = parsed.Warnings,
+        }, review);
+    }
+
+    private async Task<(object result, IReadOnlyList<CustomerImportService.SkippedItem> skipped)>
+        DiffCustomerInfoAsync(string filename, string csv, CancellationToken ct)
+    {
+        var parsed = importer.ParseCustomerInfo(csv);
+        if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
+            return (new { file = filename, type = "customerinfo", dryRun = true, parsed = 0,
+                          warnings = parsed.Warnings }, parsed.Skipped);
+
+        var diff   = await sp.DiffCustomerInfoAsync(parsed.Rows, ct);
+        var review = BuildCustomerInfoReview(parsed.Skipped, diff.UnmatchedSample, diff.Unmatched);
+        return (new
+        {
+            file = filename, type = "customerinfo", dryRun = true, parsed = parsed.Rows.Count,
+            matched = diff.Matched, toUpdate = diff.ToUpdate, unchanged = diff.Unchanged,
+            unmatchedCandidates = diff.Unmatched, unmatchedSample = diff.UnmatchedSample,
+            infoUpdateSamples = diff.UpdateSamples.Select(s => new { name = s.Name, changedFields = s.ChangedFields }),
+            skippedForReview = review.Count, warnings = parsed.Warnings,
+        }, review);
+    }
+
+    /// <summary>Folds parse oddities (dupes / unparseable cells) AND unmatched "candidate to add" names
+    /// into review-file rows, so everything that needs a human lands in _skipped_review_{ts}.csv.</summary>
+    private static IReadOnlyList<CustomerImportService.SkippedItem> BuildCustomerInfoReview(
+        IReadOnlyList<CustomerImportService.SkippedItem> parseSkipped,
+        IReadOnlyList<string> unmatchedSample, int unmatchedTotal)
+    {
+        var list = new List<CustomerImportService.SkippedItem>(parseSkipped);
+        foreach (var name in unmatchedSample)
+            list.Add(new CustomerImportService.SkippedItem(name, "not in Customers list (candidate to add)"));
+        if (unmatchedTotal > unmatchedSample.Count)
+            list.Add(new CustomerImportService.SkippedItem(
+                $"(+{unmatchedTotal - unmatchedSample.Count} more unmatched)",
+                "not in Customers list (candidate to add)"));
+        return list;
     }
 
     private static string CsvQuote(string value) =>

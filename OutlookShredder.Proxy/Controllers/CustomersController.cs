@@ -64,6 +64,38 @@ public class CustomersController(
     }
 
     /// <summary>
+    /// POST /api/customers/import-customer-info[?dryRun=true] — reads the rich "Customer Info" master CSV
+    /// (Business Partner + ~22 enrichment columns) and ENRICHES existing Customers records (matched by
+    /// name). Existing records are never created here — run import-partners first. dryRun=true returns the
+    /// would-change diff. Send the CSV as the raw request body. Run this load LAST in the sequence.
+    /// </summary>
+    [HttpPost("import-customer-info")]
+    [RequestSizeLimit(50_000_000)]
+    public async Task<IActionResult> ImportCustomerInfo([FromQuery] bool dryRun = false, CancellationToken ct = default)
+    {
+        var csv = await ReadBodyAsync(ct);
+        if (csv is null)
+            return BadRequest("Send the CSV file as the raw request body.");
+
+        var parsed = importer.ParseCustomerInfo(csv);
+        if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
+            return BadRequest(new { warnings = parsed.Warnings });
+
+        if (dryRun)
+        {
+            var diff = await sp.DiffCustomerInfoAsync(parsed.Rows, ct);
+            return Ok(new { parsed = parsed.Rows.Count, dryRun = true, diff,
+                            warnings = parsed.Warnings, oddities = parsed.Skipped });
+        }
+
+        var r = await sp.EnrichCustomersAsync(parsed.Rows, ct);
+        crmCache.Invalidate();
+        return Ok(new { parsed = parsed.Rows.Count, matched = r.Matched, updated = r.Updated,
+                        unchanged = r.Unchanged, unmatched = r.Unmatched, unmatchedSample = r.UnmatchedSample,
+                        warnings = parsed.Warnings, oddities = parsed.Skipped });
+    }
+
+    /// <summary>
     /// GET /api/customers/lookup?phone=XXXXXXXXXX — looks up a business partner and contact
     /// by phone number.  Phone is normalised (strips formatting, drops leading country code).
     /// Returns 404 when no match is found.

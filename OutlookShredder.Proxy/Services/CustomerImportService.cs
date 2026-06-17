@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualBasic.FileIO;
 
@@ -11,6 +12,10 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
 {
     public sealed record BpRow(string Name, string PopupMessage);
     public sealed record ContactRow(string CustomerName, string ContactName, string Phone);
+    /// <summary>One row of the rich "Customer Info" master export. <see cref="Fields"/> maps a
+    /// SharePoint internal column name (from <see cref="CustomerInfoSchema"/>) to the raw CSV cell
+    /// value; only columns that carried a non-empty value are present.</summary>
+    public sealed record CustomerInfoRow(string Name, IReadOnlyDictionary<string, string?> Fields);
     /// <summary>A row that was filtered out during parsing and needs manual review.</summary>
     public sealed record SkippedItem(string Name, string Reason);
     public sealed record ParseResult<T>(
@@ -147,6 +152,90 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         return new(Deduplicate(raw), warnings, skipped);
     }
 
+    // ── Customer Info (ExportedData (5).csv style — the rich BP master) ───────
+
+    /// <summary>
+    /// Parses the "Customer Info" master export (Business Partner + ~22 enrichment columns:
+    /// Payment Terms, On Hold, credit limits, sales/margin stats, etc.). The Business Partner
+    /// name is the cross-file match key (same key the partner load writes to the Customers list).
+    /// Dedups by name (first kept); blank-name rows are dropped silently (export footer/totals);
+    /// duplicate names and unparseable numeric/boolean cells are surfaced for the review file.
+    /// </summary>
+    public ParseResult<CustomerInfoRow> ParseCustomerInfo(string csv)
+    {
+        var warnings = new List<string>();
+        var skipped  = new List<SkippedItem>();
+        var rows     = new List<CustomerInfoRow>();
+        var lines    = ReadCsv(csv);
+
+        if (lines.Count < 2)
+        {
+            warnings.Add("Customer Info CSV: no data rows found");
+            return new(rows, warnings, skipped);
+        }
+
+        var hdr     = lines[0];
+        int nameIdx = ColIndex(hdr, CustomerInfoSchema.NameCsvHeader);
+        if (nameIdx < 0)
+        {
+            warnings.Add($"Customer Info CSV: '{CustomerInfoSchema.NameCsvHeader}' column not found. Header: {string.Join(" | ", hdr)}");
+            return new(rows, warnings, skipped);
+        }
+
+        // Resolve each enrichment column's CSV index once. Missing columns are tolerated (logged) so
+        // an export that drops/renames a field still loads everything else.
+        var colIdx = new List<(CustomerInfoSchema.Col Col, int Idx)>();
+        foreach (var c in CustomerInfoSchema.Columns)
+        {
+            int idx = ColIndex(hdr, c.Csv);
+            if (idx < 0) warnings.Add($"Customer Info CSV: optional column '{c.Csv}' not present — skipped");
+            colIdx.Add((c, idx));
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 1; i < lines.Count; i++)
+        {
+            var cols = lines[i];
+            if (cols.Length <= nameIdx) continue;
+
+            var name = cols[nameIdx].Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue;   // export footer / total rows — drop quietly
+
+            if (!seen.Add(name))
+            {
+                var reason = "duplicate Business Partner in Customer Info file (first kept)";
+                var msg    = $"Row {i + 1}: {reason} — '{name}'";
+                log.LogWarning("[CustImport] {Msg}", msg);
+                warnings.Add(msg);
+                skipped.Add(new SkippedItem(name, reason));
+                continue;
+            }
+
+            var fields = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var (col, idx) in colIdx)
+            {
+                if (idx < 0 || idx >= cols.Length) continue;
+                var raw = cols[idx].Trim();
+                if (raw.Length == 0) continue;
+
+                // Surface (but don't drop the row over) numeric/boolean cells we can't parse —
+                // the field is left unset; everything else on the row still loads.
+                if (col.Kind != CustomerInfoSchema.Kind.Text &&
+                    CustomerInfoSchema.ToTyped(raw, col.Kind) is null)
+                {
+                    skipped.Add(new SkippedItem(name, $"unparseable {col.Kind} for '{col.Csv}': '{raw}'"));
+                    continue;
+                }
+
+                fields[col.Sp] = raw;
+            }
+
+            rows.Add(new CustomerInfoRow(name, fields));
+        }
+
+        return new(rows, warnings, skipped);
+    }
+
     // ── Dedup: per-BP, prefer phones not shared across multiple contacts ─────
 
     private static List<ContactRow> Deduplicate(
@@ -223,5 +312,90 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
             catch { /* skip malformed lines */ }
         }
         return result;
+    }
+}
+
+/// <summary>
+/// The single source of truth for the "Customer Info" enrichment columns: maps each CSV header to a
+/// SharePoint internal column name + storage kind. Drives all four touch points so they never drift:
+/// CSV parsing (<see cref="CustomerImportService.ParseCustomerInfo"/>), SP list provisioning
+/// (<c>EnsureCustomerListsAsync</c>), change detection (<see cref="Canon"/>), and writes
+/// (<see cref="ToTyped"/>). SP internal names are deliberately clean identifiers (no spaces / % / +-/?)
+/// so Graph accepts them as column names. The Business Partner name is the match key (the Customers
+/// list <c>Title</c>) and is intentionally NOT in <see cref="Columns"/>.
+/// </summary>
+public static class CustomerInfoSchema
+{
+    public enum Kind { Text, Number, Boolean }
+    public sealed record Col(string Csv, string Sp, Kind Kind);
+
+    public const string NameCsvHeader = "Business Partner";
+
+    public static readonly Col[] Columns =
+    [
+        new("Active",                     "Active",             Kind.Boolean),
+        new("Business Partner Category",  "BpCategory",         Kind.Text),
+        new("Payment Terms",              "PaymentTerms",       Kind.Text),
+        new("On Hold",                    "OnHold",             Kind.Boolean),
+        new("Payment Method",             "PaymentMethod",      Kind.Text),
+        new("Contact",                    "PrimaryContact",     Kind.Text),
+        new("Phone Number",               "ContactPhone",       Kind.Text),
+        new("Email",                      "ContactEmail",       Kind.Text),
+        new("Credit Line Limit",          "CreditLineLimit",    Kind.Number),
+        new("Credit Limit +/-",           "CreditAvailable",    Kind.Number),
+        new("Auto Invoice",               "AutoInvoice",        Kind.Boolean),
+        new("Auto Statement",             "AutoStatement",      Kind.Boolean),
+        new("Current",                    "CurrentBalance",     Kind.Number),
+        new("Win %",                      "WinPct",             Kind.Number),
+        new("Win % Transactions",         "WinPctTransactions", Kind.Number),
+        new("Sales Last 6 Months",        "SalesLast6Mo",       Kind.Number),
+        new("Sales Last 12 Months",       "SalesLast12Mo",      Kind.Number),
+        new("Average Invoice Value",      "AvgInvoiceValue",    Kind.Number),
+        new("Average Margin Invoice",     "AvgMarginPct",       Kind.Number),
+        new("Tax Exempt",                 "TaxExempt",          Kind.Boolean),
+        new("How Did You Hear About Us?", "HowDidYouHear",      Kind.Text),
+        new("Margin Type",                "MarginType",         Kind.Text),
+    ];
+
+    /// <summary>Timestamp column stamped on each enrichment write (so a stale record is visible).</summary>
+    public const string UpdatedAtColumn = "CustomerInfoUpdatedAt";
+
+    /// <summary>SharePoint column kind string consumed by <c>EnsureListColumnsAsync</c>.</summary>
+    public static string SpType(Kind k) => k switch
+    {
+        Kind.Number  => "number",
+        Kind.Boolean => "boolean",
+        _            => "text",
+    };
+
+    /// <summary>Canonical comparable form, so "only write when changed" ignores formatting noise
+    /// (e.g. "150000" vs "150000.0", "True" vs "true"). Blank → "".</summary>
+    public static string Canon(string? raw, Kind kind)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var s = raw.Trim();
+        return kind switch
+        {
+            Kind.Boolean => bool.TryParse(s, out var b) ? (b ? "true" : "false") : s.ToLowerInvariant(),
+            // "0.####" strips trailing-zero scale so "150000" == "150000.0" and 50.49697… rounds to 50.497.
+            Kind.Number  => decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)
+                              ? Math.Round(d, 4).ToString("0.####", CultureInfo.InvariantCulture)
+                              : s,
+            _            => s,
+        };
+    }
+
+    /// <summary>The typed value to store in SharePoint, or null when blank / unparseable.</summary>
+    public static object? ToTyped(string? raw, Kind kind)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var s = raw.Trim();
+        return kind switch
+        {
+            Kind.Boolean => bool.TryParse(s, out var b) ? b : null,
+            Kind.Number  => decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)
+                              ? (double)Math.Round(d, 4) : null,
+            _            => (object?)s,
+        };
     }
 }

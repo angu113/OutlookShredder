@@ -35,7 +35,7 @@ Also installs:
 | `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
 | `SupplierConversationsController` | `/api` | Read supplier conversation threads + send follow-up inquiries (WIP) |
 | `RfqSummaryController` | `/api/rfq` | `POST /api/rfq/summarize` — turns a client-assembled RFQ text input into ≤3 AI bullet points (Claude); empty bullets on failure so the client falls back to its deterministic summary |
-| `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts, list contacts |
+| `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts/customer-info (enrichment), list contacts |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 | `ErpController` | `/api/erp` | Proxy SP PDFs (with FAB-drawing append), build a slip's combined DXF, ERP document records + stamp annotations |
 | `DiagController` | `/api/diag` | Read-only extraction-pipeline traces (live email vs extracted/stored), for forensic review |
@@ -355,17 +355,21 @@ Shredder desktop  ◄─AMQP───  Azure Service Bus (RfqServiceBusListener)
 Drop CSV files into this folder, then POST to the endpoint. Processed files move to `Import\processed\{yyyyMMdd_HHmmss}_{filename}` so they are never re-processed.
 
 **File type detection (first match wins):**
+- Filename contains `customer info` / `customerinfo` / `cust info` / `custinfo` → **Customer Info** (rich BP master)
 - Filename contains `partner`, ` bp`, `_bp`, or starts with `bp` → **Business Partners** (Name + Popup Message)
 - Filename contains `contact` → **Contacts** (Customer Name + Contact Name + Phone)
+- Header row contains `Business Partner` **and** `Margin Type` → Customer Info
 - Header row contains `Popup Message` → Business Partners
 - Header row contains both `Contact Name` and `Customer Name` → Contacts
 - Otherwise: file is skipped with a warning in the response
+
+**Load order:** files are classified up front and processed **Business Partners → Contacts → Customer Info LAST**. Customer Info only *enriches* records the partner load already created, so it must run after every new record exists. All loads write in **paced batches** (`SharePointService.RunBatchedAsync`, throttle-retry via `PatchListItemWithRetryAsync`) so a 12k-row file doesn't flood Graph/SharePoint.
 
 **Business Partner processing rules:**
 - Unique key: BP name (case-insensitive)
 - BP names containing `duplicate` or `do not use` (any case) are silently skipped — ERP marks these as invalid entries that interfere with lookups
 - Duplicate names within the same file are also skipped (second occurrence)
-- Only `PopupMessage` is persisted per BP. **TODO:** enrich schema with more fields (address, credit terms, account number, etc.) once ERP export format is confirmed — `CustomerImportService.ParsePartners` and `SharePointService.UpsertBusinessPartnersAsync` are the two places to extend.
+- The partner load persists `Name` (Title) + `PopupMessage`. Richer per-customer fields (Payment Terms, credit limits, sales/margin stats, etc.) come from the **Customer Info** load below, which enriches the same record.
 
 **Contact processing rules:**
 - Unique key: (CustomerName, ContactName, Phone) triple
@@ -373,6 +377,13 @@ Drop CSV files into this folder, then POST to the endpoint. Processed files move
 - Contacts with invalid/missing phones are skipped with a warning
 - Phones shared by 2+ contacts at the same BP are treated as company/general-line numbers and de-prioritised (contact's own unique phone is preferred)
 - On upsert: **additive only** — existing `(CustomerName, ContactName, Phone)` triples are never deleted. Only triples not already present in SP are inserted. Customers accumulate phone numbers over time.
+
+**Customer Info processing rules** (the rich BP master — `ExportedData (5).csv` style, ~23 columns):
+- Match key: `Business Partner` name == the Customers list `Title` (same key the partner load writes) — case-insensitive. Dedup within the file (first kept); dupes are reported.
+- **Enrichment only — UPDATES existing Customers records; never creates them.** Names present in the file but absent from the Customers list are *reported* as "candidates to add" (in the response + the review CSV), not added — so run the partner load first.
+- Only **changed** fields are written (canonical compare ignores formatting noise like `150000` vs `150000.0`); each write stamps `CustomerInfoUpdatedAt`. Blank cells never overwrite an existing value.
+- Schema is one source of truth: `CustomerInfoSchema` (in `CustomerImportService.cs`) maps each CSV header → SharePoint column + kind, and drives parsing, **Customers**-list column provisioning (`EnsureCustomerListsAsync`, auto-run at startup), change detection, and writes. Columns added: `Active, BpCategory, PaymentTerms, OnHold, PaymentMethod, PrimaryContact, ContactPhone, ContactEmail, CreditLineLimit, CreditAvailable, AutoInvoice, AutoStatement, CurrentBalance, WinPct, WinPctTransactions, SalesLast6Mo, SalesLast12Mo, AvgInvoiceValue, AvgMarginPct, TaxExempt, HowDidYouHear, MarginType, CustomerInfoUpdatedAt`.
+- Endpoints: drop-folder `POST /api/import/run` (used by the Shredder "Import Customer & Contact Data" dialog), or direct `POST /api/customers/import-customer-info[?dryRun=true]` (raw CSV body). Unparseable numeric/boolean cells are reported for review, never fatal.
 
 **Automation:** A `FileSystemWatcherImportService` (auto-trigger on file drop) is in `todos.md` as a future enhancement. Currently requires a manual `POST /api/import/run`.
 
