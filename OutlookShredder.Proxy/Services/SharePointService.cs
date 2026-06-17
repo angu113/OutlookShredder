@@ -10586,7 +10586,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage,Active)"];
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage,Active,PaymentTerms)"];
                 r.QueryParameters.Top    = 999;
             }, ct);
 
@@ -10599,7 +10599,7 @@ public partial class SharePointService
                 if (string.IsNullOrWhiteSpace(name)) continue;
                 // Active is the ERP logical-delete flag (only explicit false = inactive; blank/unenriched = active).
                 var active = !(bool.TryParse(GetStr(d, "Active"), out var b) && !b);
-                result.Add(new CustomerBpRow(name, GetStr(d, "PopupMessage"), active));
+                result.Add(new CustomerBpRow(name, GetStr(d, "PopupMessage"), active, GetStr(d, "PaymentTerms")));
             }
             if (page.OdataNextLink is null) break;
             page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(

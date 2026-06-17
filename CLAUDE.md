@@ -35,7 +35,7 @@ Also installs:
 | `MailStatusController` | `/api/mail` | Live snapshot of poller, reprocess batch, rate limiter, and in-flight messages |
 | `SupplierConversationsController` | `/api` | Read supplier conversation threads + send follow-up inquiries (WIP) |
 | `RfqSummaryController` | `/api/rfq` | `POST /api/rfq/summarize` — turns a client-assembled RFQ text input into ≤3 AI bullet points (Claude); empty bullets on failure so the client falls back to its deterministic summary |
-| `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts/customer-info (enrichment), list contacts |
+| `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts/customer-info (enrichment), list contacts, per-customer payment `terms` |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 | `ErpController` | `/api/erp` | Proxy SP PDFs (with FAB-drawing append), build a slip's combined DXF, ERP document records + stamp annotations |
 | `DiagController` | `/api/diag` | Read-only extraction-pipeline traces (live email vs extracted/stored), for forensic review |

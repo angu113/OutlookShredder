@@ -45,6 +45,10 @@ public class CustomerCacheService : IHostedService
     public List<CustomerContactRow> GetAllContacts()     => _snap.Contacts;
     public List<string>             GetAllPartnerNames() => _snap.PartnerNames;
 
+    /// <summary>Customer name → ERP payment terms (e.g. "Net 30 Days"). Covers all customers, incl. inactive,
+    /// so terms resolve for any document/statement. Empty string/blank when the customer has no terms set.</summary>
+    public Dictionary<string, string?> GetAllTerms()     => _snap.BpTerms;
+
     public CustomerLookupResult? LookupByPhone(string rawPhone) =>
         LookupAllByPhone(rawPhone).FirstOrDefault();
 
@@ -126,7 +130,12 @@ public class CustomerCacheService : IHostedService
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups);
+        // Payment terms keyed by customer name — built from ALL customers (incl. inactive) so terms still
+        // resolve for any document/statement that references a customer regardless of active state.
+        var bpTerms = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in partners) bpTerms[p.Name] = p.PaymentTerms;
+
+        _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups, bpTerms);
         var hiddenBp = partners.Count - activePartners.Count;
         _log.LogInformation(
             "[CRM] Cache refreshed — {C} contacts, {B} business partners{Hidden}",
@@ -142,15 +151,17 @@ public class CustomerCacheService : IHostedService
         List<CustomerContactRow>                          contacts,
         List<string>                                      partnerNames,
         Dictionary<string, List<CustomerContactRow>>     phoneIndex,
-        Dictionary<string, string?>                      bpPopups)
+        Dictionary<string, string?>                      bpPopups,
+        Dictionary<string, string?>                      bpTerms)
     {
         public List<CustomerContactRow>                      Contacts     { get; } = contacts;
         public List<string>                                  PartnerNames { get; } = partnerNames;
         public Dictionary<string, List<CustomerContactRow>> PhoneIndex   { get; } = phoneIndex;
         public Dictionary<string, string?>                  BpPopups     { get; } = bpPopups;
+        public Dictionary<string, string?>                  BpTerms      { get; } = bpTerms;
 
-        public static CrmSnapshot Empty { get; } = new([], [], [], []);
+        public static CrmSnapshot Empty { get; } = new([], [], [], [], []);
     }
 }
 
-public sealed record CustomerBpRow(string Name, string? PopupMessage, bool Active = true);
+public sealed record CustomerBpRow(string Name, string? PopupMessage, bool Active = true, string? PaymentTerms = null);

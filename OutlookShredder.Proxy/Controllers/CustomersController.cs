@@ -130,6 +130,17 @@ public class CustomersController(
     }
 
     /// <summary>
+    /// GET /api/customers/terms — customer name → ERP payment terms (e.g. "Net 30 Days") for every
+    /// customer (active + inactive). Served from the CRM cache. Used by the ERP list + statement views
+    /// to show terms per customer.
+    /// </summary>
+    [HttpGet("terms")]
+    public IActionResult GetTerms()
+    {
+        return Ok(crmCache.GetAllTerms());
+    }
+
+    /// <summary>
     /// POST /api/customers/contacts/add — adds a single contact row directly (bypassing CSV import).
     /// isErpOrphan=true marks contacts added manually so they can be reported separately.
     /// </summary>
