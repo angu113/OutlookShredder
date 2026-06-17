@@ -101,11 +101,17 @@ public class CustomerCacheService : IHostedService
         // filtered uniformly. The import path reads SP directly, so it still sees/marks inactive records.
         var includeInactive = _config.GetValue("Customers:IncludeInactive", false);
         var activePartners  = includeInactive ? partners : partners.Where(p => p.Active).ToList();
-        var activeNames     = new HashSet<string>(activePartners.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
 
-        var visibleContacts = includeInactive
+        // Hide a contact ONLY when its parent customer is known AND inactive. Orphan contacts — whose
+        // customer isn't in the Customers list at all — are left visible (absence ≠ inactivity), preserving
+        // the pre-existing additive behavior for them.
+        var inactiveNames = includeInactive
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(partners.Where(p => !p.Active).Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+
+        var visibleContacts = inactiveNames.Count == 0
             ? contacts
-            : contacts.Where(c => activeNames.Contains(c.CustomerName)).ToList();
+            : contacts.Where(c => !inactiveNames.Contains(c.CustomerName)).ToList();
 
         var phoneIndex = visibleContacts
             .GroupBy(c => CustomerImportService.NormalizePhone(c.Phone) ?? c.Phone,
