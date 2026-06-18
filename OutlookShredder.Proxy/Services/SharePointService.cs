@@ -10615,12 +10615,13 @@ public partial class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetCustomersListIdAsync();
 
-        // Read all existing: Title → (itemId, popupMessage)
-        var existing = new Dictionary<string, (string Id, string? Popup)>(StringComparer.OrdinalIgnoreCase);
+        // Read all existing: Title → (itemId, popupMessage, active). Active defaults true for
+        // legacy rows created before the column existed.
+        var existing = new Dictionary<string, (string Id, string? Popup, bool Active)>(StringComparer.OrdinalIgnoreCase);
         var page     = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage,Active)"];
                 r.QueryParameters.Top    = 999;
             }, ct);
 
@@ -10631,14 +10632,15 @@ public partial class SharePointService
                 if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
                 var name = GetStr(d, "Title");
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                existing[name] = (item.Id, GetStr(d, "PopupMessage"));
+                var exActive = !d.TryGetValue("Active", out var av) || av is not bool b || b; // missing ⇒ active
+                existing[name] = (item.Id, GetStr(d, "PopupMessage"), exActive);
             }
             if (page.OdataNextLink is null) break;
             page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
                 page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
         }
 
-        int added = 0, updated = 0, skipped = 0;
+        int added = 0, updated = 0, skipped = 0, deactivated = 0;
 
         await Parallel.ForEachAsync(rows,
             new ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct },
@@ -10646,16 +10648,19 @@ public partial class SharePointService
             {
                 if (existing.TryGetValue(row.Name, out var ex))
                 {
-                    if (string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal))
+                    bool popupChanged  = !string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal);
+                    bool activeChanged = ex.Active != row.Active;
+                    if (!popupChanged && !activeChanged)
                     {
                         Interlocked.Increment(ref skipped);
                         return;
                     }
+                    var patch = new Dictionary<string, object?>();
+                    if (popupChanged)  patch["PopupMessage"] = row.PopupMessage;
+                    if (activeChanged) patch["Active"]       = row.Active;
                     await GetGraph().Sites[siteId].Lists[listId].Items[ex.Id].Fields
-                        .PatchAsync(new FieldValueSet
-                        {
-                            AdditionalData = new Dictionary<string, object?> { ["PopupMessage"] = row.PopupMessage }
-                        }, cancellationToken: token);
+                        .PatchAsync(new FieldValueSet { AdditionalData = patch }, cancellationToken: token);
+                    if (activeChanged && !row.Active) Interlocked.Increment(ref deactivated);
                     var u = Interlocked.Increment(ref updated);
                     if (u % 200 == 0)
                         _log.LogInformation("[SP] UpsertPartners: {N} updated so far", u);
@@ -10671,17 +10676,19 @@ public partial class SharePointService
                                 {
                                     ["Title"]        = row.Name,
                                     ["PopupMessage"] = row.PopupMessage,
+                                    ["Active"]       = row.Active,
                                 }
                             }
                         }, cancellationToken: token);
+                    if (!row.Active) Interlocked.Increment(ref deactivated);
                     var a = Interlocked.Increment(ref added);
                     if (a % 200 == 0)
                         _log.LogInformation("[SP] UpsertPartners: {N} added so far", a);
                 }
             });
 
-        _log.LogInformation("[SP] UpsertPartners: {Added} added, {Updated} updated, {Skipped} skipped",
-            added, updated, skipped);
+        _log.LogInformation("[SP] UpsertPartners: {Added} added, {Updated} updated, {Skipped} skipped, {Deact} marked inactive",
+            added, updated, skipped, deactivated);
         return (added, updated, skipped);
     }
 
@@ -10739,6 +10746,7 @@ public partial class SharePointService
         var patch = new Dictionary<string, object?>();
         foreach (var c in CustomerInfoSchema.Columns)
         {
+            if (!c.Write) continue;   // Active is owned by the partners load — never written by enrichment
             if (!row.Fields.TryGetValue(c.Sp, out var raw) || string.IsNullOrWhiteSpace(raw)) continue;
             existing.TryGetValue(c.Sp, out var ev);
             if (CustomerInfoSchema.Canon(raw, c.Kind) == CustomerInfoSchema.Canon(ev, c.Kind)) continue;
@@ -10975,11 +10983,11 @@ public partial class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetCustomersListIdAsync();
 
-        var existing = new Dictionary<string, (string Id, string? Popup)>(StringComparer.OrdinalIgnoreCase);
+        var existing = new Dictionary<string, (string Id, string? Popup, bool Active)>(StringComparer.OrdinalIgnoreCase);
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage)"];
+                r.QueryParameters.Expand = ["fields($select=Title,PopupMessage,Active)"];
                 r.QueryParameters.Top    = 999;
             }, ct);
 
@@ -10990,7 +10998,8 @@ public partial class SharePointService
                 if (item.Id is null || item.Fields?.AdditionalData is not { } d) continue;
                 var name = GetStr(d, "Title");
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                existing[name] = (item.Id, GetStr(d, "PopupMessage"));
+                var exActive = !d.TryGetValue("Active", out var av) || av is not bool b || b; // missing ⇒ active
+                existing[name] = (item.Id, GetStr(d, "PopupMessage"), exActive);
             }
             if (page.OdataNextLink is null) break;
             page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
@@ -11001,14 +11010,26 @@ public partial class SharePointService
         var toUpdate  = new List<BpUpdateSample>();
         int unchanged = 0;
 
+        static string Act(bool a) => a ? "active" : "inactive";
+
         foreach (var row in rows)
         {
             if (existing.TryGetValue(row.Name, out var ex))
             {
-                if (string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal))
-                    unchanged++;
-                else
-                    toUpdate.Add(new BpUpdateSample(row.Name, ex.Popup, row.PopupMessage));
+                bool popupChanged  = !string.Equals(ex.Popup ?? "", row.PopupMessage ?? "", StringComparison.Ordinal);
+                bool activeChanged = ex.Active != row.Active;
+                if (!popupChanged && !activeChanged) { unchanged++; continue; }
+
+                // Show whichever changed; an Active flip is annotated so the preview is honest.
+                string oldDisp = popupChanged ? (ex.Popup ?? "(empty)") : "";
+                string newDisp = popupChanged ? (row.PopupMessage ?? "(empty)") : "";
+                if (activeChanged)
+                {
+                    var tag = $"[{Act(ex.Active)} → {Act(row.Active)}]";
+                    oldDisp = string.IsNullOrEmpty(oldDisp) ? Act(ex.Active)  : $"{oldDisp} {tag}";
+                    newDisp = string.IsNullOrEmpty(newDisp) ? Act(row.Active) : $"{newDisp} {tag}";
+                }
+                toUpdate.Add(new BpUpdateSample(row.Name, oldDisp, newDisp));
             }
             else
             {

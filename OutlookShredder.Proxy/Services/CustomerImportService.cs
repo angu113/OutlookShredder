@@ -10,7 +10,17 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public sealed class CustomerImportService(ILogger<CustomerImportService> log)
 {
-    public sealed record BpRow(string Name, string PopupMessage);
+    public sealed record BpRow(string Name, string PopupMessage, bool Active = true);
+
+    /// <summary>Parses an ERP "Active" cell. Accepts true/false, yes/no, y/n, 1/0 (any case).
+    /// Blank / missing / unrecognised ⇒ <c>true</c> (active) — we never flip a customer inactive from
+    /// absent data; only an explicit negative deactivates.</summary>
+    internal static bool ParseActiveFlag(string? raw) =>
+        (raw?.Trim().ToLowerInvariant()) switch
+        {
+            "false" or "no" or "n" or "0" or "inactive" => false,
+            _                                           => true,
+        };
     public sealed record ContactRow(string CustomerName, string ContactName, string Phone);
     /// <summary>One row of the rich "Customer Info" master export. <see cref="Fields"/> maps a
     /// SharePoint internal column name (from <see cref="CustomerInfoSchema"/>) to the raw CSV cell
@@ -47,6 +57,7 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         var hdr      = lines[0];
         int nameIdx  = ColIndex(hdr, "Name");
         int popupIdx = ColIndex(hdr, "Popup Message");
+        int activeIdx = ColIndex(hdr, "Active");   // optional — older partner exports omit it (=> all active)
 
         if (nameIdx < 0 || popupIdx < 0)
         {
@@ -87,7 +98,10 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
                 continue;
             }
 
-            rows.Add(new BpRow(name, cols[popupIdx].Trim()));
+            var active = activeIdx < 0 || activeIdx >= cols.Length
+                ? true                                        // column absent ⇒ active
+                : ParseActiveFlag(cols[activeIdx]);
+            rows.Add(new BpRow(name, cols[popupIdx].Trim(), active));
         }
 
         return new(rows, warnings, skipped);
@@ -327,13 +341,18 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
 public static class CustomerInfoSchema
 {
     public enum Kind { Text, Number, Boolean }
-    public sealed record Col(string Csv, string Sp, Kind Kind);
+    /// <summary><paramref name="Write"/>=false means the column is provisioned + parsed (so it can be
+    /// read, e.g. for the inactive-candidate filter) but the Customer Info enrichment never WRITES it —
+    /// used for <c>Active</c>, which is owned by the Business Partner (partners) load.</summary>
+    public sealed record Col(string Csv, string Sp, Kind Kind, bool Write = true);
 
     public const string NameCsvHeader = "Business Partner";
 
     public static readonly Col[] Columns =
     [
-        new("Active",                     "Active",             Kind.Boolean),
+        // Active is owned by the partners (BP master) load — provisioned + parsed here (for IsInactive),
+        // but NOT written by enrichment, so the last-running customerinfo load can't override it.
+        new("Active",                     "Active",             Kind.Boolean, Write: false),
         new("Business Partner Category",  "BpCategory",         Kind.Text),
         new("Payment Terms",              "PaymentTerms",       Kind.Text),
         new("On Hold",                    "OnHold",             Kind.Boolean),
