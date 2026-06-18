@@ -156,7 +156,7 @@ internal static class PickingSlipFabAppender
         {
             var spec = DrawingTextParser.Parse(desc);
             var fp = FlatPattern.Develop(spec);
-            var pdf = DrawingPdfRenderer.Render(fp);
+            var pdf = DrawingPdfRenderer.Render(fp, polishBilingual: false);   // shop slip → Spanish-only polish label
             _cache[desc] = pdf;
             return pdf;
         }

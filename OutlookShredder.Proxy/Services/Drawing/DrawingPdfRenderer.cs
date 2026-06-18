@@ -35,7 +35,10 @@ public static class DrawingPdfRenderer
     // Section-view panel margins (shared so the pan's two sections render at one common scale).
     private const double SecBandL = 46, SecBandB = 42, SecBandT = 12, SecBandR = 18;
 
-    public static byte[] Render(FlatPatternResult fp, bool calibrate = false)
+    // polishBilingual: the "Dirección de pulido" callout is bilingual ("Polish direction / …") on Pixar
+    // PDFs but Spanish-only on the auto picking-slip drawings (the shop floor reads those). Default = the
+    // Pixar (bilingual) behaviour; PickingSlipFabAppender passes false.
+    public static byte[] Render(FlatPatternResult fp, bool calibrate = false, bool polishBilingual = true)
     {
         PickingSlipEnricher.EnsureFontResolver();
 
@@ -85,7 +88,7 @@ public static class DrawingPdfRenderer
                 double wFlatP = (usable - gap) / 3.0, wIsoP = (usable - gap) * 2.0 / 3.0;
                 double isoX = M + wFlatP + gap;
                 DrawPan(gfx, fp, new XRect(M, top, wFlatP, topH));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlatP, topH));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlatP, topH), polishBilingual);
                 DrawPanIso(gfx, fp, new XRect(isoX, top, wIsoP, topH - 46));
                 DrawSectionKey(gfx, new XRect(isoX + (wIsoP - 250) / 2, top + topH - 36, 250, 30), isPan: true);
 
@@ -105,22 +108,22 @@ public static class DrawingPdfRenderer
             else if (fp.IsColumn)
             {
                 DrawColumn(gfx, fp, new XRect(M, top, usable, h));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
             else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
             else if (fp.IsPaddle)
             {
                 DrawPaddleBlind(gfx, fp, new XRect(M, top, usable, h));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
             else
             {
                 DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlat, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlat, h), polishBilingual);
                 DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h), calibrate);
                 double isoX = M + wFlat + wSect + 2 * gap;
                 // Single-section views: the "End section" header already carries the dash key, so we
@@ -195,14 +198,16 @@ public static class DrawingPdfRenderer
     // right-side placement (acceptance: "its own simple placement for now"). No-op when unset.
     // TODO: items 2 (finish) + 4 (polish) should later share ONE right-side placement manager so the
     // label never collides with the finish callout. Do NOT refactor the finish callout here.
-    private static void DrawPolishCallout(XGraphics gfx, FlatPatternResult fp, XRect box)
+    private static void DrawPolishCallout(XGraphics gfx, FlatPatternResult fp, XRect box, bool bilingual)
     {
         if (fp.Spec.PolishDirection == PolishDirection.None) return;
         bool vertical = fp.Spec.PolishDirection == PolishDirection.Vertical;
 
         var pen  = new XPen(XColor.FromArgb(120, 70, 180), 1.4);   // violet — distinct from cut/bend/dim
         var font = new XFont("Arial", 7, XFontStyleEx.Bold);
-        string label = Bi.T("polish.direction");
+        // Bilingual on Pixar PDFs ("Polish direction / Dirección de pulido"); Spanish-only on the auto
+        // picking-slip drawings the shop reads ("Dirección de pulido").
+        string label = bilingual ? Bi.T("polish.direction") : Bi.Es("polish.direction");
 
         double cx = box.X + box.Width * 0.5;
         double cy = box.Y + box.Height * 0.5;

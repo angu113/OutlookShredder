@@ -121,4 +121,24 @@ public class PolishDirectionTests
         Assert.True(Arrows(with) >= 5, "vertical polish adds the 5 arrow segments");
         Assert.Equal(0, Arrows(without));
     }
+
+    // ── Label language by context (Angus, CP3) ─────────────────────────────────
+    // Pixar PDFs render the polish label bilingually; the auto picking-slip drawings render it
+    // Spanish-only (the shop floor reads those). The renderer picks Bi.T vs Bi.Es accordingly.
+
+    [Fact]
+    public void Pixar_label_is_bilingual()
+    {
+        var s = Bi.T("polish.direction");
+        Assert.StartsWith("Polish direction", s);   // English half present
+        Assert.Contains("pulido", s);               // Spanish half present
+    }
+
+    [Fact]
+    public void Picking_slip_label_is_spanish_only()
+    {
+        var s = Bi.Es("polish.direction");
+        Assert.DoesNotContain("Polish direction", s);   // no English
+        Assert.Contains("pulido", s);                   // Spanish term only
+    }
 }
