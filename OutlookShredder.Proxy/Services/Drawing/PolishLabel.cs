@@ -11,8 +11,10 @@ namespace OutlookShredder.Proxy.Services.Drawing;
 /// has no accented glyphs; the accented "Dirección de pulido" appears on the PDF, which uses a real
 /// font. No-op when the direction is unset.
 ///
-/// TODO: items 2 (finish) and 4 (polish) should later share ONE right-side placement manager so the
-/// polish label never collides with the finish callout. Do NOT refactor the finish label here.
+/// Placed INDEPENDENTLY of the finish callout — they annotate different drawing components, so they are
+/// deliberately NOT merged under a shared placement manager. (Finish + polish are linked at the SPEC
+/// level — a polish implies a finish side, optionally a direction when the finish is directional — but
+/// the labels stay separate.)
 /// </summary>
 public static class PolishLabel
 {

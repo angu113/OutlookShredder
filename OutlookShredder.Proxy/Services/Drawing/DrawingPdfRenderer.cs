@@ -198,7 +198,7 @@ public static class DrawingPdfRenderer
     // vertical axis) and tied back to the arrow with a short leader. No-op when unset.
     // NB: this is the PDF label ONLY. The DXF carries its own PolishLabel geometry on the no-cut L1
     // layer, which the PDF render explicitly skips (see the cut-geometry loops) so it never leaks here.
-    // TODO: finish + polish should later share ONE placement manager so they never collide.
+    // Placed INDEPENDENTLY of the finish callout by design — they annotate different drawing components.
     private static void DrawPolishCallout(XGraphics gfx, FlatPatternResult fp, XRect box, bool bilingual)
     {
         if (fp.Spec.PolishDirection == PolishDirection.None) return;
