@@ -11,18 +11,31 @@ public class SupplierConversationsController : ControllerBase
     private readonly SharePointService    _sp;
     private readonly MailService          _mail;
     private readonly SupplierCacheService _suppliers;
+    private readonly RfqNotificationService _notify;
     private readonly ILogger<SupplierConversationsController> _log;
 
     public SupplierConversationsController(
         SharePointService    sp,
         MailService          mail,
         SupplierCacheService suppliers,
+        RfqNotificationService notify,
         ILogger<SupplierConversationsController> log)
     {
         _sp        = sp;
         _mail      = mail;
         _suppliers = suppliers;
+        _notify    = notify;
         _log       = log;
+    }
+
+    /// <summary>Request body for POST /api/supplier-conversations/mark-read.</summary>
+    public sealed class MarkReadRequest
+    {
+        public string  RfqId        { get; set; } = "";
+        public string  SupplierName { get; set; } = "";
+        public string  MessageId    { get; set; } = "";
+        public bool    Read         { get; set; } = true;
+        public string? ReadBy       { get; set; }
     }
 
     /// <summary>
@@ -50,6 +63,71 @@ public class SupplierConversationsController : ControllerBase
         catch (Exception ex)
         {
             _log.LogError(ex, "[Conv] Read failed for {RfqId} / {Supplier}", rfqId, supplierName);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Marks one inbound supplier message read/unread (team-wide) by MessageId, then publishes a
+    /// "SupplierMsgRead" bus event so peers update the message + the unread badge cascade.
+    /// </summary>
+    [HttpPost("supplier-conversations/mark-read")]
+    public async Task<IActionResult> MarkRead([FromBody] MarkReadRequest req)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.RfqId) ||
+            string.IsNullOrWhiteSpace(req.SupplierName) || string.IsNullOrWhiteSpace(req.MessageId))
+            return BadRequest(new { error = "rfqId, supplierName and messageId are required" });
+
+        try
+        {
+            var patched = await _sp.MarkSupplierMessageReadAsync(
+                req.RfqId, req.SupplierName, req.MessageId, req.Read, req.ReadBy);
+            // Publish even when patched==0 so peers stay consistent on the optimistic UI.
+            _notify.NotifySupplierMessageRead(req.RfqId, req.SupplierName, req.MessageId, req.Read, req.ReadBy);
+            return Ok(new { ok = true, patched });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Conv] mark-read failed for {RfqId}/{Supplier} msg={Msg}",
+                req.RfqId, req.SupplierName, req.MessageId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Unread inbound-supplier-message tallies across all RFQs: grand total + per-RFQ + per-(rfq|supplier).
+    /// Powers the RFQ-tab / RFQ-header / SR-header unread badges.
+    /// </summary>
+    [HttpGet("supplier-conversations/unread")]
+    public async Task<IActionResult> GetUnread()
+    {
+        try
+        {
+            var counts = await _sp.GetSupplierUnreadCountsAsync();
+            return Ok(new { total = counts.Total, byRfq = counts.ByRfq, bySupplier = counts.BySupplier });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Conv] unread tally failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// One-time clean-slate: stamp every existing inbound supplier message read (no reader attribution),
+    /// so only messages arriving after this start unread. Idempotent.
+    /// </summary>
+    [HttpPost("supplier-conversations/backfill-read")]
+    public async Task<IActionResult> BackfillRead()
+    {
+        try
+        {
+            var stamped = await _sp.BackfillSupplierReadStateAsync();
+            return Ok(new { ok = true, stamped });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Conv] backfill read-state failed");
             return StatusCode(500, new { error = ex.Message });
         }
     }

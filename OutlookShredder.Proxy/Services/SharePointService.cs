@@ -5236,6 +5236,10 @@ public partial class SharePointService
                 ("FreightTerms",         "text"),
                 ("IsRegret",             "boolean"),
                 ("ClaudeResponseLog",    "note"),
+                // Per-message read state (team-wide). Missing/false ⇒ unread; backfill stamps existing true.
+                ("IsRead",               "boolean"),
+                ("ReadAt",               "dateTime"),
+                ("ReadBy",               "text"),
             ]),
             ["SupplierLineItems"] = await EnsureListColumnsAsync(siteId, "SupplierLineItems",
             [
@@ -5359,6 +5363,10 @@ public partial class SharePointService
                 ("GraphConversationId", "text"),
                 ("ContactEmail",        "text"),
                 ("BccAddresses",        "note"),
+                // Per-message read state (team-wide), for inbound (Direction=in) rows.
+                ("IsRead",              "boolean"),
+                ("ReadAt",              "dateTime"),
+                ("ReadBy",              "text"),
             ]),
             ["ProductSynonyms"] = await EnsureListColumnsAsync(siteId, "ProductSynonyms",
             [
@@ -8675,7 +8683,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[convListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing,ContactEmail,BccAddresses)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing,ContactEmail,BccAddresses,IsRead,ReadAt,ReadBy)"];
                 req.QueryParameters.Top    = 500;
                 req.QueryParameters.Filter = filter;
             });
@@ -8703,6 +8711,9 @@ public partial class SharePointService
                     ExtractedPricing   = f.TryGetValue("ExtractedPricing", out var ep) && ep is bool epb && epb,
                     ContactEmail       = GetStr(f, "ContactEmail"),
                     BccAddresses       = GetStr(f, "BccAddresses"),
+                    IsRead             = f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb,
+                    ReadAt             = GetStr(f, "ReadAt"),
+                    ReadBy             = GetStr(f, "ReadBy"),
                 });
             }
             if (page.OdataNextLink is null) break;
@@ -8720,7 +8731,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ContactEmail,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ContactEmail,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile,IsRead,ReadAt,ReadBy)"];
                 req.QueryParameters.Top    = 200;
                 req.QueryParameters.Filter = filter;
             });
@@ -8746,6 +8757,9 @@ public partial class SharePointService
                     AttachmentName     = GetStr(f, "SourceFile"),
                     ExtractedPricing   = true,
                     ContactEmail       = GetStr(f, "ContactEmail"),
+                    IsRead             = f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb,
+                    ReadAt             = GetStr(f, "ReadAt"),
+                    ReadBy             = GetStr(f, "ReadBy"),
                 });
             }
             if (page.OdataNextLink is null) break;
@@ -8754,6 +8768,163 @@ public partial class SharePointService
         }
 
         return results;
+    }
+
+    // ── Per-message read state (team-wide; inbound supplier messages) ─────────
+
+    /// <summary>Unread tallies for the badge cascade: grand total + per-RFQ + per-(rfq|supplier).</summary>
+    public sealed record SupplierUnreadCounts(
+        int Total,
+        Dictionary<string, int> ByRfq,
+        Dictionary<string, int> BySupplier);
+
+    /// <summary>
+    /// Marks one inbound supplier message read/unread (team-wide) by MessageId. Patches the matching row
+    /// in SupplierResponses and/or SupplierConversations (a message may live in either). MessageId is
+    /// matched with Ordinal (Graph IDs are case-sensitive). Returns the number of rows patched.
+    /// </summary>
+    public async Task<int> MarkSupplierMessageReadAsync(
+        string rfqId, string supplierName, string messageId, bool read, string? readBy,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(messageId)) return 0;
+        var siteId = await GetSiteIdAsync();
+        var safe   = rfqId.Replace("'", "''");
+        var patch  = new Dictionary<string, object?>
+        {
+            ["IsRead"] = read,
+            ["ReadAt"] = read ? DateTimeOffset.UtcNow : null,
+            ["ReadBy"] = read ? readBy : null,
+        };
+        int patched = 0;
+
+        async Task PatchMatchAsync(string listId)
+        {
+            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=MessageId)"];
+                req.QueryParameters.Top    = 500;
+                req.QueryParameters.Filter = $"fields/RFQ_ID eq '{safe}'";
+            }, ct);
+            while (page?.Value is not null)
+            {
+                foreach (var item in page.Value)
+                {
+                    var f = item.Fields?.AdditionalData;
+                    if (item.Id is null || f is null) continue;
+                    if (string.Equals(GetStr(f, "MessageId"), messageId, StringComparison.Ordinal))
+                    {
+                        await PatchListItemWithRetryAsync(siteId, listId, item.Id, patch, ct);
+                        patched++;
+                    }
+                }
+                if (page.OdataNextLink is null) break;
+                page = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+            }
+        }
+
+        await PatchMatchAsync(await GetSupplierResponsesListIdAsync());
+        await PatchMatchAsync(await GetConversationsListIdAsync());
+        _log.LogInformation("[Conv] mark-read msg={Msg} read={Read} by={By} -> {N} row(s)",
+            messageId, read, readBy, patched);
+        return patched;
+    }
+
+    /// <summary>
+    /// Counts unread inbound supplier messages across the whole tenant (IsRead missing/false = unread),
+    /// deduped by MessageId across the two source lists. Drives the SR / RFQ / tab unread badges.
+    /// </summary>
+    public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var entries = new List<(string Rfq, string Sup, string? Msg)>();
+
+        async Task ScanAsync(string listId, bool inboundOnly)
+        {
+            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,Direction,MessageId,IsRead)"];
+                req.QueryParameters.Top    = 999;
+            }, ct);
+            while (page?.Value is not null)
+            {
+                foreach (var item in page.Value)
+                {
+                    var f = item.Fields?.AdditionalData;
+                    if (f is null) continue;
+                    if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb) continue;  // read
+                    var rfq = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
+                    if (string.IsNullOrEmpty(rfq)) continue;
+                    entries.Add((rfq, GetStr(f, "SupplierName") ?? "", GetStr(f, "MessageId")));
+                }
+                if (page.OdataNextLink is null) break;
+                page = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+            }
+        }
+
+        await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false); // SR rows are all inbound
+        await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true);
+
+        // Dedup by MessageId (a message may be logged in both lists); null-MessageId rows count individually.
+        var byRfq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var bySup = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var seen  = new HashSet<string>(StringComparer.Ordinal);
+        int total = 0;
+        foreach (var (rfq, sup, msg) in entries)
+        {
+            if (!string.IsNullOrEmpty(msg) && !seen.Add(msg)) continue;
+            total++;
+            byRfq[rfq] = byRfq.GetValueOrDefault(rfq) + 1;
+            var sk = $"{rfq}|{sup}";
+            bySup[sk] = bySup.GetValueOrDefault(sk) + 1;
+        }
+        return new SupplierUnreadCounts(total, byRfq, bySup);
+    }
+
+    /// <summary>
+    /// Clean-slate rollout: stamps IsRead=true on every inbound supplier message that isn't already read
+    /// (no ReadBy/ReadAt — nobody actually read them), so only messages arriving AFTER this start unread.
+    /// Idempotent. Returns the number of rows stamped.
+    /// </summary>
+    public async Task<int> BackfillSupplierReadStateAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var work   = new List<(string ListId, string ItemId)>();
+
+        async Task CollectAsync(string listId, bool inboundOnly)
+        {
+            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+            {
+                req.QueryParameters.Expand = ["fields($select=Direction,IsRead)"];
+                req.QueryParameters.Top    = 999;
+            }, ct);
+            while (page?.Value is not null)
+            {
+                foreach (var item in page.Value)
+                {
+                    var f = item.Fields?.AdditionalData;
+                    if (item.Id is null || f is null) continue;
+                    if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb) continue; // already read
+                    work.Add((listId, item.Id));
+                }
+                if (page.OdataNextLink is null) break;
+                page = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+            }
+        }
+
+        await CollectAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false);
+        await CollectAsync(await GetConversationsListIdAsync(),     inboundOnly: true);
+
+        await RunBatchedAsync(work, 100, 8, "BackfillRead",
+            async (w, token) => await PatchListItemWithRetryAsync(
+                siteId, w.ListId, w.ItemId, new Dictionary<string, object?> { ["IsRead"] = true }, token), ct);
+        _log.LogInformation("[Conv] backfill read-state: stamped {N} inbound row(s) as read", work.Count);
+        return work.Count;
     }
 
     /// <summary>

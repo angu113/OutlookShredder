@@ -101,6 +101,15 @@ public class RfqProcessedNotification
     public bool    MaterialReceived { get; set; }
     /// <summary>Populated when EventType = "TASK_COMPLETE". Name of the completed forge task.</summary>
     public string? TaskName { get; set; }
+
+    // ── Populated when EventType = "SupplierMsgRead" (a supplier message's read state changed). Reuses
+    //    RfqId / SupplierName / MessageId; peers update that message + the unread badge cascade. ──
+    /// <summary>True = marked read, false = marked unread.</summary>
+    public bool?    ConvRead   { get; set; }
+    /// <summary>Shredder username who changed it (null when unread).</summary>
+    public string?  ConvReadBy { get; set; }
+    /// <summary>When it changed (UTC ISO), or null.</summary>
+    public string?  ConvReadAt { get; set; }
 }
 
 /// <summary>

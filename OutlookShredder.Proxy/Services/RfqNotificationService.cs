@@ -275,6 +275,23 @@ public class RfqNotificationService
         });
 
     /// <summary>
+    /// Publishes a "SupplierMsgRead" event so peers update one supplier message's read state and adjust
+    /// the SR/RFQ/tab unread badge cascade.
+    /// </summary>
+    public void NotifySupplierMessageRead(
+        string rfqId, string supplierName, string messageId, bool read, string? readBy) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType    = "SupplierMsgRead",
+            RfqId        = rfqId,
+            SupplierName = supplierName,
+            MessageId    = messageId,
+            ConvRead     = read,
+            ConvReadBy   = read ? readBy : null,
+            ConvReadAt   = read ? DateTimeOffset.UtcNow.ToString("o") : null,
+        });
+
+    /// <summary>
     /// Publishes a "Mail" event so peer proxies sync their MailCache and Shredder Inbox views
     /// refresh. <paramref name="action"/> is Captured | Classified | Amended | Completed | Deleted;
     /// <paramref name="item"/> carries the full snapshot (null on Deleted).

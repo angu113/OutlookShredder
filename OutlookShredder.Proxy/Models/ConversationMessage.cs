@@ -28,6 +28,14 @@ public class ConversationMessage
     public int? SliVersionAtSend { get; set; }
     /// <summary>Comma-separated BCC addresses used on this outbound message.</summary>
     public string? BccAddresses { get; set; }
+
+    // ── Per-message read state (team-wide; inbound messages only) ────────────
+    /// <summary>True when this inbound supplier message has been marked read by someone. Outbound = always false.</summary>
+    public bool IsRead { get; set; }
+    /// <summary>When it was marked read (UTC ISO), or null.</summary>
+    public string? ReadAt { get; set; }
+    /// <summary>The Shredder username who marked it read, or null (e.g. historical/backfilled rows).</summary>
+    public string? ReadBy { get; set; }
 }
 
 /// <summary>
