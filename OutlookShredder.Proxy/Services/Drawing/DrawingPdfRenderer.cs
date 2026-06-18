@@ -192,55 +192,61 @@ public static class DrawingPdfRenderer
         }
     }
 
-    // ── Polish / grain-direction callout (screen + PDF) ──────────────────────
-    // A double-headed arrow along the chosen axis on the part, with the bilingual "Dirección de pulido"
-    // label on the right. Part-type-agnostic: drawn on each type's primary view box with a simple
-    // right-side placement (acceptance: "its own simple placement for now"). No-op when unset.
-    // TODO: items 2 (finish) + 4 (polish) should later share ONE right-side placement manager so the
-    // label never collides with the finish callout. Do NOT refactor the finish callout here.
+    // ── Polish / grain-direction callout (screen + PDF only — NOT the DXF) ─────
+    // A double-headed arrow along the chosen axis (centred on the panel/part); the "Dirección de pulido"
+    // label sits in the panel margin OUTSIDE the part, oriented PARALLEL to the arrow (rotated 90° for a
+    // vertical axis) and tied back to the arrow with a short leader. No-op when unset.
+    // NB: this is the PDF label ONLY. The DXF carries its own PolishLabel geometry on the no-cut L1
+    // layer, which the PDF render explicitly skips (see the cut-geometry loops) so it never leaks here.
+    // TODO: finish + polish should later share ONE placement manager so they never collide.
     private static void DrawPolishCallout(XGraphics gfx, FlatPatternResult fp, XRect box, bool bilingual)
     {
         if (fp.Spec.PolishDirection == PolishDirection.None) return;
         bool vertical = fp.Spec.PolishDirection == PolishDirection.Vertical;
 
         var pen  = new XPen(XColor.FromArgb(120, 70, 180), 1.4);   // violet — distinct from cut/bend/dim
+        var thin = new XPen(XColor.FromArgb(120, 70, 180), 0.6);   // leader from the label to the arrow
         var font = new XFont("Arial", 7, XFontStyleEx.Bold);
-        // Bilingual on Pixar PDFs ("Polish direction / Dirección de pulido"); Spanish-only on the auto
-        // picking-slip drawings the shop reads ("Dirección de pulido").
+        // Bilingual on Pixar PDFs; Spanish-only on the auto picking-slip drawings the shop reads.
         string label = bilingual ? Bi.T("polish.direction") : Bi.Es("polish.direction");
+        var sz = gfx.MeasureString(label, font);
+        const double head = 5, pad = 3;
 
-        double cx = box.X + box.Width * 0.5;
-        double cy = box.Y + box.Height * 0.5;
-        double half = (vertical ? box.Height : box.Width) * 0.19;
-        const double head = 5;
+        double cx = box.X + box.Width * 0.5, cy = box.Y + box.Height * 0.5;
 
         if (vertical)
         {
-            var tp = new XPoint(cx, cy - half);
-            var bt = new XPoint(cx, cy + half);
+            double half = box.Height * 0.18;
+            var tp = new XPoint(cx, cy - half); var bt = new XPoint(cx, cy + half);
             gfx.DrawLine(pen, tp, bt);
-            gfx.DrawLine(pen, tp, new XPoint(cx - head, tp.Y + head));
-            gfx.DrawLine(pen, tp, new XPoint(cx + head, tp.Y + head));
-            gfx.DrawLine(pen, bt, new XPoint(cx - head, bt.Y - head));
-            gfx.DrawLine(pen, bt, new XPoint(cx + head, bt.Y - head));
+            gfx.DrawLine(pen, tp, new XPoint(cx - head, tp.Y + head)); gfx.DrawLine(pen, tp, new XPoint(cx + head, tp.Y + head));
+            gfx.DrawLine(pen, bt, new XPoint(cx - head, bt.Y - head)); gfx.DrawLine(pen, bt, new XPoint(cx + head, bt.Y - head));
+
+            // Vertical (rotated) label hugging the right margin, parallel to the arrow; leader back to it.
+            var lc = new XPoint(box.X + box.Width - pad - sz.Height / 2.0, cy);
+            gfx.DrawLine(thin, new XPoint(cx + 1, cy), new XPoint(lc.X - sz.Height / 2.0, cy));
+            var st = gfx.Save();
+            gfx.TranslateTransform(lc.X, lc.Y);
+            gfx.RotateTransform(-90);
+            gfx.DrawString(label, font, XBrushes.Black,
+                new XRect(-sz.Width / 2, -sz.Height / 2, sz.Width, sz.Height), XStringFormats.Center);
+            gfx.Restore(st);
         }
         else
         {
-            var lf = new XPoint(cx - half, cy);
-            var rg = new XPoint(cx + half, cy);
+            double half = box.Width * 0.18;
+            var lf = new XPoint(cx - half, cy); var rg = new XPoint(cx + half, cy);
             gfx.DrawLine(pen, lf, rg);
-            gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy - head));
-            gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy + head));
-            gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy - head));
-            gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy + head));
-        }
+            gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy - head)); gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy + head));
+            gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy - head)); gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy + head));
 
-        // Label on the right-hand side, outside the (centred) part, clamped within the box.
-        var sz = gfx.MeasureString(label, font);
-        double lx = Math.Min(box.X + box.Width - sz.Width - 2, cx + half + 6);
-        if (lx < box.X) lx = box.X;
-        gfx.DrawString(label, font, XBrushes.Black,
-            new XRect(lx, cy - sz.Height / 2, sz.Width, sz.Height), XStringFormats.TopLeft);
+            // Horizontal label in the bottom margin, parallel to the arrow, centred + clamped; leader up.
+            double ly = box.Y + box.Height - pad - sz.Height;
+            double lx = Math.Max(box.X + pad, Math.Min(cx - sz.Width / 2, box.X + box.Width - sz.Width - pad));
+            gfx.DrawLine(thin, new XPoint(cx, cy + 1), new XPoint(cx, ly - 1));
+            gfx.DrawString(label, font, XBrushes.Black,
+                new XRect(lx, ly, sz.Width, sz.Height), XStringFormats.TopLeft);
+        }
     }
 
     // ── 2. Dimensioned end-section (any shape, primary dims only) ─────────────
@@ -745,9 +751,10 @@ public static class DrawingPdfRenderer
         double oy = area.Y + bandT + (availH - drawH) / 2;
         XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
 
-        // Cut outline (the disc-plus-handle polyline).
+        // Cut outline (the disc-plus-handle polyline). Skip the no-cut L1 label layer — that geometry
+        // (PartLabel / PolishLabel) is for the DXF only; the PDF carries its own labels.
         foreach (var e in fp.Cut.Entities)
-            if (e.Type == "polyline" && e.Vertices is { Count: > 1 })
+            if (e.Type == "polyline" && e.Vertices is { Count: > 1 } && e.Layer != PartLabel.LayerName)
                 gfx.DrawPolygon(cutPen, e.Vertices.Select(v => P(v.X, v.Y)).ToArray());
 
         // Centre axis (through disc + handle) + a short cross tick at the disc centre.
@@ -780,6 +787,7 @@ public static class DrawingPdfRenderer
         void Acc(double x, double y) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
         foreach (var e in fp.Cut.Entities)
         {
+            if (e.Layer == PartLabel.LayerName) continue;   // no-cut DXF label layer — never sized/drawn on the PDF
             if (e.Vertices is { } vs) foreach (var v in vs) Acc(v.X, v.Y);
             if (e.Type == "line") { Acc(e.X1, e.Y1); Acc(e.X2, e.Y2); }
         }
@@ -796,6 +804,7 @@ public static class DrawingPdfRenderer
 
         foreach (var e in fp.Cut.Entities)
         {
+            if (e.Layer == PartLabel.LayerName) continue;   // no-cut DXF label layer — never drawn on the PDF
             var pen = e.Layer == FlatPattern.BendLayer ? bendPen : cutPen;
             switch (e.Type)
             {

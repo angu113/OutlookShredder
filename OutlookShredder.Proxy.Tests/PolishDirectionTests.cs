@@ -141,4 +141,20 @@ public class PolishDirectionTests
         Assert.DoesNotContain("Polish direction", s);   // no English
         Assert.Contains("pulido", s);                   // Spanish term only
     }
+
+    // ── PDF render smoke (Angus: DXF L1 labels must not leak onto the PDF; rotated label must not throw) ──
+    // Exercises the cut-geometry render paths that skip the L1 layer (paddle outline, pan bounds+draw)
+    // and the rotated/leadered polish callout, across vertical + horizontal axes. A real PDF is produced.
+    [Theory]
+    [InlineData("Frying Pan 6 #150, 0.25 steel, polish vertical")]
+    [InlineData("Pan 24 x 18 x 2, 2 long 2 short, 16ga, polish horizontal")]
+    [InlineData("U 4 x 2 x 36, 16ga CRS, polish vertical")]
+    [InlineData("Flitch 48 x 6, 0.25 steel, polish horizontal")]
+    public void Pdf_render_with_polish_produces_a_pdf(string text)
+    {
+        var fp = FlatPattern.Develop(DrawingTextParser.Parse(text));
+        var pdf = DrawingPdfRenderer.Render(fp);
+        Assert.NotNull(pdf);
+        Assert.True(pdf.Length > 1000, $"expected a real PDF, got {pdf.Length} bytes");
+    }
 }
