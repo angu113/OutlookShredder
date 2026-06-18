@@ -28,6 +28,7 @@ internal static class Bi
 
         // ── callouts ────────────────────────────────────────────────────────
         ["finish"]               = ("Finish",                    "Acabado"),
+        ["polish.direction"]     = ("Polish direction",          "Dirección de pulido"),
         ["finish.outside"]       = ("Finish: outside",           "Acabado: exterior"),
         ["finish.inside"]        = ("Finish: inside",            "Acabado: interior"),
         ["hem"]                  = ("HEM",                       "DOBLADILLO"),

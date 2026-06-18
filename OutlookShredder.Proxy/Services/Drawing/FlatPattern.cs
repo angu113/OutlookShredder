@@ -31,6 +31,7 @@ public static class FlatPattern
     {
         var fp = DevelopShape(spec);
         PartLabel.AddTo(fp.Cut, quantity, spec.Material, spec.Thickness);
+        PolishLabel.AddTo(fp.Cut, spec.PolishDirection);
         return fp;
     }
 

@@ -120,6 +120,7 @@ public class DrawingController : ControllerBase
                     flangeLeft = new { spec.FlangeLeft.Value, basis = spec.FlangeLeft.Basis.ToString() },
                     flangeRight = new { spec.FlangeRight.Value, basis = spec.FlangeRight.Basis.ToString() },
                     length = spec.Length,
+                    polishDirection = spec.PolishDirection.ToString(),
                 },
                 math = new
                 {

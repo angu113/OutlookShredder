@@ -37,6 +37,13 @@ public sealed record ReturnSpec(double Length, DimBasis Basis, double AngleDeg, 
 /// </summary>
 public enum FinishSide { None, Inside, Outside, Top, Bottom }
 
+/// <summary>
+/// Polish / grain direction for a finished (brushed/grained) part — a 2-value axis the shop aligns the
+/// grain to. <see cref="None"/> = unset (no callout). Applies to ANY part type (any part may be cut
+/// from finished metal), independent of <see cref="FinishSide"/>.
+/// </summary>
+public enum PolishDirection { None, Vertical, Horizontal }
+
 /// <summary>Bolt-hole specification for a flat plate.</summary>
 public sealed class HoleSpec
 {
@@ -173,4 +180,12 @@ public sealed class PartSpec
 
     /// <summary>Which face carries the finish (and gets the "Finish" arrow on the drawing).</summary>
     public FinishSide Finish { get; init; } = FinishSide.None;
+
+    /// <summary>
+    /// Polish / grain direction (Vertical / Horizontal / unset). When set, the drawing gets a
+    /// double-headed arrow along the axis + the bilingual "Dirección de pulido" label. Carried in the
+    /// fab-note / canonical text (token "polish vertical|horizontal") so it round-trips with no
+    /// out-of-band state — exactly like <see cref="Finish"/>.
+    /// </summary>
+    public PolishDirection PolishDirection { get; init; } = PolishDirection.None;
 }

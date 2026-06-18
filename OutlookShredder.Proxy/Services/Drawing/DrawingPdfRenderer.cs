@@ -85,6 +85,7 @@ public static class DrawingPdfRenderer
                 double wFlatP = (usable - gap) / 3.0, wIsoP = (usable - gap) * 2.0 / 3.0;
                 double isoX = M + wFlatP + gap;
                 DrawPan(gfx, fp, new XRect(M, top, wFlatP, topH));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlatP, topH));
                 DrawPanIso(gfx, fp, new XRect(isoX, top, wIsoP, topH - 46));
                 DrawSectionKey(gfx, new XRect(isoX + (wIsoP - 250) / 2, top + topH - 36, 250, 30), isPan: true);
 
@@ -104,18 +105,22 @@ public static class DrawingPdfRenderer
             else if (fp.IsColumn)
             {
                 DrawColumn(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
             }
             else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
             }
             else if (fp.IsPaddle)
             {
                 DrawPaddleBlind(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h));
             }
             else
             {
                 DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, wFlat, h));
                 DrawCrossSection(gfx, fp, new XRect(M + wFlat + gap, top, wSect, h), calibrate);
                 double isoX = M + wFlat + wSect + 2 * gap;
                 // Single-section views: the "End section" header already carries the dash key, so we
@@ -182,6 +187,55 @@ public static class DrawingPdfRenderer
             prev = bx;
             idx++;
         }
+    }
+
+    // ── Polish / grain-direction callout (screen + PDF) ──────────────────────
+    // A double-headed arrow along the chosen axis on the part, with the bilingual "Dirección de pulido"
+    // label on the right. Part-type-agnostic: drawn on each type's primary view box with a simple
+    // right-side placement (acceptance: "its own simple placement for now"). No-op when unset.
+    // TODO: items 2 (finish) + 4 (polish) should later share ONE right-side placement manager so the
+    // label never collides with the finish callout. Do NOT refactor the finish callout here.
+    private static void DrawPolishCallout(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        if (fp.Spec.PolishDirection == PolishDirection.None) return;
+        bool vertical = fp.Spec.PolishDirection == PolishDirection.Vertical;
+
+        var pen  = new XPen(XColor.FromArgb(120, 70, 180), 1.4);   // violet — distinct from cut/bend/dim
+        var font = new XFont("Arial", 7, XFontStyleEx.Bold);
+        string label = Bi.T("polish.direction");
+
+        double cx = box.X + box.Width * 0.5;
+        double cy = box.Y + box.Height * 0.5;
+        double half = (vertical ? box.Height : box.Width) * 0.19;
+        const double head = 5;
+
+        if (vertical)
+        {
+            var tp = new XPoint(cx, cy - half);
+            var bt = new XPoint(cx, cy + half);
+            gfx.DrawLine(pen, tp, bt);
+            gfx.DrawLine(pen, tp, new XPoint(cx - head, tp.Y + head));
+            gfx.DrawLine(pen, tp, new XPoint(cx + head, tp.Y + head));
+            gfx.DrawLine(pen, bt, new XPoint(cx - head, bt.Y - head));
+            gfx.DrawLine(pen, bt, new XPoint(cx + head, bt.Y - head));
+        }
+        else
+        {
+            var lf = new XPoint(cx - half, cy);
+            var rg = new XPoint(cx + half, cy);
+            gfx.DrawLine(pen, lf, rg);
+            gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy - head));
+            gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy + head));
+            gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy - head));
+            gfx.DrawLine(pen, rg, new XPoint(rg.X - head, cy + head));
+        }
+
+        // Label on the right-hand side, outside the (centred) part, clamped within the box.
+        var sz = gfx.MeasureString(label, font);
+        double lx = Math.Min(box.X + box.Width - sz.Width - 2, cx + half + 6);
+        if (lx < box.X) lx = box.X;
+        gfx.DrawString(label, font, XBrushes.Black,
+            new XRect(lx, cy - sz.Height / 2, sz.Width, sz.Height), XStringFormats.TopLeft);
     }
 
     // ── 2. Dimensioned end-section (any shape, primary dims only) ─────────────

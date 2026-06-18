@@ -39,9 +39,21 @@ public static class DrawingTextParser
         // ── Material + thickness ────────────────────────────────────────────
         var (family, materialLabel) = DetectMaterial(lower);
 
+        // ── Polish / grain direction — parsed + stripped EARLY (before the column early-return below)
+        //    so it reaches EVERY part type. Strip from both text and lower so neither downstream parser
+        //    (e.g. the column's quoted-label scan over text) trips on it. Mirrors the finish token. ──
+        PolishDirection polish = PolishDirection.None;
+        var pmatch = Regex.Match(lower, @"\bpolish\s+(vertical|horizontal)\b");
+        if (pmatch.Success)
+        {
+            polish = pmatch.Groups[1].Value == "vertical" ? PolishDirection.Vertical : PolishDirection.Horizontal;
+            lower = lower.Remove(pmatch.Index, pmatch.Length);
+            text  = text.Remove(pmatch.Index, pmatch.Length);
+        }
+
         // ── Structural column — its own field set (per-plate thickness + tube); parsed + returned here ──
         if (type == PartType.Column)
-            return ParseColumn(text, lower, materialLabel);
+            return ParseColumn(text, lower, materialLabel, polish);
 
         double thickness = ResolveThickness(lower, family, materialLabel);
 
@@ -69,15 +81,15 @@ public static class DrawingTextParser
 
         // ── Flat plates (Flitch / Base) — different field set; parsed + returned here ──
         if (type is PartType.FlitchPlate or PartType.BasePlate)
-            return ParsePlate(type, lower, thickness, materialLabel, ri, k);
+            return ParsePlate(type, lower, thickness, materialLabel, ri, k, polish);
 
         // ── Pan — L x W x D plus which walls are present; parsed + returned here ──
         if (type == PartType.Pan)
-            return ParsePan(lower, thickness, materialLabel, ri, k, finish);
+            return ParsePan(lower, thickness, materialLabel, ri, k, finish, polish);
 
         // ── Paddle blind / spade ("frying pan") — NPS + class lookup; parsed + returned here ──
         if (type == PartType.PaddleBlind)
-            return ParsePaddleBlind(lower, thickness, materialLabel, ri);
+            return ParsePaddleBlind(lower, thickness, materialLabel, ri, polish);
 
         // ── Global basis (whole words only; id/od are reserved for per-dim) ──
         DimBasis globalBasis = Regex.IsMatch(lower, @"\binside\b") ? DimBasis.Inside : DimBasis.Outside;
@@ -200,6 +212,7 @@ public static class DrawingTextParser
             Material = materialLabel,
             Units = "in",
             Finish = finish,
+            PolishDirection = polish,
         };
     }
 
@@ -224,7 +237,7 @@ public static class DrawingTextParser
         new($"{what} is coming soon — U-channel, L-angle and Z-channel are available now.");
 
     /// <summary>Parses a flat plate (Flitch / Base) — length x width, thickness, and bolt holes.</summary>
-    private static PartSpec ParsePlate(PartType type, string lower, double thickness, string material, double ri, double k)
+    private static PartSpec ParsePlate(PartType type, string lower, double thickness, string material, double ri, double k, PolishDirection polish)
     {
         if (thickness <= 0)
             throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"0.25 steel\").");
@@ -292,11 +305,12 @@ public static class DrawingTextParser
         {
             Type = type, Length = L, Width = W, Thickness = thickness,
             InsideRadius = ri, KFactor = k, Material = material, Holes = holes, Units = "in",
+            PolishDirection = polish,
         };
     }
 
     /// <summary>Parses a pan — "Pan L x W x D, {n} long {n} short, {material}".</summary>
-    private static PartSpec ParsePan(string lower, double thickness, string material, double ri, double k, FinishSide finish)
+    private static PartSpec ParsePan(string lower, double thickness, string material, double ri, double k, FinishSide finish, PolishDirection polish)
     {
         if (thickness <= 0)
             throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"16ga\").");
@@ -330,7 +344,7 @@ public static class DrawingTextParser
             WidthBasis = BasisFrom(m.Groups[4].Value, DimBasis.Outside),
             DepthBasis = BasisFrom(m.Groups[6].Value, DimBasis.Outside),
             Thickness = thickness, InsideRadius = ri, KFactor = k, AngleDeg = 90,
-            Material = material, Units = "in", Finish = finish,
+            Material = material, Units = "in", Finish = finish, PolishDirection = polish,
             PanBottom = longN >= 1, PanTop = longN >= 2,
             PanLeft = shortN >= 1, PanRight = shortN >= 2,
             PanReturn = panReturn,
@@ -338,7 +352,7 @@ public static class DrawingTextParser
     }
 
     /// <summary>Parses a paddle blind / spade — "Frying Pan {nps} #{class}, {material/thickness}".</summary>
-    private static PartSpec ParsePaddleBlind(string lower, double thickness, string material, double ri)
+    private static PartSpec ParsePaddleBlind(string lower, double thickness, string material, double ri, PolishDirection polish)
     {
         // NPS: the first number after the type keyword (fraction / mixed / decimal), optional inch mark.
         var nm = Regex.Match(lower, $@"\b(?:frying\s*pan|paddle\s*(?:blind|blank)|spade)\b\s*({Num})\s*(?:""|in|inch)?");
@@ -369,6 +383,7 @@ public static class DrawingTextParser
             InsideRadius = ri > 0 ? ri : t,
             Material = material,
             Units = "in",
+            PolishDirection = polish,
         };
     }
 
@@ -378,7 +393,7 @@ public static class DrawingTextParser
     ///    column {round|square|rect} D1 [x D2] wall W, {material} "Product label"".
     /// Tube cut length = H − base T − bearing T (computed in FlatPattern).
     /// </summary>
-    private static PartSpec ParseColumn(string text, string lower, string material)
+    private static PartSpec ParseColumn(string text, string lower, string material, PolishDirection polish)
     {
         double height = MatchNum(lower, $@"\b(?:height|h|gap)\s*[:=]?\s*({Num})")
             ?? throw new DrawingParseException("Column needs a full height, e.g. \"Column height 96, base 10 x 10 x 0.75, …\".");
@@ -425,7 +440,7 @@ public static class DrawingTextParser
             ColumnShape = shape, ColumnOuterWidth = d1, ColumnOuterDepth = d2, ColumnWall = wall,
             ColumnLabel = label,
             Thickness = baseT,   // representative only; geometry uses the per-plate thicknesses
-            Material = material, Units = "in",
+            Material = material, Units = "in", PolishDirection = polish,
         };
     }
 
