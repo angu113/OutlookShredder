@@ -216,7 +216,7 @@ public static class DrawingPdfRenderer
 
         if (vertical)
         {
-            double half = box.Height * 0.18;
+            double half = box.Height * 0.09;   // arrow ~18% of the view tall — sits well inside the part
             var tp = new XPoint(cx, cy - half); var bt = new XPoint(cx, cy + half);
             gfx.DrawLine(pen, tp, bt);
             gfx.DrawLine(pen, tp, new XPoint(cx - head, tp.Y + head)); gfx.DrawLine(pen, tp, new XPoint(cx + head, tp.Y + head));
@@ -234,7 +234,7 @@ public static class DrawingPdfRenderer
         }
         else
         {
-            double half = box.Width * 0.18;
+            double half = box.Width * 0.09;   // arrow ~18% of the view wide — sits well inside the part
             var lf = new XPoint(cx - half, cy); var rg = new XPoint(cx + half, cy);
             gfx.DrawLine(pen, lf, rg);
             gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy - head)); gfx.DrawLine(pen, lf, new XPoint(lf.X + head, cy + head));
