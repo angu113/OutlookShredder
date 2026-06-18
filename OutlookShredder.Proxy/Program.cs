@@ -349,6 +349,26 @@ try
                 // than waiting for the 5-minute TTL to expire.
                 var notify = app.Services.GetRequiredService<RfqNotificationService>();
                 await notify.StartBusListenerAsync();
+
+                // One-time clean-slate backfill of supplier-message read state: stamp every existing
+                // inbound message as read so the new unread paradigm starts from zero. Guarded by a
+                // persistent ShredderConfig flag (shared across all proxies) — running it on every
+                // startup would re-stamp genuinely-unread messages as read and destroy live state.
+                try
+                {
+                    var flag = await sp.GetShredderConfigAsync("SupplierReadBackfillDone");
+                    if (!string.Equals(flag?.Value, "true", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var stamped = await sp.BackfillSupplierReadStateAsync();
+                        await sp.UpsertShredderConfigAsync("SupplierReadBackfillDone", "true",
+                            $"Clean-slate read-state backfill; stamped {stamped} inbound rows read.");
+                        Log.Information("[ReadBackfill] One-time supplier read-state backfill stamped {Count} rows", stamped);
+                    }
+                }
+                catch (Exception bfx)
+                {
+                    Log.Warning(bfx, "[ReadBackfill] One-time supplier read-state backfill failed (non-fatal)");
+                }
             }
             catch (Exception ex)
             {
