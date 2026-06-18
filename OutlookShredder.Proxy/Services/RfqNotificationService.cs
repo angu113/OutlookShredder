@@ -279,7 +279,7 @@ public class RfqNotificationService
     /// the SR/RFQ/tab unread badge cascade.
     /// </summary>
     public void NotifySupplierMessageRead(
-        string rfqId, string supplierName, string messageId, bool read, string? readBy) =>
+        string userId, string rfqId, string supplierName, string messageId, bool read, string? readBy) =>
         NotifyRfqProcessed(new RfqProcessedNotification
         {
             EventType    = "SupplierMsgRead",
@@ -289,6 +289,7 @@ public class RfqNotificationService
             ConvRead     = read,
             ConvReadBy   = read ? readBy : null,
             ConvReadAt   = read ? DateTimeOffset.UtcNow.ToString("o") : null,
+            ConvReadUser = userId,
         });
 
     /// <summary>

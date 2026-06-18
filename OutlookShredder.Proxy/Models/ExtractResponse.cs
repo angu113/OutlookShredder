@@ -110,6 +110,9 @@ public class RfqProcessedNotification
     public string?  ConvReadBy { get; set; }
     /// <summary>When it changed (UTC ISO), or null.</summary>
     public string?  ConvReadAt { get; set; }
+    /// <summary>The user (Environment.UserName) whose per-user read state changed. Peers refresh only when
+    /// this matches THEIR user (read is per-user now) — i.e. the same person on another machine.</summary>
+    public string?  ConvReadUser { get; set; }
 }
 
 /// <summary>

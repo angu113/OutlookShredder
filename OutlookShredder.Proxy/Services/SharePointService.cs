@@ -5345,6 +5345,16 @@ public partial class SharePointService
                 ("FeedbackBy",   "text"),
                 ("FeedbackAt",   "dateTime"),
             ]),
+            // Per-user read state: one row per user (Title = userId). AdoptedAt = clean-slate watermark;
+            // ReadMessageIds = newline-joined MessageIds read after it. Drives the per-user unread badge.
+            // Queried by Title ($filter) — so Title is indexed AT construction (EnsureIndexedListAsync).
+            ["SupplierReadProfiles"] = await EnsureIndexedListAsync(siteId, "SupplierReadProfiles",
+            [
+                ("AdoptedAt",        "dateTime"),
+                ("ReadMessageIds",   "note"),   // explicit reads  (override a watermark-unread)
+                ("UnreadMessageIds", "note"),   // explicit unreads (override a watermark-read — old messages)
+                ("UpdatedAt",        "dateTime"),
+            ], "Title"),
             ["SupplierConversations"] = await EnsureListColumnsAsync(siteId, "SupplierConversations",
             [
                 ("RFQ_ID",             "text"),
@@ -5952,6 +5962,22 @@ public partial class SharePointService
             }
         }
         return results;
+    }
+
+    /// <summary>
+    /// Ensures a list + its columns AND indexes the columns used in $filter/$orderby — in ONE call, so a
+    /// filterable column can never be added without its index. SharePoint 500s ("Field '…' cannot be
+    /// referenced in filter … as it is not indexed") on a filtered query against an un-indexed column —
+    /// EVEN on a tiny list (the warning header "may fail randomly"). So index EVERY queried column right
+    /// here at construction. Prefer this over EnsureListColumnsAsync whenever the list is queried by a column.
+    /// </summary>
+    private async Task<Dictionary<string, string>> EnsureIndexedListAsync(
+        string siteId, string listName, (string Name, string Type)[] columns, params string[] indexedColumns)
+    {
+        var result = await EnsureListColumnsAsync(siteId, listName, columns);
+        if (indexedColumns.Length > 0)
+            await EnsureColumnIndexesAsync(siteId, listName, indexedColumns);
+        return result;
     }
 
     private async Task<Dictionary<string, string>> EnsureListColumnsAsync(
@@ -8393,6 +8419,82 @@ public partial class SharePointService
         return listId;
     }
 
+    private string? _readProfilesListId;
+
+    private async Task<string> GetReadProfilesListIdAsync()
+    {
+        if (_readProfilesListId is not null) return _readProfilesListId;
+        var siteId = await GetSiteIdAsync();
+        var lists  = await GetGraph().Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = "displayName eq 'SupplierReadProfiles'");
+        var listId = lists?.Value?.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException(
+                "SupplierReadProfiles list not found. EnsureSupplierListsAsync provisions it at startup.");
+        _readProfilesListId = listId;
+        return listId;
+    }
+
+    /// <summary>A user's per-user read profile: clean-slate watermark + explicit read/unread override sets.</summary>
+    private sealed record ReadProfile(string ItemId, DateTimeOffset AdoptedAt, HashSet<string> ReadIds, HashSet<string> UnreadIds);
+
+    /// <summary>
+    /// Loads user <paramref name="userId"/>'s read profile. Creates it lazily with AdoptedAt=now (the
+    /// clean slate — every existing message counts as already-read) when missing and
+    /// <paramref name="createIfMissing"/> is set; returns null when missing and not creating.
+    /// </summary>
+    private async Task<ReadProfile?> GetOrCreateReadProfileAsync(string userId, bool createIfMissing, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetReadProfilesListIdAsync();
+        var safe   = userId.Replace("'", "''");
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=Title,AdoptedAt,ReadMessageIds,UnreadMessageIds)"];
+            req.QueryParameters.Top    = 1;
+            req.QueryParameters.Filter = $"fields/Title eq '{safe}'";
+        }, ct);
+        var item = page?.Value?.FirstOrDefault();
+        if (item?.Fields?.AdditionalData is { } f && item.Id is { } existingId)
+        {
+            var adopted = DateTimeOffset.TryParse(GetStr(f, "AdoptedAt"), out var a) ? a : DateTimeOffset.UtcNow;
+            return new ReadProfile(existingId, adopted,
+                SupplierReadModel.ParseReadIds(GetStr(f, "ReadMessageIds")),
+                SupplierReadModel.ParseReadIds(GetStr(f, "UnreadMessageIds")));
+        }
+        if (!createIfMissing) return null;
+
+        var now = DateTimeOffset.UtcNow;
+        var created = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(new ListItem
+        {
+            Fields = new FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]     = userId,
+                    ["AdoptedAt"] = now,
+                    ["UpdatedAt"] = now,
+                }
+            }
+        }, cancellationToken: ct);
+        _log.LogInformation("[Conv] created read profile for '{User}' (clean slate @ {At:o})", userId, now);
+        return new ReadProfile(created?.Id ?? "", now,
+            new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
+    }
+
+    /// <summary>Writes the user's read + unread override sets (+ UpdatedAt) back; AdoptedAt unchanged.</summary>
+    private async Task WriteReadProfileAsync(string itemId, IEnumerable<string> readIds, IEnumerable<string> unreadIds, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(itemId)) return;
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetReadProfilesListIdAsync();
+        await PatchListItemWithRetryAsync(siteId, listId, itemId, new Dictionary<string, object?>
+        {
+            ["ReadMessageIds"]   = SupplierReadModel.SerializeReadIds(readIds),
+            ["UnreadMessageIds"] = SupplierReadModel.SerializeReadIds(unreadIds),
+            ["UpdatedAt"]        = DateTimeOffset.UtcNow,
+        }, ct);
+    }
+
     /// <summary>
     /// Appends one message (inbound or outbound) to the SupplierConversations list.
     /// Dedupes on MessageId when provided so re-runs and the mail poller don't duplicate.
@@ -8524,7 +8626,7 @@ public partial class SharePointService
     /// The two underlying SharePoint list queries run in parallel.
     /// </summary>
     public async Task<List<Models.ConversationMessage>> ReadConversationAsync(
-        string rfqId, string supplierName)
+        string userId, string rfqId, string supplierName)
     {
         // Resolve site/list IDs first (these are typically cached after first resolve).
         var siteId     = await GetSiteIdAsync();
@@ -8557,7 +8659,9 @@ public partial class SharePointService
                 .ToList();
         }
 
-        return convRows.Concat(srRows).OrderBy(r => r.SentAt).ToList();
+        var merged = convRows.Concat(srRows).OrderBy(r => r.SentAt).ToList();
+        await ApplyUserReadStateAsync(userId, merged);
+        return merged;
     }
 
     /// <summary>
@@ -8566,15 +8670,17 @@ public partial class SharePointService
     /// scan. Use when the caller already has the SR-derived inbound messages in memory.
     /// </summary>
     public async Task<List<Models.ConversationMessage>> ReadOutboundConversationAsync(
-        string rfqId, string supplierName)
+        string userId, string rfqId, string supplierName)
     {
         var siteId     = await GetSiteIdAsync();
         var convListId = await GetConversationsListIdAsync();
         var rfq        = rfqId.Replace("'", "''");
         var supplier   = supplierName.Replace("'", "''");
         var filter     = $"fields/RFQ_ID eq '{rfq}' and fields/SupplierName eq '{supplier}'";
-        var rows       = await ReadConversationRowsAsync(siteId, convListId, filter, rfqId, supplierName);
-        return rows.OrderBy(r => r.SentAt).ToList();
+        var rows       = (await ReadConversationRowsAsync(siteId, convListId, filter, rfqId, supplierName))
+            .OrderBy(r => r.SentAt).ToList();
+        await ApplyUserReadStateAsync(userId, rows);
+        return rows;
     }
 
     /// <summary>
@@ -8770,7 +8876,25 @@ public partial class SharePointService
         return results;
     }
 
-    // ── Per-message read state (team-wide; inbound supplier messages) ─────────
+    /// <summary>Stamps per-user IsRead on the INBOUND messages of a thread (outbound is never read-tracked):
+    /// read = at/before the user's clean-slate watermark OR explicitly in their read-set. The per-user model
+    /// stores ids only, so the legacy team-wide ReadBy/ReadAt display stamps are cleared.</summary>
+    private async Task ApplyUserReadStateAsync(string userId, List<Models.ConversationMessage> messages)
+    {
+        if (string.IsNullOrWhiteSpace(userId) || messages.Count == 0) return;
+        var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: false)
+                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
+        foreach (var m in messages)
+        {
+            if (!string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase)) continue;
+            DateTimeOffset? t = m.SentAt == default ? null : m.SentAt;
+            m.IsRead = !SupplierReadModel.IsUnread(t, m.MessageId, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds);
+            m.ReadBy = null;
+            m.ReadAt = null;
+        }
+    }
+
+    // ── Per-user read state (inbound supplier messages) ───────────────────────
 
     /// <summary>Unread tallies for the badge cascade: grand total + per-RFQ + per-(rfq|supplier).</summary>
     public sealed record SupplierUnreadCounts(
@@ -8779,72 +8903,40 @@ public partial class SharePointService
         Dictionary<string, int> BySupplier);
 
     /// <summary>
-    /// Marks one inbound supplier message read/unread (team-wide) by MessageId. Patches the matching row
-    /// in SupplierResponses and/or SupplierConversations (a message may live in either). MessageId is
-    /// matched with Ordinal (Graph IDs are case-sensitive). Returns the number of rows patched.
+    /// Marks one inbound supplier message read/unread FOR ONE USER by MessageId — adds/removes the id in
+    /// the user's read-set (per-user model; the legacy team-wide IsRead/ReadAt/ReadBy columns are no
+    /// longer written). MessageId is stored Ordinal (Graph IDs are case-sensitive). Returns 1 when applied.
     /// </summary>
     public async Task<int> MarkSupplierMessageReadAsync(
-        string rfqId, string supplierName, string messageId, bool read, string? readBy,
-        CancellationToken ct = default)
+        string userId, string messageId, bool read, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(messageId)) return 0;
-        var siteId = await GetSiteIdAsync();
-        var safe   = rfqId.Replace("'", "''");
-        var patch  = new Dictionary<string, object?>
-        {
-            ["IsRead"] = read,
-            ["ReadAt"] = read ? DateTimeOffset.UtcNow : null,
-            ["ReadBy"] = read ? readBy : null,
-        };
-        int patched = 0;
-
-        async Task PatchMatchAsync(string listId)
-        {
-            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields($select=MessageId)"];
-                req.QueryParameters.Top    = 500;
-                req.QueryParameters.Filter = $"fields/RFQ_ID eq '{safe}'";
-            }, ct);
-            while (page?.Value is not null)
-            {
-                foreach (var item in page.Value)
-                {
-                    var f = item.Fields?.AdditionalData;
-                    if (item.Id is null || f is null) continue;
-                    if (string.Equals(GetStr(f, "MessageId"), messageId, StringComparison.Ordinal))
-                    {
-                        await PatchListItemWithRetryAsync(siteId, listId, item.Id, patch, ct);
-                        patched++;
-                    }
-                }
-                if (page.OdataNextLink is null) break;
-                page = await GetGraph().Sites[siteId].Lists[listId].Items
-                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
-            }
-        }
-
-        await PatchMatchAsync(await GetSupplierResponsesListIdAsync());
-        await PatchMatchAsync(await GetConversationsListIdAsync());
-        _log.LogInformation("[Conv] mark-read msg={Msg} read={Read} by={By} -> {N} row(s)",
-            messageId, read, readBy, patched);
-        return patched;
+        if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(messageId)) return 0;
+        var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct);
+        if (profile is null) return 0;
+        var sets = SupplierReadModel.ApplyMark(profile.ReadIds, profile.UnreadIds, messageId, read);
+        await WriteReadProfileAsync(profile.ItemId, sets.Read, sets.Unread, ct);
+        _log.LogInformation("[Conv] mark-read user={User} msg={Msg} read={Read}", userId, messageId, read);
+        return 1;
     }
 
     /// <summary>
-    /// Counts unread inbound supplier messages across the whole tenant (IsRead missing/false = unread),
-    /// deduped by MessageId across the two source lists. Drives the SR / RFQ / tab unread badges.
+    /// Counts unread inbound supplier messages FOR ONE USER across the whole tenant, deduped by MessageId
+    /// across the two source lists. Unread = arrived after the user's clean-slate watermark AND not in
+    /// their read-set. The profile is created lazily (AdoptedAt=now) on first call — the per-user clean
+    /// slate. Drives the SR / RFQ / tab unread badges.
     /// </summary>
-    public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(CancellationToken ct = default)
+    public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(string userId, CancellationToken ct = default)
     {
+        var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct)
+                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
         var siteId = await GetSiteIdAsync();
-        var entries = new List<(string Rfq, string Sup, string? Msg)>();
+        var rows = new List<SupplierReadModel.ReadRow>();
 
-        async Task ScanAsync(string listId, bool inboundOnly)
+        async Task ScanAsync(string listId, bool inboundOnly, string timeField)
         {
             var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,Direction,MessageId,IsRead)"];
+                req.QueryParameters.Expand = [$"fields($select=RFQ_ID,SupplierName,Direction,MessageId,{timeField})"];
                 req.QueryParameters.Top    = 999;
             }, ct);
             while (page?.Value is not null)
@@ -8854,10 +8946,10 @@ public partial class SharePointService
                     var f = item.Fields?.AdditionalData;
                     if (f is null) continue;
                     if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb) continue;  // read
                     var rfq = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
                     if (string.IsNullOrEmpty(rfq)) continue;
-                    entries.Add((rfq, GetStr(f, "SupplierName") ?? "", GetStr(f, "MessageId")));
+                    DateTimeOffset? t = DateTimeOffset.TryParse(GetStr(f, timeField), out var dt) ? dt : null;
+                    rows.Add(new SupplierReadModel.ReadRow(rfq, GetStr(f, "SupplierName") ?? "", GetStr(f, "MessageId"), t));
                 }
                 if (page.OdataNextLink is null) break;
                 page = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -8865,23 +8957,11 @@ public partial class SharePointService
             }
         }
 
-        await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false); // SR rows are all inbound
-        await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true);
+        await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false, "ReceivedAt"); // SR rows all inbound
+        await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true,  "SentAt");
 
-        // Dedup by MessageId (a message may be logged in both lists); null-MessageId rows count individually.
-        var byRfq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var bySup = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var seen  = new HashSet<string>(StringComparer.Ordinal);
-        int total = 0;
-        foreach (var (rfq, sup, msg) in entries)
-        {
-            if (!string.IsNullOrEmpty(msg) && !seen.Add(msg)) continue;
-            total++;
-            byRfq[rfq] = byRfq.GetValueOrDefault(rfq) + 1;
-            var sk = $"{rfq}|{sup}";
-            bySup[sk] = bySup.GetValueOrDefault(sk) + 1;
-        }
-        return new SupplierUnreadCounts(total, byRfq, bySup);
+        var t = SupplierReadModel.Tally(rows, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds);
+        return new SupplierUnreadCounts(t.Total, t.ByRfq, t.BySupplier);
     }
 
     /// <summary>

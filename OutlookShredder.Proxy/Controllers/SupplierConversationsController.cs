@@ -35,7 +35,8 @@ public class SupplierConversationsController : ControllerBase
         public string  SupplierName { get; set; } = "";
         public string  MessageId    { get; set; } = "";
         public bool    Read         { get; set; } = true;
-        public string? ReadBy       { get; set; }
+        public string? ReadBy       { get; set; }   // display only ("read by … · time")
+        public string? UserId       { get; set; }   // per-user read-state key (Environment.UserName)
     }
 
     /// <summary>
@@ -48,16 +49,19 @@ public class SupplierConversationsController : ControllerBase
     public async Task<IActionResult> Get(
         [FromQuery] string rfqId,
         [FromQuery] string supplierName,
-        [FromQuery] bool   outboundOnly = false)
+        [FromQuery] bool   outboundOnly = false,
+        [FromQuery] string? userId = null)
     {
         if (string.IsNullOrWhiteSpace(rfqId) || string.IsNullOrWhiteSpace(supplierName))
             return BadRequest(new { error = "rfqId and supplierName are required" });
 
         try
         {
+            // userId optional here — when absent, per-user read flags are simply not applied (badge path
+            // requires it). The client always sends it (ships in lockstep with this proxy).
             var messages = outboundOnly
-                ? await _sp.ReadOutboundConversationAsync(rfqId, supplierName)
-                : await _sp.ReadConversationAsync(rfqId, supplierName);
+                ? await _sp.ReadOutboundConversationAsync(userId ?? "", rfqId, supplierName)
+                : await _sp.ReadConversationAsync(userId ?? "", rfqId, supplierName);
             return Ok(new { rfqId, supplierName, messages });
         }
         catch (Exception ex)
@@ -77,13 +81,14 @@ public class SupplierConversationsController : ControllerBase
         if (req is null || string.IsNullOrWhiteSpace(req.RfqId) ||
             string.IsNullOrWhiteSpace(req.SupplierName) || string.IsNullOrWhiteSpace(req.MessageId))
             return BadRequest(new { error = "rfqId, supplierName and messageId are required" });
+        if (string.IsNullOrWhiteSpace(req.UserId))
+            return BadRequest(new { error = "userId is required" });
 
         try
         {
-            var patched = await _sp.MarkSupplierMessageReadAsync(
-                req.RfqId, req.SupplierName, req.MessageId, req.Read, req.ReadBy);
-            // Publish even when patched==0 so peers stay consistent on the optimistic UI.
-            _notify.NotifySupplierMessageRead(req.RfqId, req.SupplierName, req.MessageId, req.Read, req.ReadBy);
+            var patched = await _sp.MarkSupplierMessageReadAsync(req.UserId, req.MessageId, req.Read);
+            // Publish scoped to the user so only THAT user's other machines refresh (read is per-user now).
+            _notify.NotifySupplierMessageRead(req.UserId, req.RfqId, req.SupplierName, req.MessageId, req.Read, req.ReadBy);
             return Ok(new { ok = true, patched });
         }
         catch (Exception ex)
@@ -99,11 +104,13 @@ public class SupplierConversationsController : ControllerBase
     /// Powers the RFQ-tab / RFQ-header / SR-header unread badges.
     /// </summary>
     [HttpGet("supplier-conversations/unread")]
-    public async Task<IActionResult> GetUnread()
+    public async Task<IActionResult> GetUnread([FromQuery] string userId)
     {
+        if (string.IsNullOrWhiteSpace(userId))
+            return BadRequest(new { error = "userId is required" });
         try
         {
-            var counts = await _sp.GetSupplierUnreadCountsAsync();
+            var counts = await _sp.GetSupplierUnreadCountsAsync(userId);
             return Ok(new { total = counts.Total, byRfq = counts.ByRfq, bySupplier = counts.BySupplier });
         }
         catch (Exception ex)
@@ -118,19 +125,10 @@ public class SupplierConversationsController : ControllerBase
     /// so only messages arriving after this start unread. Idempotent.
     /// </summary>
     [HttpPost("supplier-conversations/backfill-read")]
-    public async Task<IActionResult> BackfillRead()
-    {
-        try
-        {
-            var stamped = await _sp.BackfillSupplierReadStateAsync();
-            return Ok(new { ok = true, stamped });
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "[Conv] backfill read-state failed");
-            return StatusCode(500, new { error = ex.Message });
-        }
-    }
+    public IActionResult BackfillRead() =>
+        // Deprecated no-op: the team-wide clean-slate is replaced by the per-user lazy watermark — each
+        // user's profile is created with AdoptedAt=now on their first unread fetch.
+        Ok(new { ok = true, stamped = 0, deprecated = true });
 
     /// <summary>
     /// Returns the three contact email addresses (primary, manager, OOO) for the given supplier.
