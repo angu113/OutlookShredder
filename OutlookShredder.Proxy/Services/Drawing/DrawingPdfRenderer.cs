@@ -110,6 +110,11 @@ public static class DrawingPdfRenderer
                 DrawColumn(gfx, fp, new XRect(M, top, usable, h));
                 DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
+            else if (fp.IsCircle)
+            {
+                DrawCircle(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
+            }
             else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
@@ -770,6 +775,54 @@ public static class DrawingPdfRenderer
         DimV(gfx, dimFont, P(xW, R).X, P(R + C, R).X + 12, P(xW, R - hw).Y, P(xW, R + hw).Y, Fq(fp.Spec.PaddleHandleWidth), false);
     }
 
+    // ── Circle / disc (and donut): flat face view with Ø dimension(s) ──
+    private static void DrawCircle(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var centre = new XPen(DimColor, 0.5) { DashStyle = XDashStyle.DashDot };
+
+        gfx.DrawString(Bi.T("flatPattern.cut"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double od = fp.Spec.Diameter, R = od / 2.0, innerD = fp.Spec.InnerDiameter;
+        if (od <= 0) return;
+
+        // Bands hold the OD label (left) + the cross-axis ticks; keep the disc clear of the page edge.
+        const double bandL = 64, bandR = 32, bandT = 24, bandB = 40;
+        double availW = area.Width - bandL - bandR, availH = area.Height - bandT - bandB;
+        double scale = Math.Min(availW / od, availH / od);
+        double drawSz = od * scale;
+        double ox = area.X + bandL + (availW - drawSz) / 2;
+        double oy = area.Y + bandT + (availH - drawSz) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawSz - my * scale);
+
+        // Disc outline (+ donut bore). Origin lower-left; disc centre at (R, R).
+        var c = P(R, R);
+        gfx.DrawEllipse(cutPen, c.X - R * scale, c.Y - R * scale, drawSz, drawSz);
+        if (innerD > 0)
+        {
+            double ir = innerD / 2.0 * scale;
+            gfx.DrawEllipse(cutPen, c.X - ir, c.Y - ir, 2 * ir, 2 * ir);
+        }
+
+        // Centre cross.
+        gfx.DrawLine(centre, P(0, R), P(od, R));
+        gfx.DrawLine(centre, P(R, 0), P(R, od));
+
+        // OD — vertical dim down the left of the disc (spans y 0..OD).
+        DimV(gfx, dimFont, P(0, 0).X, P(0, 0).X - 30, P(0, 0).Y, P(0, od).Y, $"{Fq(od)} {Bi.T("dia")}", true);
+        // Donut bore — horizontal dim across the inner circle, below the centre line.
+        if (innerD > 0)
+        {
+            double iy = R - innerD / 2.0;
+            DimH(gfx, dimFont, P(R - innerD / 2.0, iy).X, P(R + innerD / 2.0, iy).X, oy + drawSz, oy + drawSz + 22,
+                 $"{Fq(innerD)} {Bi.T("dia")}", true);
+        }
+    }
+
     // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──
     private static void DrawPan(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
@@ -996,9 +1049,9 @@ public static class DrawingPdfRenderer
         // (web/flanges/legs/section/holes/material) is already labelled on the drawing itself.
         var rows = new List<(string Label, string Value)>();
 
-        // Length (or a column's overall height); paddle blinds have no length.
-        if (fp.IsColumn)        rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
-        else if (!fp.IsPaddle)  rows.Add((Bi.T("spec.length"), Frac(s.Length)));
+        // Length (or a column's overall height); paddle blinds / circles / sheets have no single "length".
+        if (fp.IsColumn)                                          rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
+        else if (!fp.IsPaddle && !fp.IsCircle && s.Length > 0)    rows.Add((Bi.T("spec.length"), Frac(s.Length)));
 
         // Thickness — single-sheet parts; a column carries several (its plates/wall are on the drawing).
         if (!fp.IsColumn) rows.Add((Bi.T("thickness"), thk));
@@ -1007,6 +1060,7 @@ public static class DrawingPdfRenderer
         string Dec(double v) => DrawFormat.DecInch(v);
         string blankLabel = fp.IsColumn ? Bi.T("cutTo") : fp.IsPaddle ? Bi.T("plateToCut") : Bi.T("flatBlank");
         string blankValue = fp.IsColumn ? $"tube {Dec(fp.ColumnTubeLength)} + plates"
+            : fp.IsCircle ? (s.InnerDiameter > 0 ? $"{thk} x Ø{Dec(s.Diameter)} / Ø{Dec(s.InnerDiameter)}" : $"{thk} x Ø{Dec(s.Diameter)}")
             : (fp.IsPlate || fp.IsPaddle) ? $"{thk} x {Dec(fp.FlatHeight)} x {Dec(fp.FlatWidth)}"
             : $"{Dec(fp.FlatWidth)} x {Dec(fp.FlatHeight)}";
         rows.Add((blankLabel, blankValue));

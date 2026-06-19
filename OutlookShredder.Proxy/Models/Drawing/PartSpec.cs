@@ -12,6 +12,8 @@ public enum PartType
     BasePlate,
     PaddleBlind,
     Column,
+    Circle,
+    Sheet,
     Custom,
 }
 
@@ -92,8 +94,19 @@ public sealed class PartSpec
     /// <summary>The part run / depth. No inside/outside basis — it is the blank's other extent.</summary>
     public double Length { get; init; }
 
-    /// <summary>Plate width (for flat plates; Length is the plate length). Also the pan base width.</summary>
+    /// <summary>Plate width (for flat plates; Length is the plate length). Also the pan base width.
+    /// For a <see cref="PartType.Sheet"/> this is the horizontal extent (paired with <see cref="Height"/>).</summary>
     public double Width { get; init; }
+
+    // ── Sheet (plain flat rectangle, no bends) ──────────────────────────────
+    /// <summary>Sheet vertical extent. Paired with <see cref="Width"/> (horizontal).</summary>
+    public double Height { get; init; }
+
+    // ── Circle / disc (flat, no bends) ──────────────────────────────────────
+    /// <summary>Circle outside diameter.</summary>
+    public double Diameter { get; init; }
+    /// <summary>Inner diameter for a donut/annulus (&gt; 0 ⇒ cut a concentric inner hole). 0 = solid disc.</summary>
+    public double InnerDiameter { get; init; }
 
     /// <summary>Pan wall height.</summary>
     public double Depth { get; init; }

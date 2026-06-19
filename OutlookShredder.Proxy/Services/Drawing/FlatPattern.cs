@@ -45,6 +45,8 @@ public static class FlatPattern
         PartType.Pan         => DevelopPan(spec),
         PartType.PaddleBlind => DevelopPaddleBlind(spec),
         PartType.Column      => DevelopColumn(spec),
+        PartType.Circle      => DevelopCircle(spec),
+        PartType.Sheet       => DevelopSheet(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
 
@@ -470,6 +472,83 @@ public static class FlatPattern
             $"NPS {s.PaddleNps}\" Class {s.PaddleClass} per ASME B16.48",
             $"Spade OD {F(s.PaddleOd)}{u}, handle {F(s.PaddleHandleWidth)}{u} wide x {F(s.PaddleCenterToEnd)}{u} centre-to-end",
         });
+    }
+
+    // ── Circle / disc — flat outline (+ concentric inner hole for a donut), no bends ──
+    private static FlatPatternResult DevelopCircle(PartSpec spec)
+    {
+        double od = spec.Diameter, R = od / 2.0;
+        double inner = spec.InnerDiameter;
+
+        // Origin lower-left; disc centre at (R, R) so coords are positive, matching the other shapes.
+        var entities = new List<CutEntity> { CutEntity.Circle(CutLayer, R, R, R) };
+        if (inner > 0) entities.Add(CutEntity.Circle(CutLayer, R, R, inner / 2.0));   // donut bore
+
+        string slug = inner > 0 ? $"donut_{Trim(od)}x{Trim(inner)}" : $"circle_{Trim(od)}";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = od, FlatHeight = od,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsCircle = true,
+            Summary = CircleSummary(spec),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static string CircleSummary(PartSpec s)
+    {
+        string u = U(s.Units);
+        return s.InnerDiameter > 0
+            ? string.Join("\n", new[] { $"Donut / annulus  {s.Material}  (T={F(s.Thickness)}{u})", $"OD {F(s.Diameter)}{u}  /  ID {F(s.InnerDiameter)}{u}" })
+            : string.Join("\n", new[] { $"Circle / disc  {s.Material}  (T={F(s.Thickness)}{u})", $"Dia {F(s.Diameter)}{u}" });
+    }
+
+    // ── Sheet — plain flat rectangle (Width x Height), no holes, no bends ────
+    private static FlatPatternResult DevelopSheet(PartSpec spec)
+    {
+        double W = spec.Width, H = spec.Height;
+        var entities = new List<CutEntity>
+        {
+            CutEntity.Polyline(CutLayer, closed: true, new[]
+            {
+                new CutVertex(0, 0), new CutVertex(W, 0), new CutVertex(W, H), new CutVertex(0, H),
+            }),
+        };
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = $"sheet_{Trim(W)}x{Trim(H)}",
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = W, FlatHeight = H,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsPlate = true,   // reuse the flat-plate top-view renderer; no holes => clean W x H rectangle
+            Holes = new(),
+            Summary = SheetSummary(spec),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static string SheetSummary(PartSpec s)
+    {
+        string u = U(s.Units);
+        return string.Join("\n", new[] { $"Sheet (flat)  {s.Material}  (T={F(s.Thickness)}{u})", $"{F(s.Width)}{u} x {F(s.Height)}{u}" });
     }
 
     // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
@@ -920,6 +999,14 @@ public static class FlatPattern
         if (s.Type == PartType.PaddleBlind)
             return $"{mat} Paddle Blind — {s.PaddleNps}\" NPS #{s.PaddleClass} x {thk} thickness".Trim();
 
+        if (s.Type == PartType.Circle)
+            return s.InnerDiameter > 0
+                ? $"{mat} Donut — {D(s.Diameter)} OD x {D(s.InnerDiameter)} ID x {thk} thickness".Trim()
+                : $"{mat} Circle — {D(s.Diameter)} dia x {thk} thickness".Trim();
+
+        if (s.Type == PartType.Sheet)
+            return $"{mat} Sheet — {D(s.Width)} x {D(s.Height)} x {thk} thickness".Trim();
+
         string shape = s.Type switch
         {
             PartType.UChannel => "U Channel",
@@ -1030,6 +1117,8 @@ public sealed class FlatPatternResult
     public bool IsPan { get; init; }
     /// <summary>True for paddle blinds / spades — drawn as a single disc-plus-handle face view.</summary>
     public bool IsPaddle { get; init; }
+    /// <summary>True for circles / discs (and donuts) — drawn as a single flat face view with Ø dims.</summary>
+    public bool IsCircle { get; init; }
     // Pan base rectangle (between bend lines) + flange flat length, for dimensioning.
     public double PanBaseX0 { get; init; }
     public double PanBaseX1 { get; init; }

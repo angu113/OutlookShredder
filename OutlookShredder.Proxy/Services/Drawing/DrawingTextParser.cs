@@ -83,6 +83,13 @@ public static class DrawingTextParser
         if (type is PartType.FlitchPlate or PartType.BasePlate)
             return ParsePlate(type, lower, thickness, materialLabel, ri, k, polish);
 
+        // ── Flat shapes (Circle / Sheet) — no bends; parsed + returned here. Circle carries no polish
+        //    (rotationally ambiguous); Sheet does. ──
+        if (type == PartType.Circle)
+            return ParseCircle(lower, thickness, materialLabel, ri, k);
+        if (type == PartType.Sheet)
+            return ParseSheet(lower, thickness, materialLabel, ri, k, polish);
+
         // ── Pan — L x W x D plus which walls are present; parsed + returned here ──
         if (type == PartType.Pan)
             return ParsePan(lower, thickness, materialLabel, ri, k, finish, polish);
@@ -220,6 +227,9 @@ public static class DrawingTextParser
     {
         // Column first — its clause contains "base"/"bearing" which must not trip the plate checks.
         if (Regex.IsMatch(lower, @"\bcolumn\b")) return PartType.Column;
+        // Flat shapes (no bends) — distinct lead words, checked before the single-letter U/Z/L matches.
+        if (Regex.IsMatch(lower, @"\b(circle|disc|disk|donut|doughnut)\b")) return PartType.Circle;
+        if (Regex.IsMatch(lower, @"\bsheet\b")) return PartType.Sheet;
         if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
         if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
@@ -305,6 +315,54 @@ public static class DrawingTextParser
         {
             Type = type, Length = L, Width = W, Thickness = thickness,
             InsideRadius = ri, KFactor = k, Material = material, Holes = holes, Units = "in",
+            PolishDirection = polish,
+        };
+    }
+
+    /// <summary>Parses a circle/disc — "Circle dia 12, 16ga steel"; "id 8" (or "donut") = annulus.
+    /// No polish (a disc has no single grain axis to call out).</summary>
+    private static PartSpec ParseCircle(string lower, double thickness, string material, double ri, double k)
+    {
+        if (thickness <= 0)
+            throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"16ga steel\").");
+
+        double? d = MatchNum(lower, $@"\b(?:dia|diameter|d)\s*[:=]?\s*({Num})");
+        if (d is null)
+        {
+            var sh = Regex.Match(lower, $@"\b(?:circle|disc|disk|donut|doughnut)\b\s*({Num})");
+            if (sh.Success) d = NumOf(sh.Groups[1].Value);
+        }
+        if (d is null || d <= 0)
+            throw new DrawingParseException("Circle needs a diameter, e.g. \"Circle dia 12, 16ga steel\".");
+
+        double inner = MatchNum(lower, $@"\b(?:id|inner)\s*[:=]?\s*({Num})") ?? 0;
+        if (inner < 0) inner = 0;
+        if (inner >= d.Value)
+            throw new DrawingParseException("Donut inner diameter must be less than the outside diameter.");
+
+        return new PartSpec
+        {
+            Type = PartType.Circle, Diameter = d.Value, InnerDiameter = inner,
+            Thickness = thickness, InsideRadius = ri, KFactor = k, Material = material, Units = "in",
+        };
+    }
+
+    /// <summary>Parses a plain flat sheet — "Sheet 24 x 12, 16ga steel" (width x height). Carries polish.</summary>
+    private static PartSpec ParseSheet(string lower, double thickness, string material, double ri, double k, PolishDirection polish)
+    {
+        if (thickness <= 0)
+            throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"16ga steel\").");
+
+        var m = Regex.Match(lower, $@"\bsheet\b\s*({Num})\s*x\s*({Num})");
+        if (!m.Success)
+            throw new DrawingParseException("Sheet needs width x height, e.g. \"Sheet 24 x 12, 16ga steel\".");
+        double w = NumOf(m.Groups[1].Value), h = NumOf(m.Groups[2].Value);
+        if (w <= 0 || h <= 0) throw new DrawingParseException("Sheet dimensions must be positive.");
+
+        return new PartSpec
+        {
+            Type = PartType.Sheet, Width = w, Height = h,
+            Thickness = thickness, InsideRadius = ri, KFactor = k, Material = material, Units = "in",
             PolishDirection = polish,
         };
     }
