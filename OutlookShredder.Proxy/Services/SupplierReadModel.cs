@@ -105,10 +105,12 @@ public static class SupplierReadModel
     /// <summary>
     /// Count unread across inbound message rows for ONE user, deduped by MessageId (Ordinal) across the two
     /// source lists; null/empty-MessageId rows count individually (cannot dedup). Grouped by RFQ and by
-    /// "rfqId|supplier" (keys compared OrdinalIgnoreCase, matching the existing badge cascade).
+    /// "rfqId|supplier" (keys compared OrdinalIgnoreCase, matching the existing badge cascade). Rows received
+    /// strictly before <paramref name="commsStartCutoff"/> (when set) are out of scope and never counted —
+    /// even if explicitly marked unread — matching the Comms data-start bound used across queries/UI.
     /// </summary>
     public static UnreadTally Tally(IEnumerable<ReadRow> rows, DateTimeOffset adoptedAt,
-        IReadOnlySet<string> readIds, IReadOnlySet<string> unreadIds)
+        IReadOnlySet<string> readIds, IReadOnlySet<string> unreadIds, DateTimeOffset? commsStartCutoff = null)
     {
         var seen  = new HashSet<string>(IdComparer);
         var byRfq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -117,6 +119,7 @@ public static class SupplierReadModel
         foreach (var r in rows)
         {
             if (!IsCountableRfq(r.Rfq)) continue;                               // junk/misclassified id the grid can't badge
+            if (commsStartCutoff is { } cut && r.MsgTime is { } mt && mt < cut) continue;  // before the Comms data-start bound -> out of scope
             if (r.MessageId is { Length: > 0 } id && !seen.Add(id)) continue;   // dedup across both lists
             if (!IsUnread(r.MsgTime, r.MessageId, adoptedAt, readIds, unreadIds)) continue;
             total++;

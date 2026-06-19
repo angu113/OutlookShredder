@@ -8959,6 +8959,7 @@ public partial class SharePointService
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct);
         if (profile is null || string.IsNullOrEmpty(profile.ItemId)) return 0;
         var siteId = await GetSiteIdAsync();
+        var cutoff = await GetCommsStartCutoffAsync();
         var toMark = new HashSet<string>(SupplierReadModel.IdComparer);
 
         async Task ScanAsync(string listId, bool inboundOnly, string timeField)
@@ -8980,6 +8981,7 @@ public partial class SharePointService
                     var id = GetStr(f, "MessageId");
                     if (string.IsNullOrEmpty(id)) continue;
                     DateTimeOffset? t = SupplierReadModel.ParseSpInstant(GetStr(f, timeField));
+                    if (cutoff > DateTimeOffset.MinValue && t is { } tt && tt < cutoff) continue;   // before the Comms data-start bound -> out of scope
                     if (SupplierReadModel.IsUnread(t, id, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds))
                         toMark.Add(id);
                 }
@@ -9002,11 +9004,35 @@ public partial class SharePointService
         return toMark.Count;
     }
 
+    // Comms data-start lower bound (ShredderConfig "CommsDataStartDate") applied to the unread scans —
+    // mirrors MailCacheService. Cached briefly so the per-call tally doesn't re-read SP config every time.
+    private const int CommsDefaultLookbackDays = 90;
+    private (DateTimeOffset Cutoff, DateTimeOffset At)? _commsCutoffCache;
+
+    /// <summary>Resolves the Comms data-start lower bound (UTC) for the unread scans — the same
+    /// "CommsDataStartDate" config MailCacheService uses. Falls back to a 90-day rolling window when unset/
+    /// unreadable. Cached for 5 minutes so a per-request tally doesn't re-read SP config each call. Parsed
+    /// via <see cref="SupplierReadModel.ParseSpInstant"/> so it shares the messages' true-UTC basis.</summary>
+    private async Task<DateTimeOffset> GetCommsStartCutoffAsync()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_commsCutoffCache is { } c && now - c.At < TimeSpan.FromMinutes(5)) return c.Cutoff;
+        var cutoff = now.AddDays(-CommsDefaultLookbackDays);
+        try
+        {
+            var cfg = await GetShredderConfigAsync("CommsDataStartDate");
+            if (cfg.HasValue && SupplierReadModel.ParseSpInstant(cfg.Value.Value) is { } d) cutoff = d;
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "[Conv] CommsDataStartDate read failed — using default {Days}d lookback", CommsDefaultLookbackDays); }
+        _commsCutoffCache = (cutoff, now);
+        return cutoff;
+    }
+
     /// <summary>
     /// Counts unread inbound supplier messages FOR ONE USER across the whole tenant, deduped by MessageId
     /// across the two source lists. Unread = arrived after the user's clean-slate watermark AND not in
-    /// their read-set. The profile is created lazily (AdoptedAt=now) on first call — the per-user clean
-    /// slate. Drives the SR / RFQ / tab unread badges.
+    /// their read-set, AND on/after the Comms data-start bound. The profile is created lazily (AdoptedAt=now)
+    /// on first call — the per-user clean slate. Drives the SR / RFQ / tab unread badges.
     /// </summary>
     public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(string userId, CancellationToken ct = default)
     {
@@ -9043,7 +9069,8 @@ public partial class SharePointService
         await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false, "ReceivedAt"); // SR rows all inbound
         await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true,  "SentAt");
 
-        var t = SupplierReadModel.Tally(rows, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds);
+        var cutoff = await GetCommsStartCutoffAsync();
+        var t = SupplierReadModel.Tally(rows, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds, cutoff);
         return new SupplierUnreadCounts(t.Total, t.ByRfq, t.BySupplier);
     }
 

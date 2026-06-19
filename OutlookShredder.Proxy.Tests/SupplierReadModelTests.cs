@@ -172,6 +172,39 @@ public class SupplierReadModelTests
         Assert.Equal(2, t.BySupplier["AW0001|Eastern"]);
     }
 
+    // ── Comms data-start cutoff (early bound for queries/UI) ───────────────────
+    [Fact]
+    public void Comms_cutoff_drops_messages_received_before_it()
+    {
+        var cutoff = T0;                                        // Comms data-start = T0
+        var rows = new[]
+        {
+            Row("AW0001", "Eastern", "old", T0.AddMinutes(-10)),   // before cutoff -> out of scope
+            Row("AW0001", "Eastern", "new", T0.AddMinutes(10)),    // after cutoff + after watermark -> counts
+        };
+        // Watermark is older than the cutoff, so "old" would otherwise count as unread-by-default;
+        // the comms-start bound must still drop it.
+        var t = SupplierReadModel.Tally(rows, T0.AddMinutes(-60), None, None, commsStartCutoff: cutoff);
+        Assert.Equal(1, t.Total);
+        Assert.Equal(1, t.ByRfq["AW0001"]);
+    }
+
+    [Fact]
+    public void Comms_cutoff_wins_over_an_explicit_unread_override()   // pre-comms-start data is out of scope, period
+    {
+        var cutoff = T0;
+        var rows = new[] { Row("AW0001", "Eastern", "old", T0.AddMinutes(-10)) };
+        var t = SupplierReadModel.Tally(rows, T0.AddMinutes(-60), None, Set("old"), commsStartCutoff: cutoff);
+        Assert.Equal(0, t.Total);
+    }
+
+    [Fact]
+    public void No_cutoff_counts_everything_after_the_watermark_as_before()   // null cutoff = unchanged behaviour
+    {
+        var rows = new[] { Row("AW0001", "Eastern", "m3", T0.AddMinutes(10)) };
+        Assert.Equal(1, SupplierReadModel.Tally(rows, T0, None, None, commsStartCutoff: null).Total);
+    }
+
     [Fact]
     public void Junk_or_misclassified_rfq_id_is_not_counted()   // WHOIS badge-desync bug Angus found
     {
