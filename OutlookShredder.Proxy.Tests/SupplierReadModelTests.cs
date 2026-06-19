@@ -130,6 +130,36 @@ public class SupplierReadModelTests
     }
 
     [Fact]
+    public void Junk_or_misclassified_rfq_id_is_not_counted()   // WHOIS badge-desync bug Angus found
+    {
+        var after = T0.AddMinutes(10);
+        var rows = new[]
+        {
+            Row("WHOIS",    "Unknown", "j1", after),   // 5 chars -> not a real RFQ; grid shows no group to badge
+            Row("123456",   "Unknown", "j2", after),   // no leading letters
+            Row("[000000]", "Unknown", "j3", after),   // orphan sentinel (8 chars)
+            Row("AW0001",   "Eastern", "ok", after),   // a real RFQ -> the only one that counts
+        };
+        var t = SupplierReadModel.Tally(rows, T0, None, None);
+        Assert.Equal(1, t.Total);
+        Assert.Equal(1, t.ByRfq["AW0001"]);
+        Assert.False(t.ByRfq.ContainsKey("WHOIS"));
+        Assert.False(t.BySupplier.ContainsKey("WHOIS|Unknown"));
+    }
+
+    [Fact]
+    public void IsCountableRfq_mirrors_the_grid_validity_rule()
+    {
+        Assert.True(SupplierReadModel.IsCountableRfq("AW0001"));
+        Assert.True(SupplierReadModel.IsCountableRfq("JM12AB"));
+        Assert.False(SupplierReadModel.IsCountableRfq(null));
+        Assert.False(SupplierReadModel.IsCountableRfq("WHOIS"));     // 5 chars
+        Assert.False(SupplierReadModel.IsCountableRfq("AW00012"));   // 7 chars
+        Assert.False(SupplierReadModel.IsCountableRfq("1W0001"));    // first char not a letter
+        Assert.False(SupplierReadModel.IsCountableRfq("A_0001"));    // non-alphanumeric
+    }
+
+    [Fact]
     public void Grouping_splits_by_rfq_and_supplier()
     {
         var after = T0.AddMinutes(10);

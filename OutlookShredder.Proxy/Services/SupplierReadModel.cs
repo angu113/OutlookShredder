@@ -12,6 +12,16 @@ public static class SupplierReadModel
     /// <summary>Graph MessageIds are case-SENSITIVE base64 — always compare/store Ordinal.</summary>
     public static readonly StringComparer IdComparer = StringComparer.Ordinal;
 
+    /// <summary>
+    /// Whether an RFQ id is a real, displayable RFQ — i.e. one the live grid renders as a group and can
+    /// therefore badge. Mirrors the client's <c>RfqDisplayProcessor.IsValidRfqId</c> (6 chars, two leading
+    /// letters, all alphanumeric). Junk / misclassified ids (e.g. the 5-char "WHOIS" a misfiled statement
+    /// email minted, or the "[000000]" orphan sentinel) are NOT countable: the grid never shows a group for
+    /// them, so counting them would desync the badge — a tab total the user can never clear from the UI.
+    /// </summary>
+    public static bool IsCountableRfq(string? rfq)
+        => rfq is { Length: 6 } && char.IsLetter(rfq[0]) && char.IsLetter(rfq[1]) && rfq.All(char.IsLetterOrDigit);
+
     /// <summary>One inbound message row for tallying (deduped across the two source lists by MessageId).</summary>
     public readonly record struct ReadRow(string Rfq, string Supplier, string? MessageId, DateTimeOffset? MsgTime);
 
@@ -88,6 +98,7 @@ public static class SupplierReadModel
         int total = 0;
         foreach (var r in rows)
         {
+            if (!IsCountableRfq(r.Rfq)) continue;                               // junk/misclassified id the grid can't badge
             if (r.MessageId is { Length: > 0 } id && !seen.Add(id)) continue;   // dedup across both lists
             if (!IsUnread(r.MsgTime, r.MessageId, adoptedAt, readIds, unreadIds)) continue;
             total++;
