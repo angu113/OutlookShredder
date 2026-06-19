@@ -8948,6 +8948,61 @@ public partial class SharePointService
     }
 
     /// <summary>
+    /// Marks EVERY currently-unread inbound supplier message in one RFQ as read for the user, in a single
+    /// profile write (the focus view's "Mark All Read"). Scans both source lists (same as the tally),
+    /// filters to <paramref name="rfqId"/>, and adds each unread MessageId to the read-set. Returns the
+    /// number marked. Write-through cache keeps the next tally immediate (no badge bounce).
+    /// </summary>
+    public async Task<int> MarkRfqMessagesReadAsync(string userId, string rfqId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(rfqId)) return 0;
+        var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct);
+        if (profile is null || string.IsNullOrEmpty(profile.ItemId)) return 0;
+        var siteId = await GetSiteIdAsync();
+        var toMark = new HashSet<string>(SupplierReadModel.IdComparer);
+
+        async Task ScanAsync(string listId, bool inboundOnly, string timeField)
+        {
+            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+            {
+                req.QueryParameters.Expand = [$"fields($select=RFQ_ID,Direction,MessageId,{timeField})"];
+                req.QueryParameters.Top    = 999;
+            }, ct);
+            while (page?.Value is not null)
+            {
+                foreach (var item in page.Value)
+                {
+                    var f = item.Fields?.AdditionalData;
+                    if (f is null) continue;
+                    if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
+                    var rfq = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
+                    if (!string.Equals(rfq, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+                    var id = GetStr(f, "MessageId");
+                    if (string.IsNullOrEmpty(id)) continue;
+                    DateTimeOffset? t = DateTimeOffset.TryParse(GetStr(f, timeField), out var dt) ? dt : null;
+                    if (SupplierReadModel.IsUnread(t, id, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds))
+                        toMark.Add(id);
+                }
+                if (page.OdataNextLink is null) break;
+                page = await GetGraph().Sites[siteId].Lists[listId].Items
+                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
+            }
+        }
+
+        await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false, "ReceivedAt"); // SR rows all inbound
+        await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true,  "SentAt");
+
+        if (toMark.Count == 0) return 0;
+        var read   = new HashSet<string>(profile.ReadIds,   SupplierReadModel.IdComparer);
+        var unread = new HashSet<string>(profile.UnreadIds, SupplierReadModel.IdComparer);
+        foreach (var id in toMark) { read.Add(id); unread.Remove(id); }
+        var stamp = await WriteReadProfileAsync(profile.ItemId, read, unread, ct);
+        _readProfileCache[userId] = profile with { ReadIds = read, UnreadIds = unread, UpdatedAt = stamp };
+        _log.LogInformation("[Conv] mark-rfq-read user={User} rfq={Rfq} marked={N}", userId, rfqId, toMark.Count);
+        return toMark.Count;
+    }
+
+    /// <summary>
     /// Counts unread inbound supplier messages FOR ONE USER across the whole tenant, deduped by MessageId
     /// across the two source lists. Unread = arrived after the user's clean-slate watermark AND not in
     /// their read-set. The profile is created lazily (AdoptedAt=now) on first call — the per-user clean

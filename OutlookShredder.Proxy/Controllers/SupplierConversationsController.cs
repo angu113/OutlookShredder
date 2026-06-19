@@ -99,6 +99,40 @@ public class SupplierConversationsController : ControllerBase
         }
     }
 
+    /// <summary>Request body for POST /api/supplier-conversations/mark-rfq-read.</summary>
+    public sealed class MarkRfqReadRequest
+    {
+        public string  RfqId  { get; set; } = "";
+        public string? UserId { get; set; }   // per-user read-state key (Environment.UserName)
+        public string? ReadBy { get; set; }   // display only
+    }
+
+    /// <summary>
+    /// Marks EVERY unread inbound supplier message in one RFQ as read for the user ("Mark All Read" in
+    /// the focus view), then publishes a user-scoped SupplierMsgRead event (blank supplier+messageId =
+    /// "whole RFQ") so this user's other machines refresh their badges + conversation panels.
+    /// </summary>
+    [HttpPost("supplier-conversations/mark-rfq-read")]
+    public async Task<IActionResult> MarkRfqRead([FromBody] MarkRfqReadRequest req)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.RfqId))
+            return BadRequest(new { error = "rfqId is required" });
+        if (string.IsNullOrWhiteSpace(req.UserId))
+            return BadRequest(new { error = "userId is required" });
+        try
+        {
+            var marked = await _sp.MarkRfqMessagesReadAsync(req.UserId, req.RfqId);
+            if (marked > 0)
+                _notify.NotifySupplierMessageRead(req.UserId, req.RfqId, "", "", true, req.ReadBy);
+            return Ok(new { ok = true, marked });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Conv] mark-rfq-read failed for {RfqId}", req.RfqId);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Unread inbound-supplier-message tallies across all RFQs: grand total + per-RFQ + per-(rfq|supplier).
     /// Powers the RFQ-tab / RFQ-header / SR-header unread badges.
