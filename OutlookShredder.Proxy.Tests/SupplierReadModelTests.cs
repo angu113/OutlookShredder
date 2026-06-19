@@ -61,6 +61,49 @@ public class SupplierReadModelTests
         Assert.Contains("P", back); Assert.Contains("p", back); Assert.Contains("a", back);
     }
 
+    // ── ParseSpInstant (UTC normalization of SP timestamps) ────────────────────
+    [Fact]
+    public void ParseSpInstant_treats_a_tzless_value_as_utc_not_local()   // the first-load leak root cause
+    {
+        // SharePoint echoes these columns with the UTC clock value but NO 'Z'/offset. A bare TryParse would
+        // attach the machine's local offset (timezone-dependent); ParseSpInstant must pin it to UTC so it
+        // compares correctly against the DateTimeOffset.UtcNow clean-slate watermark.
+        var dt = SupplierReadModel.ParseSpInstant("2026-06-19T11:37:36");
+        Assert.NotNull(dt);
+        Assert.Equal(new DateTimeOffset(2026, 6, 19, 11, 37, 36, TimeSpan.Zero), dt!.Value);
+        Assert.Equal(TimeSpan.Zero, dt!.Value.Offset);
+    }
+
+    [Fact]
+    public void ParseSpInstant_normalizes_offset_bearing_values_to_utc()
+    {
+        Assert.Equal(new DateTimeOffset(2026, 6, 19, 11, 37, 36, TimeSpan.Zero),
+            SupplierReadModel.ParseSpInstant("2026-06-19T11:37:36Z"));
+        Assert.Equal(new DateTimeOffset(2026, 6, 19, 12, 0, 0, TimeSpan.Zero),
+            SupplierReadModel.ParseSpInstant("2026-06-19T08:00:00-04:00"));   // -04:00 -> 12:00Z (same instant)
+    }
+
+    [Fact]
+    public void ParseSpInstant_returns_null_on_empty_or_garbage()
+    {
+        Assert.Null(SupplierReadModel.ParseSpInstant(null));
+        Assert.Null(SupplierReadModel.ParseSpInstant(""));
+        Assert.Null(SupplierReadModel.ParseSpInstant("   "));
+        Assert.Null(SupplierReadModel.ParseSpInstant("not-a-date"));
+    }
+
+    [Fact]
+    public void Fresh_user_first_tally_ignores_a_tzless_received_time_before_the_watermark()   // first-load leak
+    {
+        // Repro of the shipped bug: a brand-new user's watermark is DateTimeOffset.UtcNow (true UTC); the
+        // message's ReceivedAt comes back from SP tz-less. Parsed as UTC, an older message stays read (0),
+        // so the user does NOT inherit another user's unread count on first load.
+        var watermark = new DateTimeOffset(2026, 6, 19, 12, 29, 57, TimeSpan.Zero);
+        var msgTime   = SupplierReadModel.ParseSpInstant("2026-06-19T11:37:36");   // ~52 min before the watermark
+        Assert.False(SupplierReadModel.IsUnread(msgTime, "m1", watermark, None, None));
+        Assert.Equal(0, SupplierReadModel.Tally(new[] { Row("JM0079", "J F Fazzio", "m1", msgTime) }, watermark, None, None).Total);
+    }
+
     // ── ApplyMark (moves an id between the read/unread override sets) ───────────
     [Fact]
     public void Mark_read_adds_to_read_set_and_clears_unread()

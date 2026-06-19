@@ -72,8 +72,9 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
-    /// Marks one inbound supplier message read/unread (team-wide) by MessageId, then publishes a
-    /// "SupplierMsgRead" bus event so peers update the message + the unread badge cascade.
+    /// Marks one inbound supplier message read/unread FOR THE CALLING USER (per-user read state, keyed by
+    /// UserId) by MessageId, then publishes a user-scoped "SupplierMsgRead" bus event so only THAT user's
+    /// other machines update the message + the unread badge cascade — never anyone else's.
     /// </summary>
     [HttpPost("supplier-conversations/mark-read")]
     public async Task<IActionResult> MarkRead([FromBody] MarkReadRequest req)

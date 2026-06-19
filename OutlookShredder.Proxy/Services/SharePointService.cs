@@ -8468,8 +8468,8 @@ public partial class SharePointService
         var item = page?.Value?.FirstOrDefault();
         if (item?.Fields?.AdditionalData is { } f && item.Id is { } existingId)
         {
-            var adopted = DateTimeOffset.TryParse(GetStr(f, "AdoptedAt"), out var a) ? a : DateTimeOffset.UtcNow;
-            var updated = DateTimeOffset.TryParse(GetStr(f, "UpdatedAt"), out var u) ? u : DateTimeOffset.MinValue;
+            var adopted = SupplierReadModel.ParseSpInstant(GetStr(f, "AdoptedAt")) ?? DateTimeOffset.UtcNow;
+            var updated = SupplierReadModel.ParseSpInstant(GetStr(f, "UpdatedAt")) ?? DateTimeOffset.MinValue;
             var spProfile = new ReadProfile(existingId, adopted,
                 SupplierReadModel.ParseReadIds(GetStr(f, "ReadMessageIds")),
                 SupplierReadModel.ParseReadIds(GetStr(f, "UnreadMessageIds")), updated);
@@ -8832,7 +8832,7 @@ public partial class SharePointService
                     Direction          = GetStr(f, "Direction") ?? "out",
                     MessageId          = GetStr(f, "MessageId"),
                     InReplyTo          = GetStr(f, "InReplyTo"),
-                    SentAt             = DateTimeOffset.TryParse(GetStr(f, "SentAt"), out var dt) ? dt : default,
+                    SentAt             = SupplierReadModel.ParseSpInstant(GetStr(f, "SentAt")) ?? default,
                     Subject            = GetStr(f, "EmailSubject"),
                     BodyText           = GetStr(f, "BodyText"),
                     HasAttachments     = f.TryGetValue("HasAttachments", out var ha) && ha is bool hab && hab,
@@ -8879,7 +8879,7 @@ public partial class SharePointService
                     SupplierResponseId = item.Id,
                     Direction          = "in",
                     MessageId          = GetStr(f, "MessageId"),
-                    SentAt             = DateTimeOffset.TryParse(GetStr(f, "ReceivedAt"), out var dt) ? dt : default,
+                    SentAt             = SupplierReadModel.ParseSpInstant(GetStr(f, "ReceivedAt")) ?? default,
                     Subject            = GetStr(f, "EmailSubject"),
                     BodyText           = GetStr(f, "EmailBody"),
                     HasAttachments     = !string.IsNullOrEmpty(GetStr(f, "SourceFile")),
@@ -8979,7 +8979,7 @@ public partial class SharePointService
                     if (!string.Equals(rfq, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
                     var id = GetStr(f, "MessageId");
                     if (string.IsNullOrEmpty(id)) continue;
-                    DateTimeOffset? t = DateTimeOffset.TryParse(GetStr(f, timeField), out var dt) ? dt : null;
+                    DateTimeOffset? t = SupplierReadModel.ParseSpInstant(GetStr(f, timeField));
                     if (SupplierReadModel.IsUnread(t, id, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds))
                         toMark.Add(id);
                 }
@@ -9031,7 +9031,7 @@ public partial class SharePointService
                     if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
                     var rfq = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
                     if (string.IsNullOrEmpty(rfq)) continue;
-                    DateTimeOffset? t = DateTimeOffset.TryParse(GetStr(f, timeField), out var dt) ? dt : null;
+                    DateTimeOffset? t = SupplierReadModel.ParseSpInstant(GetStr(f, timeField));
                     rows.Add(new SupplierReadModel.ReadRow(rfq, GetStr(f, "SupplierName") ?? "", GetStr(f, "MessageId"), t));
                 }
                 if (page.OdataNextLink is null) break;

@@ -62,6 +62,24 @@ public static class SupplierReadModel
         return set;
     }
 
+    /// <summary>
+    /// Parses a SharePoint-returned date/time string to a true-UTC <see cref="DateTimeOffset"/>, or null when
+    /// empty/unparseable. SharePoint echoes these columns with the UTC clock value but WITHOUT a 'Z'/offset
+    /// (e.g. "2026-06-19T11:37:36"); a bare <c>DateTimeOffset.TryParse</c> then mis-attaches the machine's
+    /// LOCAL offset, shifting the instant by that offset. That shifted a recently-received message's time INTO
+    /// THE FUTURE relative to a brand-new user's clean-slate watermark — which is <c>DateTimeOffset.UtcNow</c>,
+    /// the only instant in the unread path NOT round-tripped through SP and therefore the only one on the
+    /// correct UTC basis — so the user's very first unread tally counted pre-existing messages as unread (the
+    /// "first-load cross-user leak"). AssumeUniversal treats a tz-less value as UTC; AdjustToUniversal
+    /// normalises any offset-bearing value to UTC — so every SP instant compares against the watermark on one
+    /// basis. Compare/store all read-path instants through here.
+    /// </summary>
+    public static DateTimeOffset? ParseSpInstant(string? s)
+        => DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+               System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+               out var dt)
+           ? dt : null;
+
     /// <summary>Serialize a read-set back to the stored note form (sorted Ordinal for stable diffs).</summary>
     public static string SerializeReadIds(IEnumerable<string> readIds)
         => string.Join('\n', readIds.Where(s => !string.IsNullOrWhiteSpace(s))
