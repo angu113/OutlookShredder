@@ -8435,7 +8435,19 @@ public partial class SharePointService
     }
 
     /// <summary>A user's per-user read profile: clean-slate watermark + explicit read/unread override sets.</summary>
-    private sealed record ReadProfile(string ItemId, DateTimeOffset AdoptedAt, HashSet<string> ReadIds, HashSet<string> UnreadIds);
+    private sealed record ReadProfile(string ItemId, DateTimeOffset AdoptedAt, HashSet<string> ReadIds, HashSet<string> UnreadIds, DateTimeOffset UpdatedAt);
+
+    /// <summary>
+    /// Write-through cache of each user's read profile, keyed by userId. Bridges SharePoint's
+    /// read-after-write lag: a mark PATCHes the profile item immediately, but the profile is read back
+    /// via a <c>$filter</c> query (served from the search index, which trails a write by a few seconds).
+    /// Without this, the reconcile fetch right after a mark re-reads the STALE pre-write profile — the
+    /// "badge bounce" (mark unread → +1, reconcile reads stale → -1, index catches up → +1). The cache
+    /// wins only while it is strictly newer than the indexed copy (by UpdatedAt); once SP catches up the
+    /// two agree and SP is trusted again, so cross-machine changes are never masked.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ReadProfile> _readProfileCache
+        = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Loads user <paramref name="userId"/>'s read profile. Creates it lazily with AdoptedAt=now (the
@@ -8449,7 +8461,7 @@ public partial class SharePointService
         var safe   = userId.Replace("'", "''");
         var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
         {
-            req.QueryParameters.Expand = ["fields($select=Title,AdoptedAt,ReadMessageIds,UnreadMessageIds)"];
+            req.QueryParameters.Expand = ["fields($select=Title,AdoptedAt,ReadMessageIds,UnreadMessageIds,UpdatedAt)"];
             req.QueryParameters.Top    = 1;
             req.QueryParameters.Filter = $"fields/Title eq '{safe}'";
         }, ct);
@@ -8457,9 +8469,15 @@ public partial class SharePointService
         if (item?.Fields?.AdditionalData is { } f && item.Id is { } existingId)
         {
             var adopted = DateTimeOffset.TryParse(GetStr(f, "AdoptedAt"), out var a) ? a : DateTimeOffset.UtcNow;
-            return new ReadProfile(existingId, adopted,
+            var updated = DateTimeOffset.TryParse(GetStr(f, "UpdatedAt"), out var u) ? u : DateTimeOffset.MinValue;
+            var spProfile = new ReadProfile(existingId, adopted,
                 SupplierReadModel.ParseReadIds(GetStr(f, "ReadMessageIds")),
-                SupplierReadModel.ParseReadIds(GetStr(f, "UnreadMessageIds")));
+                SupplierReadModel.ParseReadIds(GetStr(f, "UnreadMessageIds")), updated);
+            // Prefer the cache only while it reflects a local write the $filter index hasn't surfaced yet.
+            if (_readProfileCache.TryGetValue(userId, out var cached) && cached.UpdatedAt > spProfile.UpdatedAt)
+                return cached;
+            _readProfileCache[userId] = spProfile;
+            return spProfile;
         }
         if (!createIfMissing) return null;
 
@@ -8477,22 +8495,27 @@ public partial class SharePointService
             }
         }, cancellationToken: ct);
         _log.LogInformation("[Conv] created read profile for '{User}' (clean slate @ {At:o})", userId, now);
-        return new ReadProfile(created?.Id ?? "", now,
-            new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
+        var createdProfile = new ReadProfile(created?.Id ?? "", now,
+            new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer), now);
+        if (!string.IsNullOrEmpty(createdProfile.ItemId)) _readProfileCache[userId] = createdProfile;
+        return createdProfile;
     }
 
-    /// <summary>Writes the user's read + unread override sets (+ UpdatedAt) back; AdoptedAt unchanged.</summary>
-    private async Task WriteReadProfileAsync(string itemId, IEnumerable<string> readIds, IEnumerable<string> unreadIds, CancellationToken ct = default)
+    /// <summary>Writes the user's read + unread override sets (+ UpdatedAt) back; AdoptedAt unchanged.
+    /// Returns the UpdatedAt stamp written (so the caller can cache the profile at the same instant).</summary>
+    private async Task<DateTimeOffset> WriteReadProfileAsync(string itemId, IEnumerable<string> readIds, IEnumerable<string> unreadIds, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(itemId)) return;
+        var stamp = DateTimeOffset.UtcNow;
+        if (string.IsNullOrEmpty(itemId)) return stamp;
         var siteId = await GetSiteIdAsync();
         var listId = await GetReadProfilesListIdAsync();
         await PatchListItemWithRetryAsync(siteId, listId, itemId, new Dictionary<string, object?>
         {
             ["ReadMessageIds"]   = SupplierReadModel.SerializeReadIds(readIds),
             ["UnreadMessageIds"] = SupplierReadModel.SerializeReadIds(unreadIds),
-            ["UpdatedAt"]        = DateTimeOffset.UtcNow,
+            ["UpdatedAt"]        = stamp,
         }, ct);
+        return stamp;
     }
 
     /// <summary>
@@ -8883,7 +8906,7 @@ public partial class SharePointService
     {
         if (string.IsNullOrWhiteSpace(userId) || messages.Count == 0) return;
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: false)
-                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
+                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer), DateTimeOffset.MinValue);
         foreach (var m in messages)
         {
             if (!string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase)) continue;
@@ -8913,8 +8936,13 @@ public partial class SharePointService
         if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(messageId)) return 0;
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct);
         if (profile is null) return 0;
-        var sets = SupplierReadModel.ApplyMark(profile.ReadIds, profile.UnreadIds, messageId, read);
-        await WriteReadProfileAsync(profile.ItemId, sets.Read, sets.Unread, ct);
+        var sets  = SupplierReadModel.ApplyMark(profile.ReadIds, profile.UnreadIds, messageId, read);
+        var stamp = await WriteReadProfileAsync(profile.ItemId, sets.Read, sets.Unread, ct);
+        // Write-through the cache so the very next unread tally reflects this mark even though the SP
+        // $filter index won't surface it for a few seconds (kills the badge bounce + makes rapid
+        // successive marks compound instead of clobbering a stale reload).
+        if (!string.IsNullOrEmpty(profile.ItemId))
+            _readProfileCache[userId] = profile with { ReadIds = sets.Read, UnreadIds = sets.Unread, UpdatedAt = stamp };
         _log.LogInformation("[Conv] mark-read user={User} msg={Msg} read={Read}", userId, messageId, read);
         return 1;
     }
@@ -8928,7 +8956,7 @@ public partial class SharePointService
     public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(string userId, CancellationToken ct = default)
     {
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct)
-                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer));
+                      ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer), DateTimeOffset.MinValue);
         var siteId = await GetSiteIdAsync();
         var rows = new List<SupplierReadModel.ReadRow>();
 
