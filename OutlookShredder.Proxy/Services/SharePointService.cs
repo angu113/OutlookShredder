@@ -465,6 +465,7 @@ public partial class SharePointService
     {
         _srRowCache       = null;
         _srRowCacheExpiry = DateTime.MinValue;
+        InboundChanged?.Invoke();   // SR rows changed -> refresh the in-memory unread index (debounced there)
     }
 
     // Returns the set of RFQ IDs marked Complete=true.  Cached for 30 s so all pages of a
@@ -8595,6 +8596,8 @@ public partial class SharePointService
 
         _log.LogInformation("[Conv] Wrote {Direction} message for [{RfqId}] {Supplier}",
             msg.Direction, msg.RfqId, msg.SupplierName);
+        if (string.Equals(msg.Direction, "in", StringComparison.OrdinalIgnoreCase))
+            InboundChanged?.Invoke();   // new inbound row -> refresh the in-memory unread index (debounced)
         return item?.Id;
     }
 
@@ -8949,50 +8952,29 @@ public partial class SharePointService
 
     /// <summary>
     /// Marks EVERY currently-unread inbound supplier message in one RFQ as read for the user, in a single
-    /// profile write (the focus view's "Mark All Read"). Scans both source lists (same as the tally),
-    /// filters to <paramref name="rfqId"/>, and adds each unread MessageId to the read-set. Returns the
-    /// number marked. Write-through cache keeps the next tally immediate (no badge bounce).
+    /// profile write (the focus view's "Mark All Read"). Reads from the prebuilt unread index when supplied
+    /// (<paramref name="indexRows"/>), else falls back to a live scan; filters to <paramref name="rfqId"/> and
+    /// adds each unread MessageId to the read-set. Returns the number marked. The profile write-through cache
+    /// keeps the next tally immediate (no badge bounce).
     /// </summary>
-    public async Task<int> MarkRfqMessagesReadAsync(string userId, string rfqId, CancellationToken ct = default)
+    public async Task<int> MarkRfqMessagesReadAsync(
+        string userId, string rfqId, IReadOnlyList<SupplierReadModel.ReadRow>? indexRows = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(rfqId)) return 0;
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct);
         if (profile is null || string.IsNullOrEmpty(profile.ItemId)) return 0;
-        var siteId = await GetSiteIdAsync();
         var cutoff = await GetCommsStartCutoffAsync();
+        var rows   = indexRows ?? await ScanInboundRowsAsync(ct);
         var toMark = new HashSet<string>(SupplierReadModel.IdComparer);
-
-        async Task ScanAsync(string listId, bool inboundOnly, string timeField)
+        foreach (var r in rows)
         {
-            var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=RFQ_ID,Direction,MessageId,{timeField})"];
-                req.QueryParameters.Top    = 999;
-            }, ct);
-            while (page?.Value is not null)
-            {
-                foreach (var item in page.Value)
-                {
-                    var f = item.Fields?.AdditionalData;
-                    if (f is null) continue;
-                    if (inboundOnly && !string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
-                    var rfq = GetStr(f, "RFQ_ID") ?? GetStr(f, "RFQ_x005F_ID");
-                    if (!string.Equals(rfq, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
-                    var id = GetStr(f, "MessageId");
-                    if (string.IsNullOrEmpty(id)) continue;
-                    DateTimeOffset? t = SupplierReadModel.ParseSpInstant(GetStr(f, timeField));
-                    if (cutoff > DateTimeOffset.MinValue && t is { } tt && tt < cutoff) continue;   // before the Comms data-start bound -> out of scope
-                    if (SupplierReadModel.IsUnread(t, id, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds))
-                        toMark.Add(id);
-                }
-                if (page.OdataNextLink is null) break;
-                page = await GetGraph().Sites[siteId].Lists[listId].Items
-                    .WithUrl(page.OdataNextLink).GetAsync(cancellationToken: ct);
-            }
+            if (!string.Equals(r.Rfq, rfqId, StringComparison.OrdinalIgnoreCase)) continue;
+            var id = r.MessageId;
+            if (string.IsNullOrEmpty(id)) continue;
+            if (cutoff > DateTimeOffset.MinValue && r.MsgTime is { } tt && tt < cutoff) continue;   // before the Comms data-start bound -> out of scope
+            if (SupplierReadModel.IsUnread(r.MsgTime, id, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds))
+                toMark.Add(id);
         }
-
-        await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false, "ReceivedAt"); // SR rows all inbound
-        await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true,  "SentAt");
 
         if (toMark.Count == 0) return 0;
         var read   = new HashSet<string>(profile.ReadIds,   SupplierReadModel.IdComparer);
@@ -9003,6 +8985,12 @@ public partial class SharePointService
         _log.LogInformation("[Conv] mark-rfq-read user={User} rfq={Rfq} marked={N}", userId, rfqId, toMark.Count);
         return toMark.Count;
     }
+
+    /// <summary>Raised after a new INBOUND supplier row is written (a SupplierResponse — via
+    /// <see cref="InvalidateSrCache"/> — or a Direction=="in" conversation row), so the in-memory unread
+    /// index can refresh. A plain event so SharePointService needn't reference the index (avoids a DI cycle);
+    /// cross-proxy freshness rides the rfq-updates bus instead.</summary>
+    public event Action? InboundChanged;
 
     // Comms data-start lower bound (ShredderConfig "CommsDataStartDate") applied to the unread scans —
     // mirrors MailCacheService. Cached briefly so the per-call tally doesn't re-read SP config every time.
@@ -9034,10 +9022,29 @@ public partial class SharePointService
     /// their read-set, AND on/after the Comms data-start bound. The profile is created lazily (AdoptedAt=now)
     /// on first call — the per-user clean slate. Drives the SR / RFQ / tab unread badges.
     /// </summary>
-    public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(string userId, CancellationToken ct = default)
+    public async Task<SupplierUnreadCounts> GetSupplierUnreadCountsAsync(
+        string userId, IReadOnlyList<SupplierReadModel.ReadRow>? indexRows = null, CancellationToken ct = default)
     {
         var profile = await GetOrCreateReadProfileAsync(userId, createIfMissing: true, ct)
                       ?? new ReadProfile("", DateTimeOffset.UtcNow, new HashSet<string>(SupplierReadModel.IdComparer), new HashSet<string>(SupplierReadModel.IdComparer), DateTimeOffset.MinValue);
+        // Prefer the prebuilt in-memory index (SupplierUnreadIndexService); fall back to a live scan when it
+        // isn't built yet (cold start). ScanInboundRowsAsync is the single row-projection source either way.
+        var rows   = indexRows ?? await ScanInboundRowsAsync(ct);
+        var cutoff = await GetCommsStartCutoffAsync();
+        var t = SupplierReadModel.Tally(rows, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds, cutoff);
+        return new SupplierUnreadCounts(t.Total, t.ByRfq, t.BySupplier);
+    }
+
+    /// <summary>
+    /// Scans both inbound sources — SupplierResponses (all inbound) + SupplierConversations (Direction=="in")
+    /// — into the minimal projection <see cref="SupplierReadModel.Tally"/> consumes (Rfq, Supplier, MessageId,
+    /// MsgTime). The SINGLE source of truth for the unread row set: the live fallback in
+    /// <see cref="GetSupplierUnreadCountsAsync"/> / <see cref="MarkRfqMessagesReadAsync"/> AND
+    /// <c>SupplierUnreadIndexService</c> all call this, so they can never drift. Does NOT apply the comms-start
+    /// cutoff (Tally floors at read time, so a CommsDataStartDate change needs no rebuild).
+    /// </summary>
+    public async Task<List<SupplierReadModel.ReadRow>> ScanInboundRowsAsync(CancellationToken ct = default)
+    {
         var siteId = await GetSiteIdAsync();
         var rows = new List<SupplierReadModel.ReadRow>();
 
@@ -9068,10 +9075,7 @@ public partial class SharePointService
 
         await ScanAsync(await GetSupplierResponsesListIdAsync(), inboundOnly: false, "ReceivedAt"); // SR rows all inbound
         await ScanAsync(await GetConversationsListIdAsync(),     inboundOnly: true,  "SentAt");
-
-        var cutoff = await GetCommsStartCutoffAsync();
-        var t = SupplierReadModel.Tally(rows, profile.AdoptedAt, profile.ReadIds, profile.UnreadIds, cutoff);
-        return new SupplierUnreadCounts(t.Total, t.ByRfq, t.BySupplier);
+        return rows;
     }
 
     /// <summary>

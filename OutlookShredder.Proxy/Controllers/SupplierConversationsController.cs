@@ -12,6 +12,7 @@ public class SupplierConversationsController : ControllerBase
     private readonly MailService          _mail;
     private readonly SupplierCacheService _suppliers;
     private readonly RfqNotificationService _notify;
+    private readonly SupplierUnreadIndexService _index;
     private readonly ILogger<SupplierConversationsController> _log;
 
     public SupplierConversationsController(
@@ -19,12 +20,14 @@ public class SupplierConversationsController : ControllerBase
         MailService          mail,
         SupplierCacheService suppliers,
         RfqNotificationService notify,
+        SupplierUnreadIndexService index,
         ILogger<SupplierConversationsController> log)
     {
         _sp        = sp;
         _mail      = mail;
         _suppliers = suppliers;
         _notify    = notify;
+        _index     = index;
         _log       = log;
     }
 
@@ -122,7 +125,7 @@ public class SupplierConversationsController : ControllerBase
             return BadRequest(new { error = "userId is required" });
         try
         {
-            var marked = await _sp.MarkRfqMessagesReadAsync(req.UserId, req.RfqId);
+            var marked = await _sp.MarkRfqMessagesReadAsync(req.UserId, req.RfqId, _index.TryGetRows());
             if (marked > 0)
                 _notify.NotifySupplierMessageRead(req.UserId, req.RfqId, "", "", true, req.ReadBy);
             return Ok(new { ok = true, marked });
@@ -145,7 +148,7 @@ public class SupplierConversationsController : ControllerBase
             return BadRequest(new { error = "userId is required" });
         try
         {
-            var counts = await _sp.GetSupplierUnreadCountsAsync(userId);
+            var counts = await _sp.GetSupplierUnreadCountsAsync(userId, _index.TryGetRows());
             return Ok(new { total = counts.Total, byRfq = counts.ByRfq, bySupplier = counts.BySupplier });
         }
         catch (Exception ex)

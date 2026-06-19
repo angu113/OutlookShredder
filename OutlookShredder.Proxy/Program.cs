@@ -134,6 +134,10 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<SharePointService>();
     builder.Services.AddSingleton<SliCacheService>();
+    // In-memory unread-row index: builds the inbound-row set once + on write-through/bus, so the per-user
+    // unread tally is an in-memory pass instead of a ~5-7s dual SharePoint scan on every call.
+    builder.Services.AddSingleton<SupplierUnreadIndexService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierUnreadIndexService>());
     builder.Services.AddSingleton<MailService>();
     builder.Services.AddSingleton<RfqNotificationService>();
     builder.Services.AddSingleton<ShrConvInRouter>();
@@ -205,6 +209,7 @@ try
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierCacheService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SliCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierUnreadIndexService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<MailCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());

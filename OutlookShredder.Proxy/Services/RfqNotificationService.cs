@@ -34,6 +34,7 @@ public class RfqNotificationService
     private readonly ServiceBusClient?                           _sbClient;
     private readonly ServiceBusSender?                           _sbSender;
     private readonly SliCacheService                             _sliCache;
+    private readonly SupplierUnreadIndexService                  _unreadIndex;
     private readonly MailCacheService                            _mailCache;
     private readonly Lazy<ForgeTaskService>                      _forgeTasks;
     private readonly IConfiguration                              _config;
@@ -50,15 +51,17 @@ public class RfqNotificationService
     public RfqNotificationService(
         IConfiguration config,
         SliCacheService sliCache,
+        SupplierUnreadIndexService unreadIndex,
         MailCacheService mailCache,
         Lazy<ForgeTaskService> forgeTasks,
         ILogger<RfqNotificationService> log)
     {
-        _config     = config;
-        _sliCache   = sliCache;
-        _mailCache  = mailCache;
-        _forgeTasks = forgeTasks;
-        _log        = log;
+        _config      = config;
+        _sliCache    = sliCache;
+        _unreadIndex = unreadIndex;
+        _mailCache   = mailCache;
+        _forgeTasks  = forgeTasks;
+        _log         = log;
 
         var connStr   = config["ServiceBus:ConnectionString"];
         var topicName = config["ServiceBus:TopicName"] ?? "rfq-updates";
@@ -166,6 +169,9 @@ public class RfqNotificationService
                         "[ServiceBus] Proxy received SR from {PeerId} — invalidated cache for {RfqId}",
                         msg.ProxyId, msg.RfqId);
                 }
+                // A peer's new/changed supplier response changed the inbound row set — refresh our unread
+                // index too (debounced) so this proxy's badge tallies stay fresh without a polling timer.
+                _unreadIndex.RequestRefresh();
             }
 
             // Refresh the in-memory statements cache when a peer proxy completes the OB export.
