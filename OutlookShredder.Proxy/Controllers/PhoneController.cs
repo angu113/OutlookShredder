@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services;
 
 namespace OutlookShredder.Proxy.Controllers;
@@ -102,6 +103,114 @@ public class PhoneController : ControllerBase
             _log.LogWarning(ex, "[Phone] Failed to update CRM for phone {Phone}", phone);
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Backfills CRM fields (BpName / ContactName / PopupMessage) on existing call-log rows using the SAME
+    /// phone→customer lookup as live incoming-call detection (CustomerCacheService.LookupAllByPhone, primary
+    /// match). Reads every historic row, normalises its CallerPhone, looks it up, and sets the matched CRM
+    /// values. dryRun=true (default) reports what WOULD change without writing. includeChanged=false fills
+    /// only blank BpName rows (never overwrites an existing value).
+    /// </summary>
+    [HttpPost("call-log/backfill-crm")]
+    public async Task<IActionResult> BackfillCrm(
+        [FromQuery] bool dryRun = true,
+        [FromQuery] bool includeChanged = true,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var records = await _sp.ReadAllPhoneCallLogAsync(ct);
+
+            int noPhone = 0, noMatch = 0, unchanged = 0, addBlank = 0, changeExisting = 0, multiMatch = 0;
+            var plan         = new List<(PhoneCallLogRecord Rec, CustomerLookupResult Match)>();
+            var addSamples   = new List<string>();
+            var changeSamples = new List<string>();
+
+            foreach (var rec in records)
+            {
+                var digits = CustomerImportService.NormalizePhone(rec.CallerPhone);
+                if (digits is null) { noPhone++; continue; }
+
+                var matches = _crm.LookupAllByPhone(digits);
+                if (matches.Count == 0) { noMatch++; continue; }
+                if (matches.Count > 1) multiMatch++;
+                var m = matches[0];   // primary match — same as live detection's call-log write
+
+                switch (ClassifyBackfill(rec, m.BusinessPartner, m.ContactName, m.PopupMessage))
+                {
+                    case CrmBackfillAction.Unchanged:
+                        unchanged++;
+                        break;
+                    case CrmBackfillAction.AddBp:
+                        addBlank++;
+                        plan.Add((rec, m));
+                        if (addSamples.Count < 40)
+                            addSamples.Add($"{rec.CallerPhone} -> '{m.BusinessPartner}' (was blank)");
+                        break;
+                    case CrmBackfillAction.ChangeBp:
+                        changeExisting++;
+                        if (includeChanged) plan.Add((rec, m));
+                        if (changeSamples.Count < 40)
+                            changeSamples.Add($"{rec.CallerPhone}: '{rec.BpName}' -> '{m.BusinessPartner}'");
+                        break;
+                }
+            }
+
+            int updated = 0, failed = 0;
+            if (!dryRun)
+            {
+                foreach (var (rec, m) in plan)
+                {
+                    try
+                    {
+                        await _sp.UpdateCallLogCrmByItemIdAsync(
+                            rec.SpItemId, m.BusinessPartner, m.ContactName, m.PopupMessage, ct);
+                        updated++;
+                    }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        _log.LogWarning(ex, "[Phone] backfill patch failed for item {Id}", rec.SpItemId);
+                    }
+                }
+                _log.LogInformation("[Phone] CRM backfill: {Updated} updated, {Failed} failed (of {Plan} planned)",
+                    updated, failed, plan.Count);
+            }
+
+            return Ok(new
+            {
+                dryRun, includeChanged,
+                totalRecords   = records.Count,
+                wouldUpdate    = plan.Count,
+                addBlank, changeExisting, unchanged, noMatch, noPhone,
+                multiMatchPhones = multiMatch,
+                updated, failed,
+                addSamples, changeSamples,
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Phone] CRM backfill failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    internal enum CrmBackfillAction { Unchanged, AddBp, ChangeBp }
+
+    /// <summary>Decides the backfill action for one call-log row given its matched CRM values. Pure +
+    /// testable: Unchanged when all three CRM fields already equal the match (null/blank- and trim-
+    /// insensitive); AddBp when BpName is currently blank (a gain); otherwise ChangeBp (would overwrite).</summary>
+    internal static CrmBackfillAction ClassifyBackfill(
+        PhoneCallLogRecord rec, string? matchBp, string? matchContact, string? matchPopup)
+    {
+        static bool Same(string? a, string? b) =>
+            string.Equals((a ?? "").Trim(), (b ?? "").Trim(), StringComparison.Ordinal);
+
+        if (Same(rec.BpName, matchBp) && Same(rec.ContactName, matchContact) && Same(rec.PopupMessage, matchPopup))
+            return CrmBackfillAction.Unchanged;
+
+        return string.IsNullOrWhiteSpace(rec.BpName) ? CrmBackfillAction.AddBp : CrmBackfillAction.ChangeBp;
     }
 
     /// <summary>
