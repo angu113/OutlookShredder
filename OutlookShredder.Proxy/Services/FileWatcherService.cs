@@ -729,6 +729,24 @@ public class FileWatcherService : BackgroundService
         try { await _sp.PatchErpDocumentFieldsAsync(spItemId!, extraction, ct); }
         catch (Exception ex) { _log.LogWarning(ex, "[FW] SP field patch (AI data) failed for {File}", fileName); }
 
+        // Append to the order-history list (insert-if-absent) so this SalesOrder shows on the caller's
+        // Raptor card. Sparse — only customer/date/total — the total lands in GrossAmount. The local cache
+        // self-merges via SalesOrderAppended; peer proxies merge from the EventType="ERP" notify below.
+        if (string.Equals(extraction.DocumentType, "SalesOrder", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                await _sp.AppendSalesOrderIfAbsentAsync(
+                    extraction.DocumentNumber, extraction.CustomerName,
+                    extraction.DocumentDate, extraction.TotalAmount, "erp-doc", ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] SalesOrderHistory append failed for {Number} ({File})",
+                    extraction.DocumentNumber, fileName);
+            }
+        }
+
         // Notify #2 — enrichment complete. EnrichmentPending=false re-enables the gated client actions.
         _notify.NotifyErpDocument(new ErpBusRecord
         {

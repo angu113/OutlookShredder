@@ -36,7 +36,7 @@ public partial class SharePointService
                     BpName       = Get("BpName"),
                     ContactName  = Get("ContactName"),
                     PopupMessage = Get("PopupMessage"),
-                    ReceivedAt   = Get("ReceivedAt"),
+                    ReceivedAt   = NormalizeInstant(Get("ReceivedAt")),
                     Notes        = Get("Notes"),
                 });
             }

@@ -130,6 +130,10 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierCacheService>());
     builder.Services.AddSingleton<CustomerCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<CustomerCacheService>());
+    // Sales-Order-history serving cache (indexed by customer) + resumable bulk-import runner, feeding the
+    // Raptor incoming-call card. Built once at startup, write-through + 5-min safety re-scan thereafter.
+    builder.Services.AddSingleton<SalesOrderHistoryService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<SalesOrderHistoryService>());
     builder.Services.AddSingleton<ProductCatalogService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<SharePointService>();
@@ -201,6 +205,7 @@ try
     builder.Services.AddSingleton<PaymentReconciliationService>();
     builder.Services.AddSingleton<CatalogAnalysisService>();
     builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
+    builder.Services.AddSingleton(sp => new Lazy<SalesOrderHistoryService>(() => sp.GetRequiredService<SalesOrderHistoryService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierProductMappingsCacheService>());
 

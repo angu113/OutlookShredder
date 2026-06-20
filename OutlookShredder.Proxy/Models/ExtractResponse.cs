@@ -46,6 +46,9 @@ public class RfqProcessedNotification
     public string? ContactName       { get; set; }
     /// <summary>Populated only when EventType = "IncomingCall". SharePoint item ID of the call log entry.</summary>
     public string? CallLogSpItemId   { get; set; }
+    /// <summary>Populated only when EventType = "IncomingCall". The call-log write time (UTC ISO 8601) —
+    /// the SAME instant persisted to the PhoneCallLog list, so the live card and the reloaded row agree.</summary>
+    public string? CallReceivedAt    { get; set; }
     /// <summary>
     /// Identity of the proxy that published this event: "{MachineName}:{startupGuid}".
     /// Receiving proxies skip cache updates for their own events; Shredder logs it for diagnostics.

@@ -37,6 +37,7 @@ public class RfqNotificationService
     private readonly SupplierUnreadIndexService                  _unreadIndex;
     private readonly MailCacheService                            _mailCache;
     private readonly Lazy<ForgeTaskService>                      _forgeTasks;
+    private readonly Lazy<SalesOrderHistoryService>              _soHistory;
     private readonly IConfiguration                              _config;
     private readonly ILogger<RfqNotificationService>             _log;
 
@@ -54,6 +55,7 @@ public class RfqNotificationService
         SupplierUnreadIndexService unreadIndex,
         MailCacheService mailCache,
         Lazy<ForgeTaskService> forgeTasks,
+        Lazy<SalesOrderHistoryService> soHistory,
         ILogger<RfqNotificationService> log)
     {
         _config      = config;
@@ -61,6 +63,7 @@ public class RfqNotificationService
         _unreadIndex = unreadIndex;
         _mailCache   = mailCache;
         _forgeTasks  = forgeTasks;
+        _soHistory   = soHistory;
         _log         = log;
 
         var connStr   = config["ServiceBus:ConnectionString"];
@@ -192,6 +195,27 @@ public class RfqNotificationService
                 _log.LogDebug("[ServiceBus] Proxy received Mail '{Action}' from {PeerId} for {Id}",
                     msg.MailAction, msg.ProxyId, msg.MailItemId);
             }
+
+            // Signal 2 — keep the SalesOrderHistory cache coherent when a peer proxy appends a SalesOrder.
+            // Merge the order carried IN the message (O(1), no SharePoint read). Only the enriched publish
+            // (EnrichmentPending=false) carries DocumentDate/TotalAmount; the preliminary notify is skipped.
+            if (msg is { EventType: "ERP" } && msg.ProxyId != ProxyId &&
+                msg.ErpDocument is { EnrichmentPending: false } erp &&
+                string.Equals(erp.DocumentType, "SalesOrder", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(erp.DocumentNumber) && !string.IsNullOrWhiteSpace(erp.CustomerName) &&
+                erp.DocumentNumber!.StartsWith("HSK-SO", StringComparison.OrdinalIgnoreCase))
+            {
+                _soHistory.Value.MergeOrder(new Models.SalesOrderRecord
+                {
+                    OrderId      = erp.DocumentNumber!,
+                    CustomerName = erp.CustomerName!,
+                    OrderDate    = CustomerImportService.ParseErpDate(erp.DocumentDate),
+                    GrossAmount  = CustomerImportService.ParseMoney(erp.TotalAmount),
+                    Source       = "erp-doc",
+                });
+                _log.LogDebug("[ServiceBus] Proxy received ERP SalesOrder {Order} from {PeerId} — merged into cache",
+                    erp.DocumentNumber, msg.ProxyId);
+            }
         }
         catch (Exception ex)
         {
@@ -243,7 +267,8 @@ public class RfqNotificationService
     public void NotifyIncomingCall(string callerName, string? callerPhone,
         string? bpName = null, string? popupMessage = null, string? contactName = null,
         string? callLogSpItemId = null,
-        IList<CustomerLookupResult>? allMatches = null) =>
+        IList<CustomerLookupResult>? allMatches = null,
+        string? receivedAt = null) =>
         NotifyRfqProcessed(new RfqProcessedNotification
         {
             EventType       = "IncomingCall",
@@ -253,6 +278,7 @@ public class RfqNotificationService
             PopupMessage    = popupMessage,
             ContactName     = contactName,
             CallLogSpItemId = callLogSpItemId,
+            CallReceivedAt  = receivedAt,
             CrmMatches      = allMatches?.Count > 1
                 ? allMatches.Select(m => new CrmBusMatchDto(m.BusinessPartner, m.ContactName, m.PopupMessage)).ToList()
                 : null,

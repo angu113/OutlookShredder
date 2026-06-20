@@ -46,6 +46,7 @@ public partial class SharePointService
     private string? _erpDocumentsListId;  // ErpDocuments
     private string? _customersListId;        // Customers
     private string? _customerContactsListId; // CustomerContacts
+    private string? _salesOrderHistoryListId; // SalesOrderHistory
     private string? _callLogListId;          // PhoneCallLog
     private string? _messagesListId;         // Messages
     private string? _leaseListId;            // ProxyLease
@@ -109,6 +110,17 @@ public partial class SharePointService
 
     private static string? GetStrRaw(IDictionary<string, object> d, string key) =>
         d.TryGetValue(key, out var v) ? Str(v) : null;
+
+    /// <summary>Normalizes a SharePoint instant field to a UTC ISO-8601 string. The Graph SDK surfaces a
+    /// dateTime-shaped value as a locally-rendered string (e.g. "6/19/2026 11:49:30 AM"), which drops the UTC
+    /// anchor and makes client TZ conversion + cross-format sorting unreliable. Parse it (no-offset ⇒ the
+    /// proxy's local TZ, which is the business TZ), convert to UTC, emit round-trip "o". Non-date text passes through.</summary>
+    private static string? NormalizeInstant(string? s) =>
+        !string.IsNullOrWhiteSpace(s) &&
+        DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.CurrentCulture,
+            System.Globalization.DateTimeStyles.None, out var dto)
+            ? dto.ToUniversalTime().ToString("o")
+            : s;
 
     /// <summary>
     /// Reads the RFQ ID from a field dictionary, handling both the logical name
@@ -220,6 +232,7 @@ public partial class SharePointService
             await TrySwallowAsync(async () => { await EnsureSupplierListsAsync(); _log.LogInformation("[SP] Supplier lists ensured"); });
             await TrySwallowAsync(async () => { await EnsureErpDocumentsListAsync(ct); _log.LogInformation("[SP] ERP documents list ensured"); });
             await TrySwallowAsync(async () => { await EnsureCustomerListsAsync(ct); _log.LogInformation("[SP] Customer lists ensured"); });
+            await TrySwallowAsync(async () => { await EnsureSalesOrderHistoryListAsync(ct); _log.LogInformation("[SP] SalesOrderHistory list ensured"); });
             await TrySwallowAsync(async () => { await EnsureCallLogListAsync(ct); _log.LogInformation("[SP] Call log list ensured"); });
             await TrySwallowAsync(async () => { await EnsureMessagesListAsync(ct); _log.LogInformation("[SP] Messages list ensured"); });
             await TrySwallowAsync(async () => { await EnsureWorkflowCardsListAsync(ct); _log.LogInformation("[SP] WorkflowCards list ensured"); });
@@ -11850,46 +11863,21 @@ public partial class SharePointService
         return result?.Id ?? "";
     }
 
-    private const int CallLogFetchCap = 2000;
-
-    /// <summary>Returns all call log entries with ReceivedAt >= <paramref name="since"/>, newest first.</summary>
+    /// <summary>Returns all call log entries with ReceivedAt >= <paramref name="since"/>, newest first.
+    /// Reads the FULL list (paginated via <see cref="ReadAllPhoneCallLogAsync"/>) so recent calls are never
+    /// missed once the list grows past one page — a single Top=N fetch returns the OLDEST N by item id and
+    /// silently hides newer calls. (Future optimization for very large lists: index ReceivedAt and filter
+    /// server-side by the ISO instant instead of reading every row.)</summary>
     public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
         DateTimeOffset since, CancellationToken ct = default)
     {
-        var siteId = await GetSiteIdAsync();
-        var listId = await GetOrCreateCallLogListIdAsync(ct);
-
-        // SP Graph ignores $orderby when $expand is present, so we fetch the full list and sort client-side.
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Expand = ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,Notes)"];
-                r.QueryParameters.Top    = CallLogFetchCap;
-            }, ct);
-
-        var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();
-        foreach (var item in (items?.Value ?? []))
-        {
-            var d = item.Fields?.AdditionalData;
-            if (d is null) continue;
-            string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
-            results.Add(new OutlookShredder.Proxy.Models.PhoneCallLogRecord
-            {
-                SpItemId     = item.Id ?? "",
-                CallerName   = Get("Title") ?? "",
-                CallerPhone  = Get("CallerPhone"),
-                BpName       = Get("BpName"),
-                ContactName  = Get("ContactName"),
-                PopupMessage = Get("PopupMessage"),
-                ReceivedAt   = Get("ReceivedAt"),
-                Notes        = Get("Notes"),
-            });
-        }
-        // Filter to today (since = midnight EST as UTC), sort newest-first by SP item ID.
-        return [.. results
-            .Where(r => DateTimeOffset.TryParse(r.ReceivedAt, null,
-                System.Globalization.DateTimeStyles.RoundtripKind, out var t) && t >= since)
-            .OrderByDescending(r => int.TryParse(r.SpItemId, out var n) ? n : 0)];
+        var all = await ReadAllPhoneCallLogAsync(ct);   // paginated; normalizes ReceivedAt to UTC ISO
+        static DateTimeOffset RxTime(string? s) =>
+            DateTimeOffset.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var t)
+                ? t : DateTimeOffset.MinValue;
+        return [.. all
+            .Where(r => RxTime(r.ReceivedAt) >= since)
+            .OrderByDescending(r => RxTime(r.ReceivedAt))];
     }
 
     /// <summary>Patches the Notes field on an existing PhoneCallLog item.</summary>

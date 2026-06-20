@@ -105,6 +105,38 @@ public class PhoneController : ControllerBase
         }
     }
 
+    /// <summary>Targeted backfill for ONE phone right after a manual link: refreshes the CRM cache so the
+    /// just-added contact is live, then writes the matched BpName/ContactName/PopupMessage onto every call-log
+    /// row for that phone. (The team-wide variant is call-log/backfill-crm.)</summary>
+    [HttpPost("call-log/backfill-customer")]
+    public async Task<IActionResult> BackfillCustomer([FromQuery] string phone, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(phone))
+            return BadRequest(new { error = "phone is required" });
+        try
+        {
+            await _crm.RefreshNowAsync(ct);   // pick up the newly-linked contact before looking it up
+            var match = _crm.LookupByPhone(phone);
+            if (match is null)
+                return Ok(new { phone, matched = false });
+
+            await _sp.UpdateCallLogCrmByPhoneAsync(
+                phone, match.BusinessPartner, match.ContactName, match.PopupMessage, ct);
+            _log.LogInformation("[Phone] backfill-customer {Phone} -> bp='{Bp}' contact='{Contact}' popup={HasPopup}",
+                phone, match.BusinessPartner, match.ContactName ?? "(none)", !string.IsNullOrEmpty(match.PopupMessage));
+            return Ok(new
+            {
+                phone, matched = true, bp = match.BusinessPartner,
+                contact = match.ContactName, hasPopup = !string.IsNullOrEmpty(match.PopupMessage),
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Phone] backfill-customer failed for {Phone}", phone);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Backfills CRM fields (BpName / ContactName / PopupMessage) on existing call-log rows using the SAME
     /// phone→customer lookup as live incoming-call detection (CustomerCacheService.LookupAllByPhone, primary
@@ -247,12 +279,13 @@ public class PhoneController : ControllerBase
             }
         }
 
+        var receivedAt = DateTimeOffset.UtcNow;
         string spItemId = "";
         try
         {
             spItemId = await _sp.WritePhoneCallLogAsync(
                 name, phone, resolvedBp, resolvedContact, resolvedPopup,
-                DateTimeOffset.UtcNow, ct);
+                receivedAt, ct);
         }
         catch (Exception ex)
         {
@@ -260,7 +293,7 @@ public class PhoneController : ControllerBase
         }
 
         _notify.NotifyIncomingCall(name, phone, resolvedBp, resolvedPopup, resolvedContact,
-            callLogSpItemId: spItemId);
+            callLogSpItemId: spItemId, receivedAt: receivedAt.ToString("o"));
         _log.LogInformation("[Phone] test-call fired — name='{Name}' phone='{Phone}' bp='{Bp}' spItemId={Id}",
             name, phone, resolvedBp ?? "none", spItemId);
 

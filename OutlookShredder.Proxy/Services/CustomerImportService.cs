@@ -265,6 +265,108 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         return NormalizePhone(s[..i]);
     }
 
+    // ── Sales-Order history (ExportedData (8).csv — one row per HSK-SO#) ──────
+
+    /// <summary>One order mined from the Sales-Orders export, keyed by <see cref="OrderId"/> (the ERP
+    /// <c>Doc #</c>, e.g. <c>HSK-SO1036200</c>). Money/weight/percent cells are stripped of <c>$</c>/<c>,</c>
+    /// and parsed to numbers (blank ⇒ null); dates are <c>MM-dd-yyyy</c> (blank ⇒ null). Stored on the
+    /// SalesOrderHistory SP list and served to the Raptor incoming-call card.</summary>
+    public sealed record SalesOrderRow(
+        string          OrderId,
+        string          CustomerName,
+        DateTimeOffset? OrderDate,
+        string?         Status,
+        string?         SecondaryStatus,
+        string?         CustomerPo,
+        double?         NetAmount,
+        double?         GrossAmount,
+        double?         PctPaid,
+        DateTimeOffset? DeliveryDate,
+        double?         Weight);
+
+    /// <summary>
+    /// Parses the Sales-Orders export into one <see cref="SalesOrderRow"/> per <c>Doc #</c>. Requires the
+    /// distinctive <c>Order Date</c> + <c>Doc #</c> + <c>Customer</c> columns. Rows with a blank or
+    /// non-<c>HSK-SO</c> Doc # (export footer/total rows) or a blank customer are dropped; a Doc # seen
+    /// twice keeps the first and is counted as a collapsed duplicate. Quotes are kept — they are still
+    /// HSK-SO# docs and <c>Status</c> distinguishes them. No SharePoint dependency (the dedup-vs-existing
+    /// and the insert live in <c>SharePointService</c>).
+    /// </summary>
+    public ParseResult<SalesOrderRow> ParseSalesOrders(string csv)
+    {
+        var warnings = new List<string>();
+        var skipped  = new List<SkippedItem>();
+        var rows     = new List<SalesOrderRow>();
+        var lines    = ReadCsv(csv);
+
+        if (lines.Count < 2)
+        {
+            warnings.Add("Sales Orders CSV: no data rows found");
+            return new(rows, warnings, skipped);
+        }
+
+        var hdr       = lines[0];
+        int docIdx    = ColIndex(hdr, "Doc #");
+        int custIdx   = ColIndex(hdr, "Customer");
+        int dateIdx   = ColIndex(hdr, "Order Date");
+        int statusIdx = ColIndex(hdr, "Status");
+        int secIdx    = ColIndex(hdr, "Secondary Status");
+        int poIdx     = ColIndex(hdr, "Customer PO Number");
+        int netIdx    = ColIndex(hdr, "Net $");
+        int grossIdx  = ColIndex(hdr, "Gross $");
+        int paidIdx   = ColIndex(hdr, "% Paid");
+        int delIdx    = ColIndex(hdr, "Delivery Date");
+        int wtIdx     = ColIndex(hdr, "Wt.");
+
+        if (docIdx < 0 || custIdx < 0 || dateIdx < 0)
+        {
+            warnings.Add($"Sales Orders CSV: required columns 'Order Date'/'Doc #'/'Customer' not found. Header: {string.Join(" | ", hdr)}");
+            return new(rows, warnings, skipped);
+        }
+
+        // Trimmed cell at an index, tolerating short rows / absent optional columns.
+        static string? Cell(string[] cols, int idx) =>
+            idx >= 0 && idx < cols.Length ? cols[idx].Trim() : null;
+
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int dupes = 0;
+
+        for (int i = 1; i < lines.Count; i++)
+        {
+            var cols = lines[i];
+            if (cols.Length <= Math.Max(docIdx, custIdx)) continue;
+
+            var orderId  = cols[docIdx].Trim();
+            var customer = cols[custIdx].Trim();
+
+            // Drop export footer/total rows and any non-order Doc #. Quotes survive — they are HSK-SO# docs.
+            if (string.IsNullOrWhiteSpace(orderId) ||
+                !orderId.StartsWith("HSK-SO", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(customer))
+                continue;
+
+            if (!seen.Add(orderId)) { dupes++; continue; }   // one row per order — keep first
+
+            rows.Add(new SalesOrderRow(
+                OrderId:         orderId,
+                CustomerName:    customer,
+                OrderDate:       ParseErpDate(Cell(cols, dateIdx)),
+                Status:          NullIfBlank(Cell(cols, statusIdx)),
+                SecondaryStatus: NullIfBlank(Cell(cols, secIdx)),
+                CustomerPo:      NullIfBlank(Cell(cols, poIdx)),
+                NetAmount:       ParseMoney(Cell(cols, netIdx)),
+                GrossAmount:     ParseMoney(Cell(cols, grossIdx)),
+                PctPaid:         ParseMoney(Cell(cols, paidIdx)),
+                DeliveryDate:    ParseErpDate(Cell(cols, delIdx)),
+                Weight:          ParseMoney(Cell(cols, wtIdx))));
+        }
+
+        if (dupes > 0)
+            warnings.Add($"Sales Orders CSV: {dupes} duplicate Doc # row(s) collapsed (first kept)");
+
+        return new(rows, warnings, skipped);
+    }
+
     // ── Customer Info (ExportedData (5).csv style — the rich BP master) ───────
 
     /// <summary>
@@ -404,6 +506,36 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         var d = new string(raw.Where(char.IsDigit).ToArray());
         if (d.Length == 11 && d[0] == '1') d = d[1..];
         return d.Length == 10 ? d : null;
+    }
+
+    private static string? NullIfBlank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+    /// <summary>Parses an ERP <c>MM-dd-yyyy</c> date cell (the Sales-Orders export format), anchored at
+    /// 12:00 UTC so the calendar day survives the SharePoint UTC↔local round-trip (noon UTC is the same
+    /// date across US time zones). Tolerates a trailing time and a single-digit month/day.
+    /// Blank / unparseable ⇒ null.</summary>
+    internal static DateTimeOffset? ParseErpDate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var s = raw.Trim();
+        if (DateTime.TryParseExact(s, ["MM-dd-yyyy", "M-d-yyyy"], CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var d) ||
+            DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+            return new DateTimeOffset(d.Year, d.Month, d.Day, 12, 0, 0, TimeSpan.Zero);
+        return null;
+    }
+
+    /// <summary>Parses a money / weight / percent cell: strips <c>$</c>, <c>%</c>, commas and whitespace,
+    /// then to a number rounded to 4 dp (matches the Customer Info numeric handling). Blank / unparseable
+    /// ⇒ null.</summary>
+    internal static double? ParseMoney(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var s = raw.Replace("$", "").Replace("%", "").Replace(",", "").Trim();
+        if (s.Length == 0) return null;
+        return decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d)
+            ? (double)Math.Round(d, 4)
+            : null;
     }
 
     // ── CSV helpers ──────────────────────────────────────────────────────────

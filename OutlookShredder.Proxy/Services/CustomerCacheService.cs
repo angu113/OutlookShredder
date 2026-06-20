@@ -81,6 +81,10 @@ public class CustomerCacheService : IHostedService
     /// <summary>Call after any write to CRM data so the cache stays fresh.</summary>
     public void Invalidate() => _ = SafeRefreshAsync();
 
+    /// <summary>Awaitable refresh — use when a caller must read CRM data that reflects a just-completed write
+    /// (e.g. a targeted backfill right after a phone is linked to a contact).</summary>
+    public Task RefreshNowAsync(CancellationToken ct = default) => RefreshAsync(ct);
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     private async Task SafeRefreshAsync()

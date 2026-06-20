@@ -370,13 +370,14 @@ public class ZoomCallWatcherService : BackgroundService
                     allCrm.Count, crm!.BusinessPartner, crm.ContactName ?? "(none)");
 
             // SharePoint call log write
+            var receivedAt = DateTimeOffset.UtcNow;
             string spItemId = "";
             try
             {
                 spItemId = await _sp.WritePhoneCallLogAsync(
                     callerName, callerPhone ?? "",
                     crm?.BusinessPartner, crm?.ContactName, crm?.PopupMessage,
-                    DateTimeOffset.UtcNow, CancellationToken.None);
+                    receivedAt, CancellationToken.None);
                 _log.LogInformation("[Zoom] Call log written — SpItemId={SpItemId}", spItemId);
             }
             catch (Exception ex)
@@ -388,7 +389,8 @@ public class ZoomCallWatcherService : BackgroundService
             _notify.NotifyIncomingCall(callerName, callerPhone,
                 crm?.BusinessPartner, crm?.PopupMessage, crm?.ContactName,
                 callLogSpItemId: spItemId,
-                allMatches: allCrm.Count > 1 ? allCrm : null);
+                allMatches: allCrm.Count > 1 ? allCrm : null,
+                receivedAt: receivedAt.ToString("o"));
             _log.LogInformation("[Zoom] Notification published — name='{Name}' phone='{Phone}' spItemId='{SpItemId}'",
                 callerName, callerPhone, spItemId);
         });
