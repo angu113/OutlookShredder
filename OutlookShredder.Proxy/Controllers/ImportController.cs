@@ -23,8 +23,10 @@ public class ImportController(
     ///
     /// File type detection (first match wins):
     ///   - Filename contains "partner" or "bp"  → business partners
+    ///   - Filename contains "sales order"       → order contacts (mined from the Sales-Orders export)
     ///   - Filename contains "contact"           → contacts
     ///   - Header contains "Popup Message"       → business partners
+    ///   - Header contains "Order Date" + "Doc #" + "Contact" → order contacts
     ///   - Header contains "Contact Name" and "Customer Name" → contacts
     ///   - Otherwise: skipped with a warning
     ///
@@ -68,10 +70,11 @@ public class ImportController(
 
         static int LoadOrder(string t) => t switch
         {
-            "partners"     => 0,
-            "contacts"     => 1,
-            "customerinfo" => 2,   // enrichment — always last
-            _              => 3,
+            "partners"      => 0,
+            "contacts"      => 1,
+            "ordercontacts" => 2,   // additive contacts mined from the orders export (needs customers to exist)
+            "customerinfo"  => 3,   // enrichment — always last
+            _               => 4,
         };
         var ordered = loaded
             .OrderBy(f => LoadOrder(f.Type))
@@ -100,6 +103,9 @@ public class ImportController(
                     "contacts" => dryRun
                         ? await DiffContactsAsync(filename, csv, ct)
                         : await ProcessContactsAsync(filename, csv, ct),
+                    "ordercontacts" => dryRun
+                        ? await DiffOrderContactsAsync(filename, csv, ct)
+                        : await ProcessOrderContactsAsync(filename, csv, ct),
                     "customerinfo" => dryRun
                         ? await DiffCustomerInfoAsync(filename, csv, ct)
                         : await ProcessCustomerInfoAsync(filename, csv, ct),
@@ -173,6 +179,10 @@ public class ImportController(
             return "customerinfo";
         if (fn.Contains("partner") || fn.Contains(" bp") || fn.StartsWith("bp") || fn.Contains("_bp"))
             return "partners";
+        // Sales-Orders export mined for contacts — check before the generic "contact" hint so a file
+        // named e.g. "sales orders - contacts.csv" routes to the orders parser, not the contacts parser.
+        if (fn.Contains("sales order") || fn.Contains("salesorder") || fn.Contains("order contact"))
+            return "ordercontacts";
         if (fn.Contains("contact"))
             return "contacts";
 
@@ -182,6 +192,10 @@ public class ImportController(
             return "customerinfo";
         if (firstLine.Contains("popup message"))
             return "partners";
+        // Sales-Orders export: distinctive Order Date + Doc # columns alongside the "Contact" column
+        // ("[phone] - [name]"). Disjoint from the Contacts file (which has "Contact Name"/"Customer Name").
+        if (firstLine.Contains("order date") && firstLine.Contains("doc #") && firstLine.Contains("contact"))
+            return "ordercontacts";
         if (firstLine.Contains("contact name") && firstLine.Contains("customer name"))
             return "contacts";
 
@@ -267,6 +281,69 @@ public class ImportController(
             rowsUnchanged = diff.RowsUnchanged,
             warnings     = parsed.Warnings,
         }, parsed.Skipped);
+    }
+
+    // ── Order-sourced contacts (additive; existing customers only, unmatched reported) ──
+
+    private async Task<(object result, IReadOnlyList<CustomerImportService.SkippedItem> skipped)>
+        ProcessOrderContactsAsync(string filename, string csv, CancellationToken ct)
+    {
+        var parsed = importer.ParseContactsFromOrders(csv);
+        if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
+            return (new { file = filename, type = "ordercontacts", parsed = 0,
+                          skippedForReview = parsed.Skipped.Count, warnings = parsed.Warnings }, parsed.Skipped);
+
+        var r = await sp.UpsertContactsExistingOnlyAsync(parsed.Rows, ct);
+        log.LogInformation(
+            "[Import] {File} ordercontacts: parsed={P} matched={M} added={A} unchanged={U} unmatchedCustomers={X}",
+            filename, parsed.Rows.Count, r.MatchedRows, r.Added, r.Unchanged, r.UnmatchedCustomers);
+
+        var review = BuildOrderContactsReview(parsed.Skipped, r.UnmatchedSample, r.UnmatchedCustomers);
+        return (new
+        {
+            file = filename, type = "ordercontacts", parsed = parsed.Rows.Count,
+            matched = r.MatchedRows, added = r.Added, unchanged = r.Unchanged,
+            unmatchedCustomers = r.UnmatchedCustomers, unmatchedSample = r.UnmatchedSample,
+            skippedForReview = review.Count, warnings = parsed.Warnings,
+        }, review);
+    }
+
+    private async Task<(object result, IReadOnlyList<CustomerImportService.SkippedItem> skipped)>
+        DiffOrderContactsAsync(string filename, string csv, CancellationToken ct)
+    {
+        var parsed = importer.ParseContactsFromOrders(csv);
+        if (parsed.Rows.Count == 0 && parsed.Warnings.Count > 0)
+            return (new { file = filename, type = "ordercontacts", dryRun = true, parsed = 0,
+                          skippedForReview = parsed.Skipped.Count, warnings = parsed.Warnings }, parsed.Skipped);
+
+        var diff   = await sp.DiffContactsExistingOnlyAsync(parsed.Rows, ct);
+        var review = BuildOrderContactsReview(parsed.Skipped, diff.UnmatchedSample, diff.UnmatchedCustomers);
+        return (new
+        {
+            file = filename, type = "ordercontacts", dryRun = true, parsed = parsed.Rows.Count,
+            matched = diff.MatchedRows, rowsToAdd = diff.RowsToAdd, rowsUnchanged = diff.RowsUnchanged,
+            // Add-quality breakdown so a large rowsToAdd can be inspected before committing.
+            samePhoneAdds = diff.SamePhoneAdds, sameNameNewPhoneAdds = diff.SameNameNewPhoneAdds,
+            brandNewAdds = diff.BrandNewAdds, samePhoneSample = diff.SamePhoneSample,
+            unmatchedCustomers = diff.UnmatchedCustomers, unmatchedSample = diff.UnmatchedSample,
+            skippedForReview = review.Count, warnings = parsed.Warnings,
+        }, review);
+    }
+
+    /// <summary>Folds parse rejects (no phone / no name) AND unmatched customer names into review-file
+    /// rows, so everything needing a human lands in _skipped_review_{ts}.csv.</summary>
+    private static IReadOnlyList<CustomerImportService.SkippedItem> BuildOrderContactsReview(
+        IReadOnlyList<CustomerImportService.SkippedItem> parseSkipped,
+        IReadOnlyList<string> unmatchedSample, int unmatchedTotal)
+    {
+        var list = new List<CustomerImportService.SkippedItem>(parseSkipped);
+        foreach (var name in unmatchedSample)
+            list.Add(new CustomerImportService.SkippedItem(name, "customer not in Customers list (contacts skipped)"));
+        if (unmatchedTotal > unmatchedSample.Count)
+            list.Add(new CustomerImportService.SkippedItem(
+                $"(+{unmatchedTotal - unmatchedSample.Count} more unmatched)",
+                "customer not in Customers list (contacts skipped)"));
+        return list;
     }
 
     // ── Customer Info (enrichment of existing Customers records) ──────────────

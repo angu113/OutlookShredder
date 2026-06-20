@@ -11245,11 +11245,17 @@ public partial class SharePointService
         }
     }
 
+    // Compare customer/contact names whitespace- AND case-insensitively. Prior contact loads stored some
+    // names with internal double spaces ("Aryzel  Espirtu") while the orders parser collapses them; without
+    // this, the same (customer, person, phone) reads as new and a duplicate row gets created on upsert.
+    private static string NormName(string s) =>
+        string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+
     private static string ContactKey(string bp, string contact) =>
-        bp.ToLowerInvariant() + " " + contact.ToLowerInvariant();
+        NormName(bp) + " " + NormName(contact);
 
     private static string ContactTripleKey(string bp, string contact, string phone) =>
-        bp.ToLowerInvariant() + "|" + contact.ToLowerInvariant() + "|" + phone;
+        NormName(bp) + "|" + NormName(contact) + "|" + phone;
 
     public async Task<(int Added, int Unchanged)> UpsertContactsAsync(
         IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
@@ -11445,6 +11451,184 @@ public partial class SharePointService
         int unchanged = rows.Count - toAdd;
 
         return new ContactDiffResult(RowsToAdd: toAdd, RowsUnchanged: unchanged);
+    }
+
+    // ── Orders-sourced contacts: existing-customer-only upsert + unmatched report ─────
+    // The Sales-Orders contact enrichment (CustomerImportService.ParseContactsFromOrders) attaches
+    // contacts ONLY to customers that already exist on the Customers list; rows whose Customer has no
+    // match are dropped and their (distinct) names reported, mirroring the Customer Info enrichment's
+    // "candidate to add" handling. Customers are never created here.
+
+    public sealed record ContactsExistingOnlyResult(
+        int Added, int Unchanged, int MatchedRows, int UnmatchedCustomers,
+        IReadOnlyList<string> UnmatchedSample);
+
+    public sealed record ContactsExistingOnlyDiffResult(
+        int RowsToAdd, int RowsUnchanged, int MatchedRows, int UnmatchedCustomers,
+        IReadOnlyList<string> UnmatchedSample,
+        // Breakdown of RowsToAdd vs the customer's EXISTING contacts (data-quality preview of the creations):
+        int SamePhoneAdds,        // the phone is already on file for this customer under a different name (likely a near-dup person)
+        int SameNameNewPhoneAdds, // the contact name already exists for this customer, but this is a new number (expected enrichment)
+        int BrandNewAdds,         // neither the name nor the phone exists for this customer
+        IReadOnlyList<string> SamePhoneSample);
+
+    /// <summary>A customer's existing contacts, indexed for the add-classification preview.</summary>
+    private sealed class CustContacts
+    {
+        public readonly Dictionary<string, string> PhoneToName = new(StringComparer.Ordinal);       // phone -> a name that already carries it
+        public readonly HashSet<string>            Names       = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string>            Triples     = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Reads just the Customers list names (Title) into a case-insensitive set — the match key
+    /// for "does this customer exist?". Lighter than <see cref="ReadCustomersForEnrichAsync"/> (no
+    /// enrichment columns). Includes inactive customers: a contact still belongs to its customer, and
+    /// active-filtering happens at lookup time (CustomerCacheService), not at import.</summary>
+    private async Task<HashSet<string>> ReadCustomerNamesAsync(CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomersListIdAsync();
+        var names  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r => { r.QueryParameters.Expand = ["fields($select=Title)"]; r.QueryParameters.Top = 999; }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var name = GetStr(d, "Title");
+                if (!string.IsNullOrWhiteSpace(name)) names.Add(name);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+        return names;
+    }
+
+    /// <summary>Splits parsed contact rows by whether their Customer exists on the Customers list:
+    /// matched rows (kept) and the distinct unmatched customer names (reported, never created).</summary>
+    private static (List<CustomerImportService.ContactRow> Matched, List<string> Unmatched)
+        PartitionByExistingCustomer(
+            IReadOnlyList<CustomerImportService.ContactRow> rows, HashSet<string> customerNames)
+    {
+        var matched     = new List<CustomerImportService.ContactRow>();
+        var unmatched   = new List<string>();
+        var unmatchSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in rows)
+        {
+            if (customerNames.Contains(r.CustomerName)) matched.Add(r);
+            else if (unmatchSeen.Add(r.CustomerName))   unmatched.Add(r.CustomerName);
+        }
+        return (matched, unmatched);
+    }
+
+    /// <summary>Additive contact upsert restricted to existing customers. Rows whose Customer is not on
+    /// the Customers list are dropped and their distinct names returned for the review file; contacts are
+    /// never attached to an unknown customer, and customers are never created here. Reuses
+    /// <see cref="UpsertContactsAsync"/> for the additive triple insert over the matched rows.</summary>
+    public async Task<ContactsExistingOnlyResult> UpsertContactsExistingOnlyAsync(
+        IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
+    {
+        var names = await ReadCustomerNamesAsync(ct);
+        var (matched, unmatched) = PartitionByExistingCustomer(rows, names);
+
+        _log.LogInformation(
+            "[SP] UpsertContactsExistingOnly: {Matched} rows match existing customers, {Unmatched} unmatched customer name(s) dropped",
+            matched.Count, unmatched.Count);
+
+        var (added, unchanged) = await UpsertContactsAsync(matched, ct);
+        return new ContactsExistingOnlyResult(
+            added, unchanged, matched.Count, unmatched.Count, unmatched.Take(200).ToList());
+    }
+
+    /// <summary>Reads every existing contact row grouped by customer (lower-cased name) — phones (→ a name
+    /// that carries each), contact names, and exact (bp,name,phone) triples — to classify the proposed adds.</summary>
+    private async Task<Dictionary<string, CustContacts>> ReadContactsByCustomerAsync(CancellationToken ct)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetCustomerContactsListIdAsync();
+        var map    = new Dictionary<string, CustContacts>(StringComparer.OrdinalIgnoreCase);
+
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items
+            .GetAsync(r =>
+            {
+                r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
+                r.QueryParameters.Top    = 999;
+            }, ct);
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                if (item.Fields?.AdditionalData is not { } d) continue;
+                var bp      = GetStr(d, "CustomerName") ?? "";
+                var contact = GetStr(d, "ContactName")  ?? "";
+                var phone   = GetStr(d, "Phone")        ?? "";
+                if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(contact)) continue;
+
+                var ckey = NormName(bp);
+                if (!map.TryGetValue(ckey, out var c)) { c = new CustContacts(); map[ckey] = c; }
+                c.Names.Add(NormName(contact));
+                c.Triples.Add(ContactTripleKey(bp, contact, phone));
+                if (!string.IsNullOrWhiteSpace(phone)) c.PhoneToName.TryAdd(phone, contact);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
+        }
+        return map;
+    }
+
+    /// <summary>Dry-run for <see cref="UpsertContactsExistingOnlyAsync"/>: reports adds/unchanged over the
+    /// matched rows plus the distinct unmatched customer names, without writing. Also classifies each
+    /// proposed add against the customer's existing contacts (same-phone / same-name-new-phone / brand-new)
+    /// so an unexpectedly large add count can be inspected before committing.</summary>
+    public async Task<ContactsExistingOnlyDiffResult> DiffContactsExistingOnlyAsync(
+        IReadOnlyList<CustomerImportService.ContactRow> rows, CancellationToken ct = default)
+    {
+        var names = await ReadCustomerNamesAsync(ct);
+        var (matched, unmatched) = PartitionByExistingCustomer(rows, names);
+        var byCust = await ReadContactsByCustomerAsync(ct);
+
+        int toAdd = 0, unchanged = 0, samePhone = 0, sameNameNew = 0, brandNew = 0;
+        var samePhoneSample = new List<string>();
+
+        foreach (var r in matched)
+        {
+            byCust.TryGetValue(NormName(r.CustomerName), out var ex);
+            if (ex is not null && ex.Triples.Contains(ContactTripleKey(r.CustomerName, r.ContactName, r.Phone)))
+            {
+                unchanged++;
+                continue;
+            }
+            toAdd++;
+
+            if (ex is not null && ex.PhoneToName.TryGetValue(r.Phone, out var onName))
+            {
+                samePhone++;
+                if (samePhoneSample.Count < 80)
+                    samePhoneSample.Add($"{r.CustomerName} | add '{r.ContactName}' [{r.Phone}] — phone already on '{onName}'");
+            }
+            else if (ex is not null && ex.Names.Contains(NormName(r.ContactName)))
+            {
+                sameNameNew++;
+            }
+            else
+            {
+                brandNew++;
+            }
+        }
+
+        _log.LogInformation(
+            "[SP] DiffContactsExistingOnly: toAdd={Add} (samePhone={SP} sameNameNewPhone={SN} brandNew={BN}), unchanged={Unch}, unmatchedCustomers={X}",
+            toAdd, samePhone, sameNameNew, brandNew, unchanged, unmatched.Count);
+
+        return new ContactsExistingOnlyDiffResult(
+            toAdd, unchanged, matched.Count, unmatched.Count, unmatched.Take(200).ToList(),
+            samePhone, sameNameNew, brandNew, samePhoneSample);
     }
 
     public async Task<CustomerLookupResult?> LookupCustomerByPhoneAsync(

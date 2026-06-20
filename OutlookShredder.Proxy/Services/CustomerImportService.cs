@@ -166,6 +166,105 @@ public sealed class CustomerImportService(ILogger<CustomerImportService> log)
         return new(Deduplicate(raw), warnings, skipped);
     }
 
+    // ── Contacts from the Sales-Orders export (ExportedData (8).csv style) ────
+
+    /// <summary>
+    /// Mines the Sales-Orders export for contacts: its <c>Contact</c> column carries
+    /// <c>"[phone] - [name] - "</c>, which we split into the same <see cref="ContactRow"/> triples
+    /// <see cref="ParseContacts"/> produces (so the downstream upsert is reused). The order export
+    /// repeats customers/contacts heavily across its ~35k rows, so duplicates collapse via the shared
+    /// <see cref="Deduplicate"/> and each malformed cell is reported only once. Rows with no usable
+    /// phone or no name are skipped and surfaced for review. Customer scope (existing-only +
+    /// report-unmatched) is enforced downstream in <c>SharePointService.UpsertContactsExistingOnlyAsync</c>.
+    /// </summary>
+    public ParseResult<ContactRow> ParseContactsFromOrders(string csv)
+    {
+        var warnings = new List<string>();
+        var skipped  = new List<SkippedItem>();
+        var raw      = new List<(string Bp, string Contact, string Phone)>();
+        var lines    = ReadCsv(csv);
+
+        if (lines.Count < 2)
+        {
+            warnings.Add("Orders CSV: no data rows found");
+            return new([], warnings, skipped);
+        }
+
+        var hdr        = lines[0];
+        int bpIdx      = ColIndex(hdr, "Customer");
+        int contactIdx = ColIndex(hdr, "Contact");
+
+        if (bpIdx < 0 || contactIdx < 0)
+        {
+            warnings.Add($"Orders CSV: required columns 'Customer'/'Contact' not found. Header: {string.Join(" | ", hdr)}");
+            return new([], warnings, skipped);
+        }
+
+        // Report each malformed (customer, raw-contact) only once — without this the review file would
+        // carry thousands of identical skip rows (same customer/contact repeats on every order).
+        var rejectSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 1; i < lines.Count; i++)
+        {
+            var cols   = lines[i];
+            int maxIdx = Math.Max(bpIdx, contactIdx);
+            if (cols.Length <= maxIdx) continue;
+
+            var bp       = cols[bpIdx].Trim();
+            var rawField = cols[contactIdx].Trim();
+            if (string.IsNullOrWhiteSpace(bp) || string.IsNullOrWhiteSpace(rawField)) continue;
+
+            var (phone, name) = ParseOrderContact(rawField);
+
+            if (phone is null || string.IsNullOrWhiteSpace(name))
+            {
+                var reason = phone is null
+                    ? (string.IsNullOrWhiteSpace(name) ? "no usable phone or name" : "no usable phone")
+                    : "no contact name";
+                if (rejectSeen.Add(bp + "|" + rawField))
+                {
+                    log.LogWarning("[CustImport] Row {Row}: {Bp} contact '{Raw}' — {Reason}", i + 1, bp, rawField, reason);
+                    skipped.Add(new SkippedItem($"{bp} / {rawField}", reason));
+                }
+                continue;
+            }
+
+            raw.Add((bp, name, phone));
+        }
+
+        return new(Deduplicate(raw), warnings, skipped);
+    }
+
+    /// <summary>Splits an orders-export <c>Contact</c> cell (<c>"[phone] - [name] - "</c>) into
+    /// (phone, name). Name is the text after the first <c>" - "</c> delimiter with the trailing
+    /// <c>" - "</c> stripped and internal whitespace collapsed; phone is parsed from the part before it.
+    /// Either part may be null/empty when the cell omits it.</summary>
+    internal static (string? Phone, string Name) ParseOrderContact(string contactCell)
+    {
+        int sep       = contactCell.IndexOf(" - ", StringComparison.Ordinal);
+        var phonePart = sep < 0 ? contactCell : contactCell[..sep];
+        var namePart  = sep < 0 ? ""          : contactCell[(sep + 3)..];
+
+        namePart = namePart.Trim();
+        if (namePart.EndsWith('-')) namePart = namePart[..^1].Trim();   // drop the trailing " -" the ERP appends
+        namePart = string.Join(' ', namePart.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        return (ParseLeadingPhone(phonePart), namePart);
+    }
+
+    /// <summary>The first 10-digit phone at the START of a string: takes the leading run of phone-shaped
+    /// characters (digits and <c>space ( ) . - +</c>), which stops at the first letter (so an
+    /// <c>"Ex 355"</c> extension is dropped) or any other separator beginning a second number
+    /// (<c>"/"</c>, <c>","</c>), then normalises it. Null unless the run yields exactly 10 digits
+    /// (a leading country-code <c>1</c> is dropped first).</summary>
+    private static string? ParseLeadingPhone(string s)
+    {
+        s = s.TrimStart();
+        int i = 0;
+        while (i < s.Length && (char.IsDigit(s[i]) || s[i] is ' ' or '(' or ')' or '-' or '.' or '+')) i++;
+        return NormalizePhone(s[..i]);
+    }
+
     // ── Customer Info (ExportedData (5).csv style — the rich BP master) ───────
 
     /// <summary>
