@@ -24,10 +24,13 @@ public class ForgeTaskService : BackgroundService
         new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
 
     private const string TaskName = "customer-statements-export";
+    private const string ImmediateOverdueEmailTask = "immediate-overdue-email";   // 4pm EST
 
     private readonly ForgeSchedulerQueue      _queue;
     private readonly SharePointService        _sp;
     private readonly RfqNotificationService   _notify;
+    private readonly MailService              _mail;
+    private readonly IConfiguration           _config;
     private readonly ILogger<ForgeTaskService> _log;
 
     // In-memory cache — written from one thread at a time (queue processor or bus handler);
@@ -44,11 +47,15 @@ public class ForgeTaskService : BackgroundService
         ForgeSchedulerQueue      queue,
         SharePointService        sp,
         RfqNotificationService   notify,
+        MailService              mail,
+        IConfiguration           config,
         ILogger<ForgeTaskService> log)
     {
         _queue  = queue;
         _sp     = sp;
         _notify = notify;
+        _mail   = mail;
+        _config = config;
         _log    = log;
     }
 
@@ -201,24 +208,35 @@ public class ForgeTaskService : BackgroundService
     private async Task CheckScheduleAsync(CancellationToken ct)
     {
         var estNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est);
-        if (estNow.Hour != 19 || estNow.Minute != 0) return;
 
-        // Guard: skip if the last successful load was within 23 hours (e.g. manual trigger earlier today).
-        // 23 (not 24) leaves margin so a run completing a few minutes after 19:00 doesn't skip the next
-        // night's 19:00 run (_asOf is the completion time).
-        if (_asOf.HasValue && (DateTime.UtcNow - _asOf.Value).TotalHours < 23)
+        // 4pm EST — Immediate-overdue email. The queue's MessageId dedup ({task}:{yyyyMMdd}) guarantees a
+        // single send per day even if several proxies enqueue at 16:00.
+        if (estNow is { Hour: 16, Minute: 0 })
         {
-            _log.LogInformation(
-                "[ForgeTask] Skipping 7pm enqueue — last run was {Hours:F1}h ago (< 23h threshold)",
-                (DateTime.UtcNow - _asOf.Value).TotalHours);
-            return;
+            _log.LogInformation("[ForgeTask] 4pm EST — enqueueing {Task}", ImmediateOverdueEmailTask);
+            await _queue.EnqueueAsync(ImmediateOverdueEmailTask, ct);
         }
 
-        // Guard: skip if today's EST date already has a recorded run in cache.
-        if (_lastRunEstDate.HasValue && _lastRunEstDate.Value.Date == estNow.Date) return;
+        // 7pm EST — statements export.
+        if (estNow is { Hour: 19, Minute: 0 })
+        {
+            // Guard: skip if the last successful load was within 23 hours (e.g. manual trigger earlier today).
+            // 23 (not 24) leaves margin so a run completing a few minutes after 19:00 doesn't skip the next
+            // night's 19:00 run (_asOf is the completion time).
+            if (_asOf.HasValue && (DateTime.UtcNow - _asOf.Value).TotalHours < 23)
+            {
+                _log.LogInformation(
+                    "[ForgeTask] Skipping 7pm enqueue — last run was {Hours:F1}h ago (< 23h threshold)",
+                    (DateTime.UtcNow - _asOf.Value).TotalHours);
+                return;
+            }
 
-        _log.LogInformation("[ForgeTask] 7pm EST — enqueueing {Task}", TaskName);
-        await _queue.EnqueueAsync(TaskName, ct);
+            // Guard: skip if today's EST date already has a recorded run in cache.
+            if (_lastRunEstDate.HasValue && _lastRunEstDate.Value.Date == estNow.Date) return;
+
+            _log.LogInformation("[ForgeTask] 7pm EST — enqueueing {Task}", TaskName);
+            await _queue.EnqueueAsync(TaskName, ct);
+        }
     }
 
     // ── Queue message handler ─────────────────────────────────────────────────
@@ -255,6 +273,13 @@ public class ForgeTaskService : BackgroundService
 
     private async Task ExecuteTaskAsync(string taskName, CancellationToken ct)
     {
+        // Lightweight tasks that don't run the Steve export (and must not touch the statements status).
+        if (taskName == ImmediateOverdueEmailTask)
+        {
+            await RunOverdueEmailAsync(TermsBucket.Immediate, send: true, ct);
+            return;
+        }
+
         _log.LogInformation("[ForgeTask] Starting '{Task}' on {Machine}", taskName, Environment.MachineName);
 
         _status         = "running";
@@ -316,6 +341,12 @@ public class ForgeTaskService : BackgroundService
             _notify.NotifyTaskComplete(taskName);
             _log.LogInformation("[ForgeTask] '{Task}' complete — {Count} customers stored",
                 taskName, statements.Count);
+
+            // Right after the 7pm load: email the Net-terms overdue customers. Runs ONLY on the proxy that
+            // executed the export (peers get TASK_COMPLETE -> HandleTaskCompleteAsync, which does not send),
+            // so exactly one Net email goes out. A mail failure must not fail the export (already succeeded).
+            try { await RunOverdueEmailAsync(TermsBucket.Net, send: true, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[ForgeTask] post-load Net-overdue email failed"); }
         }
         catch (Exception ex)
         {
@@ -361,6 +392,65 @@ public class ForgeTaskService : BackgroundService
         catch (Exception ex) { _log.LogWarning(ex, "[ForgeTask] Cache refresh from SP failed"); }
     }
 
+    // ── ShadowCat overdue-customer emails ─────────────────────────────────────
+
+    /// <summary>
+    /// Computes the overdue customers for one terms bucket (Immediate / Net), renders the list to a PDF,
+    /// and — when <paramref name="send"/> is true — emails it to the AR address. Uses the in-memory
+    /// statements snapshot; at 4pm (before tonight's 7pm run) that may be empty, so it falls back to the last
+    /// stored SP result (prior night). Sends a "none overdue" note when the bucket is clear; does nothing
+    /// only when there's no data at all. With <paramref name="send"/>=false it renders without emailing (the
+    /// PDF is returned) — used by the admin preview endpoint so the live AR inbox isn't hit during testing.
+    /// </summary>
+    public async Task<OverdueEmailResult> RunOverdueEmailAsync(TermsBucket bucket, bool send, CancellationToken ct = default)
+    {
+        var asOf  = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _est).Date;
+        var label = bucket == TermsBucket.Immediate ? "Immediate" : "Net";
+
+        var statements = _statements;
+        if (statements is null)
+        {
+            // 4pm path: today's export hasn't run; use the most recent stored snapshot (prior night).
+            try
+            {
+                var json = await _sp.GetForgeTaskResultAsync(TaskName, ct);
+                if (!string.IsNullOrEmpty(json))
+                    statements = JsonSerializer.Deserialize<List<CustomerStatementDto>>(json, _jsonOpts);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[ForgeTask] overdue email: SP snapshot load failed"); }
+        }
+        if (statements is null)
+        {
+            _log.LogWarning("[ForgeTask] {Label}-overdue email skipped — no statements data available", label);
+            return new OverdueEmailResult(label, asOf, 0, 0m, false, null);
+        }
+
+        var rows  = StatementOverdue.OverdueRows(statements, bucket, asOf);
+        var total = rows.Sum(r => r.Overdue);
+        byte[]? pdf = rows.Count > 0 ? StatementOverdueDocument.Render(rows, label, asOf) : null;
+
+        if (send)
+        {
+            var to      = _config["ShadowCat:OverdueEmailTo"] ?? "hackensack@metalsupermarkets.com";
+            var subject = $"ShadowCat: {label} Customers Overdue on {asOf:MMMM d, yyyy}";
+            var body    = rows.Count > 0
+                ? $"{rows.Count} {label}-terms customer(s) overdue as of {asOf:MMMM d, yyyy}. " +
+                  $"Total overdue {total:C0}. See the attached PDF."
+                : $"No {label}-terms customers are overdue as of {asOf:MMMM d, yyyy}.";
+
+            await _mail.SendSupplierInquiryAsync(
+                to, subject, body,
+                attachmentName:        pdf is null ? null : $"ShadowCat-{label}-Overdue-{asOf:yyyy-MM-dd}.pdf",
+                attachmentBytes:       pdf,
+                attachmentContentType: pdf is null ? null : "application/pdf");
+
+            _log.LogInformation("[ForgeTask] Sent {Label}-overdue email to {To}: {Count} customer(s), asOf {AsOf:yyyy-MM-dd}",
+                label, to, rows.Count, asOf);
+        }
+
+        return new OverdueEmailResult(label, asOf, rows.Count, total, send, send ? null : pdf);
+    }
+
     // ── Startup SP load ───────────────────────────────────────────────────────
 
     private async Task LoadFromSpAsync(CancellationToken ct)
@@ -401,3 +491,8 @@ public class ForgeTaskService : BackgroundService
             statements.Count, runEst);
     }
 }
+
+/// <summary>Result of a ShadowCat overdue-email run. <see cref="Pdf"/> is populated only on a preview
+/// (send=false) so the admin endpoint can return it without hitting the live AR inbox.</summary>
+public sealed record OverdueEmailResult(
+    string Bucket, DateTime AsOf, int Count, decimal TotalOverdue, bool Sent, byte[]? Pdf);

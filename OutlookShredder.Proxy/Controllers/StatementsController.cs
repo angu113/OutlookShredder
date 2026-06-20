@@ -43,6 +43,27 @@ public class StatementsController(ForgeTaskService forgeTask, SharePointService 
         return Accepted(new { started = true, message = "Statements export triggered. Poll /api/statements/status for completion." });
     }
 
+    /// <summary>
+    /// ShadowCat overdue-customer email for a terms bucket (<c>bucket=immediate|net</c>). Default
+    /// <c>send=false</c> renders the overdue-list PDF and returns it (preview — does NOT email, so the live
+    /// AR inbox is untouched during testing). <c>send=true</c> emails it to the AR address now — the same
+    /// action the 4pm Immediate and post-7pm Net schedules perform.
+    /// </summary>
+    [HttpPost("overdue-email")]
+    public async Task<IActionResult> OverdueEmail(
+        [FromQuery] string bucket = "immediate", [FromQuery] bool send = false, CancellationToken ct = default)
+    {
+        var b = bucket.Equals("net", StringComparison.OrdinalIgnoreCase) ? TermsBucket.Net : TermsBucket.Immediate;
+        var r = await forgeTask.RunOverdueEmailAsync(b, send, ct);
+        if (!send && r.Pdf is not null)
+            return File(r.Pdf, "application/pdf", $"ShadowCat-{r.Bucket}-Overdue-{r.AsOf:yyyy-MM-dd}.pdf");
+        return Ok(new
+        {
+            bucket = r.Bucket, asOf = r.AsOf.ToString("yyyy-MM-dd"),
+            count = r.Count, totalOverdue = r.TotalOverdue, sent = r.Sent,
+        });
+    }
+
     /// <summary>Returns the sorted list of customer names with outstanding balances.</summary>
     [HttpGet("customers")]
     public IActionResult GetCustomers()
