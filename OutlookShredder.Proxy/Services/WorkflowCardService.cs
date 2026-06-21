@@ -174,8 +174,8 @@ public class WorkflowCardService : IHostedService
     /// <summary>
     /// Called by FileWatcherService after a PickingSlip is written to SP.
     /// Routes into the Trigger "Prioritize" intake (AssignedDate="") so the user can schedule it.
-    ///   Processing (Fabrication lane): created for EVERY picking slip so nothing is missed; any matched
-    ///     shop-operation keywords ride along on the card's Notes for context.
+    ///   Worklist lane (persisted Tab key = "Processing"): created for EVERY picking slip so nothing is
+    ///     missed; any matched shop-operation keywords ride along on the card's Notes for context.
     ///   Delivery: created for any delivery method that isn't a customer pickup / will-call
     ///     (see <see cref="IsDeliveryMethod"/>) — e.g. "Our Truck", "UPS Ground", "Delivery".
     /// Both are deduped against existing non-completed cards for the same doc + tab.
@@ -207,8 +207,8 @@ public class WorkflowCardService : IHostedService
         }
         finally { _lock.Release(); }
 
-        // Fabrication lane: every picking slip lands in Prioritize so nothing is missed. Any matched
-        // shop ops ride along on Notes for context (previously these gated whether the card was created).
+        // Worklist lane (Tab key "Processing"): every picking slip lands in Prioritize so nothing is missed.
+        // Any matched shop ops ride along on Notes for context (previously these gated whether the card was created).
         if (!hasProcessing)
             await CreateAsync(new CreateWorkflowCardRequest
             {
