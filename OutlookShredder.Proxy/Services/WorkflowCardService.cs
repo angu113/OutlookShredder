@@ -118,6 +118,7 @@ public class WorkflowCardService : IHostedService
                 DeliveryService = req.DeliveryService,
                 WasAutoCreated  = req.WasAutoCreated,
                 OwnerUser       = req.OwnerUser,
+                ProcessOps      = req.ProcessOps,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -208,7 +209,9 @@ public class WorkflowCardService : IHostedService
         finally { _lock.Release(); }
 
         // Worklist lane (Tab="Worklist"): every picking slip lands in Prioritize so nothing is missed.
-        // Any matched shop ops ride along on Notes for context (previously these gated whether the card was created).
+        // Any matched shop ops ride along on ProcessOps (rendered as fab-type chips on the card); Notes is
+        // left empty for the user. (Previously ops were dumped into Notes — moved out so the notes box is the
+        // user's own, and the ops drive structured chips instead.)
         if (!hasWorklist)
             await CreateAsync(new CreateWorkflowCardRequest
             {
@@ -220,7 +223,7 @@ public class WorkflowCardService : IHostedService
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
-                Notes           = processOps.Count > 0 ? string.Join(", ", processOps) : null,
+                ProcessOps      = processOps.Count > 0 ? string.Join(", ", processOps) : null,
                 WasAutoCreated  = true,
                 OwnerUser       = owner,
             }, ct);

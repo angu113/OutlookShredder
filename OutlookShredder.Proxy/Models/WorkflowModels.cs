@@ -25,6 +25,9 @@ public class WorkflowCard
     public string? Status            { get; set; }
     /// <summary>Customer told their order is Ready (only meaningful once Status = "Ready").</summary>
     public bool    CustomerNotified  { get; set; }
+    /// <summary>Shop ops parsed from the slip (comma-joined, e.g. "Laser Cutting, Bending"), rendered as
+    /// fabrication-type chips on the Worklist card. Null/empty = a plain cut job ("Cutting").</summary>
+    public string? ProcessOps        { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -44,6 +47,7 @@ public class CreateWorkflowCardRequest
     public string? OwnerUser       { get; set; }
     public string? Status          { get; set; }
     public bool    CustomerNotified { get; set; }
+    public string? ProcessOps      { get; set; }
 }
 
 public class UpdateWorkflowCardRequest
