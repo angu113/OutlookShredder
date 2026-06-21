@@ -12318,6 +12318,8 @@ public partial class SharePointService
             ("Status",            "text"),     // Worklist progress: "" (none) | "InProgress" | "Ready"
             ("CustomerNotified",  "boolean"),  // set once Ready and the customer has been told
             ("ProcessOps",        "text"),     // shop ops parsed from the slip (comma-joined) → fab-type chips
+            ("ContactName",       "text"),     // customer contact from the slip "Attention:" line
+            ("ContactPhone",      "text"),     // customer contact phone from the slip "Contact Phone:" line
         };
 
         foreach (var (name, type) in schema)
@@ -12407,6 +12409,8 @@ public partial class SharePointService
                                        ? cnfEl.ValueKind == System.Text.Json.JsonValueKind.True
                                        : cnf is bool cnb && cnb),
                 ProcessOps       = d.TryGetValue("ProcessOps",       out var po) ? (po?.ToString() is string pv && pv.Length > 0 ? pv : null) : null,
+                ContactName      = d.TryGetValue("ContactName",      out var ctn) ? (ctn?.ToString() is string ctv && ctv.Length > 0 ? ctv : null) : null,
+                ContactPhone     = d.TryGetValue("ContactPhone",     out var ctp) ? (ctp?.ToString() is string cpv && cpv.Length > 0 ? cpv : null) : null,
             });
         }
 
@@ -12461,6 +12465,8 @@ public partial class SharePointService
                         ["Status"]          = card.Status,
                         ["CustomerNotified"]= card.CustomerNotified,
                         ["ProcessOps"]      = card.ProcessOps,
+                        ["ContactName"]     = card.ContactName,
+                        ["ContactPhone"]    = card.ContactPhone,
                     }
                 }
             }, cancellationToken: ct);

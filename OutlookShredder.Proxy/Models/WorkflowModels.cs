@@ -28,6 +28,11 @@ public class WorkflowCard
     /// <summary>Shop ops parsed from the slip (comma-joined, e.g. "Laser Cutting, Bending"), rendered as
     /// fabrication-type chips on the Worklist card. Null/empty = a plain cut job ("Cutting").</summary>
     public string? ProcessOps        { get; set; }
+    /// <summary>Customer contact person from the slip's "Attention:" line. Null if not on the slip (the card
+    /// then falls back to the CRM primary contact for display).</summary>
+    public string? ContactName        { get; set; }
+    /// <summary>Customer contact phone from the slip's "Contact Phone:" line. Null if not on the slip.</summary>
+    public string? ContactPhone        { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -48,6 +53,8 @@ public class CreateWorkflowCardRequest
     public string? Status          { get; set; }
     public bool    CustomerNotified { get; set; }
     public string? ProcessOps      { get; set; }
+    public string? ContactName     { get; set; }
+    public string? ContactPhone    { get; set; }
 }
 
 public class UpdateWorkflowCardRequest

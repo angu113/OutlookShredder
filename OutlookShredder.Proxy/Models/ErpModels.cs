@@ -24,6 +24,15 @@ public class ErpExtraction
     [JsonPropertyName("sales_rep")]
     public string? SalesRep { get; set; }
 
+    /// <summary>The customer's contact person, printed after "Attention:" on picking slips (paired with
+    /// "Contact Phone:"). Null if not present.</summary>
+    [JsonPropertyName("contact_name")]
+    public string? ContactName { get; set; }
+
+    /// <summary>The customer contact's phone, printed after "Contact Phone:" on picking slips. Null if absent.</summary>
+    [JsonPropertyName("contact_phone")]
+    public string? ContactPhone { get; set; }
+
     [JsonPropertyName("document_date")]
     public string? DocumentDate { get; set; }
 

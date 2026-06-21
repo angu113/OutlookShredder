@@ -45,6 +45,13 @@ public class ErpAiService
         sales_rep:          The name of our sales rep / order taker printed on the document, taken from
                             the field labelled "Customer Rep:" (most ERP docs) or "Requested By:" (on
                             purchase orders). Return the name exactly as printed. Leave null if absent.
+        contact_name:       The CUSTOMER'S contact person for this order, printed after "Attention:" on a
+                            line where the colon and the name are on the SAME line (it is paired with
+                            "Contact Phone:"), e.g. "Sam B". Do NOT use the standalone "Attention" section
+                            header that sits above the ship-to address, the Customer Rep, or our own
+                            store / franchise name. Leave null if absent.
+        contact_phone:      The customer contact's phone number, printed after "Contact Phone:". Return the
+                            digits as shown, e.g. "929 355 6805". Leave null if absent.
 
         DATE
         document_date: The date printed on the document (invoice date, order date, quotation date).
@@ -96,6 +103,8 @@ public class ErpAiService
               "customer_name":      { "type": ["string","null"],   "description": "Company the document is addressed to. On picking slips: the company name on the line BELOW 'Ship To:' (not the text to the right of it on the same line). Not the Customer Rep or store name." },
               "customer_reference": { "type": ["string","null"],   "description": "Customer's own PO or reference number. Never our own ERP reference." },
               "sales_rep":          { "type": ["string","null"],   "description": "Our sales rep / order taker, from the 'Customer Rep:' field (most docs) or 'Requested By:' (purchase orders). Name as printed; null if absent." },
+              "contact_name":       { "type": ["string","null"],   "description": "Customer's contact person after 'Attention:' (colon + name on the SAME line, paired with 'Contact Phone:'), e.g. 'Sam B'. NOT the standalone 'Attention' header above the ship-to address, the Customer Rep, or the store name. Null if absent." },
+              "contact_phone":      { "type": ["string","null"],   "description": "Customer contact phone after 'Contact Phone:', digits as printed, e.g. '929 355 6805'. Null if absent." },
               "document_date":      { "type": ["string","null"],   "description": "Date as printed on the document." },
               "total_amount":       { "type": ["string","null"],   "description": "Grand total as a plain numeric string, e.g. '1234.56'. Null for documents with no pricing (picking slips, shipping notes)." },
               "currency":           { "type": ["string","null"],   "description": "Currency code, e.g. USD. Default USD." },
@@ -133,6 +142,8 @@ public class ErpAiService
             "customer_name":      { "type": "string",  "nullable": true },
             "customer_reference": { "type": "string",  "nullable": true },
             "sales_rep":          { "type": "string",  "nullable": true },
+            "contact_name":       { "type": "string",  "nullable": true },
+            "contact_phone":      { "type": "string",  "nullable": true },
             "document_date":      { "type": "string",  "nullable": true },
             "total_amount":       { "type": "string",  "nullable": true },
             "currency":           { "type": "string",  "nullable": true },

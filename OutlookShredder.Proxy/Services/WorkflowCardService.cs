@@ -119,6 +119,8 @@ public class WorkflowCardService : IHostedService
                 WasAutoCreated  = req.WasAutoCreated,
                 OwnerUser       = req.OwnerUser,
                 ProcessOps      = req.ProcessOps,
+                ContactName     = req.ContactName,
+                ContactPhone    = req.ContactPhone,
             };
 
             card.SpItemId = await _sp.WriteWorkflowCardAsync(card, ct);
@@ -224,6 +226,8 @@ public class WorkflowCardService : IHostedService
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
                 ProcessOps      = processOps.Count > 0 ? string.Join(", ", processOps) : null,
+                ContactName     = extraction.ContactName,
+                ContactPhone    = extraction.ContactPhone,
                 WasAutoCreated  = true,
                 OwnerUser       = owner,
             }, ct);
@@ -241,6 +245,8 @@ public class WorkflowCardService : IHostedService
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
                 DeliveryMethod  = extraction.DeliveryMethod,
+                ContactName     = extraction.ContactName,
+                ContactPhone    = extraction.ContactPhone,
                 WasAutoCreated  = true,
                 OwnerUser       = owner,
             }, ct);
