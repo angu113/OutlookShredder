@@ -174,8 +174,8 @@ public class WorkflowCardService : IHostedService
     /// <summary>
     /// Called by FileWatcherService after a PickingSlip is written to SP.
     /// Routes into the Trigger "Prioritize" intake (AssignedDate="") so the user can schedule it.
-    ///   Worklist lane (persisted Tab key = "Processing"): created for EVERY picking slip so nothing is
-    ///     missed; any matched shop-operation keywords ride along on the card's Notes for context.
+    ///   Worklist lane (Tab="Worklist"): created for EVERY picking slip so nothing is missed; any matched
+    ///     shop-operation keywords ride along on the card's Notes for context.
     ///   Delivery: created for any delivery method that isn't a customer pickup / will-call
     ///     (see <see cref="IsDeliveryMethod"/>) — e.g. "Our Truck", "UPS Ground", "Delivery".
     /// Both are deduped against existing non-completed cards for the same doc + tab.
@@ -198,24 +198,24 @@ public class WorkflowCardService : IHostedService
             : Environment.UserName;
 
         // Guard: skip if a non-completed card already exists for this doc + tab (in any column, incl. Prioritize)
-        bool hasProcessing, hasDelivery;
+        bool hasWorklist, hasDelivery;
         await _lock.WaitAsync(ct);
         try
         {
-            hasProcessing = _cache.Any(c => c.DocumentNumber == docNum && c.Tab == "Processing" && !c.IsCompleted);
+            hasWorklist = _cache.Any(c => c.DocumentNumber == docNum && c.Tab == "Worklist" && !c.IsCompleted);
             hasDelivery   = _cache.Any(c => c.DocumentNumber == docNum && c.Tab == "Delivery"   && !c.IsCompleted);
         }
         finally { _lock.Release(); }
 
-        // Worklist lane (Tab key "Processing"): every picking slip lands in Prioritize so nothing is missed.
+        // Worklist lane (Tab="Worklist"): every picking slip lands in Prioritize so nothing is missed.
         // Any matched shop ops ride along on Notes for context (previously these gated whether the card was created).
-        if (!hasProcessing)
+        if (!hasWorklist)
             await CreateAsync(new CreateWorkflowCardRequest
             {
                 DocumentNumber  = docNum,
                 CustomerName    = extraction.CustomerName,
                 DocumentType    = extraction.DocumentType,
-                Tab             = "Processing",
+                Tab             = "Worklist",
                 AssignedDate    = "",
                 ErpSpItemId     = erpSpItemId,
                 DeliveryAddress = extraction.DeliveryAddress,
@@ -244,7 +244,7 @@ public class WorkflowCardService : IHostedService
 
         _log.LogInformation(
             "[WF] Auto-create {Doc}: fabrication={Fab} delivery={Del} (method='{Method}', ops={Ops})",
-            docNum, !hasProcessing, createDelivery, extraction.DeliveryMethod ?? "", processOps.Count);
+            docNum, !hasWorklist, createDelivery, extraction.DeliveryMethod ?? "", processOps.Count);
     }
 
     /// <summary>

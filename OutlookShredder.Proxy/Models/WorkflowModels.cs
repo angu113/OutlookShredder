@@ -6,7 +6,7 @@ public class WorkflowCard
     public string  DocumentNumber { get; set; } = "";
     public string? CustomerName   { get; set; }
     public string? DocumentType   { get; set; }
-    public string  Tab            { get; set; } = "Processing"; // "Processing" | "Delivery"
+    public string  Tab            { get; set; } = "Worklist"; // "Worklist" | "Delivery" | "Transfer"
     public string  AssignedDate   { get; set; } = "";           // ISO date "2026-05-05"
     public int     SortOrder      { get; set; }
     public string? Notes          { get; set; }
@@ -28,7 +28,7 @@ public class CreateWorkflowCardRequest
     public string  DocumentNumber  { get; set; } = "";
     public string? CustomerName    { get; set; }
     public string? DocumentType    { get; set; }
-    public string  Tab             { get; set; } = "Processing";
+    public string  Tab             { get; set; } = "Worklist";
     public string  AssignedDate    { get; set; } = "";
     public string? Notes           { get; set; }
     public string? ErpSpItemId     { get; set; }

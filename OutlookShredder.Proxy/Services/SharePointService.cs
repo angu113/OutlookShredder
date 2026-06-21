@@ -12360,17 +12360,24 @@ public partial class SharePointService
             }, ct);
 
         var cards = new List<Models.WorkflowCard>();
+        var processingToMigrate = new List<int>();   // legacy Tab="Processing" → backfill to "Worklist"
         foreach (var item in items?.Value ?? [])
         {
             if (item.Id is null) continue;
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
             if (!int.TryParse(item.Id, out var spId)) continue;
 
+            // Worklist lane: the legacy stored Tab value was "Processing" — normalise on read, and queue a
+            // one-time backfill so stored data becomes "Worklist" too. (Old/empty defaults to Worklist.)
+            var rawTab  = d.TryGetValue("Tab", out var tb) ? tb?.ToString() : null;
+            var laneTab = (string.IsNullOrEmpty(rawTab) || rawTab == "Processing") ? "Worklist" : rawTab;
+            if (rawTab == "Processing") processingToMigrate.Add(spId);
+
             cards.Add(new Models.WorkflowCard
             {
                 SpItemId       = spId,
                 DocumentNumber = d.TryGetValue("Title",        out var t)  ? t?.ToString() ?? "" : "",
-                Tab            = d.TryGetValue("Tab",          out var tb) ? tb?.ToString() ?? "Processing" : "Processing",
+                Tab            = laneTab,
                 AssignedDate   = d.TryGetValue("AssignedDate", out var ad) ? NormalizeDateString(ad?.ToString()) ?? "" : "",
                 SortOrder      = d.TryGetValue("SortOrder",    out var so) && so is System.Text.Json.JsonElement soEl
                                      ? (int)soEl.GetDouble() : 0,
@@ -12392,6 +12399,18 @@ public partial class SharePointService
                                        : wa is bool wb && wb),
                 OwnerUser        = d.TryGetValue("OwnerUser",        out var ou) ? (ou?.ToString() is string ov && ov.Length > 0 ? ov : null) : null,
             });
+        }
+
+        // One-time backfill: rewrite any legacy Tab="Processing" cards to "Worklist" in SP. Idempotent +
+        // self-limiting (after this, none are "Processing", so subsequent reads queue nothing).
+        if (processingToMigrate.Count > 0)
+        {
+            _log.LogInformation("[SP] Migrating {N} WorkflowCards: Tab 'Processing' → 'Worklist'", processingToMigrate.Count);
+            foreach (var id in processingToMigrate)
+            {
+                try { await UpdateWorkflowCardAsync(id, new Models.UpdateWorkflowCardRequest { Tab = "Worklist" }, ct); }
+                catch (Exception ex) { _log.LogWarning(ex, "[SP] WorkflowCards Tab migration failed for {Id}", id); }
+            }
         }
         return cards;
     }

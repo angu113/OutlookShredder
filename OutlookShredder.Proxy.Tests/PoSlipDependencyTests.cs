@@ -14,7 +14,7 @@ public class PoSlipDependencyTests
                 SalesOrders = salesOrders, BoardDate = boardDate, ExpectedDate = eta, MaterialReceivedAt = received };
 
     private static WorkflowCard Slip(int id, string so, string assigned = "", bool done = false) =>
-        new() { SpItemId = id, DocumentNumber = so, AssignedDate = assigned, Tab = "Processing", IsCompleted = done };
+        new() { SpItemId = id, DocumentNumber = so, AssignedDate = assigned, Tab = "Worklist", IsCompleted = done };
 
     [Fact]
     public void ReceiptDate_prefers_board_date_then_eta_and_is_normalized()
