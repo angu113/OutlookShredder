@@ -130,6 +130,17 @@ public class CustomersController(
     }
 
     /// <summary>
+    /// GET /api/customers/primary-contacts — customer name → its primary contact (name + 10-digit phone),
+    /// one row per customer. Served from the CRM cache. Worklist/Delivery cards use it to show the customer's
+    /// contact under the company name when the picking slip doesn't carry the order's own contact.
+    /// </summary>
+    [HttpGet("primary-contacts")]
+    public IActionResult GetPrimaryContacts()
+    {
+        return Ok(crmCache.GetPrimaryContacts());
+    }
+
+    /// <summary>
     /// GET /api/customers/terms — customer name → ERP payment terms (e.g. "Net 30 Days") for every
     /// customer (active + inactive). Served from the CRM cache. Used by the ERP list + statement views
     /// to show terms per customer.

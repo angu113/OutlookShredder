@@ -45,6 +45,10 @@ public class CustomerCacheService : IHostedService
     public List<CustomerContactRow> GetAllContacts()     => _snap.Contacts;
     public List<string>             GetAllPartnerNames() => _snap.PartnerNames;
 
+    /// <summary>Customer name → its primary contact (name + phone), one per customer. Used to stamp a
+    /// contact onto worklist/delivery cards when the slip doesn't carry the order's own contact.</summary>
+    public Dictionary<string, CustomerPrimaryContact> GetPrimaryContacts() => _snap.PrimaryContacts;
+
     /// <summary>Customer name → ERP payment terms (e.g. "Net 30 Days"). Covers all customers, incl. inactive,
     /// so terms resolve for any document/statement. Empty string/blank when the customer has no terms set.</summary>
     public Dictionary<string, string?> GetAllTerms()     => _snap.BpTerms;
@@ -139,7 +143,24 @@ public class CustomerCacheService : IHostedService
         var bpTerms = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in partners) bpTerms[p.Name] = p.PaymentTerms;
 
-        _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups, bpTerms);
+        // One "primary" contact per customer (name + phone), derived from the visible CustomerContacts rows:
+        // prefer the first row that has BOTH a contact name and a phone, else the first with a phone, else the
+        // first row. Used to stamp a customer's contact onto worklist/delivery cards (CRM fallback when the
+        // slip itself doesn't carry the order's contact). Keyed by customer name, case-insensitive.
+        var primaryContacts = visibleContacts
+            .GroupBy(c => c.CustomerName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g =>
+                {
+                    var best = g.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.ContactName) && !string.IsNullOrWhiteSpace(c.Phone))
+                            ?? g.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.Phone))
+                            ?? g.First();
+                    return new CustomerPrimaryContact(best.ContactName, best.Phone);
+                },
+                StringComparer.OrdinalIgnoreCase);
+
+        _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups, bpTerms, primaryContacts);
         var hiddenBp = partners.Count - activePartners.Count;
         _log.LogInformation(
             "[CRM] Cache refreshed — {C} contacts, {B} business partners{Hidden}",
@@ -156,16 +177,21 @@ public class CustomerCacheService : IHostedService
         List<string>                                      partnerNames,
         Dictionary<string, List<CustomerContactRow>>     phoneIndex,
         Dictionary<string, string?>                      bpPopups,
-        Dictionary<string, string?>                      bpTerms)
+        Dictionary<string, string?>                      bpTerms,
+        Dictionary<string, CustomerPrimaryContact>       primaryContacts)
     {
-        public List<CustomerContactRow>                      Contacts     { get; } = contacts;
-        public List<string>                                  PartnerNames { get; } = partnerNames;
-        public Dictionary<string, List<CustomerContactRow>> PhoneIndex   { get; } = phoneIndex;
-        public Dictionary<string, string?>                  BpPopups     { get; } = bpPopups;
-        public Dictionary<string, string?>                  BpTerms      { get; } = bpTerms;
+        public List<CustomerContactRow>                      Contacts        { get; } = contacts;
+        public List<string>                                  PartnerNames    { get; } = partnerNames;
+        public Dictionary<string, List<CustomerContactRow>> PhoneIndex      { get; } = phoneIndex;
+        public Dictionary<string, string?>                  BpPopups        { get; } = bpPopups;
+        public Dictionary<string, string?>                  BpTerms         { get; } = bpTerms;
+        public Dictionary<string, CustomerPrimaryContact>   PrimaryContacts { get; } = primaryContacts;
 
-        public static CrmSnapshot Empty { get; } = new([], [], [], [], []);
+        public static CrmSnapshot Empty { get; } = new([], [], [], [], [], []);
     }
 }
 
 public sealed record CustomerBpRow(string Name, string? PopupMessage, bool Active = true, string? PaymentTerms = null);
+
+/// <summary>A customer's primary contact for card display: contact name + phone (10-digit, unformatted).</summary>
+public sealed record CustomerPrimaryContact(string ContactName, string Phone);
