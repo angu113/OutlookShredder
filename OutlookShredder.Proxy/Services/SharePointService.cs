@@ -12315,6 +12315,8 @@ public partial class SharePointService
             ("DeliveryService",   "text"),
             ("WasAutoCreated",    "boolean"),
             ("OwnerUser",         "text"),
+            ("Status",            "text"),     // Worklist progress: "" (none) | "InProgress" | "Ready"
+            ("CustomerNotified",  "boolean"),  // set once Ready and the customer has been told
         };
 
         foreach (var (name, type) in schema)
@@ -12398,6 +12400,11 @@ public partial class SharePointService
                                        ? waEl.ValueKind == System.Text.Json.JsonValueKind.True
                                        : wa is bool wb && wb),
                 OwnerUser        = d.TryGetValue("OwnerUser",        out var ou) ? (ou?.ToString() is string ov && ov.Length > 0 ? ov : null) : null,
+                Status           = d.TryGetValue("Status",          out var st) ? (st?.ToString() is string sv && sv.Length > 0 ? sv : null) : null,
+                CustomerNotified = d.TryGetValue("CustomerNotified", out var cnf) &&
+                                   (cnf is System.Text.Json.JsonElement cnfEl
+                                       ? cnfEl.ValueKind == System.Text.Json.JsonValueKind.True
+                                       : cnf is bool cnb && cnb),
             });
         }
 
@@ -12449,6 +12456,8 @@ public partial class SharePointService
                         ["DeliveryService"] = card.DeliveryService,
                         ["WasAutoCreated"]  = card.WasAutoCreated,
                         ["OwnerUser"]       = card.OwnerUser,
+                        ["Status"]          = card.Status,
+                        ["CustomerNotified"]= card.CustomerNotified,
                     }
                 }
             }, cancellationToken: ct);
@@ -12472,6 +12481,8 @@ public partial class SharePointService
         if (req.RagStatus       is not null) fields["RagStatus"]       = req.RagStatus       == "" ? null : req.RagStatus;
         if (req.DeliveryService is not null) fields["DeliveryService"] = req.DeliveryService == "" ? null : req.DeliveryService;
         if (req.WasAutoCreated  is not null) fields["WasAutoCreated"]  = req.WasAutoCreated.Value;
+        if (req.Status          is not null) fields["Status"]          = req.Status == "" ? null : req.Status;
+        if (req.CustomerNotified is not null) fields["CustomerNotified"] = req.CustomerNotified.Value;
 
         if (fields.Count == 0) return;
 

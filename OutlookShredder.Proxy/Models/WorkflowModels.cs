@@ -21,6 +21,10 @@ public class WorkflowCard
     /// <summary>The user this card belongs to (full name). Focus-chip cards: the creating Shredder
     /// user; auto-created cards: the doc's sales rep ("Customer Rep:") or the importer. Null = none.</summary>
     public string? OwnerUser         { get; set; }
+    /// <summary>Worklist progress: null/"" (no status, e.g. Prioritize) | "InProgress" | "Ready".</summary>
+    public string? Status            { get; set; }
+    /// <summary>Customer told their order is Ready (only meaningful once Status = "Ready").</summary>
+    public bool    CustomerNotified  { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -38,6 +42,8 @@ public class CreateWorkflowCardRequest
     public string? DeliveryService { get; set; }
     public bool    WasAutoCreated  { get; set; }
     public string? OwnerUser       { get; set; }
+    public string? Status          { get; set; }
+    public bool    CustomerNotified { get; set; }
 }
 
 public class UpdateWorkflowCardRequest
@@ -52,4 +58,7 @@ public class UpdateWorkflowCardRequest
     /// <summary>Pass "" to clear. Null means no change.</summary>
     public string? DeliveryService { get; set; }
     public bool?   WasAutoCreated  { get; set; }
+    /// <summary>Worklist progress: "" (none) | "InProgress" | "Ready". Pass "" to clear; null = no change.</summary>
+    public string? Status          { get; set; }
+    public bool?   CustomerNotified { get; set; }
 }
