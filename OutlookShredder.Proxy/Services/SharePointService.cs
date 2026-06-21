@@ -11901,39 +11901,25 @@ public partial class SharePointService
     }
 
     /// <summary>Patches BpName/ContactName/PopupMessage on every PhoneCallLog row matching the given phone number.</summary>
+    /// <remarks>
+    /// Matches in-memory on the NORMALIZED phone (not a SharePoint <c>$filter</c>): <c>CallerPhone</c> is not an
+    /// indexed column, so a server-side filter 500s ("cannot be referenced in filter as it is not indexed"), AND
+    /// the stored value is formatted ("(201) 868-0293") while callers pass digits ("2018680293") — an <c>eq</c>
+    /// filter would never match anyway. Reading the full list + normalizing each row mirrors the team-wide
+    /// <c>backfill-crm</c> path and patches by item id.
+    /// </remarks>
     public async Task UpdateCallLogCrmByPhoneAsync(
         string phone, string? bpName, string? contactName, string? popupMessage,
         CancellationToken ct = default)
     {
-        var siteId = await GetSiteIdAsync();
-        var listId = await GetOrCreateCallLogListIdAsync(ct);
+        var target = CustomerImportService.NormalizePhone(phone);
+        if (target is null) return;
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Filter  = $"fields/CallerPhone eq '{phone.Replace("'", "''")}'";
-                req.QueryParameters.Select  = ["id"];
-                req.QueryParameters.Expand  = ["fields($select=id)"];
-                req.QueryParameters.Top     = 200;
-            }, ct);
-
-        if (items?.Value is null) return;
-
-        var fields = new Microsoft.Graph.Models.FieldValueSet
+        var records = await ReadAllPhoneCallLogAsync(ct);
+        foreach (var rec in records)
         {
-            AdditionalData = new Dictionary<string, object?>
-            {
-                ["BpName"]       = bpName,
-                ["ContactName"]  = contactName,
-                ["PopupMessage"] = popupMessage,
-            }
-        };
-
-        foreach (var item in items.Value)
-        {
-            if (item.Id is null) continue;
-            await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
-                .PatchAsync(fields, cancellationToken: ct);
+            if (CustomerImportService.NormalizePhone(rec.CallerPhone) != target) continue;
+            await UpdateCallLogCrmByItemIdAsync(rec.SpItemId, bpName, contactName, popupMessage, ct);
         }
     }
 

@@ -137,6 +137,9 @@ try
     builder.Services.AddSingleton<ProductCatalogService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProductCatalogService>());
     builder.Services.AddSingleton<SharePointService>();
+    // Call-log CRM backfill (fills BpName/Contact/Popup on historic PhoneCallLog rows). Shared by the manual
+    // /api/phone/call-log/backfill-crm endpoint and the post-import auto-backfill in ImportController.
+    builder.Services.AddSingleton<CallLogCrmBackfillService>();
     builder.Services.AddSingleton<SliCacheService>();
     // In-memory unread-row index: builds the inbound-row set once + on write-through/bus, so the per-user
     // unread tally is an in-memory pass instead of a ~5-7s dual SharePoint scan on every call.

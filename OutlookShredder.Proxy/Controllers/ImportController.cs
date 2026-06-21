@@ -8,9 +8,15 @@ namespace OutlookShredder.Proxy.Controllers;
 public class ImportController(
     CustomerImportService importer,
     SharePointService     sp,
+    CustomerCacheService  crm,
+    CallLogCrmBackfillService callLogBackfill,
     IConfiguration        config,
     ILogger<ImportController> log) : ControllerBase
 {
+    // File types that add/map customers or contacts — a successful real run of any of these can make
+    // historic PhoneCallLog rows newly resolvable, so we re-run the blanks-only CRM backfill afterwards.
+    private static readonly string[] CrmAffectingTypes = ["partners", "contacts", "ordercontacts", "customerinfo"];
+
     /// <summary>
     /// POST /api/import/run[?dryRun=true] — scans the import directory for CSV files and
     /// processes each one.
@@ -157,7 +163,33 @@ public class ImportController(
             }
         }
 
-        return Ok(new { importDir, dryRun, reviewFile, skippedForReview = reviewRows.Count, files = results });
+        // After a real run that added/mapped customers or contacts, refresh the CRM cache and backfill blank
+        // CRM fields on historic call-log rows so the call log / Raptor reflect the new mappings. Blanks-only
+        // (never overwrites an existing BpName — that stays the manual includeChanged=true review path).
+        // Fire-and-forget so the import response isn't blocked by the call-log scan.
+        var crmBackfillQueued = false;
+        if (!dryRun && ordered.Any(f => CrmAffectingTypes.Contains(f.Type)))
+        {
+            crmBackfillQueued = true;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await crm.RefreshNowAsync();   // pick up the just-imported customers/contacts before lookup
+                    var r = await callLogBackfill.RunAsync(dryRun: false, includeChanged: false);
+                    log.LogInformation(
+                        "[Import] post-import call-log backfill: {Updated} filled, {Failed} failed (of {Total} rows; {Changed} changed left for review)",
+                        r.Updated, r.Failed, r.TotalRecords, r.ChangeExisting);
+                }
+                catch (Exception ex)
+                {
+                    log.LogWarning(ex, "[Import] post-import call-log backfill failed");
+                }
+            });
+        }
+
+        return Ok(new { importDir, dryRun, reviewFile, skippedForReview = reviewRows.Count,
+                        crmBackfillQueued, files = results });
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
