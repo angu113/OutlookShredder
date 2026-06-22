@@ -50,6 +50,9 @@
          redundant and triggered NU1510. -->
     <PackageReference Include="PDFsharp" Version="6.2.4" />
     <PackageReference Include="PdfPig" Version="0.1.14" />
+    <!-- Cut optimizer flat-sheet (2D) nesting: GuillotineBinPack (shear) + MaxRectsBinPack (laser).
+         Selected per machine profile behind INestStrategy (see Services/CutOptimizer). -->
+    <PackageReference Include="RectangleBinPack.CSharp" Version="1.0.4" />
     <!-- ShadowCat overdue-customer email PDFs (matches the client QuestPDF version). -->
     <PackageReference Include="QuestPDF" Version="2024.3.4" />
     <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
