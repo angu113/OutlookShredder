@@ -13,6 +13,11 @@ public static class Long1DPacker
     /// <summary>Kerf consumed per cut when "Precision needed" is on — 1/8". A named, tunable constant.</summary>
     public const double LongKerf = 0.125;
 
+    /// <summary>De-minimis leftover for long product: a drop this short (≤ 12") is negligible waste, NOT
+    /// scrap — so it's fine to make the cut that leaves it rather than preserve a reusable remnant. Only a
+    /// leftover BETWEEN this and the reuse minimum counts as scrap to avoid.</summary>
+    public const double Deminimis = 12.0;
+
     private const double Eps = 1e-9;
 
     /// <summary>
@@ -125,16 +130,18 @@ public static class Long1DPacker
                 if (b.Remaining + Eps >= eff)
                 {
                     double post = b.Remaining - eff;
-                    bool good = post <= Eps || post + Eps >= min;
+                    // "Good" = the leftover is either negligible (<= de-minimis) or a reusable remnant (>= min);
+                    // a leftover strictly between the two is the scrap we try to avoid.
+                    bool good = post <= Deminimis + Eps || post + Eps >= min;
                     if (post < bestAnyRem) { bestAnyRem = post; bestAny = b; }
                     if (good && post < bestGoodRem) { bestGoodRem = post; bestGood = b; }
                 }
 
             if (bestGood is not null) { Place(bestGood, eff, pc); continue; }
 
-            // No existing bar takes it cleanly — open a new one if that leaves a reusable/zero remainder.
+            // No existing bar takes it cleanly — open a new one if that leaves a negligible/reusable remainder.
             double newPost = openOrder.Where(s => s.Length + Eps >= eff).Select(s => s.Length - eff).DefaultIfEmpty(-1).Max();
-            bool newGood = newPost >= 0 && (newPost <= Eps || newPost + Eps >= min);
+            bool newGood = newPost >= 0 && (newPost <= Deminimis + Eps || newPost + Eps >= min);
             if (newGood)
             {
                 var nb = OpenBar(openOrder, eff);
@@ -184,8 +191,9 @@ public static class Long1DPacker
         return best ?? new();
     }
 
+    // Scrap = a leftover too big to be negligible yet too small to reuse: de-minimis < drop < min.
     private static double Scrap(List<Layout> plan, double min) =>
-        plan.Sum(l => l.Drop > Eps && l.Drop + Eps < min ? l.Drop : 0);
+        plan.Sum(l => l.Drop > Deminimis + Eps && l.Drop + Eps < min ? l.Drop : 0);
 
     /// <summary>
     /// Open a fresh bar for a piece needing <paramref name="eff"/> length. Use on-hand stock first

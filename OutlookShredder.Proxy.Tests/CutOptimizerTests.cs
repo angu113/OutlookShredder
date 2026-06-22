@@ -70,6 +70,21 @@ public class CutOptimizerTests
         Assert.Contains(noMin.Layouts, l => l.Drop > 1e-6 && l.Drop + 1e-6 < 96);            // tight pack leaves scrap
     }
 
+    [Fact]
+    public void Long_min_drop_allows_a_deminimis_leftover()
+    {
+        // 3 x 96" from a 289" bar: cut all 3 and leave 1" (de-minimis, <= 12") rather than 2 parts + a
+        // 97" remnant. A leftover that small isn't scrap, so making the cut is correct.
+        var r = CutOptimizerService.Optimize(new OptimizeRequest
+        {
+            Form = "long", MinUsableDrop = 96,
+            Parts = new() { Part(96, 3) }, Stock = new() { Stock(289) },
+        });
+        var bar = Assert.Single(r.Layouts);            // all three fit on one bar
+        Assert.Equal(3, bar.Pieces.Count);
+        Assert.True(bar.Drop < 12, $"expected a de-minimis leftover, got {bar.Drop}");
+    }
+
     // ── Rendering: identical cuts collapse to one pro-forma + count ───────────────
     [Fact]
     public void Render_collapses_identical_cuts()

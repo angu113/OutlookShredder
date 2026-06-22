@@ -47,9 +47,9 @@ public static class CutOptimizerService
         // Soft usable-drop preference (long): warn about any short scrap the best plan couldn't avoid.
         if (isLong && req.MinUsableDrop > 0)
         {
-            int scrapCount = result.Layouts.Count(l => l.Drop > 1e-6 && l.Drop + 1e-6 < req.MinUsableDrop);
+            int scrapCount = result.Layouts.Count(l => l.Drop > Long1DPacker.Deminimis + 1e-6 && l.Drop + 1e-6 < req.MinUsableDrop);
             if (scrapCount > 0)
-                result.Issues.Add(new Issue { Message = $"{scrapCount} drop(s) shorter than the {DrawFormat.FracInch(req.MinUsableDrop)} reusable minimum (unavoidable for this part/stock mix)." });
+                result.Issues.Add(new Issue { Message = $"{scrapCount} drop(s) between {DrawFormat.FracInch(Long1DPacker.Deminimis)} and the {DrawFormat.FracInch(req.MinUsableDrop)} reusable minimum (unavoidable scrap for this part/stock mix)." });
         }
 
         BuildUsageAndPurchases(result);
@@ -96,7 +96,8 @@ public static class CutOptimizerService
             if (minUsableDrop > 0)
             {
                 var reusable = layouts.Where(l => l.Drop + 1e-6 >= minUsableDrop).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
-                var scrap = layouts.Where(l => l.Drop > 1e-6 && l.Drop + 1e-6 < minUsableDrop).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
+                // Scrap = the avoidable middle band; drops <= de-minimis are negligible and not called out.
+                var scrap = layouts.Where(l => l.Drop > Long1DPacker.Deminimis + 1e-6 && l.Drop + 1e-6 < minUsableDrop).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
                 if (reusable.Count > 0)
                     sb.AppendLine($"  Reusable drops (>= {DrawFormat.FracInch(minUsableDrop)}): {string.Join(", ", reusable)}");
                 if (scrap.Count > 0)

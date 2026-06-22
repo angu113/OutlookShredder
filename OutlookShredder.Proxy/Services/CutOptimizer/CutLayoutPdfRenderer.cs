@@ -244,9 +244,10 @@ public static class CutLayoutPdfRenderer
         if (lay.Drop > 1e-6)
         {
             double dropW = lay.Drop * scale;
-            // With a usable-drop minimum, mark the leftover as a reusable remnant (green) or scrap (red).
+            // With a usable-drop minimum: reusable remnant (green, >= min), avoidable scrap (red, de-minimis..min),
+            // or negligible/normal drop (faint, <= de-minimis).
             bool reusable = minUsableDrop > 0 && lay.Drop + 1e-6 >= minUsableDrop;
-            bool scrap = minUsableDrop > 0 && lay.Drop + 1e-6 < minUsableDrop;
+            bool scrap = minUsableDrop > 0 && lay.Drop > Long1DPacker.Deminimis + 1e-6 && lay.Drop + 1e-6 < minUsableDrop;
             var brush = new XSolidBrush(reusable ? Reuse : scrap ? CutLine : Faint);
             string word = reusable ? "reuse" : scrap ? "scrap" : "drop";
             gfx.DrawString($"{word} {Frac(lay.Drop)}", lblFont, brush,
