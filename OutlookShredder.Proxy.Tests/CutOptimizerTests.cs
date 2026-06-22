@@ -157,4 +157,35 @@ public class CutOptimizerTests
         Assert.True(laser.Layouts.Count >= 2, $"laser web should force a 2nd sheet, got {laser.Layouts.Count}");
         Assert.Equal(4, laser.Layouts.Sum(l => l.Pieces.Count));   // still cuts all 4 parts
     }
+
+    // ── PDF report (Phase 3) ───────────────────────────────────────────────────────
+    [Fact]
+    public void Long_plan_renders_a_pdf_report()
+    {
+        var r = CutOptimizerService.Optimize(Long(true, new[] { Part(60, 5), Part(40, 3) }, new[] { Stock(240, qty: 2) }));
+        AssertRealPdf(r.PdfBase64);
+    }
+
+    [Fact]
+    public void Flat_plan_renders_a_pdf_report()
+    {
+        var r = CutOptimizerService.Optimize(Flat("shear", new[] { FlatPart(24, 48, 6) }, new[] { FlatStock(48, 96) }));
+        AssertRealPdf(r.PdfBase64);
+    }
+
+    [Fact]
+    public void No_plan_means_no_pdf()
+    {
+        var r = CutOptimizerService.Optimize(Long(false, new[] { Part(300, 1) }, new[] { Stock(240) }));   // uncuttable
+        Assert.Null(r.PdfBase64);
+    }
+
+    private static void AssertRealPdf(string? base64)
+    {
+        Assert.False(string.IsNullOrEmpty(base64));
+        var bytes = System.Convert.FromBase64String(base64!);
+        Assert.True(bytes.Length > 1000, $"expected a real PDF, got {bytes.Length} bytes");
+        Assert.Equal((byte)'%', bytes[0]);   // %PDF header
+        Assert.Equal((byte)'P', bytes[1]);
+    }
 }

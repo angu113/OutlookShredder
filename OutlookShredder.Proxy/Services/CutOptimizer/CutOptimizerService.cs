@@ -47,6 +47,12 @@ public static class CutOptimizerService
         BuildUsageAndPurchases(result);
         AppendGlobalSummary(sb, result);
         result.TextSummary = sb.ToString().TrimEnd();
+
+        // Phase 3: a printable PDF report (only when there's an actual plan to draw).
+        if (result.Layouts.Count > 0)
+            result.PdfBase64 = Convert.ToBase64String(
+                CutLayoutPdfRenderer.Render(result, req.ResolvedForm, req.ResolvedMethod, req.PrecisionNeeded));
+
         return result;
     }
 
