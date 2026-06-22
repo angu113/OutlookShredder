@@ -70,6 +70,17 @@ public class CutOptimizerTests
         Assert.Equal(240, buy.Length, 3);
     }
 
+    [Fact]
+    public void Long_with_no_material_reads_cleanly()
+    {
+        // The client hides metal/gauge for long, so material/gauge arrive empty — summary must not say "(unspecified)".
+        var r = CutOptimizerService.Optimize(Long(false,
+            new[] { new CutPart { Material = "", Gauge = "", Length = 60, Qty = 2 } },
+            new[] { new StockSize { Material = "", Gauge = "", Length = 240 } }));
+        Assert.Contains("Long stock", r.TextSummary);
+        Assert.DoesNotContain("unspecified", r.TextSummary);
+    }
+
     // ── Grouping + issues ────────────────────────────────────────────────────────
     [Fact]
     public void Parts_are_grouped_by_material_and_gauge()

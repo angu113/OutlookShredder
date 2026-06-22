@@ -267,6 +267,8 @@ public static class CutLayoutPdfRenderer
     private static string SizeText(double? width, double length) =>
         width is double w && w > 0 ? $"{Frac(w)} x {Frac(length)}" : Frac(length);
     private static string Frac(double v) => DrawFormat.FracInch(v);
-    private static string Group(string m, string g) => string.IsNullOrWhiteSpace(g) ? m : $"{m} {g}";
+    private static string Group(string m, string g) =>
+        string.IsNullOrWhiteSpace(m) && string.IsNullOrWhiteSpace(g) ? "Stock"
+        : string.IsNullOrWhiteSpace(g) ? m : $"{m} {g}";
     private static string Cap(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpper(s[0]) + s[1..];
 }

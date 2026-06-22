@@ -59,7 +59,11 @@ public static class CutOptimizerService
     private static void AppendGroupSummary(StringBuilder sb, string material, string gauge, List<Layout> layouts, bool isLong)
     {
         if (layouts.Count == 0) return;
-        sb.AppendLine($"{GroupLabel(material, gauge)} — {(isLong ? "long stock" : "flat sheet")}");
+        // Long jobs carry no metal/gauge (the client hides those for long) — then just name the form.
+        bool noMaterial = string.IsNullOrWhiteSpace(material) && string.IsNullOrWhiteSpace(gauge);
+        sb.AppendLine(noMaterial
+            ? (isLong ? "Long stock" : "Flat sheet")
+            : $"{GroupLabel(material, gauge)} — {(isLong ? "long stock" : "flat sheet")}");
 
         int parts = layouts.Sum(l => l.Pieces.Count);
         // Yield basis: total stock length (long, 1D) vs total sheet area (flat, 2D).
@@ -132,7 +136,11 @@ public static class CutOptimizerService
         {
             sb.AppendLine("To purchase (on-hand can't finish the job):");
             foreach (var p in result.ToPurchase)
-                sb.AppendLine($"  {p.Count} x {GroupLabel(p.Material, p.Gauge)} {SizeLabel(p.Width, p.Length)}");
+            {
+                string lbl = string.IsNullOrWhiteSpace(p.Material) && string.IsNullOrWhiteSpace(p.Gauge)
+                    ? "stock" : GroupLabel(p.Material, p.Gauge);
+                sb.AppendLine($"  {p.Count} x {lbl} {SizeLabel(p.Width, p.Length)}");
+            }
             sb.AppendLine();
         }
         if (result.Issues.Count > 0)
