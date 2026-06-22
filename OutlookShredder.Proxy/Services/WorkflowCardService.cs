@@ -147,6 +147,11 @@ public class WorkflowCardService : IHostedService
             if (req.RagStatus       is not null) card.RagStatus       = req.RagStatus       == "" ? null : req.RagStatus;
             if (req.DeliveryService is not null) card.DeliveryService = req.DeliveryService == "" ? null : req.DeliveryService;
             if (req.WasAutoCreated  is not null) card.WasAutoCreated  = req.WasAutoCreated.Value;
+            // These were written to SP but never mirrored into the in-memory cache, so GetAllAsync (which
+            // serves the cache) returned stale values for them until a restart/refresh.
+            if (req.Status          is not null) card.Status          = req.Status == "" ? null : req.Status;
+            if (req.CustomerNotified is not null) card.CustomerNotified = req.CustomerNotified.Value;
+            if (req.LocationNumber  is not null) card.LocationNumber  = req.LocationNumber.Value == 0 ? null : req.LocationNumber.Value;
 
             await _sp.UpdateWorkflowCardAsync(spItemId, req, ct);
             Publish("Updated", card);
