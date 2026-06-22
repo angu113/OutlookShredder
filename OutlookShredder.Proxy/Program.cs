@@ -219,8 +219,14 @@ try
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SliCacheService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierUnreadIndexService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<MailCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<CustomerCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
+
+    // Readiness: tracks per-cache warm state, serves GET /api/ready, pushes cache-ready / all-ready SSE.
+    builder.Services.AddSingleton<ReadinessService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ReadinessService>());
+
     builder.Services.AddHostedService<ShutdownWatcherService>();
 
     var app = builder.Build();

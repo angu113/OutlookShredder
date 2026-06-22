@@ -408,6 +408,17 @@ public class RfqNotificationService
             _ = PublishToServiceBusAsync(json);
     }
 
+    /// <summary>
+    /// Broadcasts a custom-named SSE event to LOCAL subscribers only (no Service Bus) — used for the
+    /// per-proxy readiness signals (<c>cache-ready</c> / <c>all-ready</c>) which are machine-local.
+    /// </summary>
+    public void BroadcastLocal(string eventName, string json)
+    {
+        var msg = $"{eventName}\n{json}";
+        foreach (var ch in _subscribers.Values)
+            ch.Writer.TryWrite(msg);
+    }
+
     private async Task PublishToServiceBusAsync(string json)
     {
         try

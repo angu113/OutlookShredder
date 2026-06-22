@@ -9,7 +9,7 @@ namespace OutlookShredder.Proxy.Services;
 /// and for the contact-mapping dialog in Shredder.
 /// Refreshes every 5 minutes; invalidates on write operations.
 /// </summary>
-public class CustomerCacheService : IHostedService
+public class CustomerCacheService : IHostedService, ICacheStatusProvider
 {
     private readonly SharePointService                _sp;
     private readonly ILogger<CustomerCacheService>    _log;
@@ -19,6 +19,8 @@ public class CustomerCacheService : IHostedService
     private volatile CrmSnapshot _snap = CrmSnapshot.Empty;
 
     private Timer? _timer;
+    private DateTime? _builtUtc;     // set after the first successful refresh — drives readiness
+    private DateTime? _lastRefresh;
 
     public CustomerCacheService(SharePointService sp, ILogger<CustomerCacheService> log, IConfiguration config)
     {
@@ -88,6 +90,17 @@ public class CustomerCacheService : IHostedService
     /// <summary>Awaitable refresh — use when a caller must read CRM data that reflects a just-completed write
     /// (e.g. a targeted backfill right after a phone is linked to a contact).</summary>
     public Task RefreshNowAsync(CancellationToken ct = default) => RefreshAsync(ct);
+
+    // ── ICacheStatusProvider (readiness) ───────────────────────────────────────
+    public string Name => "customers";
+    public string DisplayName => "Customers / CRM";
+    public int SchemaVersion => 1;
+    public int ItemCount => _snap.PartnerNames.Count + _snap.Contacts.Count;
+    public DateTime? CacheBuiltUtc => _builtUtc;
+    public DateTime? LastDeltaUtc => _lastRefresh;
+    public bool IsLoading => false;
+    public Task ForceRebuildAsync(CancellationToken ct = default) => RefreshAsync(ct);
+    public Task ForceDeltaAsync(CancellationToken ct = default) => RefreshAsync(ct);
 
     // ── Private ───────────────────────────────────────────────────────────────
 
@@ -161,6 +174,8 @@ public class CustomerCacheService : IHostedService
                 StringComparer.OrdinalIgnoreCase);
 
         _snap = new CrmSnapshot(visibleContacts, partnerNames, phoneIndex, bpPopups, bpTerms, primaryContacts);
+        _lastRefresh = DateTime.UtcNow;
+        _builtUtc ??= _lastRefresh;
         var hiddenBp = partners.Count - activePartners.Count;
         _log.LogInformation(
             "[CRM] Cache refreshed — {C} contacts, {B} business partners{Hidden}",

@@ -192,6 +192,10 @@ public partial class SharePointService
     /// Called once from Program.cs at app startup  --  subsequent user requests skip ~500ms
     /// of one-time warmup cost.
     /// </summary>
+    /// <summary>True once <see cref="PrewarmAsync"/> has finished resolving site/list IDs + warming the
+    /// SR cache, so live-SharePoint reads no longer pay the cold-start penalty. Drives the readiness signal.</summary>
+    public bool IsPrewarmed { get; private set; }
+
     public async Task PrewarmAsync(CancellationToken ct = default)
     {
         try
@@ -243,6 +247,10 @@ public partial class SharePointService
         catch (Exception ex)
         {
             _log.LogWarning(ex, "[SP] Pre-warm failed (non-fatal  --  first request will warm cold)");
+        }
+        finally
+        {
+            IsPrewarmed = true;   // even on partial failure, live reads proceed (cold-warm on first use)
         }
     }
 

@@ -54,6 +54,7 @@ public sealed class ProxyAuthService
     private static readonly (string Method, string Prefix)[] Exempt =
     {
         ("GET",  "/api/health"),         // Home dashboard + health checks (read-only)
+        ("GET",  "/api/ready"),          // startup readiness snapshot (polled before the token race resolves)
         ("GET",  "/api/events"),         // SSE stream (add-in dashboard)
         ("GET",  "/api/items"),          // add-in dashboard data (+ /by-rfq/...)
         ("GET",  "/api/qc"),             // QC read (Python diagnostic script)
