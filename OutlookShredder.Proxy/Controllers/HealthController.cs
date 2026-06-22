@@ -17,6 +17,7 @@ public class HealthController : ControllerBase
     private readonly FileWatcherService _fileWatcher;
     private readonly MailboxBridgeService _mailboxBridge;
     private readonly ForgeTaskService _forgeTask;
+    private readonly CustomerCacheService _customers;
 
     public HealthController(
         IConfiguration config,
@@ -24,7 +25,8 @@ public class HealthController : ControllerBase
         AiServiceFactory aiFactory,
         FileWatcherService fileWatcher,
         MailboxBridgeService mailboxBridge,
-        ForgeTaskService forgeTask)
+        ForgeTaskService forgeTask,
+        CustomerCacheService customers)
     {
         _config = config;
         _catalog = catalog;
@@ -32,6 +34,7 @@ public class HealthController : ControllerBase
         _fileWatcher = fileWatcher;
         _mailboxBridge = mailboxBridge;
         _forgeTask = forgeTask;
+        _customers = customers;
     }
 
     [HttpGet]
@@ -41,6 +44,7 @@ public class HealthController : ControllerBase
         {
             CheckSecrets(),
             CheckSharePoint(),
+            CheckCustomers(),
             CheckMail(),
             CheckServiceBus(),
             CheckClaude(),
@@ -100,10 +104,24 @@ public class HealthController : ControllerBase
     private ServiceHealth CheckServiceBus()
     {
         var conn = _config["ServiceBus:ConnectionString"];
-        var topic = _config["ServiceBus:TopicName"] ?? "rfq-updates";
         if (string.IsNullOrWhiteSpace(conn))
             return new("serviceBus", "Service Bus", "fail", "ServiceBus:ConnectionString not configured");
-        return new("serviceBus", "Service Bus", "ok", $"Topic '{topic}' configured");
+
+        // All Service Bus entities the proxy uses — not just the main rfq-updates topic.
+        var topic  = _config["ServiceBus:TopicName"] ?? "rfq-updates";
+        var forgeQ = _config["ForgeScheduler:TaskQueueName"] ?? "forge-task-scheduler";
+        var sumQ   = _config["ServiceBus:SummaryQueueName"] ?? "rfq-summary-jobs";
+        return new("serviceBus", "Service Bus", "ok",
+            $"topic '{topic}'  •  queues '{forgeQ}', '{sumQ}'");
+    }
+
+    private ServiceHealth CheckCustomers()
+    {
+        if (_customers.CacheBuiltUtc is null)
+            return new("customers", "Customers / CRM", "degraded", "CRM cache not yet loaded");
+        var age = DateTime.UtcNow - _customers.CacheBuiltUtc.Value;
+        return new("customers", "Customers / CRM", "ok",
+            $"CRM cached ({_customers.ItemCount} records, {FormatAge(age)})");
     }
 
     private ServiceHealth CheckClaude()
