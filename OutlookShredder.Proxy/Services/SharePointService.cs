@@ -12320,6 +12320,7 @@ public partial class SharePointService
             ("ProcessOps",        "text"),     // shop ops parsed from the slip (comma-joined) → fab-type chips
             ("ContactName",       "text"),     // customer contact from the slip "Attention:" line
             ("ContactPhone",      "text"),     // customer contact phone from the slip "Contact Phone:" line
+            ("LocationNumber",    "number"),   // pickup Location # (1-20) assigned when marked Ready
         };
 
         foreach (var (name, type) in schema)
@@ -12411,6 +12412,12 @@ public partial class SharePointService
                 ProcessOps       = d.TryGetValue("ProcessOps",       out var po) ? (po?.ToString() is string pv && pv.Length > 0 ? pv : null) : null,
                 ContactName      = d.TryGetValue("ContactName",      out var ctn) ? (ctn?.ToString() is string ctv && ctv.Length > 0 ? ctv : null) : null,
                 ContactPhone     = d.TryGetValue("ContactPhone",     out var ctp) ? (ctp?.ToString() is string cpv && cpv.Length > 0 ? cpv : null) : null,
+                LocationNumber   = d.TryGetValue("LocationNumber",   out var loc) && loc is not null
+                                       ? (loc is System.Text.Json.JsonElement le && le.ValueKind == System.Text.Json.JsonValueKind.Number ? (int?)le.GetInt32()
+                                          : loc is double ld   ? (int?)ld
+                                          : loc is decimal lm  ? (int?)lm
+                                          : int.TryParse(loc.ToString(), out var lp) ? (int?)lp : null)
+                                       : null,
             });
         }
 
@@ -12467,6 +12474,7 @@ public partial class SharePointService
                         ["ProcessOps"]      = card.ProcessOps,
                         ["ContactName"]     = card.ContactName,
                         ["ContactPhone"]    = card.ContactPhone,
+                        ["LocationNumber"]  = card.LocationNumber is int lnum && lnum > 0 ? (double)lnum : null,
                     }
                 }
             }, cancellationToken: ct);
@@ -12492,6 +12500,7 @@ public partial class SharePointService
         if (req.WasAutoCreated  is not null) fields["WasAutoCreated"]  = req.WasAutoCreated.Value;
         if (req.Status          is not null) fields["Status"]          = req.Status == "" ? null : req.Status;
         if (req.CustomerNotified is not null) fields["CustomerNotified"] = req.CustomerNotified.Value;
+        if (req.LocationNumber  is not null) fields["LocationNumber"]   = req.LocationNumber.Value == 0 ? null : (object)(double)req.LocationNumber.Value;
 
         if (fields.Count == 0) return;
 

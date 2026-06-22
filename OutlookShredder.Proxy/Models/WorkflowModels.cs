@@ -33,6 +33,8 @@ public class WorkflowCard
     public string? ContactName        { get; set; }
     /// <summary>Customer contact phone from the slip's "Contact Phone:" line. Null if not on the slip.</summary>
     public string? ContactPhone        { get; set; }
+    /// <summary>Pickup Location # (1–20) assigned when the order is marked Ready. Null/0 = unset.</summary>
+    public int?    LocationNumber      { get; set; }
 }
 
 public class CreateWorkflowCardRequest
@@ -72,4 +74,6 @@ public class UpdateWorkflowCardRequest
     /// <summary>Worklist progress: "" (none) | "InProgress" | "Ready". Pass "" to clear; null = no change.</summary>
     public string? Status          { get; set; }
     public bool?   CustomerNotified { get; set; }
+    /// <summary>Pickup Location # (1–20). Null = no change.</summary>
+    public int?    LocationNumber  { get; set; }
 }
