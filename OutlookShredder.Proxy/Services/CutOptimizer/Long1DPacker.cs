@@ -22,7 +22,7 @@ public static class Long1DPacker
     public static List<Layout> Pack(
         string material, string gauge,
         IReadOnlyList<CutPart> parts, IReadOnlyList<StockSize> stock,
-        bool precision, List<Issue> issues)
+        bool precision, List<Issue> issues, double minUsableDrop = 0)
     {
         double kerf = precision ? LongKerf : 0.0;
 
@@ -54,7 +54,14 @@ public static class Long1DPacker
         // Two open-bar strategies (prefer largest / smallest fitting size); keep the less-wasteful plan.
         var large = PackOnce(material, gauge, cuttable, stock, kerf, preferLargest: true);
         var small = PackOnce(material, gauge, cuttable, stock, kerf, preferLargest: false);
-        return Better(large, small);
+
+        if (minUsableDrop <= 0)
+            return Better(large, small);   // original objective: least stock, then fewest bars
+
+        // Soft "usable drop" preference: also try a drop-aware plan, then pick the one with the least
+        // SCRAP (a leftover in (0, min) — too short to reuse), tie-broken by least stock then fewest bars.
+        var dropAware = PackDropAware(material, gauge, cuttable, stock, kerf, minUsableDrop);
+        return BestByScrap(new[] { large, small, dropAware }, minUsableDrop);
     }
 
     private static List<Layout> PackOnce(
@@ -87,11 +94,67 @@ public static class Long1DPacker
                 bars.Add(best);
             }
 
-            best.Remaining -= eff;
-            best.Pieces.Add(new PlacedPiece { Length = pc.Len, Label = pc.Label });
+            Place(best, eff, pc);
         }
 
-        return bars.Select(b => new Layout
+        return ToLayouts(material, gauge, bars);
+    }
+
+    /// <summary>
+    /// Drop-aware placement (only used when a usable-drop minimum is set). For each piece, prefer an
+    /// existing bar whose remainder stays "good" (≈0 or ≥ min); otherwise open a fresh bar when that
+    /// leaves a reusable (or zero) remainder rather than squeezing the piece into a bar and creating
+    /// short scrap. Costs more stock than tight packing — that's the point (reusable remnants).
+    /// </summary>
+    private static List<Layout> PackDropAware(
+        string material, string gauge,
+        List<(double Len, string? Label)> cuttable, IReadOnlyList<StockSize> stock,
+        double kerf, double min)
+    {
+        var sizes = stock.Select(s => new Bucket(s.Length, s.QtyAvailable ?? int.MaxValue)).ToList();
+        var openOrder = sizes.OrderByDescending(b => b.Length).ToList();   // largest first -> bigger reusable drops
+
+        var bars = new List<Bar>();
+        foreach (var pc in cuttable)
+        {
+            double eff = pc.Len + kerf;
+
+            Bar? bestGood = null; double bestGoodRem = double.MaxValue;
+            Bar? bestAny = null; double bestAnyRem = double.MaxValue;
+            foreach (var b in bars)
+                if (b.Remaining + Eps >= eff)
+                {
+                    double post = b.Remaining - eff;
+                    bool good = post <= Eps || post + Eps >= min;
+                    if (post < bestAnyRem) { bestAnyRem = post; bestAny = b; }
+                    if (good && post < bestGoodRem) { bestGoodRem = post; bestGood = b; }
+                }
+
+            if (bestGood is not null) { Place(bestGood, eff, pc); continue; }
+
+            // No existing bar takes it cleanly — open a new one if that leaves a reusable/zero remainder.
+            double newPost = openOrder.Where(s => s.Length + Eps >= eff).Select(s => s.Length - eff).DefaultIfEmpty(-1).Max();
+            bool newGood = newPost >= 0 && (newPost <= Eps || newPost + Eps >= min);
+            if (newGood)
+            {
+                var nb = OpenBar(openOrder, eff);
+                if (nb is not null) { bars.Add(nb); Place(nb, eff, pc); continue; }
+            }
+            if (bestAny is not null) { Place(bestAny, eff, pc); continue; }   // unavoidable scrap
+            var fb = OpenBar(openOrder, eff);
+            if (fb is not null) { bars.Add(fb); Place(fb, eff, pc); }
+        }
+        return ToLayouts(material, gauge, bars);
+    }
+
+    private static void Place(Bar b, double eff, (double Len, string? Label) pc)
+    {
+        b.Remaining -= eff;
+        b.Pieces.Add(new PlacedPiece { Length = pc.Len, Label = pc.Label });
+    }
+
+    private static List<Layout> ToLayouts(string material, string gauge, List<Bar> bars) =>
+        bars.Select(b => new Layout
         {
             Material = material,
             Gauge = gauge,
@@ -101,7 +164,28 @@ public static class Long1DPacker
             YieldPct = b.StockLength > 0 ? 100.0 * b.Pieces.Sum(p => p.Length) / b.StockLength : 0,
             Purchased = b.Purchased,
         }).ToList();
+
+    /// <summary>Pick the plan with the least scrap (drops in (0, min)); tie-break least stock, then fewest bars.</summary>
+    private static List<Layout> BestByScrap(IEnumerable<List<Layout>> plans, double min)
+    {
+        List<Layout>? best = null;
+        double bestScrap = 0, bestStock = 0; int bestBars = 0;
+        foreach (var p in plans)
+        {
+            double scrap = Scrap(p, min);
+            double stock = p.Sum(l => l.StockLength);
+            int barsN = p.Count;
+            bool take = best is null
+                || scrap + Eps < bestScrap
+                || (Math.Abs(scrap - bestScrap) <= Eps && stock + Eps < bestStock)
+                || (Math.Abs(scrap - bestScrap) <= Eps && Math.Abs(stock - bestStock) <= Eps && barsN < bestBars);
+            if (take) { best = p; bestScrap = scrap; bestStock = stock; bestBars = barsN; }
+        }
+        return best ?? new();
     }
+
+    private static double Scrap(List<Layout> plan, double min) =>
+        plan.Sum(l => l.Drop > Eps && l.Drop + Eps < min ? l.Drop : 0);
 
     /// <summary>
     /// Open a fresh bar for a piece needing <paramref name="eff"/> length. Use on-hand stock first

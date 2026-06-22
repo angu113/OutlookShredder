@@ -24,7 +24,9 @@ public static class CutLayoutPdfRenderer
     private static readonly XColor CutLine = XColor.FromArgb(200, 60, 60);      // guillotine cut (shear)
     private static readonly XColor Accent = XColor.FromArgb(0x7C, 0x4D, 0xFF);
 
-    public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision)
+    private static readonly XColor Reuse = XColor.FromArgb(46, 125, 50);    // reusable drop (green)
+
+    public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision, double minUsableDrop = 0)
     {
         PickingSlipEnricher.EnsureFontResolver();
         var doc = new PdfDocument();
@@ -42,11 +44,11 @@ public static class CutLayoutPdfRenderer
                           (flat ? (method == CutMethod.Laser ? "Laser (free nest)" : "Shear (guillotine)")
                                 : (precision ? "Precision (1/8\" kerf/cut)" : "No kerf"));
 
-        var layouts = result.Layouts;
+        // Collapse identical cuts (same stock + same piece set) into one pro-forma diagram with a x N count.
+        var groups = GroupIdenticalCuts(result.Layouts, flat);
         int idx = 0, page = 0;
-        int totalPages = 0;   // unknown up front; stamped as "Page n"
 
-        while (idx < layouts.Count || page == 0)
+        while (idx < groups.Count || page == 0)
         {
             page++;
             var pg = doc.AddPage();
@@ -76,22 +78,24 @@ public static class CutLayoutPdfRenderer
             double cellW = (gw - (cols - 1) * 14) / cols;
             double cellH = (gh - (rows - 1) * 10) / rows;
 
-            for (int r = 0; r < rows && idx < layouts.Count; r++)
-            for (int c = 0; c < cols && idx < layouts.Count; c++)
+            for (int r = 0; r < rows && idx < groups.Count; r++)
+            for (int c = 0; c < cols && idx < groups.Count; c++)
             {
                 var cell = new XRect(gx + c * (cellW + 14), gy + r * (cellH + 10), cellW, cellH);
-                var lay = layouts[idx];
-                string cap = $"{(flat ? "Sheet" : "Bar")} {idx + 1}: {SizeLabel(lay)}  •  {lay.YieldPct:0.#}% yield" +
+                var (lay, count) = groups[idx];
+                string noun = flat ? "Sheet" : "Bar";
+                string head = count > 1 ? $"{noun} x{count}" : noun;
+                string cap = $"{head}: {SizeLabel(lay)}  •  {lay.YieldPct:0.#}% yield" +
                              (lay.Purchased ? "  •  PURCHASE" : "");
                 gfx.DrawString(cap, capFont, new XSolidBrush(lay.Purchased ? Accent : Ink),
                     new XRect(cell.X, cell.Y, cell.Width, 12), XStringFormats.TopLeft);
                 var diag = new XRect(cell.X, cell.Y + 14, cell.Width, cell.Height - 14);
                 if (flat) DrawSheet(gfx, diag, lay, method);
-                else DrawBar(gfx, diag, lay);
+                else DrawBar(gfx, diag, lay, minUsableDrop);
                 idx++;
             }
 
-            if (idx >= layouts.Count) { totalPages = page; break; }
+            if (idx >= groups.Count) break;
         }
 
         using var ms = new MemoryStream();
@@ -204,7 +208,7 @@ public static class CutLayoutPdfRenderer
     }
 
     // ── long bar diagram ──
-    private static void DrawBar(XGraphics gfx, XRect area, Layout lay)
+    private static void DrawBar(XGraphics gfx, XRect area, Layout lay, double minUsableDrop)
     {
         double sl = lay.StockLength;
         if (sl <= 0) return;
@@ -228,7 +232,12 @@ public static class CutLayoutPdfRenderer
         if (lay.Drop > 1e-6)
         {
             double dropW = lay.Drop * scale;
-            gfx.DrawString($"drop {Frac(lay.Drop)}", lblFont, new XSolidBrush(Faint),
+            // With a usable-drop minimum, mark the leftover as a reusable remnant (green) or scrap (red).
+            bool reusable = minUsableDrop > 0 && lay.Drop + 1e-6 >= minUsableDrop;
+            bool scrap = minUsableDrop > 0 && lay.Drop + 1e-6 < minUsableDrop;
+            var brush = new XSolidBrush(reusable ? Reuse : scrap ? CutLine : Faint);
+            string word = reusable ? "reuse" : scrap ? "scrap" : "drop";
+            gfx.DrawString($"{word} {Frac(lay.Drop)}", lblFont, brush,
                 new XRect(ox + cursor * scale, oy + barH / 2 - 4, Math.Max(dropW, 40), 8), XStringFormats.Center);
         }
     }
@@ -271,4 +280,29 @@ public static class CutLayoutPdfRenderer
         string.IsNullOrWhiteSpace(m) && string.IsNullOrWhiteSpace(g) ? "Stock"
         : string.IsNullOrWhiteSpace(g) ? m : $"{m} {g}";
     private static string Cap(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpper(s[0]) + s[1..];
+
+    // Group layouts that are the SAME cut (same stock + same piece set + same on-hand/purchase state),
+    // preserving first-seen order, so the report draws one pro-forma diagram per pattern with a x N count.
+    internal static List<(Layout Rep, int Count)> GroupIdenticalCuts(List<Layout> layouts, bool flat)
+    {
+        var order = new List<(Layout Rep, int Count)>();
+        var index = new Dictionary<string, int>();
+        foreach (var l in layouts)
+        {
+            string sig = Sig(l, flat);
+            if (index.TryGetValue(sig, out var i)) order[i] = (order[i].Rep, order[i].Count + 1);
+            else { index[sig] = order.Count; order.Add((l, 1)); }
+        }
+        return order;
+    }
+
+    private static string Sig(Layout l, bool flat)
+    {
+        static double R(double v) => Math.Round(v, 4);
+        string body = flat
+            ? string.Join(",", l.Pieces.Select(p => $"{R(p.W)}x{R(p.L)}{(p.Rotated ? "R" : "")}").OrderBy(s => s, StringComparer.Ordinal))
+            : string.Join(",", l.Pieces.Select(p => R(p.Length)).OrderBy(x => x));
+        string stock = flat ? $"{R(l.StockWidth ?? 0)}x{R(l.StockLength)}" : R(l.StockLength).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $"{stock}|{body}|{(l.Purchased ? "P" : "")}";
+    }
 }

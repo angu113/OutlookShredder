@@ -41,6 +41,9 @@ public sealed class OptimizeRequest
     public string? Form { get; set; }      // "flat" | "long"
     public string? Method { get; set; }    // "shear" | "laser" (flat only)
     public bool PrecisionNeeded { get; set; }
+    /// <summary>Long only: a soft preference to keep each leftover either ~0 or ≥ this many inches
+    /// (a reusable remnant) rather than short scrap. 0 = off. Ignored for flat sheets.</summary>
+    public double MinUsableDrop { get; set; }
     public List<CutPart> Parts { get; set; } = new();
     public List<StockSize> Stock { get; set; } = new();
 

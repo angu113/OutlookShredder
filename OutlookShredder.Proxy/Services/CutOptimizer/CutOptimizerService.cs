@@ -37,11 +37,19 @@ public static class CutOptimizerService
             string gauge = groupParts[0].Gauge;
 
             List<Layout> layouts = isLong
-                ? Long1DPacker.Pack(material, gauge, groupParts, groupStock, req.PrecisionNeeded, result.Issues)
+                ? Long1DPacker.Pack(material, gauge, groupParts, groupStock, req.PrecisionNeeded, result.Issues, req.MinUsableDrop)
                 : Flat2DPacker.Pack(material, gauge, groupParts, groupStock, req.ResolvedMethod, result.Issues);
 
             result.Layouts.AddRange(layouts);
-            AppendGroupSummary(sb, material, gauge, layouts, isLong);
+            AppendGroupSummary(sb, material, gauge, layouts, isLong, req.MinUsableDrop);
+        }
+
+        // Soft usable-drop preference (long): warn about any short scrap the best plan couldn't avoid.
+        if (isLong && req.MinUsableDrop > 0)
+        {
+            int scrapCount = result.Layouts.Count(l => l.Drop > 1e-6 && l.Drop + 1e-6 < req.MinUsableDrop);
+            if (scrapCount > 0)
+                result.Issues.Add(new Issue { Message = $"{scrapCount} drop(s) shorter than the {DrawFormat.FracInch(req.MinUsableDrop)} reusable minimum (unavoidable for this part/stock mix)." });
         }
 
         BuildUsageAndPurchases(result);
@@ -51,12 +59,12 @@ public static class CutOptimizerService
         // Phase 3: a printable PDF report (only when there's an actual plan to draw).
         if (result.Layouts.Count > 0)
             result.PdfBase64 = Convert.ToBase64String(
-                CutLayoutPdfRenderer.Render(result, req.ResolvedForm, req.ResolvedMethod, req.PrecisionNeeded));
+                CutLayoutPdfRenderer.Render(result, req.ResolvedForm, req.ResolvedMethod, req.PrecisionNeeded, req.MinUsableDrop));
 
         return result;
     }
 
-    private static void AppendGroupSummary(StringBuilder sb, string material, string gauge, List<Layout> layouts, bool isLong)
+    private static void AppendGroupSummary(StringBuilder sb, string material, string gauge, List<Layout> layouts, bool isLong, double minUsableDrop)
     {
         if (layouts.Count == 0) return;
         // Long jobs carry no metal/gauge (the client hides those for long) — then just name the form.
@@ -85,9 +93,21 @@ public static class CutOptimizerService
         // Long: list the usable end drops. (Flat waste is an area, conveyed by the yield %.)
         if (isLong)
         {
-            var drops = layouts.Where(l => l.Drop > 1e-6).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
-            if (drops.Count > 0)
-                sb.AppendLine($"  Drops: {string.Join(", ", drops)}");
+            if (minUsableDrop > 0)
+            {
+                var reusable = layouts.Where(l => l.Drop + 1e-6 >= minUsableDrop).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
+                var scrap = layouts.Where(l => l.Drop > 1e-6 && l.Drop + 1e-6 < minUsableDrop).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
+                if (reusable.Count > 0)
+                    sb.AppendLine($"  Reusable drops (>= {DrawFormat.FracInch(minUsableDrop)}): {string.Join(", ", reusable)}");
+                if (scrap.Count > 0)
+                    sb.AppendLine($"  Scrap drops (< {DrawFormat.FracInch(minUsableDrop)}): {string.Join(", ", scrap)}");
+            }
+            else
+            {
+                var drops = layouts.Where(l => l.Drop > 1e-6).Select(l => DrawFormat.FracInch(l.Drop)).ToList();
+                if (drops.Count > 0)
+                    sb.AppendLine($"  Drops: {string.Join(", ", drops)}");
+            }
         }
         sb.AppendLine();
     }

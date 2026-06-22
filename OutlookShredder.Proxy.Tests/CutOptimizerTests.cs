@@ -47,6 +47,43 @@ public class CutOptimizerTests
         Assert.Equal(100.0, bar.YieldPct, 1);
     }
 
+    // ── Min usable drop (soft preference, long only) ─────────────────────────────
+    [Fact]
+    public void Long_min_usable_drop_keeps_drops_reusable_not_scrap()
+    {
+        // 3 x 100" from 240" stock. Tight packing leaves a 40" scrap on one bar; with a 96" usable-drop
+        // minimum the optimizer instead leaves reusable >=96" remnants (more bars, but no short scrap).
+        var withMin = CutOptimizerService.Optimize(new OptimizeRequest
+        {
+            Form = "long", MinUsableDrop = 96,
+            Parts = new() { Part(100, 3) }, Stock = new() { Stock(240) },
+        });
+        Assert.DoesNotContain(withMin.Layouts, l => l.Drop > 1e-6 && l.Drop + 1e-6 < 96);   // no short scrap
+        Assert.Contains(withMin.Layouts, l => l.Drop + 1e-6 >= 96);                          // a reusable remnant
+        Assert.Contains("Reusable drops", withMin.TextSummary);
+
+        var noMin = CutOptimizerService.Optimize(new OptimizeRequest
+        {
+            Form = "long",
+            Parts = new() { Part(100, 3) }, Stock = new() { Stock(240) },
+        });
+        Assert.Contains(noMin.Layouts, l => l.Drop > 1e-6 && l.Drop + 1e-6 < 96);            // tight pack leaves scrap
+    }
+
+    // ── Rendering: identical cuts collapse to one pro-forma + count ───────────────
+    [Fact]
+    public void Render_collapses_identical_cuts()
+    {
+        var a = new Layout { StockLength = 240, Pieces = new() { new PlacedPiece { Length = 60 }, new PlacedPiece { Length = 60 } }, Drop = 120 };
+        var b = new Layout { StockLength = 240, Pieces = new() { new PlacedPiece { Length = 60 }, new PlacedPiece { Length = 60 } }, Drop = 120 };
+        var c = new Layout { StockLength = 120, Pieces = new() { new PlacedPiece { Length = 120 } }, Drop = 0 };
+
+        var groups = CutLayoutPdfRenderer.GroupIdenticalCuts(new List<Layout> { a, b, c }, flat: false);
+        Assert.Equal(2, groups.Count);
+        Assert.Equal(2, groups[0].Count);   // a + b are the same cut
+        Assert.Equal(1, groups[1].Count);   // c is distinct
+    }
+
     // ── On-hand vs purchase (Decision 4) ─────────────────────────────────────────
     [Fact]
     public void Long_unlimited_stock_reports_lengths_needed_no_purchase()
