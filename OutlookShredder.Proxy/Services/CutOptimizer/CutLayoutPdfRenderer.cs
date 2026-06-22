@@ -25,6 +25,7 @@ public static class CutLayoutPdfRenderer
     private static readonly XColor Accent = XColor.FromArgb(0x7C, 0x4D, 0xFF);
 
     private static readonly XColor Reuse = XColor.FromArgb(46, 125, 50);    // reusable drop (green)
+    private static readonly XColor ReuseFill = XColor.FromArgb(216, 240, 216);  // reusable offcut fill (light green)
 
     public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision, double minUsableDrop = 0)
     {
@@ -153,6 +154,17 @@ public static class CutLayoutPdfRenderer
             string t = $"{Frac(p.W)}x{Frac(p.L)}" + (p.Rotated ? " R" : "");
             if (pwd > 22 && phd > 9)
                 gfx.DrawString(t, lblFont, new XSolidBrush(Ink), new XRect(px, py + phd / 2 - 4, pwd, 8), XStringFormats.Center);
+        }
+
+        // Reusable offcut (when a usable-offcut minimum left one): shade green + label.
+        if (lay.OffcutW > 0 && lay.OffcutL > 0)
+        {
+            double fx = ox + lay.OffcutX * scale, fy = oy + lay.OffcutY * scale;
+            double fw = lay.OffcutW * scale, fh = lay.OffcutL * scale;
+            gfx.DrawRectangle(new XPen(Reuse, 0.8), new XSolidBrush(ReuseFill), fx, fy, fw, fh);
+            if (fw > 30 && fh > 9)
+                gfx.DrawString($"reuse {Frac(lay.OffcutW)}x{Frac(lay.OffcutL)}", lblFont, new XSolidBrush(Reuse),
+                    new XRect(fx, fy + fh / 2 - 4, fw, 8), XStringFormats.Center);
         }
 
         // Shear: overlay the ordered guillotine cut lines (dashed red, numbered).

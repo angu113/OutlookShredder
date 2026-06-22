@@ -206,6 +206,26 @@ public class CutOptimizerTests
         Assert.Equal(4, laser.Layouts.Sum(l => l.Pieces.Count));   // still cuts all 4 parts
     }
 
+    // ── Flat reusable offcut (soft preference, flat only) ────────────────────────
+    [Fact]
+    public void Flat_min_offcut_leaves_a_reusable_remnant_rectangle()
+    {
+        // One 48x48 part on a 96x48 sheet leaves a clean 48x48 offcut; with a 24" offcut minimum it's
+        // reported/kept as reusable inventory rather than waste.
+        var r = CutOptimizerService.Optimize(new OptimizeRequest
+        {
+            Form = "flat", Method = "shear", MinUsableOffcut = 24,
+            Parts = new() { FlatPart(48, 48, 1) }, Stock = new() { FlatStock(96, 48) },
+        });
+        var sheet = Assert.Single(r.Layouts);
+        Assert.True(sheet.OffcutW >= 24 && sheet.OffcutL >= 24, $"expected a reusable offcut, got {sheet.OffcutW} x {sheet.OffcutL}");
+        Assert.Contains("Reusable offcuts", r.TextSummary);
+
+        // Without the offcut minimum, no offcut is tracked.
+        var off = CutOptimizerService.Optimize(Flat("shear", new[] { FlatPart(48, 48, 1) }, new[] { FlatStock(96, 48) }));
+        Assert.Equal(0, off.Layouts[0].OffcutW, 3);
+    }
+
     // ── PDF report (Phase 3) ───────────────────────────────────────────────────────
     [Fact]
     public void Long_plan_renders_a_pdf_report()

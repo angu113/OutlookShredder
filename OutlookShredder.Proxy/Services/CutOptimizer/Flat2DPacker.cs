@@ -20,7 +20,7 @@ public static class Flat2DPacker
     public static List<Layout> Pack(
         string material, string gauge,
         IReadOnlyList<CutPart> parts, IReadOnlyList<StockSize> stock,
-        CutMethod method, List<Issue> issues)
+        CutMethod method, List<Issue> issues, double minOffcut = 0)
     {
         var sheets = stock.Where(s => s.Length > 0 && (s.Width ?? 0) > 0).ToList();
         // Expand parts (qty), inflate by the method's kerf/web, descending by area for a good packing order.
@@ -52,7 +52,9 @@ public static class Flat2DPacker
             else issues.Add(new Issue { Message = $"Part {Fmt(pc.TrueW)} x {Fmt(pc.TrueH)} fits no stock sheet for {GroupLabel(material, gauge)} — can't cut." });
         }
 
-        INestStrategy strategy = method == CutMethod.Laser ? new MaxRectsStrategy() : new GuillotineStrategy();
+        bool bottomLeft = minOffcut > 0;   // corner the parts so the leftover offcut stays one clean rectangle
+        int offMil = Mil(minOffcut);
+        INestStrategy strategy = method == CutMethod.Laser ? new MaxRectsStrategy(bottomLeft) : new GuillotineStrategy(bottomLeft);
 
         var layouts = new List<Layout>();
         int guard = remaining.Count + 2;
@@ -67,23 +69,39 @@ public static class Flat2DPacker
 
             // Greedy: pick the size whose sheet packs the most part area this step.
             SheetBucket best = pool[0];
-            List<Placement> bestPlaced = strategy.Nest(best.W, best.H, remaining);
-            long bestArea = AreaOf(bestPlaced);
+            NestSheet bestNest = strategy.Nest(best.W, best.H, remaining);
+            long bestArea = AreaOf(bestNest.Placed);
             foreach (var sz in pool.Skip(1))
             {
-                var placed = strategy.Nest(sz.W, sz.H, remaining);
-                long area = AreaOf(placed);
+                var nest = strategy.Nest(sz.W, sz.H, remaining);
+                long area = AreaOf(nest.Placed);
                 if (area > bestArea || (area == bestArea && sz.W * (long)sz.H < best.W * (long)best.H))
                 {
-                    best = sz; bestPlaced = placed; bestArea = area;
+                    best = sz; bestNest = nest; bestArea = area;
                 }
             }
-            if (bestPlaced.Count == 0) break;   // nothing fit (guarded above; defensive)
+            if (bestNest.Placed.Count == 0) break;   // nothing fit (guarded above; defensive)
 
             if (purchasing) best.Purchased++; else best.UsedOnHand++;
 
+            var bestPlaced = bestNest.Placed;
             double usefulSqIn = bestPlaced.Sum(pl => pl.TrueWIn * pl.TrueHIn);
             double sheetSqIn = best.WIn * best.HIn;
+
+            // Reusable offcut: the largest leftover free rectangle that's ≥ the minimum on BOTH sides.
+            double oX = 0, oY = 0, oW = 0, oL = 0;
+            if (offMil > 0)
+            {
+                (int X, int Y, int W, int H)? pick = null; long pickArea = 0;
+                foreach (var f in bestNest.Free)
+                    if (Math.Min(f.W, f.H) >= offMil)
+                    {
+                        long a = (long)f.W * f.H;
+                        if (a > pickArea) { pickArea = a; pick = f; }
+                    }
+                if (pick is { } off) { oX = off.X / MilPerInch; oY = off.Y / MilPerInch; oW = off.W / MilPerInch; oL = off.H / MilPerInch; }
+            }
+
             layouts.Add(new Layout
             {
                 Material = material,
@@ -98,6 +116,7 @@ public static class Flat2DPacker
                 Drop = Math.Max(0, sheetSqIn - usefulSqIn),
                 YieldPct = sheetSqIn > 0 ? 100.0 * usefulSqIn / sheetSqIn : 0,
                 Purchased = purchasing,
+                OffcutX = oX, OffcutY = oY, OffcutW = oW, OffcutL = oL,
             });
 
             var placedIds = bestPlaced.Select(p => p.Index).ToHashSet();
@@ -148,57 +167,69 @@ public static class Flat2DPacker
         public double WIn, HIn;
     }
 
-    /// <summary>Packs as many of <paramref name="parts"/> as fit on ONE sheet (mil units); returns placements.</summary>
+    /// <summary>Packs as many of <paramref name="parts"/> as fit on ONE sheet (mil units); returns the
+    /// placements + the leftover free rectangles (for reusable-offcut detection).</summary>
     private interface INestStrategy
     {
-        List<Placement> Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts);
+        NestSheet Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts);
     }
+
+    private sealed record NestSheet(List<Placement> Placed, List<(int X, int Y, int W, int H)> Free);
+
+    private static List<(int X, int Y, int W, int H)> FreeOf(IEnumerable<Rect> free) =>
+        free.Select(r => (r.X, r.Y, r.Width, r.Height)).ToList();
 
     // ── Shear: guillotine (edge-to-edge cuts). Cuttability over density. ─────────
     private sealed class GuillotineStrategy : INestStrategy
     {
-        public List<Placement> Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts)
+        // Guillotine's choice enum has no bottom-left rule; BestAreaFit fills tight gaps so the leftover
+        // free rectangles stay consolidated (the largest becomes the reusable offcut).
+        public GuillotineStrategy(bool bottomLeft) { _ = bottomLeft; }
+
+        public NestSheet Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts)
         {
             var bin = new GuillotineBinPack(sheetW, sheetH);
             var placed = new List<Placement>();
             foreach (var p in parts)
             {
-                var r = bin.Insert(p.IW, p.IH, true,
-                    GuillotineBinPack.FreeRectChoiceHeuristic.RectBestAreaFit,
-                    GuillotineBinPack.GuillotineSplitHeuristic.SplitMinimizeArea);
+                var r = bin.Insert(p.IW, p.IH, true, GuillotineBinPack.FreeRectChoiceHeuristic.RectBestAreaFit, GuillotineBinPack.GuillotineSplitHeuristic.SplitMinimizeArea);
                 bool rotated = false;
                 if ((r.Width <= 0 || r.Height <= 0) && p.Rotatable && p.IW != p.IH)
                 {
-                    r = bin.Insert(p.IH, p.IW, true,
-                        GuillotineBinPack.FreeRectChoiceHeuristic.RectBestAreaFit,
-                        GuillotineBinPack.GuillotineSplitHeuristic.SplitMinimizeArea);
+                    r = bin.Insert(p.IH, p.IW, true, GuillotineBinPack.FreeRectChoiceHeuristic.RectBestAreaFit, GuillotineBinPack.GuillotineSplitHeuristic.SplitMinimizeArea);
                     rotated = true;
                 }
                 if (r.Width > 0 && r.Height > 0) placed.Add(Place(p, r, rotated));
             }
-            return placed;
+            return new NestSheet(placed, FreeOf(bin.FreeRectangles));
         }
     }
 
     // ── Free (laser): MaxRects (denser non-guillotine). Rotation controlled per-part. ──
     private sealed class MaxRectsStrategy : INestStrategy
     {
-        public List<Placement> Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts)
+        private readonly FreeRectChoiceHeuristic _choice;
+        public MaxRectsStrategy(bool bottomLeft) =>
+            // Corner the parts (bottom-left) so the leftover offcut stays one contiguous rectangle.
+            _choice = bottomLeft ? FreeRectChoiceHeuristic.RectBottomLeftRule
+                                 : FreeRectChoiceHeuristic.RectBestShortSideFit;
+
+        public NestSheet Nest(int sheetW, int sheetH, IReadOnlyList<Piece> parts)
         {
             var bin = new MaxRectsBinPack(sheetW, sheetH, false);   // rotation off — we control it per part
             var placed = new List<Placement>();
             foreach (var p in parts)
             {
-                var r = bin.Insert(p.IW, p.IH, FreeRectChoiceHeuristic.RectBestShortSideFit);
+                var r = bin.Insert(p.IW, p.IH, _choice);
                 bool rotated = false;
                 if ((r.Width <= 0 || r.Height <= 0) && p.Rotatable && p.IW != p.IH)
                 {
-                    r = bin.Insert(p.IH, p.IW, FreeRectChoiceHeuristic.RectBestShortSideFit);
+                    r = bin.Insert(p.IH, p.IW, _choice);
                     rotated = true;
                 }
                 if (r.Width > 0 && r.Height > 0) placed.Add(Place(p, r, rotated));
             }
-            return placed;
+            return new NestSheet(placed, FreeOf(bin.FreeRectangles));
         }
     }
 

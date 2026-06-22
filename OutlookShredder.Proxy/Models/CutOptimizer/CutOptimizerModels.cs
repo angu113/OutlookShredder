@@ -44,6 +44,9 @@ public sealed class OptimizeRequest
     /// <summary>Long only: a soft preference to keep each leftover either ~0 or ≥ this many inches
     /// (a reusable remnant) rather than short scrap. 0 = off. Ignored for flat sheets.</summary>
     public double MinUsableDrop { get; set; }
+    /// <summary>Flat only: a soft preference to leave a reusable offcut rectangle ≥ this many inches on
+    /// BOTH sides (parts packed to a corner so the offcut stays contiguous). 0 = off. Ignored for long.</summary>
+    public double MinUsableOffcut { get; set; }
     public List<CutPart> Parts { get; set; } = new();
     public List<StockSize> Stock { get; set; } = new();
 
@@ -78,6 +81,11 @@ public sealed class Layout
     public double Drop { get; set; }            // long: end drop (in); flat: waste area (sq in)
     public double YieldPct { get; set; }
     public bool Purchased { get; set; }         // true = this bar/sheet was bought (on-hand exhausted)
+    // Flat reusable offcut rectangle (in), when a usable-offcut minimum is set; W/L = 0 ⇒ none.
+    public double OffcutX { get; set; }
+    public double OffcutY { get; set; }
+    public double OffcutW { get; set; }
+    public double OffcutL { get; set; }
 }
 
 /// <summary>Per distinct stock size: how many used and the average yield.</summary>

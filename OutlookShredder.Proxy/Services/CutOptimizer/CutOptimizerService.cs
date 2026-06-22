@@ -38,10 +38,10 @@ public static class CutOptimizerService
 
             List<Layout> layouts = isLong
                 ? Long1DPacker.Pack(material, gauge, groupParts, groupStock, req.PrecisionNeeded, result.Issues, req.MinUsableDrop)
-                : Flat2DPacker.Pack(material, gauge, groupParts, groupStock, req.ResolvedMethod, result.Issues);
+                : Flat2DPacker.Pack(material, gauge, groupParts, groupStock, req.ResolvedMethod, result.Issues, req.MinUsableOffcut);
 
             result.Layouts.AddRange(layouts);
-            AppendGroupSummary(sb, material, gauge, layouts, isLong, req.MinUsableDrop);
+            AppendGroupSummary(sb, material, gauge, layouts, isLong, req.MinUsableDrop, req.MinUsableOffcut);
         }
 
         // Soft usable-drop preference (long): warn about any short scrap the best plan couldn't avoid.
@@ -64,7 +64,7 @@ public static class CutOptimizerService
         return result;
     }
 
-    private static void AppendGroupSummary(StringBuilder sb, string material, string gauge, List<Layout> layouts, bool isLong, double minUsableDrop)
+    private static void AppendGroupSummary(StringBuilder sb, string material, string gauge, List<Layout> layouts, bool isLong, double minUsableDrop, double minOffcut)
     {
         if (layouts.Count == 0) return;
         // Long jobs carry no metal/gauge (the client hides those for long) — then just name the form.
@@ -108,6 +108,13 @@ public static class CutOptimizerService
                 if (drops.Count > 0)
                     sb.AppendLine($"  Drops: {string.Join(", ", drops)}");
             }
+        }
+        else if (minOffcut > 0)   // flat: list the reusable offcut rectangles left for inventory
+        {
+            var offcuts = layouts.Where(l => l.OffcutW > 0 && l.OffcutL > 0)
+                .Select(l => $"{DrawFormat.FracInch(l.OffcutW)} x {DrawFormat.FracInch(l.OffcutL)}").ToList();
+            if (offcuts.Count > 0)
+                sb.AppendLine($"  Reusable offcuts (>= {DrawFormat.FracInch(minOffcut)}): {string.Join(", ", offcuts)}");
         }
         sb.AppendLine();
     }
