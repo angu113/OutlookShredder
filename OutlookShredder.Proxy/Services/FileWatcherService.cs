@@ -539,6 +539,12 @@ public class FileWatcherService : BackgroundService
         if (erpInfo.DocumentType == "PickingSlip")
             enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
+        // PurchaseOrders get a header stamp too: supplier name in the left box, Requested By / Order Date
+        // in the right box (deterministic PDF parse — same mechanism as the picking-slip stamp).
+        Task<byte[]>? poEnrichTask = null;
+        if (erpInfo.DocumentType == "PurchaseOrder")
+            poEnrichTask = Task.Run(() => PickingSlipEnricher.EnrichPurchaseOrder(bytes, _log), ct);
+
         // ── Notify BEFORE the AI call ───────────────────────────────────────────────────────────────
         // The AI extraction takes seconds; the Focus window should pop as soon as the PDF can render.
         // Write a preliminary record (filename + enrichment), notify, THEN run the AI and patch the
@@ -587,6 +593,26 @@ public class FileWatcherService : BackgroundService
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "[FW] Picking-slip enrichment failed for {File}", fileName);
+            }
+        }
+
+        // PurchaseOrder header stamp — replace the bytes with the stamped PDF (uploaded to SP below).
+        if (poEnrichTask is not null)
+        {
+            try
+            {
+                var stamped = await poEnrichTask;
+                _log.LogInformation("[FW] Timing {File}: po-enrich={Ms}ms", fileName, sw.ElapsedMilliseconds);
+                sw.Restart();
+                if (!ReferenceEquals(stamped, bytes))
+                {
+                    bytes = stamped;
+                    bytesModified = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[FW] PO header enrichment failed for {File}", fileName);
             }
         }
 

@@ -218,6 +218,211 @@ internal static class PickingSlipEnricher
         return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone);
     }
 
+    // ════════════════════════════════════════════════════════════════════════════
+    // Purchase-order header enrichment — same machinery as the picking-slip stamping,
+    // but for the PO layout: the Vendor (supplier) name fills the LEFT header box, and
+    // "Requested By:" + "Order Date:" fill the RIGHT header box. Anchors on the
+    // "PURCHASE ORDER" title (cell top) and the "MSPC" column header (cell bottom).
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Stamps a Purchase-order PDF's header: supplier name (large, left box) + Requested By /
+    /// Order Date (right box). Returns the bytes unchanged when the header region can't be located.</summary>
+    public static byte[] EnrichPurchaseOrder(byte[] pdfBytes, ILogger? log = null)
+    {
+        EnsureFontResolver();
+
+        string? vendorName = null, requestedBy = null, orderDate = null;
+        var headerBounds = new List<(int PageIndex, double PsTop, double PsHeight)>();
+        int pdfPageCount;
+
+        using (var pigDoc = PigDoc.Open(pdfBytes))
+        {
+            pdfPageCount   = pigDoc.NumberOfPages;
+            var page1      = pigDoc.GetPage(1);
+            var page1Words = page1.GetWords().ToList();
+            var page1Lines = GroupIntoLines(page1Words);
+
+            vendorName = ExtractVendorNameFromWords(page1Words, log);
+            var (rb, od, top, ht) = ExtractPoHeaderFields(page1Lines, page1.Height, log);
+            requestedBy = rb;
+            orderDate   = od;
+            if (top.HasValue && ht is > 0) headerBounds.Add((0, top.Value, ht.Value));
+
+            // Multi-page POs repeat the header anchors per page; values are taken from page 1.
+            for (int p = 2; p <= pdfPageCount; p++)
+            {
+                var pg    = pigDoc.GetPage(p);
+                var lines = GroupIntoLines(pg.GetWords().ToList());
+                var (_, _, t, h2) = ExtractPoHeaderFields(lines, pg.Height, log);
+                if (t.HasValue && h2 is > 0) headerBounds.Add((p - 1, t.Value, h2.Value));
+            }
+        }
+
+        if (headerBounds.Count == 0)
+        {
+            log?.LogWarning("[POE] PO header bounds not detected — returning original bytes");
+            return pdfBytes;
+        }
+
+        log?.LogInformation("[POE] PO header — vendor='{V}' requestedBy='{R}' orderDate='{D}'",
+            vendorName, requestedBy, orderDate);
+
+        using var ms = new MemoryStream(pdfBytes);
+        var doc      = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
+        foreach (var (pageIndex, psTop, psHeight) in headerBounds)
+        {
+            if (pageIndex < 0 || pageIndex >= doc.Pages.Count) continue;
+            var page     = doc.Pages[pageIndex];
+            double pageW = page.Width.Point;
+            StampPoLeftCellOnDoc(doc,  page, vendorName,             psTop, psHeight, pageW, log);
+            StampPoRightCellOnDoc(doc, page, requestedBy, orderDate, psTop, psHeight, pageW, log);
+        }
+
+        using var outMs = new MemoryStream();
+        doc.Save(outMs);
+        return outMs.ToArray();
+    }
+
+    /// <summary>The supplier name printed below the "Vendor" label in the PO's left header box.</summary>
+    private static string? ExtractVendorNameFromWords(List<Word> words, ILogger? log)
+    {
+        const double leftColMax = 280.0;
+        var vendorWord = words
+            .Where(w => w.Text.Equals("Vendor", StringComparison.OrdinalIgnoreCase)
+                     && w.BoundingBox.Left < leftColMax)
+            .OrderByDescending(w => w.BoundingBox.Bottom)
+            .FirstOrDefault();
+        if (vendorWord is null) return null;
+
+        double vY = vendorWord.BoundingBox.Bottom;
+        var nameWords = words
+            .Where(w =>
+            {
+                double drop = vY - w.BoundingBox.Bottom;
+                return drop is > 4 and < 22 && w.BoundingBox.Left < leftColMax;
+            })
+            .OrderBy(w => w.BoundingBox.Left)
+            .ToList();
+        if (nameWords.Count == 0) return null;
+        var name = string.Join(" ", nameWords.Select(w => w.Text)).Trim();
+        log?.LogInformation("[POE] Vendor name: '{Name}'", name);
+        return string.IsNullOrWhiteSpace(name) ? null : name;
+    }
+
+    /// <summary>Parses "Requested by:" / "Order Date:" and computes the header cell band (PdfSharp
+    /// top-left origin) from the "PURCHASE ORDER" title and the "MSPC" column-header anchors.</summary>
+    private static (string? RequestedBy, string? OrderDate, double? PsTop, double? PsHeight) ExtractPoHeaderFields(
+        List<TextLine> lines, double pigPageH, ILogger? log)
+    {
+        static string? After(string text, string label)
+        {
+            var idx = text.IndexOf(label, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            var val = text[(idx + label.Length)..].TrimStart(' ', ':', '\t').Trim();
+            return string.IsNullOrWhiteSpace(val) ? null : val;
+        }
+
+        string? requestedBy = null, orderDate = null;
+        TextLine? titleLine = null, mspcLine = null;
+
+        foreach (var line in lines)
+        {
+            var text = line.Text;
+            if (titleLine is null && text.Contains("PURCHASE", StringComparison.OrdinalIgnoreCase)
+                                  && text.Contains("ORDER",    StringComparison.OrdinalIgnoreCase))
+                titleLine = line;
+            if (mspcLine is null && text.StartsWith("MSPC", StringComparison.OrdinalIgnoreCase) && line.X < 30.0)
+                mspcLine = line;
+
+            requestedBy ??= After(text, "Requested by:");
+            orderDate   ??= After(text, "Order Date:");
+        }
+
+        double? psTop = null, psHeight = null;
+        if (titleLine is not null && mspcLine is not null)
+        {
+            const double topGap = 5.0, bottomGap = 5.0;
+            double psTitleBottom = pigPageH - titleLine.Y;
+            double psMspcTop      = pigPageH - (mspcLine.Y + mspcLine.Height);
+            double top    = psTitleBottom + topGap;
+            double bottom = psMspcTop      - bottomGap;
+            double height = bottom - top;
+            if (height > 20) { psTop = top; psHeight = height; }
+        }
+        else
+            log?.LogWarning("[POE] PO header cell bounds not detected — title={T} MSPC={M}",
+                titleLine?.Text ?? "(none)", mspcLine?.Text ?? "(none)");
+
+        return (requestedBy, orderDate, psTop, psHeight);
+    }
+
+    /// <summary>White-out the left PO header cell and stamp the supplier name (large bold, fitted).</summary>
+    private static void StampPoLeftCellOnDoc(
+        SharpDoc doc, PdfPage page, string? vendorName,
+        double psTop, double psHeight, double pageW, ILogger? log)
+    {
+        if (string.IsNullOrWhiteSpace(vendorName)) return;
+        using var gfx = XGraphics.FromPdfPage(page);
+        const double margin = 8.0;
+        double splitX = pageW / 2.0;
+
+        var cellRect = new XRect(0, psTop, splitX, psHeight);
+        gfx.DrawRectangle(XBrushes.White, cellRect);
+        gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
+
+        double innerX = margin, innerW = splitX - margin * 2, innerH = psHeight - margin * 2;
+        var (nameLines, nameFont) = FitTextInBox(gfx, vendorName, innerW, innerH);
+        double lh     = nameFont.GetHeight();
+        double blockH = nameLines.Count * lh;
+        double startY = psTop + margin + (innerH - blockH) / 2.0;
+        foreach (var nl in nameLines)
+        {
+            gfx.DrawString(nl, nameFont, XBrushes.Black, new XRect(innerX, startY, innerW, lh), XStringFormats.TopCenter);
+            startY += lh;
+        }
+        log?.LogInformation("[POE] Left cell stamped — vendor='{V}'", vendorName);
+    }
+
+    /// <summary>White-out the right PO header cell and stamp Requested By / Order Date, vertically centred.</summary>
+    private static void StampPoRightCellOnDoc(
+        SharpDoc doc, PdfPage page, string? requestedBy, string? orderDate,
+        double psTop, double psHeight, double pageW, ILogger? log)
+    {
+        using var gfx = XGraphics.FromPdfPage(page);
+        const double margin = 8.0;
+        double splitX = pageW / 2.0;
+        double cellW  = pageW - splitX;
+
+        var cellRect = new XRect(splitX, psTop, cellW, psHeight);
+        gfx.DrawRectangle(XBrushes.White, cellRect);
+        gfx.DrawRectangle(new XPen(XColors.Black, 0.5), cellRect);
+
+        var rows = new List<(string Label, string Value)>();
+        if (!string.IsNullOrWhiteSpace(requestedBy)) rows.Add(("Requested By:", requestedBy!));
+        if (!string.IsNullOrWhiteSpace(orderDate))   rows.Add(("Order Date:",   orderDate!));
+        if (rows.Count == 0) return;
+
+        double innerW   = cellW   - margin * 2;
+        double innerH   = psHeight - margin * 2;
+        double rowH     = Math.Min(innerH / rows.Count, 22.0);
+        double fontSize = Math.Clamp(rowH * 0.5, 9.0, 13.0);
+        var labelFont   = new XFont("Arial", fontSize, XFontStyleEx.Bold);
+        var valueFont   = new XFont("Arial", fontSize, XFontStyleEx.Regular);
+        const double labelColW = 95.0;
+
+        double blockH = rows.Count * rowH;
+        double y      = psTop + margin + (innerH - blockH) / 2.0;
+        foreach (var (label, value) in rows)
+        {
+            gfx.DrawString(label, labelFont, XBrushes.Black,
+                new XRect(splitX + margin, y, labelColW, rowH), XStringFormats.TopLeft);
+            gfx.DrawString(value, valueFont, XBrushes.Black,
+                new XRect(splitX + margin + labelColW, y, innerW - labelColW, rowH), XStringFormats.TopLeft);
+            y += rowH;
+        }
+        log?.LogInformation("[POE] Right cell stamped — requestedBy='{R}' orderDate='{D}'", requestedBy, orderDate);
+    }
+
     private static IReadOnlyList<string> ScanProcessingKeywords(
         IReadOnlyList<string> textLines,
         IReadOnlyList<string>? keywords,
