@@ -535,7 +535,7 @@ public class FileWatcherService : BackgroundService
 
         // For PickingSlips: enrich (ship-to name, delivery method, process ops) from the raw PDF via
         // PdfPig — fast and deterministic, independent of the slow AI call.
-        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod)>? enrichTask = null;
+        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone)>? enrichTask = null;
         if (erpInfo.DocumentType == "PickingSlip")
             enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
@@ -558,7 +558,7 @@ public class FileWatcherService : BackgroundService
         {
             try
             {
-                var (enriched, shipToName, ops, deliveryMethod) = await enrichTask;
+                var (enriched, shipToName, ops, deliveryMethod, contactName, contactPhone) = await enrichTask;
                 _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms", fileName, sw.ElapsedMilliseconds);
                 sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
@@ -573,6 +573,10 @@ public class FileWatcherService : BackgroundService
                     _log.LogInformation("[FW] Delivery method from PDF: '{Method}'", deliveryMethod);
                     extraction.DeliveryMethod = deliveryMethod;
                 }
+                // Customer contact: the deterministic "Attention:" / "Contact Phone:" parse is reliable (the
+                // AI misses it on the jumbled slip layout), so it's the primary source for the card's contact.
+                if (!string.IsNullOrWhiteSpace(contactName))  extraction.ContactName  = contactName;
+                if (!string.IsNullOrWhiteSpace(contactPhone)) extraction.ContactPhone = contactPhone;
                 if (!ReferenceEquals(enriched, bytes))
                 {
                     bytes = enriched;
@@ -695,6 +699,10 @@ public class FileWatcherService : BackgroundService
                 extraction.CustomerName = aiResult.CustomerName;
             if (string.IsNullOrWhiteSpace(extraction.DeliveryAddress))
                 extraction.DeliveryAddress = aiResult.DeliveryAddress;
+            // Contact is normally set deterministically from the enrichment above; fall back to the AI's
+            // values only if the slip parse didn't yield them.
+            if (string.IsNullOrWhiteSpace(extraction.ContactName))  extraction.ContactName  = aiResult.ContactName;
+            if (string.IsNullOrWhiteSpace(extraction.ContactPhone)) extraction.ContactPhone = aiResult.ContactPhone;
             // Take the AI's DocumentNumber only when the filename had none AND it has the expected prefix.
             if (!erpInfo.HasDocNumber && !string.IsNullOrEmpty(aiResult.DocumentNumber) &&
                 (aiResult.DocumentNumber.StartsWith("HSK-", StringComparison.OrdinalIgnoreCase) ||

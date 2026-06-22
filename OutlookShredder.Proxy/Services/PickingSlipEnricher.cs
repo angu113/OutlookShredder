@@ -125,7 +125,7 @@ internal static class PickingSlipEnricher
     /// AI extractor doesn't capture this field, so the deterministic parse is the only source
     /// the auto-create Delivery rule has.
     /// </summary>
-    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod) EnrichPickingSlip(
+    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone) EnrichPickingSlip(
         byte[] pdfBytes,
         string? knownCustomerName = null,
         ILogger? log = null,
@@ -190,7 +190,7 @@ internal static class PickingSlipEnricher
         var processOps = ScanProcessingKeywords(allLinesAcrossPages, processingKeywords, log);
 
         if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
-            return (pdfBytes, shipToName, processOps, header.DeliveryMethod);
+            return (pdfBytes, shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
         using var ms  = new MemoryStream(pdfBytes);
@@ -215,7 +215,7 @@ internal static class PickingSlipEnricher
 
         using var outMs = new MemoryStream();
         doc.Save(outMs);
-        return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod);
+        return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone);
     }
 
     private static IReadOnlyList<string> ScanProcessingKeywords(
