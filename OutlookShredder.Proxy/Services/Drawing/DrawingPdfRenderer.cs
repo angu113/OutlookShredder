@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using OutlookShredder.Proxy.Models.Drawing;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
@@ -23,6 +24,11 @@ public static class DrawingPdfRenderer
     // from the RoyalBlue bend lines and the muted gray derived dims.
     private static readonly XColor AccentColor = XColor.FromArgb(176, 0, 102);   // deep magenta
     private static readonly XBrush AccentBrush = new XSolidBrush(AccentColor);
+
+    private static readonly string ForgeVersion =
+        typeof(DrawingPdfRenderer).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
 
     // Section-cut plane styling. Two distinct styles so multiple cut planes read apart:
     // A = green / dash (pan "side" + single-section views), B = orange / dash-dot (pan "end").
@@ -142,9 +148,9 @@ public static class DrawingPdfRenderer
             DrawFootnote(gfx, fp, new XRect(M, footTop, techW, footH));
             DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH));
 
-            // Copyright line under the details box (current year).
+            // Copyright line under the details box.
             var copyFont = new XFont("Arial", 7, XFontStyleEx.Regular);
-            gfx.DrawString($"Copyright © Mithril Metals Corp., Authorized Metal Supermarkets Franchisee (Hackensack), {System.DateTime.Now.Year}",
+            gfx.DrawString($"Copyright {System.DateTime.Now.Year} Silmaril Corp. Forge Version: {ForgeVersion}.",
                 copyFont, DimBrush, new XRect(M, footTop + footH + 2, usable, 10), XStringFormats.TopLeft);
         }
 

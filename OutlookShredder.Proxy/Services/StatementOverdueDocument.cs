@@ -1,3 +1,4 @@
+using System.Reflection;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
@@ -14,6 +15,11 @@ public static class StatementOverdueDocument
     private const string Blue = "#1E5BAA", Red = "#C62828", Grey = "#7A7A7A",
                          Line = "#C9C9C9", LightGrey = "#F2F2F2", White = "#FFFFFF";
 
+    private static readonly string ForgeVersion =
+        typeof(StatementOverdueDocument).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
+
     public static byte[] Render(IReadOnlyList<OverdueRow> rows, string bucketLabel, DateTime asOf)
     {
         QuestPDF.Settings.License = LicenseType.Community;
@@ -28,12 +34,18 @@ public static class StatementOverdueDocument
 
                 page.Header().Element(h => ComposeHeader(h, bucketLabel, asOf, rows));
                 page.Content().PaddingTop(6).Element(c => ComposeTable(c, rows));
-                page.Footer().AlignRight().Text(t =>
+                page.Footer().Row(row =>
                 {
-                    t.Span("Page ").FontColor(Grey).FontSize(8);
-                    t.CurrentPageNumber().FontColor(Grey).FontSize(8);
-                    t.Span(" of ").FontColor(Grey).FontSize(8);
-                    t.TotalPages().FontColor(Grey).FontSize(8);
+                    row.RelativeItem()
+                        .Text(t => t.Span($"Copyright {DateTime.Today.Year} Silmaril Corp. Forge Version: {ForgeVersion}.")
+                                    .FontColor(Grey).FontSize(7).Italic());
+                    row.AutoItem().AlignRight().Text(t =>
+                    {
+                        t.Span("Page ").FontColor(Grey).FontSize(8);
+                        t.CurrentPageNumber().FontColor(Grey).FontSize(8);
+                        t.Span(" of ").FontColor(Grey).FontSize(8);
+                        t.TotalPages().FontColor(Grey).FontSize(8);
+                    });
                 });
             });
         }).GeneratePdf();

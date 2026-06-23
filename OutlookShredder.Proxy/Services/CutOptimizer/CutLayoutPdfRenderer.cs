@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using OutlookShredder.Proxy.Models.CutOptimizer;
 using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Drawing;
@@ -26,6 +27,11 @@ public static class CutLayoutPdfRenderer
 
     private static readonly XColor Reuse = XColor.FromArgb(46, 125, 50);    // reusable drop (green)
     private static readonly XColor ReuseFill = XColor.FromArgb(216, 240, 216);  // reusable offcut fill (light green)
+
+    private static readonly string ForgeVersion =
+        typeof(CutLayoutPdfRenderer).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
 
     public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision, double minUsableDrop = 0)
     {
@@ -70,7 +76,7 @@ public static class CutLayoutPdfRenderer
             if (page == 1)
                 bodyTop = DrawSummary(gfx, result, M, bodyTop, pw - 2 * M) + 8;
 
-            double footH = 16;
+            double footH = 26;
             double bodyBottom = phh - M - footH;
             DrawFooter(gfx, new XRect(M, bodyBottom + 2, pw - 2 * M, footH), page);
 
@@ -259,9 +265,14 @@ public static class CutLayoutPdfRenderer
     private static void DrawFooter(XGraphics gfx, XRect box, int page)
     {
         var font = new XFont("Arial", 7, XFontStyleEx.Regular);
-        string left = $"Created by {Cap(Environment.UserName)} • {DateTime.Now:MMM d, yyyy} • NOT TO SCALE";
-        gfx.DrawString(left, font, new XSolidBrush(Faint), new XRect(box.X, box.Y, box.Width - 60, box.Height), XStringFormats.CenterLeft);
-        gfx.DrawString($"Page {page}", font, new XSolidBrush(Faint), new XRect(box.X, box.Y, box.Width, box.Height), XStringFormats.CenterRight);
+        var brush = new XSolidBrush(Faint);
+        // Line 1: creation info (left) + page number (right)
+        string line1 = $"Created by {Cap(Environment.UserName)} • {DateTime.Now:MMM d, yyyy} • NOT TO SCALE";
+        gfx.DrawString(line1, font, brush, new XRect(box.X, box.Y + 2, box.Width - 60, 10), XStringFormats.TopLeft);
+        gfx.DrawString($"Page {page}", font, brush, new XRect(box.X, box.Y + 2, box.Width, 10), XStringFormats.TopRight);
+        // Line 2: copyright
+        gfx.DrawString($"Copyright {DateTime.Now.Year} Silmaril Corp. Forge Version: {ForgeVersion}.",
+            font, brush, new XRect(box.X, box.Y + 14, box.Width, 10), XStringFormats.TopLeft);
     }
 
     private static void DrawLogo(XGraphics gfx, XRect box)
