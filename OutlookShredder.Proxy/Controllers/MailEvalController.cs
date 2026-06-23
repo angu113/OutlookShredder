@@ -55,11 +55,15 @@ public sealed class MailEvalController : ControllerBase
     /// The seeded label is the AI's own guess — human correction is REQUIRED before running the eval.
     /// Pass ?overwrite=true to replace existing rows (default: skip existing human corrections).
     /// </summary>
+    /// <summary>
+    /// overwrite=true  — patch every row.
+    /// overwrite=false — skip rows that already exist (default).
+    /// resumeOnly=true — patch only rows that exist but are missing Subject (resumes a partial run).
+    /// </summary>
     [HttpPost("seed-golden")]
-    public IActionResult SeedGolden([FromQuery] bool overwrite = false)
+    public IActionResult SeedGolden([FromQuery] bool overwrite = false, [FromQuery] bool resumeOnly = false)
     {
-        // Fire-and-forget with CancellationToken.None — client disconnect must not abort mid-write.
-        _ = Task.Run(() => _eval.SeedGoldenFromCurrentsAsync(overwrite, CancellationToken.None));
+        _ = Task.Run(() => _eval.SeedGoldenFromCurrentsAsync(overwrite, resumeOnly, CancellationToken.None));
         return Accepted(new { message = "Seeding started in background. Watch proxy logs for [MailEval] seed N/total progress." });
     }
 }

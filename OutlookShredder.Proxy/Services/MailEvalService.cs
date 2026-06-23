@@ -61,22 +61,30 @@ public sealed class MailEvalService
     // ── Seed golden set from current AI classifications ─────────────────────────────
 
     /// <summary>
-    /// Bootstrap MailGoldenLabels from the current in-memory classifications. Writes one row per
-    /// captured item (upsert — existing human corrections are overwritten only when overwrite=true).
-    /// The bootstrapped label is the AI's own guess, NOT ground truth — the human-correction pass
-    /// is required before running the eval.
+    /// Bootstrap MailGoldenLabels from the current in-memory classifications.
+    /// overwrite=true  — patch every row.
+    /// overwrite=false — skip rows that already exist.
+    /// resumeOnly=true — patch only rows that exist but are missing Subject (picks up a partial run).
     /// </summary>
-    public async Task<SeedGoldenResult> SeedGoldenFromCurrentsAsync(bool overwrite, CancellationToken ct)
+    public async Task<SeedGoldenResult> SeedGoldenFromCurrentsAsync(bool overwrite, bool resumeOnly, CancellationToken ct)
     {
-        var currents = _cache.GetCurrents();
-        var existing = overwrite ? [] : (await _sp.ReadGoldenLabelsAsync(ct))
-            .Select(g => g.MailItemId).ToHashSet(StringComparer.Ordinal);
+        var currents    = _cache.GetCurrents();
+        var itemLookup  = _cache.GetItems().ToDictionary(i => i.MailItemId, StringComparer.Ordinal);
 
-        var itemLookup = _cache.GetItems().ToDictionary(i => i.MailItemId, StringComparer.Ordinal);
+        // Read existing rows once so we can decide what to skip/target.
+        var existingRows = (resumeOnly || !overwrite)
+            ? (await _sp.ReadGoldenLabelsAsync(ct)).ToDictionary(g => g.MailItemId, StringComparer.Ordinal)
+            : new Dictionary<string, MailGoldenLabelRow>(StringComparer.Ordinal);
+
         int written = 0, skipped = 0;
         foreach (var c in currents)
         {
-            if (!overwrite && existing.Contains(c.MailItemId)) { skipped++; continue; }
+            bool hasRow    = existingRows.ContainsKey(c.MailItemId);
+            bool hasSubject = hasRow && existingRows[c.MailItemId].Subject.Length > 0;
+
+            if (resumeOnly && hasSubject) { skipped++; continue; }
+            if (!overwrite && !resumeOnly && hasRow) { skipped++; continue; }
+
             var item = itemLookup.GetValueOrDefault(c.MailItemId);
             await _sp.UpsertGoldenLabelAsync(new MailGoldenLabelRow
             {
