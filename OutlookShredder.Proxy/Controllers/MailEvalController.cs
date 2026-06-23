@@ -56,6 +56,10 @@ public sealed class MailEvalController : ControllerBase
     /// Pass ?overwrite=true to replace existing rows (default: skip existing human corrections).
     /// </summary>
     [HttpPost("seed-golden")]
-    public async Task<IActionResult> SeedGolden([FromQuery] bool overwrite = false, CancellationToken ct = default)
-        => Ok(await _eval.SeedGoldenFromCurrentsAsync(overwrite, ct));
+    public IActionResult SeedGolden([FromQuery] bool overwrite = false)
+    {
+        // Fire-and-forget with CancellationToken.None — client disconnect must not abort mid-write.
+        _ = Task.Run(() => _eval.SeedGoldenFromCurrentsAsync(overwrite, CancellationToken.None));
+        return Accepted(new { message = "Seeding started in background. Watch proxy logs for [MailEval] seed N/total progress." });
+    }
 }
