@@ -13,11 +13,12 @@ namespace OutlookShredder.Proxy.Services;
 /// </summary>
 public partial class SharePointService
 {
-    private const string MailItemsList = "MailItems";
-    private const string MailClassList = "MailClassifications";
-    private const string MailHintsList = "MailTaxonomyHints";
-    private const string MailProjectsList = "MailProjects";
-    private const string MailRulesList = "MailRules";
+    private const string MailItemsList        = "MailItems";
+    private const string MailClassList        = "MailClassifications";
+    private const string MailHintsList        = "MailTaxonomyHints";
+    private const string MailProjectsList     = "MailProjects";
+    private const string MailRulesList        = "MailRules";
+    private const string MailGoldenLabelsList = "MailGoldenLabels";
 
     // ── Provisioning ──────────────────────────────────────────────────────────────
 
@@ -77,7 +78,62 @@ public partial class SharePointService
             ("ValuesJson","note"), ("CreatedAt","dateTime"),
         ]);
 
-        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints, mailProjects = projects, mailRules = rules, mailMatchLists = matchLists };
+        var golden = await EnsureListColumnsAsync(siteId, MailGoldenLabelsList,
+        [
+            ("MailItemId","text"), ("GoldenCategory","text"),
+            ("Notes","note"), ("LabeledBy","text"), ("LabeledAt","dateTime"),
+        ]);
+        await IndexListColumnsAsync(siteId, MailGoldenLabelsList, "MailItemId");
+
+        return new { mailItems = items, mailClassifications = cls, mailTaxonomyHints = hints, mailProjects = projects, mailRules = rules, mailMatchLists = matchLists, mailGoldenLabels = golden };
+    }
+
+    // ── MailGoldenLabels (eval corpus) ────────────────────────────────────────────────
+
+    public async Task<List<MailGoldenLabelRow>> ReadGoldenLabelsAsync(CancellationToken ct = default)
+    {
+        var rows = await ReadAllListItemsAsync(MailGoldenLabelsList,
+            ["MailItemId","GoldenCategory","Notes","LabeledBy","LabeledAt"], null, ct);
+        return rows.Select(f => new MailGoldenLabelRow
+        {
+            SpId           = GetStr(f, "__spId") ?? "",
+            MailItemId     = GetStr(f, "MailItemId") ?? "",
+            GoldenCategory = GetStr(f, "GoldenCategory") ?? "",
+            Notes          = GetStr(f, "Notes"),
+            LabeledBy      = GetStr(f, "LabeledBy") ?? "",
+            LabeledAt      = GetStr(f, "LabeledAt") ?? "",
+        }).Where(r => r.MailItemId.Length > 0).ToList();
+    }
+
+    /// <summary>Upsert: writes a new row or patches the existing row (matched by MailItemId).</summary>
+    public async Task UpsertGoldenLabelAsync(MailGoldenLabelRow r, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await ResolveListIdAsync(MailGoldenLabelsList);
+        var existing = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(
+            q => { q.QueryParameters.Filter = $"fields/MailItemId eq '{Esc(r.MailItemId)}'"; q.QueryParameters.Top = 1; },
+            ct);
+        var spId = existing?.Value?.FirstOrDefault()?.Id;
+
+        var fields = new Dictionary<string, object?>
+        {
+            ["MailItemId"]     = r.MailItemId,
+            ["GoldenCategory"] = r.GoldenCategory,
+            ["Notes"]          = Trunc(r.Notes, 8000),
+            ["LabeledBy"]      = r.LabeledBy,
+            ["LabeledAt"]      = string.IsNullOrEmpty(r.LabeledAt) ? DateTimeOffset.UtcNow.ToString("o") : r.LabeledAt,
+        };
+        if (spId is null)
+        {
+            fields["Title"] = Trunc(r.MailItemId, 250);
+            await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
+                new ListItem { Fields = new FieldValueSet { AdditionalData = fields } }, cancellationToken: ct);
+        }
+        else
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[spId].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+        }
     }
 
     // ── MailProjects (Layer 2: cross-conversation grouping) ──────────────────────────
@@ -759,4 +815,14 @@ public sealed class MailClassRow
     public string  AiProvider   { get; set; } = "";
     public string  AiModel      { get; set; } = "";
     public string  ClassifiedAt { get; set; } = "";
+}
+
+public class MailGoldenLabelRow
+{
+    public string  SpId           { get; set; } = "";
+    public string  MailItemId     { get; set; } = "";
+    public string  GoldenCategory { get; set; } = "";
+    public string? Notes          { get; set; }
+    public string  LabeledBy      { get; set; } = "";
+    public string  LabeledAt      { get; set; } = "";
 }
