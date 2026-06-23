@@ -715,7 +715,9 @@ public class MailPollerService : BackgroundService
 
         var bodySnippet = body[..Math.Min(body.Length, bodyContextChars)];
 
-        bool supplierUnknown = false;
+        bool supplierUnknown     = false;
+        bool shouldUnclaim       = false;
+        bool anyAttachmentWritten = false;
 
         if (!sendToAi)
         {
@@ -740,12 +742,13 @@ public class MailPollerService : BackgroundService
             var row = await _sp.WriteProductRowAsync(extraction, placeholder, req, "body", null, 0, msg.Id);
             supplierUnknown = row.SupplierUnknown;
             if (row.Success && !row.Updated) _notifications.NotifyRfqProcessed();
+            shouldUnclaim = !row.Success;
         }
         else if (!hasAttachment || msg.Id is null)
         {
             // No attachments — extract pricing from body; always write at least one row.
             var extractBody = StripQuotedThread(body);
-            supplierUnknown = await RunExtractionAsync(new ExtractRequest
+            (supplierUnknown, shouldUnclaim) = await RunExtractionAsync(new ExtractRequest
             {
                 Content                = extractBody[..Math.Min(extractBody.Length, 12_000)],
                 EmailBody              = body,
@@ -812,7 +815,7 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation("[Mail] Processing attachment '{Name}' ({ContentType}, {Bytes} bytes)",
                     fileName, contentType, fa.ContentBytes.Length);
 
-                supplierUnknown = await RunExtractionAsync(new ExtractRequest
+                var (supUnk, uncl) = await RunExtractionAsync(new ExtractRequest
                 {
                     Content              = string.Empty,
                     EmailBody            = body,
@@ -829,7 +832,8 @@ public class MailPollerService : BackgroundService
                     ResolvedSupplierName = shrResult.ResolvedSupplier,
                     GraphConversationId  = msg.ConversationId,
                 }, "attachment", fa.Name, maxPerMinute, ct, msg.Id);
-
+                if (supUnk) supplierUnknown = true;
+                if (!uncl) anyAttachmentWritten = true;
                 processedAny = true;
             }
 
@@ -837,7 +841,7 @@ public class MailPollerService : BackgroundService
             if (!processedAny && !ct.IsCancellationRequested)
             {
                 var extractBody = StripQuotedThread(body);
-                supplierUnknown = await RunExtractionAsync(new ExtractRequest
+                (supplierUnknown, shouldUnclaim) = await RunExtractionAsync(new ExtractRequest
                 {
                     Content              = extractBody[..Math.Min(extractBody.Length, 12_000)],
                     EmailBody            = body,
@@ -851,14 +855,27 @@ public class MailPollerService : BackgroundService
                     GraphConversationId  = msg.ConversationId,
                 }, "body", null, maxPerMinute, ct, msg.Id);
             }
+            else if (processedAny)
+            {
+                shouldUnclaim = !anyAttachmentWritten;
+            }
         }
 
         if (msg.Id is not null)
         {
-            var extra = supplierUnknown ? "Unknown" : null;
-            if (supplierUnknown)
-                _log.LogInformation("[Mail] Supplier unrecognised in \"{Subject}\" — stamping 'Unknown' category", subject);
-            await _mail.MarkProcessedAsync(mailbox, msg.Id, extra);
+            if (shouldUnclaim)
+            {
+                _log.LogWarning("[Mail] No SP rows written for \"{Subject}\" from {From} — un-claiming for retry next poll",
+                    subject, fromAddr);
+                await _mail.MarkUnclaimAsync(mailbox, msg.Id);
+            }
+            else
+            {
+                var extra = supplierUnknown ? "Unknown" : null;
+                if (supplierUnknown)
+                    _log.LogInformation("[Mail] Supplier unrecognised in \"{Subject}\" — stamping 'Unknown' category", subject);
+                await _mail.MarkProcessedAsync(mailbox, msg.Id, extra);
+            }
         }
 
         } // end try
@@ -1008,7 +1025,7 @@ public class MailPollerService : BackgroundService
     // ── AI → SharePoint
 
     // Returns true if the supplier was not found in the reference list.
-    private async Task<bool> RunExtractionAsync(
+    private async Task<(bool SupplierUnknown, bool ShouldUnclaim)> RunExtractionAsync(
         ExtractRequest req, string source, string? fileName, int maxPerMinute, CancellationToken ct,
         string? messageId = null)
     {
@@ -1174,7 +1191,7 @@ public class MailPollerService : BackgroundService
                 _log.LogInformation(
                     "[Mail] Conv-tracked reply from {From} has no pricing — skipping SLI write to preserve existing rows",
                     req.EmailFrom);
-                return false;
+                return (false, false);
             }
 
             // Body-only emails often carry only a unit price ($/ft, $/lb, each) without
@@ -1306,12 +1323,16 @@ public class MailPollerService : BackgroundService
                     attachmentName:      req.SourceType == "attachment" ? req.FileName : null);
             }
 
-            return anyUnknown;
+            bool anyWritten = rows.Any(r => r.Success);
+            if (!anyWritten)
+                _log.LogWarning("[Mail] All SP writes failed for \"{Subject}\" from {From} — un-claiming for retry",
+                    req.EmailSubject, req.EmailFrom);
+            return (anyUnknown, !anyWritten);
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "[Mail] Extraction failed for {Source} ({File})", source, fileName ?? "body");
-            return false;
+            return (false, true);
         }
     }
 

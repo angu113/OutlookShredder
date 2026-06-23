@@ -920,4 +920,25 @@ public class MailService
             _log.LogWarning(ex, "[Mail] Could not stamp categories on message {Id} — will retry next poll", messageId);
         }
     }
+
+    /// <summary>
+    /// Removes all RFQ categories from a message so the next poll cycle retries it.
+    /// Called when extraction completes with no SP rows written (write failure path).
+    /// </summary>
+    public async Task MarkUnclaimAsync(string mailbox, string messageId)
+    {
+        try
+        {
+            await GetGraph()
+                .Users[mailbox]
+                .Messages[messageId]
+                .PatchAsync(new Message { Categories = [] });
+
+            _log.LogDebug("[Mail] Un-claimed message {Id} — will be retried next poll", messageId);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[Mail] Could not un-claim message {Id} — it will stay claimed until manually reprocessed", messageId);
+        }
+    }
 }
