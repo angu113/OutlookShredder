@@ -156,6 +156,20 @@ public sealed class PartSpec
     public double ColumnWall { get; init; }
     /// <summary>Product label for the title / cut note, e.g. "HSS 4x4x1/4".</summary>
     public string ColumnLabel { get; init; } = "";
+    /// <summary>Full catalog product name for the BOM table, e.g. "Hot Roll Square Tube 4x4 .25 Wall".</summary>
+    public string ColumnProductName { get; init; } = "";
+    /// <summary>Number of columns in the order (BOM header quantity).</summary>
+    public int ColumnQty { get; init; } = 1;
+    /// <summary>Whether the base plate is supplied/cut in this order. False = tube welded to field-supplied plate.</summary>
+    public bool ColumnBaseIncluded { get; init; } = true;
+    /// <summary>Whether the base plate is shop-welded to the tube (false = site-weld on delivery).</summary>
+    public bool ColumnBaseWelded { get; init; } = true;
+    /// <summary>Whether the bearing plate is supplied/cut in this order.</summary>
+    public bool ColumnBearingIncluded { get; init; } = true;
+    /// <summary>Whether the bearing plate is shop-welded to the tube.</summary>
+    public bool ColumnBearingWelded { get; init; } = true;
+    /// <summary>Plate metal grade (Hot Roll / Cold Roll / Stainless / Galvanized / Aluminum). Shared by both plates.</summary>
+    public string ColumnPlateMetal { get; init; } = "Hot Roll";
 
     // ── Material + bend parameters ──────────────────────────────────────────
     /// <summary>Resolved material thickness T, in the spec's units.</summary>

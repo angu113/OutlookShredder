@@ -447,27 +447,48 @@ public static class DrawingTextParser
 
     /// <summary>
     /// Parses a structural column —
-    ///   "Column height H, base L x W x T [holes N x D edge E], bearing L x W x T [holes …],
-    ///    column {round|square|rect} D1 [x D2] wall W, {material} "Product label"".
-    /// Tube cut length = H − base T − bearing T (computed in FlatPattern).
+    ///   "Column [qty=N] height H, [base L x W x T [holes N x D edge E]|base=none],
+    ///    [bearing L x W x T [holes …]|bearing=none],
+    ///    column {round|square|rect} D1 [x D2] wall W, {material} ["Product label"],
+    ///    [plate-metal=xxx], [weld-base=yes|no], [weld-bearing=yes|no]".
+    /// base=none / bearing=none marks that plate as not supplied (site-weld only).
+    /// Tube cut length = H − effectiveBaseT − effectiveBearT (computed in FlatPattern).
     /// </summary>
     private static PartSpec ParseColumn(string text, string lower, string material, PolishDirection polish)
     {
         double height = MatchNum(lower, $@"\b(?:height|h|gap)\s*[:=]?\s*({Num})")
             ?? throw new DrawingParseException("Column needs a full height, e.g. \"Column height 96, base 10 x 10 x 0.75, …\".");
 
-        var bm = Regex.Match(lower, $@"\bbase\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
-        if (!bm.Success)
-            throw new DrawingParseException("Column needs a base plate, e.g. \"base 10 x 10 x 0.75\".");
-        double baseL = NumOf(bm.Groups[1].Value), baseW = NumOf(bm.Groups[2].Value), baseT = NumOf(bm.Groups[3].Value);
+        // Optional: qty=N
+        int qty = 1;
+        var qtyM = Regex.Match(lower, @"\bqty\s*=\s*(\d+)\b");
+        if (qtyM.Success && int.TryParse(qtyM.Groups[1].Value, out var qv) && qv > 0) qty = qv;
 
-        var rm = Regex.Match(lower, $@"\bbearing\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
-        if (!rm.Success)
-            throw new DrawingParseException("Column needs a bearing plate, e.g. \"bearing 8 x 8 x 0.5\".");
-        double bearL = NumOf(rm.Groups[1].Value), bearW = NumOf(rm.Groups[2].Value), bearT = NumOf(rm.Groups[3].Value);
+        // base=none or base L x W x T
+        bool baseIncl = !Regex.IsMatch(lower, @"\bbase\s*=\s*none\b");
+        double baseL = 0, baseW = 0, baseT = 0;
+        HoleSpec? baseHoles = null;
+        if (baseIncl)
+        {
+            var bm = Regex.Match(lower, $@"\bbase\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+            if (!bm.Success)
+                throw new DrawingParseException("Column needs a base plate or \"base=none\", e.g. \"base 10 x 10 x 0.75\".");
+            baseL = NumOf(bm.Groups[1].Value); baseW = NumOf(bm.Groups[2].Value); baseT = NumOf(bm.Groups[3].Value);
+            baseHoles = ParseColumnPlateHoles(lower, "base");
+        }
 
-        HoleSpec? baseHoles = ParseColumnPlateHoles(lower, "base");
-        HoleSpec? bearHoles = ParseColumnPlateHoles(lower, "bearing");
+        // bearing=none or bearing L x W x T
+        bool bearIncl = !Regex.IsMatch(lower, @"\bbearing\s*=\s*none\b");
+        double bearL = 0, bearW = 0, bearT = 0;
+        HoleSpec? bearHoles = null;
+        if (bearIncl)
+        {
+            var rm = Regex.Match(lower, $@"\bbearing\b\s*({Num})\s*x\s*({Num})\s*x\s*({Num})");
+            if (!rm.Success)
+                throw new DrawingParseException("Column needs a bearing plate or \"bearing=none\", e.g. \"bearing 8 x 8 x 0.5\".");
+            bearL = NumOf(rm.Groups[1].Value); bearW = NumOf(rm.Groups[2].Value); bearT = NumOf(rm.Groups[3].Value);
+            bearHoles = ParseColumnPlateHoles(lower, "bearing");
+        }
 
         var cm = Regex.Match(lower,
             $@"\bcolumn\s+(round|square|rect(?:angle|angular)?)\s+({Num})(?:\s*x\s*({Num}))?\s+wall\s+({Num})");
@@ -478,16 +499,30 @@ public static class DrawingTextParser
         double d2 = cm.Groups[3].Success && cm.Groups[3].Value.Length > 0 ? NumOf(cm.Groups[3].Value) : d1;
         double wall = NumOf(cm.Groups[4].Value);
 
-        // Product label: trailing quoted token, taken from the original-case text.
+        // Product label: trailing quoted token (original-case text).
         string label = "";
         var lm = Regex.Match(text, "\"([^\"]+)\"");
         if (lm.Success) label = lm.Groups[1].Value.Trim();
 
-        if (height <= 0 || baseL <= 0 || baseW <= 0 || baseT <= 0 || bearL <= 0 || bearW <= 0 || bearT <= 0 || d1 <= 0)
+        // Optional BOM fields: plate-metal, weld-base, weld-bearing
+        string plateMetal = "Hot Roll";
+        var pmM = Regex.Match(lower, @"\bplate-metal\s*=\s*([a-z][a-z ]{0,20})(?=,|$|\s+weld|\s+qty)");
+        if (!pmM.Success) pmM = Regex.Match(lower, @"\bplate-metal\s*=\s*([a-z][a-z ]*)");
+        if (pmM.Success) plateMetal = pmM.Groups[1].Value.Trim();
+
+        bool weldBase = true, weldBear = true;
+        var wbM = Regex.Match(lower, @"\bweld-base\s*=\s*(yes|no)\b");
+        if (wbM.Success) weldBase = wbM.Groups[1].Value == "yes";
+        var wrM = Regex.Match(lower, @"\bweld-bearing\s*=\s*(yes|no)\b");
+        if (wrM.Success) weldBear = wrM.Groups[1].Value == "yes";
+
+        if (height <= 0 || (baseIncl && (baseL <= 0 || baseW <= 0 || baseT <= 0))
+                         || (bearIncl && (bearL <= 0 || bearW <= 0 || bearT <= 0)) || d1 <= 0)
             throw new DrawingParseException("Column dimensions must be positive numbers.");
-        if (height - baseT - bearT <= 0)
+        double effectiveBaseT = baseIncl ? baseT : 0, effectiveBearT = bearIncl ? bearT : 0;
+        if (height - effectiveBaseT - effectiveBearT <= 0)
             throw new DrawingParseException(
-                $"Full height {F0(height)}\" is too small for the plates (base {F0(baseT)}\" + bearing {F0(bearT)}\").");
+                $"Full height {F0(height)}\" is too small for the plates ({F0(effectiveBaseT)}\" + {F0(effectiveBearT)}\").");
 
         return new PartSpec
         {
@@ -496,8 +531,12 @@ public static class DrawingTextParser
             BaseLength = baseL, BaseWidth = baseW, BaseThickness = baseT, BaseHoles = baseHoles,
             BearingLength = bearL, BearingWidth = bearW, BearingThickness = bearT, BearingHoles = bearHoles,
             ColumnShape = shape, ColumnOuterWidth = d1, ColumnOuterDepth = d2, ColumnWall = wall,
-            ColumnLabel = label,
-            Thickness = baseT,   // representative only; geometry uses the per-plate thicknesses
+            ColumnLabel = label, ColumnProductName = label,
+            ColumnQty = qty,
+            ColumnBaseIncluded = baseIncl, ColumnBaseWelded = weldBase,
+            ColumnBearingIncluded = bearIncl, ColumnBearingWelded = weldBear,
+            ColumnPlateMetal = plateMetal,
+            Thickness = baseIncl ? baseT : (bearIncl ? bearT : 0),   // representative only
             Material = material, Units = "in", PolishDirection = polish,
         };
     }

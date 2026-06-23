@@ -44,7 +44,10 @@ public static class DrawingPdfRenderer
     // polishBilingual: the "Dirección de pulido" callout is bilingual ("Polish direction / …") on Pixar
     // PDFs but Spanish-only on the auto picking-slip drawings (the shop floor reads those). Default = the
     // Pixar (bilingual) behaviour; PickingSlipFabAppender passes false.
-    public static byte[] Render(FlatPatternResult fp, bool calibrate = false, bool polishBilingual = true)
+    // customerName: non-null triggers fab/picking-slip context for columns — draws the BOM header instead
+    // of the regular Pixar title/spec table, and suppresses the Technics footnote.
+    public static byte[] Render(FlatPatternResult fp, bool calibrate = false, bool polishBilingual = true,
+        string? customerName = null)
     {
         PickingSlipEnricher.EnsureFontResolver();
 
@@ -57,32 +60,40 @@ public static class DrawingPdfRenderer
         {
             double pw = page.Width.Point, ph = page.Height.Point;
             const double M = 36;
-
-            var titleFont = new XFont("Arial", 16, XFontStyleEx.Bold);
-
-            // Title — descriptive + gauge-aware; shrink only if it would overflow the page width.
-            double maxTitleW = pw - 2 * M;
-            double titleW = gfx.MeasureString(fp.Title, titleFont).Width;
-            if (titleW > maxTitleW)
-                titleFont = new XFont("Arial", Math.Max(11.0, 16.0 * maxTitleW / titleW), XFontStyleEx.Bold);
-            gfx.DrawString(fp.Title, titleFont, XBrushes.Black,
-                new XRect(M, M - 10, maxTitleW, 22), XStringFormats.TopLeft);
-
-            // Bilingual spec table (English / Spanish label + value) under the title.
-            double tableBottom = DrawSpecTable(gfx, fp, M, M + 16, maxTitleW);
-            double top = tableBottom + 10;
             double usable = pw - 2 * M;
             const double gap = 16;
+
+            bool fabColumn = fp.IsColumn && customerName != null;
+            double top, footTop, footH;
+
+            if (fabColumn)
+            {
+                // BOM header replaces the Pixar title + spec table.
+                double bomBottom = DrawColumnBomHeader(gfx, fp, customerName!, M, M, usable);
+                top = bomBottom + 8;
+                footH = 92;   // info box only (technics suppressed)
+                footTop = ph - M - footH;
+            }
+            else
+            {
+                var titleFont = new XFont("Arial", 16, XFontStyleEx.Bold);
+                double maxTitleW = usable;
+                double titleW = gfx.MeasureString(fp.Title, titleFont).Width;
+                if (titleW > maxTitleW)
+                    titleFont = new XFont("Arial", Math.Max(11.0, 16.0 * maxTitleW / titleW), XFontStyleEx.Bold);
+                gfx.DrawString(fp.Title, titleFont, XBrushes.Black,
+                    new XRect(M, M - 10, maxTitleW, 22), XStringFormats.TopLeft);
+                double tableBottom = DrawSpecTable(gfx, fp, M, M + 16, maxTitleW);
+                top = tableBottom + 10;
+                int footLines = fp.Summary.Split('\n').Length;
+                footH = Math.Max(footLines * 10 + 28, 92);
+                footTop = ph - M - footH;
+            }
+
             // L / U / Z three-panel split: flat 1/5, section 2/5, iso 2/5 (the iso gets the most room).
             double wFlat = (usable - 2 * gap) * 0.24;
             double wSect = (usable - 2 * gap) * 0.40;
             double wIso  = (usable - 2 * gap) * 0.36;
-
-            // Box grows with the summary (+1 line for the "solid = cut …" legend).
-            int footLines = fp.Summary.Split('\n').Length;
-            // Height = summary lines + a few wrapped legend lines; min leaves room for the info/logo box.
-            double footH = Math.Max(footLines * 10 + 28, 92);
-            double footTop = ph - M - footH;
             double h = footTop - top - 8;
 
             if (fp.IsPan)
@@ -114,7 +125,8 @@ public static class DrawingPdfRenderer
             else if (fp.IsColumn)
             {
                 DrawColumn(gfx, fp, new XRect(M, top, usable, h));
-                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
+                if (!fabColumn)
+                    DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
             else if (fp.IsCircle)
             {
@@ -141,14 +153,21 @@ public static class DrawingPdfRenderer
                 // drop the floating Section-cuts box and let the iso use the full panel height.
                 DrawIsometric(gfx, fp, new XRect(isoX, top, wIso, h));
             }
-            // Split the footnote band: left 2/3 = technics (summary + legend), right 1/3 = info + logo.
+            // Footer band: in fab-column mode only the info box is shown (no Technics).
             double infoGap = 6;
-            double infoW = (usable - infoGap) / 3.0;
-            double techW = (usable - infoGap) * 2.0 / 3.0;
-            DrawFootnote(gfx, fp, new XRect(M, footTop, techW, footH));
-            DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH));
+            if (fabColumn)
+            {
+                DrawInfoBox(gfx, new XRect(M, footTop, usable, footH));
+            }
+            else
+            {
+                double infoW = (usable - infoGap) / 3.0;
+                double techW = (usable - infoGap) * 2.0 / 3.0;
+                DrawFootnote(gfx, fp, new XRect(M, footTop, techW, footH));
+                DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH));
+            }
 
-            // Copyright line under the details box.
+            // Copyright line under the footer band.
             var copyFont = new XFont("Arial", 7, XFontStyleEx.Regular);
             gfx.DrawString($"Copyright {System.DateTime.Now.Year} Silmaril Corp. Forge Version: {ForgeVersion}.",
                 copyFont, DimBrush, new XRect(M, footTop + footH + 2, usable, 10), XStringFormats.TopLeft);
@@ -580,20 +599,130 @@ public static class DrawingPdfRenderer
         }
     }
 
-    // ── Structural column: two plate flat-patterns (left) + a dimensioned side elevation (right) ──
+    // ── Structural column BOM header (fab/picking-slip context) — replaces the Pixar title+spec band. ──
+    // Returns the bottom Y of the header so the caller can position the CAD panels below it.
+    private static double DrawColumnBomHeader(XGraphics gfx, FlatPatternResult fp, string customerName,
+        double x, double y, double w)
+    {
+        const double rowH = 15.0;
+        var boldFont  = new XFont("Arial", 13, XFontStyleEx.Bold);
+        var descFont  = new XFont("Arial", 10, XFontStyleEx.Bold);
+        var hdrFont   = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cellFont  = new XFont("Arial", 8, XFontStyleEx.Regular);
+        var boldCell  = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var hdrBrush  = new XSolidBrush(XColor.FromArgb(30, 91, 170));
+        var linePen   = new XPen(XColor.FromArgb(200, 200, 200), 0.5);
+        var borderPen = new XPen(XColor.FromArgb(160, 160, 160), 0.8);
+
+        double cy = y;
+
+        // "PREPARED FOR {customer}"
+        gfx.DrawString($"PREPARED FOR {customerName.ToUpper()}", boldFont, XBrushes.Black,
+            new XRect(x, cy, w, 18), XStringFormats.TopLeft);
+        cy += 20;
+
+        // Job description
+        gfx.DrawString(ColumnBomJobDescription(fp), descFont, XBrushes.Black,
+            new XRect(x, cy, w, 14), XStringFormats.TopLeft);
+        cy += 16;
+
+        // BOM table — 4 columns: METAL (46%), SIZE (30%), QTY (10%), LABEL (14%)
+        double cM = w * 0.46, cS = w * 0.30, cQ = w * 0.10, cL = w * 0.14;
+        double[] colX = { x, x + cM, x + cM + cS, x + cM + cS + cQ };
+        double[] colW = { cM, cS, cQ, cL };
+
+        // Header row
+        double tableTop = cy;
+        gfx.DrawRectangle(hdrBrush, new XRect(x, cy, w, rowH));
+        string[] hdrs = { "METAL", "SIZE", "QTY", "" };
+        for (int i = 0; i < 4; i++)
+            gfx.DrawString(hdrs[i], hdrFont, XBrushes.White,
+                new XRect(colX[i] + 2, cy + 1, colW[i] - 4, rowH - 2), XStringFormats.TopLeft);
+        cy += rowH;
+
+        void Row(string metal, string size, string qtyStr, string lbl, bool bold = false)
+        {
+            gfx.DrawLine(linePen, x, cy, x + w, cy);
+            var f = bold ? boldCell : cellFont;
+            gfx.DrawString(metal,  f, TextBrush, new XRect(colX[0] + 2, cy + 1, colW[0] - 4, rowH - 2), XStringFormats.TopLeft);
+            gfx.DrawString(size,   f, TextBrush, new XRect(colX[1] + 2, cy + 1, colW[1] - 4, rowH - 2), XStringFormats.TopLeft);
+            gfx.DrawString(qtyStr, f, TextBrush, new XRect(colX[2] + 2, cy + 1, colW[2] - 4, rowH - 2), XStringFormats.TopLeft);
+            gfx.DrawString(lbl,    f, TextBrush, new XRect(colX[3] + 2, cy + 1, colW[3] - 4, rowH - 2), XStringFormats.TopLeft);
+            cy += rowH;
+        }
+
+        string qtyS = fp.ColumnQty.ToString();
+        string tubeMetal = !string.IsNullOrWhiteSpace(fp.ColumnProductName)
+            ? fp.ColumnProductName.ToUpper() : $"{fp.ColumnShape.ToUpper()} TUBE";
+        Row(tubeMetal, $"{Fq(fp.ColumnTubeLength)}\"", qtyS, "");
+
+        string pm = (fp.ColumnPlateMetal ?? "HOT ROLL").ToUpper();
+        if (fp.ColumnBaseIncluded)
+            Row($"{pm} PLATE", $"{Fq(fp.ColumnBaseThickness)}\" {Fq(fp.ColumnBaseL)}\" x {Fq(fp.ColumnBaseW)}\"", qtyS, "BASE");
+        if (fp.ColumnBearingIncluded)
+            Row($"{pm} PLATE", $"{Fq(fp.ColumnBearingThickness)}\" {Fq(fp.ColumnBearingL)}\" x {Fq(fp.ColumnBearingW)}\"", qtyS, "BEARING");
+
+        bool wB = fp.ColumnBaseIncluded && fp.ColumnBaseWelded;
+        bool wR = fp.ColumnBearingIncluded && fp.ColumnBearingWelded;
+        if (wB || wR)
+        {
+            string weldText = (wB && wR) ? "WELD TOP AND BOTTOM" : wB ? "WELD BOTTOM" : "WELD TOP";
+            gfx.DrawLine(linePen, x, cy, x + w, cy);
+            gfx.DrawString(weldText, boldCell, TextBrush, new XRect(colX[0] + 2, cy + 1, cM + cS - 4, rowH - 2), XStringFormats.TopLeft);
+            cy += rowH;
+        }
+
+        Row("TOTAL COLUMN HEIGHT", $"{Fq(fp.ColumnFullHeight)}\"", "", "", bold: true);
+
+        gfx.DrawRectangle(borderPen, new XRect(x, tableTop, w, cy - tableTop));
+        return cy + 6;
+    }
+
+    private static string ColumnBomJobDescription(FlatPatternResult fp)
+    {
+        bool bI = fp.ColumnBaseIncluded, rI = fp.ColumnBearingIncluded;
+        bool wB = bI && fp.ColumnBaseWelded, wR = rI && fp.ColumnBearingWelded;
+        if (!bI && !rI) return "CUT COLUMNS";
+        if (bI && rI) return (wB && wR) ? "COLUMNS WITH WELDED BASE & BEARING PLATES"
+            : wB ? "COLUMNS WITH WELDED BASE PLATE"
+            : wR ? "COLUMNS WITH WELDED BEARING PLATE"
+            : "COLUMNS WITH BASE & BEARING PLATES";
+        if (bI) return wB ? "COLUMNS WITH WELDED BASE PLATE" : "COLUMNS WITH BASE PLATE";
+        return wR ? "COLUMNS WITH WELDED BEARING PLATE" : "COLUMNS WITH BEARING PLATE";
+    }
+
+    // ── Structural column: included plate top-views (left) + a dimensioned side elevation (right) ──
     private static void DrawColumn(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
         const double gap = 16;
+        bool baseIncl = fp.ColumnBaseIncluded;
+        bool bearIncl = fp.ColumnBearingIncluded;
+        int platePanels = (baseIncl ? 1 : 0) + (bearIncl ? 1 : 0);
+
+        if (platePanels == 0)
+        {
+            DrawColumnElevation(gfx, fp, box);
+            return;
+        }
+
         double elevW = box.Width * 0.34;
         double platesW = box.Width - elevW - gap;
-        double pw = (platesW - gap) / 2;
+        double panelW = (platesW - (platePanels - 1) * gap) / platePanels;
+        double x = box.X;
 
-        DrawPlatePanel(gfx, new XRect(box.X, box.Y, pw, box.Height),
-            Bi.T("basePlate.topView"), fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles,
-            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
-        DrawPlatePanel(gfx, new XRect(box.X + pw + gap, box.Y, pw, box.Height),
-            Bi.T("bearingPlate.topView"), fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles,
-            fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
+        if (baseIncl)
+        {
+            DrawPlatePanel(gfx, new XRect(x, box.Y, panelW, box.Height),
+                Bi.T("basePlate.topView"), fp.ColumnBaseL, fp.ColumnBaseW, fp.ColumnBaseHoles,
+                fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
+            x += panelW + gap;
+        }
+        if (bearIncl)
+        {
+            DrawPlatePanel(gfx, new XRect(x, box.Y, panelW, box.Height),
+                Bi.T("bearingPlate.topView"), fp.ColumnBearingL, fp.ColumnBearingW, fp.ColumnBearingHoles,
+                fp.ColumnShape, fp.ColumnOuterWidth, fp.ColumnOuterDepth, fp.ColumnWall, fp.ColumnTubeCornerR);
+        }
         DrawColumnElevation(gfx, fp, new XRect(box.X + platesW + gap, box.Y, elevW, box.Height));
     }
 
@@ -690,50 +819,60 @@ public static class DrawingPdfRenderer
             new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
         var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
 
-        double H = fp.ColumnFullHeight, baseT = fp.ColumnBaseThickness, bearT = fp.ColumnBearingThickness;
+        double H = fp.ColumnFullHeight;
+        double baseT = fp.ColumnBaseThickness, bearT = fp.ColumnBearingThickness;
         double tubeLen = fp.ColumnTubeLength;
         double baseW = fp.ColumnBaseW, bearW = fp.ColumnBearingW, tubeW = fp.ColumnOuterWidth;
         if (H <= 0 || tubeLen <= 0) return;
-        double maxW = Math.Max(Math.Max(baseW, bearW), Math.Max(tubeW, 0.1));
+
+        // Only include present plates in the max-width calculation.
+        double maxW = tubeW;
+        if (fp.ColumnBaseIncluded)    maxW = Math.Max(maxW, baseW);
+        if (fp.ColumnBearingIncluded) maxW = Math.Max(maxW, bearW);
+        maxW = Math.Max(maxW, 0.1);
 
         const double bandL = 48, bandR = 44, bandT = 14, bandB = 16;
         double availW = area.Width - bandL - bandR, availH = area.Height - bandT - bandB;
         double scale = Math.Min(availW / maxW, availH / H);
         double drawH = H * scale;
-        double cx = area.X + bandL + availW / 2;                  // welded centreline
-        double baseY = area.Y + bandT + (availH - drawH) / 2 + drawH;   // bottom of the stack
+        double cx = area.X + bandL + availW / 2;                       // welded centreline
+        double baseY = area.Y + bandT + (availH - drawH) / 2 + drawH; // bottom of the stack
         double Yb(double hFromBottom) => baseY - hFromBottom * scale;
+
+        // Effective base height for stacking (0 when base plate not included).
+        double effBaseT = fp.ColumnBaseIncluded ? baseT : 0;
 
         void Slab(double w, double y0, double y1)
         {
             double half = w * scale / 2.0;
             gfx.DrawRectangle(cutPen, new XRect(cx - half, Yb(y1), w * scale, (y1 - y0) * scale));
         }
-        Slab(baseW, 0, baseT);                       // base plate (bottom)
-        Slab(tubeW, baseT, baseT + tubeLen);         // tube / pipe (middle)
-        Slab(bearW, baseT + tubeLen, H);             // bearing plate (top)
+        if (fp.ColumnBaseIncluded)    Slab(baseW, 0, baseT);
+        Slab(tubeW, effBaseT, effBaseT + tubeLen);
+        if (fp.ColumnBearingIncluded) Slab(bearW, effBaseT + tubeLen, H);
 
-        double leftFace = cx - maxW * scale / 2;
+        double leftFace  = cx - maxW * scale / 2;
         double rightFace = cx + maxW * scale / 2;
 
-        // Tube name centred in the tall middle segment (room there); its cut length dimensioned left.
+        // Tube name centred in the middle segment; its cut length dimensioned left.
         gfx.DrawString(fp.ColumnShape == "round" ? Bi.T("pipe.cap") : Bi.T("tube.cap"), tagFont, TextBrush,
-            new XRect(cx - 40, Yb(baseT + tubeLen / 2.0) - 5, 80, 10), XStringFormats.TopCenter);
-        DimV(gfx, dimFont, leftFace, area.X + 56, Yb(baseT + tubeLen), Yb(baseT), Fq(tubeLen), true);
+            new XRect(cx - 40, Yb(effBaseT + tubeLen / 2.0) - 5, 80, 10), XStringFormats.TopCenter);
+        DimV(gfx, dimFont, leftFace, area.X + 56, Yb(effBaseT + tubeLen), Yb(effBaseT), Fq(tubeLen), true);
 
         // Overall full height on the right.
         DimV(gfx, dimFont, rightFace, area.X + area.Width - 56, Yb(H), Yb(0), Fq(H), true);
 
-        // Base + bearing plates are too thin to dimension inline — leader-call them out into the
-        // clear space just below / above the column so nothing overlaps.
+        // Leader callouts for thin plates (only when included).
         var leadPen = new XPen(DimColor, 0.7);
         void PlateCallout(double slabY, double labelY, string text)
         {
             gfx.DrawLine(leadPen, leftFace, slabY, area.X + 74, labelY + 5);
             gfx.DrawString(text, tagFont, TextBrush, new XRect(area.X + 2, labelY, 84, 10), XStringFormats.TopLeft);
         }
-        PlateCallout(Yb(baseT / 2.0), baseY + 4, $"Base plate {Fq(baseT)}");
-        PlateCallout(Yb(baseT + tubeLen + bearT / 2.0), Yb(H) - 13, $"Bearing plate {Fq(bearT)}");
+        if (fp.ColumnBaseIncluded)
+            PlateCallout(Yb(baseT / 2.0), baseY + 4, $"Base plate {Fq(baseT)}");
+        if (fp.ColumnBearingIncluded)
+            PlateCallout(Yb(effBaseT + tubeLen + bearT / 2.0), Yb(H) - 13, $"Bearing plate {Fq(bearT)}");
     }
 
     // ── Paddle blind / spade: face view (solid disc + handle) with OD, handle, centre-to-end dims ──

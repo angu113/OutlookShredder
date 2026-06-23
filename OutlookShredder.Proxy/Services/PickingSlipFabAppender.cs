@@ -33,14 +33,16 @@ internal static class PickingSlipFabAppender
     /// <summary>
     /// Returns the slip with a drawing page appended per distinct FAB note. On any failure
     /// (no notes, unparseable text, render/append error) the original bytes are returned unchanged.
+    /// When <paramref name="customerName"/> is supplied it is passed to the renderer so column
+    /// drawings receive their fab-context BOM header.
     /// </summary>
-    public static byte[] AppendFabDrawings(byte[] slipBytes, ILogger? log = null)
+    public static byte[] AppendFabDrawings(byte[] slipBytes, ILogger? log = null, string? customerName = null)
     {
         var distinct = GetFabDescs(slipBytes, log);
         if (distinct.Count == 0) return slipBytes;
 
         PickingSlipEnricher.EnsureFontResolver();   // drawings embed Arial, same as enrichment
-        var drawings = distinct.Select(d => RenderFab(d, log)).Where(b => b is not null).Cast<byte[]>().ToList();
+        var drawings = distinct.Select(d => RenderFab(d, log, customerName)).Where(b => b is not null).Cast<byte[]>().ToList();
         if (drawings.Count == 0) return slipBytes;
 
         try
@@ -149,15 +151,17 @@ internal static class PickingSlipFabAppender
         return result;
     }
 
-    private static byte[]? RenderFab(string desc, ILogger? log)
+    private static byte[]? RenderFab(string desc, ILogger? log, string? customerName = null)
     {
-        if (_cache.TryGetValue(desc, out var cached)) return cached;
+        // Include customerName in cache key — column drawings differ when a BOM header is requested.
+        var cacheKey = string.IsNullOrWhiteSpace(customerName) ? desc : $"{desc}|{customerName}";
+        if (_cache.TryGetValue(cacheKey, out var cached)) return cached;
         try
         {
             var spec = DrawingTextParser.Parse(desc);
             var fp = FlatPattern.Develop(spec);
-            var pdf = DrawingPdfRenderer.Render(fp, polishBilingual: false);   // shop slip → Spanish-only polish label
-            _cache[desc] = pdf;
+            var pdf = DrawingPdfRenderer.Render(fp, polishBilingual: false, customerName: customerName);
+            _cache[cacheKey] = pdf;
             return pdf;
         }
         catch (Exception ex)

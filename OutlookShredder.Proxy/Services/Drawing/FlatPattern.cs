@@ -53,38 +53,54 @@ public static class FlatPattern
     // ── Structural column — two plate flat patterns (one DXF) + a dimensioned elevation ──
     private static FlatPatternResult DevelopColumn(PartSpec spec)
     {
-        double baseT = spec.BaseThickness, bearT = spec.BearingThickness;
-        double tubeLen = spec.ColumnFullHeight - baseT - bearT;
+        bool baseIncl = spec.ColumnBaseIncluded;
+        bool bearIncl = spec.ColumnBearingIncluded;
+        // Tube length uses only the thickness of included plates.
+        double effectiveBaseT = baseIncl ? spec.BaseThickness : 0;
+        double effectiveBearT = bearIncl ? spec.BearingThickness : 0;
+        double tubeLen = spec.ColumnFullHeight - effectiveBaseT - effectiveBearT;
 
-        // Each plate reuses the plate developer; thickness only labels them (plates are flat-cut).
-        var baseSpec = new PartSpec
-        {
-            Type = PartType.BasePlate, Length = spec.BaseLength, Width = spec.BaseWidth,
-            Thickness = baseT, Holes = spec.BaseHoles, Material = spec.Material, Units = spec.Units,
-        };
-        var bearSpec = new PartSpec
-        {
-            Type = PartType.BasePlate, Length = spec.BearingLength, Width = spec.BearingWidth,
-            Thickness = bearT, Holes = spec.BearingHoles, Material = spec.Material, Units = spec.Units,
-        };
-        var baseRes = DevelopPlate(baseSpec);
-        var bearRes = DevelopPlate(bearSpec);
-
-        // Merge both flat patterns into ONE cut drawing: base at origin, bearing offset to the right.
-        double gap = Math.Max(2.0, spec.BaseWidth * 0.2);
-        double xOff = baseRes.FlatWidth + gap;
-        var entities = new List<CutEntity>(baseRes.Cut.Entities);
-        foreach (var e in bearRes.Cut.Entities) entities.Add(OffsetEntity(e, xOff, 0));
-
-        // Tube cross-section etched (marking layer — not cut) on the centre of each plate to
-        // locate the weld. Centred since the plates are welded centred on the column. Square/rect
-        // tube gets filleted corners (radius = wall thickness) for steel; aluminium extrusion is sharp.
         bool aluminium = spec.Material.IndexOf("alum", StringComparison.OrdinalIgnoreCase) >= 0;
         double cornerR = (spec.ColumnShape != "round" && !aluminium) ? spec.ColumnWall : 0;
-        entities.AddRange(TubeWeldOutline(spec.ColumnShape, spec.BaseLength / 2, spec.BaseWidth / 2,
-            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
-        entities.AddRange(TubeWeldOutline(spec.ColumnShape, xOff + spec.BearingLength / 2, spec.BearingWidth / 2,
-            spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
+
+        // Build flat-pattern entities only for included plates; bearing is offset to the right of base.
+        var entities = new List<CutEntity>();
+        var baseHoles = new List<(double x, double y, double dia)>();
+        var bearHoles = new List<(double x, double y, double dia)>();
+        double flatWidth = 0, flatHeight = 0, bearXOff = 0;
+
+        if (baseIncl)
+        {
+            var baseSpec = new PartSpec
+            {
+                Type = PartType.BasePlate, Length = spec.BaseLength, Width = spec.BaseWidth,
+                Thickness = spec.BaseThickness, Holes = spec.BaseHoles, Material = spec.Material, Units = spec.Units,
+            };
+            var baseRes = DevelopPlate(baseSpec);
+            entities.AddRange(baseRes.Cut.Entities);
+            baseHoles = baseRes.Holes;
+            entities.AddRange(TubeWeldOutline(spec.ColumnShape, spec.BaseLength / 2, spec.BaseWidth / 2,
+                spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
+            flatWidth = baseRes.FlatWidth;
+            flatHeight = baseRes.FlatHeight;
+            if (bearIncl) bearXOff = baseRes.FlatWidth + Math.Max(2.0, spec.BaseWidth * 0.2);
+        }
+
+        if (bearIncl)
+        {
+            var bearSpec = new PartSpec
+            {
+                Type = PartType.BasePlate, Length = spec.BearingLength, Width = spec.BearingWidth,
+                Thickness = spec.BearingThickness, Holes = spec.BearingHoles, Material = spec.Material, Units = spec.Units,
+            };
+            var bearRes = DevelopPlate(bearSpec);
+            foreach (var e in bearRes.Cut.Entities) entities.Add(OffsetEntity(e, bearXOff, 0));
+            bearHoles = bearRes.Holes;
+            entities.AddRange(TubeWeldOutline(spec.ColumnShape, bearXOff + spec.BearingLength / 2, spec.BearingWidth / 2,
+                spec.ColumnOuterWidth, spec.ColumnOuterDepth, spec.ColumnWall, cornerR));
+            flatWidth = bearXOff + bearRes.FlatWidth;
+            flatHeight = Math.Max(flatHeight, bearRes.FlatHeight);
+        }
 
         string slug = $"column_{Trim(spec.ColumnFullHeight)}h_base{Trim(spec.BaseLength)}x{Trim(spec.BaseWidth)}_brg{Trim(spec.BearingLength)}x{Trim(spec.BearingWidth)}";
         var cut = new CutGeometry
@@ -98,25 +114,32 @@ public static class FlatPattern
         {
             Spec = spec,
             WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
-            FlatWidth = xOff + bearRes.FlatWidth,
-            FlatHeight = Math.Max(baseRes.FlatHeight, bearRes.FlatHeight),
+            FlatWidth = flatWidth,
+            FlatHeight = flatHeight,
             BendLinesX = Array.Empty<double>(),
             Cut = cut, Profile = new(),
             IsColumn = true,
             ColumnFullHeight = spec.ColumnFullHeight,
             ColumnTubeLength = tubeLen,
-            ColumnBaseThickness = baseT,
-            ColumnBearingThickness = bearT,
+            ColumnBaseThickness = spec.BaseThickness,
+            ColumnBearingThickness = spec.BearingThickness,
             ColumnBaseL = spec.BaseLength, ColumnBaseW = spec.BaseWidth,
             ColumnBearingL = spec.BearingLength, ColumnBearingW = spec.BearingWidth,
-            ColumnBaseHoles = baseRes.Holes,
-            ColumnBearingHoles = bearRes.Holes,
+            ColumnBaseHoles = baseHoles,
+            ColumnBearingHoles = bearHoles,
             ColumnOuterWidth = spec.ColumnOuterWidth,
             ColumnOuterDepth = spec.ColumnOuterDepth,
             ColumnWall = spec.ColumnWall,
             ColumnTubeCornerR = cornerR,
             ColumnShape = spec.ColumnShape,
             ColumnLabel = spec.ColumnLabel,
+            ColumnProductName = spec.ColumnProductName,
+            ColumnQty = spec.ColumnQty,
+            ColumnBaseIncluded = spec.ColumnBaseIncluded,
+            ColumnBaseWelded = spec.ColumnBaseWelded,
+            ColumnBearingIncluded = spec.ColumnBearingIncluded,
+            ColumnBearingWelded = spec.ColumnBearingWelded,
+            ColumnPlateMetal = spec.ColumnPlateMetal,
             Summary = ColumnSummary(spec, tubeLen),
             Title = ColumnTitle(spec),
         };
@@ -219,15 +242,32 @@ public static class FlatPattern
         string shapeName = s.ColumnShape switch { "round" => "pipe", "rect" => "rectangular tube", _ => "square tube" };
         string HoleNote(HoleSpec? h) =>
             h is { Diameter: > 0 } ? $"  ({(h.Count <= 0 ? 4 : h.Count)} holes {F(h.Diameter)}{u} dia, edge {F(h.EdgeDistance)}{u})" : "";
+
+        string heightBreakdown = $"Full height {F(s.ColumnFullHeight)}{u}  =  ";
+        if (s.ColumnBaseIncluded)  heightBreakdown += $"base {F(s.BaseThickness)}{u} + ";
+        heightBreakdown += $"{shapeName} {F(tubeLen)}{u}";
+        if (s.ColumnBearingIncluded) heightBreakdown += $" + bearing {F(s.BearingThickness)}{u}";
+
         var lines = new List<string>
         {
             $"Structural column  {MaterialPlain(s.Material)}" + (s.ColumnLabel.Length > 0 ? $"   [{s.ColumnLabel}]" : ""),
-            $"Full height {F(s.ColumnFullHeight)}{u}  =  base plate {F(s.BaseThickness)}{u} + {shapeName} {F(tubeLen)}{u} + bearing plate {F(s.BearingThickness)}{u}",
-            $"Base plate    {F(s.BaseLength)}{u} x {F(s.BaseWidth)}{u} x {F(s.BaseThickness)}{u}" + HoleNote(s.BaseHoles),
-            $"Bearing plate {F(s.BearingLength)}{u} x {F(s.BearingWidth)}{u} x {F(s.BearingThickness)}{u}" + HoleNote(s.BearingHoles),
-            $"Column        {shapeName} {ColDimText(s)}, wall {F(s.ColumnWall)}{u}  →  cut to {F(tubeLen)}{u}",
-            "Plates welded centred on the column.  DXF contains both plate flat patterns.",
+            heightBreakdown,
         };
+        if (s.ColumnBaseIncluded)
+            lines.Add($"Base plate    {F(s.BaseLength)}{u} x {F(s.BaseWidth)}{u} x {F(s.BaseThickness)}{u}" + HoleNote(s.BaseHoles)
+                + (s.ColumnBaseWelded ? "  [shop-weld]" : "  [site-weld]"));
+        else
+            lines.Add("Base plate    not supplied — site-weld");
+        if (s.ColumnBearingIncluded)
+            lines.Add($"Bearing plate {F(s.BearingLength)}{u} x {F(s.BearingWidth)}{u} x {F(s.BearingThickness)}{u}" + HoleNote(s.BearingHoles)
+                + (s.ColumnBearingWelded ? "  [shop-weld]" : "  [site-weld]"));
+        else
+            lines.Add("Bearing plate not supplied — site-weld");
+        lines.Add($"Column        {shapeName} {ColDimText(s)}, wall {F(s.ColumnWall)}{u}  →  cut to {F(tubeLen)}{u}");
+        int dxfPlates = (s.ColumnBaseIncluded ? 1 : 0) + (s.ColumnBearingIncluded ? 1 : 0);
+        lines.Add(dxfPlates > 0
+            ? $"DXF contains {dxfPlates} plate flat pattern(s).  Plates welded centred on the column."
+            : "No plates to cut.  Tube cut to length only.");
         return string.Join("\n", lines);
     }
 
@@ -1150,6 +1190,13 @@ public sealed class FlatPatternResult
     public double ColumnWall { get; init; }
     public string ColumnShape { get; init; } = "square";
     public string ColumnLabel { get; init; } = "";
+    public string ColumnProductName { get; init; } = "";
+    public int    ColumnQty             { get; init; } = 1;
+    public bool   ColumnBaseIncluded    { get; init; } = true;
+    public bool   ColumnBaseWelded      { get; init; } = true;
+    public bool   ColumnBearingIncluded { get; init; } = true;
+    public bool   ColumnBearingWelded   { get; init; } = true;
+    public string ColumnPlateMetal      { get; init; } = "Hot Roll";
 
     public required string Summary { get; init; }
     public string Title { get; init; } = "";

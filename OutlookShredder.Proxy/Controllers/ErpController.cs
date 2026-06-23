@@ -277,12 +277,12 @@ public class ErpController : ControllerBase
     private static readonly TimeSpan _pdfCacheTtl = TimeSpan.FromMinutes(10);
 
     [HttpGet("/api/erp/pdf")]
-    public async Task<IActionResult> GetPdf([FromQuery] string url, [FromQuery] bool appendFabs, CancellationToken ct)
+    public async Task<IActionResult> GetPdf([FromQuery] string url, [FromQuery] bool appendFabs, [FromQuery] string? customerName, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url))
             return BadRequest(new { error = "url query parameter is required" });
 
-        var cacheKey = $"{url}|{appendFabs}";
+        var cacheKey = $"{url}|{appendFabs}|{customerName ?? ""}";
         if (_pdfCache.TryGetValue(cacheKey, out var hit) && DateTimeOffset.UtcNow - hit.At <= _pdfCacheTtl)
             return File(hit.Bytes, "application/pdf");
 
@@ -291,7 +291,7 @@ public class ErpController : ControllerBase
             var bytes = await _sp.DownloadSpFileAsync(url, ct);
             if (appendFabs)
             {
-                try { bytes = PickingSlipFabAppender.AppendFabDrawings(bytes, _log); }
+                try { bytes = PickingSlipFabAppender.AppendFabDrawings(bytes, _log, customerName: customerName); }
                 catch (Exception ex) { _log.LogWarning(ex, "[ERP] FAB drawing append failed for {Url}", url); }
             }
             var now = DateTimeOffset.UtcNow;
