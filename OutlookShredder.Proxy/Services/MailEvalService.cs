@@ -72,14 +72,18 @@ public sealed class MailEvalService
         var existing = overwrite ? [] : (await _sp.ReadGoldenLabelsAsync(ct))
             .Select(g => g.MailItemId).ToHashSet(StringComparer.Ordinal);
 
+        var itemLookup = _cache.GetItems().ToDictionary(i => i.MailItemId, StringComparer.Ordinal);
         int written = 0, skipped = 0;
         foreach (var c in currents)
         {
             if (!overwrite && existing.Contains(c.MailItemId)) { skipped++; continue; }
+            var item = itemLookup.GetValueOrDefault(c.MailItemId);
             await _sp.UpsertGoldenLabelAsync(new MailGoldenLabelRow
             {
                 MailItemId     = c.MailItemId,
                 GoldenCategory = c.CategoryPath,
+                Subject        = item?.Subject ?? "",
+                FromAddress    = item?.FromAddress ?? "",
                 LabeledBy      = "bootstrap",
                 LabeledAt      = DateTimeOffset.UtcNow.ToString("o"),
                 Notes          = "Bootstrapped from AI classification — human review required.",

@@ -81,6 +81,7 @@ public partial class SharePointService
         var golden = await EnsureListColumnsAsync(siteId, MailGoldenLabelsList,
         [
             ("MailItemId","text"), ("GoldenCategory","text"),
+            ("Subject","text"), ("FromAddress","text"),
             ("Notes","note"), ("LabeledBy","text"), ("LabeledAt","dateTime"),
         ]);
         await IndexListColumnsAsync(siteId, MailGoldenLabelsList, "MailItemId");
@@ -93,12 +94,14 @@ public partial class SharePointService
     public async Task<List<MailGoldenLabelRow>> ReadGoldenLabelsAsync(CancellationToken ct = default)
     {
         var rows = await ReadAllListItemsAsync(MailGoldenLabelsList,
-            ["MailItemId","GoldenCategory","Notes","LabeledBy","LabeledAt"], null, ct);
+            ["MailItemId","GoldenCategory","Subject","FromAddress","Notes","LabeledBy","LabeledAt"], null, ct);
         return rows.Select(f => new MailGoldenLabelRow
         {
             SpId           = GetStr(f, "__spId") ?? "",
             MailItemId     = GetStr(f, "MailItemId") ?? "",
             GoldenCategory = GetStr(f, "GoldenCategory") ?? "",
+            Subject        = GetStr(f, "Subject") ?? "",
+            FromAddress    = GetStr(f, "FromAddress") ?? "",
             Notes          = GetStr(f, "Notes"),
             LabeledBy      = GetStr(f, "LabeledBy") ?? "",
             LabeledAt      = GetStr(f, "LabeledAt") ?? "",
@@ -119,13 +122,16 @@ public partial class SharePointService
         {
             ["MailItemId"]     = r.MailItemId,
             ["GoldenCategory"] = r.GoldenCategory,
+            ["Subject"]        = Trunc(r.Subject, 250),
+            ["FromAddress"]    = Trunc(r.FromAddress, 250),
             ["Notes"]          = Trunc(r.Notes, 8000),
             ["LabeledBy"]      = r.LabeledBy,
             ["LabeledAt"]      = string.IsNullOrEmpty(r.LabeledAt) ? DateTimeOffset.UtcNow.ToString("o") : r.LabeledAt,
         };
         if (spId is null)
         {
-            fields["Title"] = Trunc(r.MailItemId, 250);
+            // Title = subject so the default SP list view shows something readable.
+            fields["Title"] = Trunc(string.IsNullOrEmpty(r.Subject) ? r.MailItemId : r.Subject, 250);
             await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
                 new ListItem { Fields = new FieldValueSet { AdditionalData = fields } }, cancellationToken: ct);
         }
@@ -822,6 +828,8 @@ public class MailGoldenLabelRow
     public string  SpId           { get; set; } = "";
     public string  MailItemId     { get; set; } = "";
     public string  GoldenCategory { get; set; } = "";
+    public string  Subject        { get; set; } = "";
+    public string  FromAddress    { get; set; } = "";
     public string? Notes          { get; set; }
     public string  LabeledBy      { get; set; } = "";
     public string  LabeledAt      { get; set; } = "";
