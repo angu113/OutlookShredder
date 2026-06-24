@@ -38,12 +38,7 @@ public class HackensackPollerService : BackgroundService
         new(@"\bRFQ\s+(?>(?:Number\b\s*)?)([A-Z]{2}[A-Z0-9]{4})\b|\bJob\s*Ref(?:erence|\b)(?>(?:\s+Number\b)?\s*[:#]?\s*)([A-Z]{2}[A-Z0-9]{4})\b",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly Regex HtmlLineBreakRegex =
-        new(@"<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex HtmlTagRegex    = new(@"<[^>]+>",  RegexOptions.Compiled);
-    private static readonly Regex HorizWhitespace = new(@"[ \t]{2,}", RegexOptions.Compiled);
-    private static readonly Regex ExcessNewlines   = new(@"\n{3,}",   RegexOptions.Compiled);
+    // HTML→plain-text conversion lives in HtmlText.ToPlainText (style/script/comment-safe).
 
     private const string ProcessedFlag = "RFQ-Processed";
 
@@ -146,17 +141,9 @@ public class HackensackPollerService : BackgroundService
         // Prefer plain text; fall back to cleaned HTML.
         var body = msg.TextBody ?? "";
         if (string.IsNullOrEmpty(body) && msg.HtmlBody is { } html)
-        {
-            body = HtmlLineBreakRegex.Replace(html, "\n");
-            body = HtmlTagRegex.Replace(body, " ");
-            body = System.Net.WebUtility.HtmlDecode(body);
-            body = HorizWhitespace.Replace(body, " ");
-            body = ExcessNewlines.Replace(body, "\n\n");
-        }
+            body = HtmlText.ToPlainText(html);
         else
-        {
             body = System.Net.WebUtility.HtmlDecode(body);
-        }
         body = body.Trim();
 
         // Only non-image file attachments count for processing decisions.

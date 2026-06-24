@@ -2552,6 +2552,11 @@ public partial class SharePointService
                   int.TryParse(_config["SharePoint:MaxEmailBodyChars"], out var mebc) ? mebc : 10_000)]
             : null;
 
+        // Durable rich-render source: store the original HTML verbatim when it fits the column cap.
+        // Oversized bodies are left null and recovered on demand via a Graph fetch by MessageId (Tier 1).
+        var htmlCap       = int.TryParse(_config["SharePoint:MaxEmailBodyHtmlChars"], out var mehc) ? mehc : 60_000;
+        var emailBodyHtml = emailMeta.EmailBodyHtml is { Length: > 0 } html && html.Length <= htmlCap ? html : null;
+
         // For forwarded emails (from internal staff) extract the original supplier sender address
         // embedded by Outlook in the forwarded body ("From: name <email>"). Store it as ContactEmail
         // so the conversation feature can reply to the real supplier rather than the internal forwarder.
@@ -2583,6 +2588,7 @@ public partial class SharePointService
             ["ReceivedAt"]           = emailMeta.ReceivedAt,
             ["EmailSubject"]         = emailMeta.EmailSubject,
             ["EmailBody"]            = emailBodyTrunc,
+            ["EmailBodyHtml"]        = emailBodyHtml,
             ["ProcessedAt"]          = DateTime.UtcNow.ToString("o"),
             ["ProcessingSource"]     = source,
             ["SourceFile"]           = sourceFile,
@@ -2669,10 +2675,34 @@ public partial class SharePointService
         }
     }
 
+    /// <summary>Reads the stored original HTML body (+ MessageId) for one SupplierResponses row by its
+    /// item id. Returns (null, null) when the row or column is missing. Used by the conversation HTML
+    /// endpoint to serve rich bodies without a Graph round-trip when the HTML was captured (Tier 2).</summary>
+    public async Task<(string? Html, string? MessageId)> ReadSupplierResponseHtmlAsync(
+        string srItemId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(srItemId)) return (null, null);
+        try
+        {
+            var siteId = await GetSiteIdAsync();
+            var listId = await GetSupplierResponsesListIdAsync();
+            var item   = await GetGraph().Sites[siteId].Lists[listId].Items[srItemId]
+                .GetAsync(r => r.QueryParameters.Expand = ["fields($select=EmailBodyHtml,MessageId)"], ct);
+            var f = item?.Fields?.AdditionalData;
+            string? Get(string k) => f is not null && f.TryGetValue(k, out var v) ? v?.ToString() : null;
+            return (Get("EmailBodyHtml"), Get("MessageId"));
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "[SP] ReadSupplierResponseHtmlAsync failed for {Id}", srItemId);
+            return (null, null);
+        }
+    }
+
     // Optional columns that may not exist on older list schemas.
     // When a PATCH or POST fails because one of these is unrecognised, it is
     // silently dropped and the request retried rather than failing the whole write.
-    private static readonly string[] _optionalColumns = ["ClaudeResponseLog", "ContactEmail"];
+    private static readonly string[] _optionalColumns = ["ClaudeResponseLog", "ContactEmail", "EmailBodyHtml"];
 
     /// <summary>
     /// PATCH a SP list item's fields, retrying without any optional columns
@@ -5248,6 +5278,7 @@ public partial class SharePointService
                 ("ReceivedAt",           "dateTime"),
                 ("EmailSubject",         "text"),
                 ("EmailBody",            "note"),
+                ("EmailBodyHtml",        "note"),
                 ("ProcessedAt",          "dateTime"),
                 ("ProcessingSource",     "text"),
                 ("SourceFile",           "text"),

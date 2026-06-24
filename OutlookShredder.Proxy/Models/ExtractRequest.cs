@@ -29,6 +29,11 @@ public class ExtractRequest
     /// <summary>Full email body text — stored in SharePoint alongside attachment data</summary>
     public string? EmailBody { get; set; }
 
+    /// <summary>Original HTML email body (when the source message was HTML), kept verbatim so the
+    /// conversation view can render it richly. Null for plain-text mail. Stored in the SupplierResponses
+    /// EmailBodyHtml column (capped); large bodies fall back to an on-demand Graph fetch by MessageId.</summary>
+    public string? EmailBodyHtml { get; set; }
+
     // Email metadata (written straight to SharePoint alongside extracted fields)
     public string? EmailSubject    { get; set; }
     public string? EmailFrom       { get; set; }

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Graph.Models;
 using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services;
 
@@ -13,6 +14,7 @@ public class SupplierConversationsController : ControllerBase
     private readonly SupplierCacheService _suppliers;
     private readonly RfqNotificationService _notify;
     private readonly SupplierUnreadIndexService _index;
+    private readonly IConfiguration       _config;
     private readonly ILogger<SupplierConversationsController> _log;
 
     public SupplierConversationsController(
@@ -21,6 +23,7 @@ public class SupplierConversationsController : ControllerBase
         SupplierCacheService suppliers,
         RfqNotificationService notify,
         SupplierUnreadIndexService index,
+        IConfiguration       config,
         ILogger<SupplierConversationsController> log)
     {
         _sp        = sp;
@@ -28,7 +31,45 @@ public class SupplierConversationsController : ControllerBase
         _suppliers = suppliers;
         _notify    = notify;
         _index     = index;
+        _config    = config;
         _log       = log;
+    }
+
+    /// <summary>
+    /// Returns the ORIGINAL HTML body for one supplier message so the conversation view can render it
+    /// richly (suppliers like Peerless reply with QuickBooks/Intuit HTML that our stored plain-text
+    /// flattening can't reproduce). Prefers the stored EmailBodyHtml (Tier 2, no Graph round-trip) when
+    /// <paramref name="srItemId"/> is given; otherwise — or when no HTML was stored — fetches the live
+    /// message from the mailbox by <paramref name="messageId"/>. Returns { found, isHtml, html, source }.
+    /// </summary>
+    [HttpGet("supplier-message-html")]
+    public async Task<IActionResult> SupplierMessageHtml(
+        [FromQuery] string? messageId,
+        [FromQuery] string? srItemId,
+        CancellationToken ct = default)
+    {
+        // 1) Stored HTML — fast path for mail captured after Tier 2 shipped; no Graph call.
+        if (!string.IsNullOrWhiteSpace(srItemId))
+        {
+            var (storedHtml, storedMsgId) = await _sp.ReadSupplierResponseHtmlAsync(srItemId!, ct);
+            if (!string.IsNullOrWhiteSpace(storedHtml))
+                return Ok(new { found = true, isHtml = true, html = storedHtml, source = "stored" });
+            if (string.IsNullOrWhiteSpace(messageId)) messageId = storedMsgId;   // recover msgId for the live fetch
+        }
+
+        // 2) Live fetch from the mailbox by MessageId (covers existing mail still in the mailbox).
+        var mailbox = _config["Mail:MailboxAddress"] ?? "";
+        if (!string.IsNullOrWhiteSpace(mailbox) && !string.IsNullOrWhiteSpace(messageId))
+        {
+            var msg = await _mail.GetMessageByIdAsync(mailbox, messageId!);
+            if (msg?.Body is not null)
+            {
+                var isHtml = msg.Body.ContentType == BodyType.Html;
+                return Ok(new { found = true, isHtml, html = msg.Body.Content ?? "", source = "live" });
+            }
+        }
+
+        return Ok(new { found = false, isHtml = false, html = "", source = "none" });
     }
 
     /// <summary>Request body for POST /api/supplier-conversations/mark-read.</summary>

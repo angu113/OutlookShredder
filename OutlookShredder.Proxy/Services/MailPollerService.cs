@@ -69,17 +69,7 @@ public class MailPollerService : BackgroundService
     private static readonly Regex SubjectPrefixRegex =
         new(@"^(\s*(RE|FW|FWD)\s*:\s*|\s*\[.*?\]\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly Regex HtmlLineBreakRegex =
-        new(@"<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex HtmlTagRegex =
-        new(@"<[^>]+>", RegexOptions.Compiled);
-
-    private static readonly Regex HorizontalWhitespaceRegex =
-        new(@"[ \t]{2,}", RegexOptions.Compiled);
-
-    private static readonly Regex ExcessiveNewlineRegex =
-        new(@"\n{3,}", RegexOptions.Compiled);
+    // HTML→plain-text conversion lives in HtmlText.ToPlainText (style/script/comment-safe).
 
     // Strips the quoted original-message thread from a supplier reply body before sending
     // to AI. Outlook appends "-----Original Message-----" when replying inline; without
@@ -287,11 +277,7 @@ public class MailPollerService : BackgroundService
 
                 var rawBody = msg.Body?.Content ?? string.Empty;
                 if (msg.Body?.ContentType == BodyType.Html)
-                {
-                    rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
-                    rawBody = HtmlTagRegex     .Replace(rawBody, " ");
-                    rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
-                }
+                    rawBody = HtmlText.ToPlainText(rawBody);
                 body    = rawBody.Trim();
                 subject = msg.Subject ?? "";
 
@@ -610,18 +596,11 @@ public class MailPollerService : BackgroundService
         // Email-based PO routing removed — see FileWatcherService.TriggerPoMatchingAsync.
 
         var rawBody = msg.Body?.Content ?? string.Empty;
-        if (msg.Body?.ContentType == BodyType.Html)
-        {
-            rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
-            rawBody = HtmlTagRegex.Replace(rawBody, " ");
-            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
-            rawBody = HorizontalWhitespaceRegex.Replace(rawBody, " ");
-            rawBody = ExcessiveNewlineRegex.Replace(rawBody, "\n\n");
-        }
-        else
-        {
-            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
-        }
+        // Keep the original HTML (durable source for rich rendering) before flattening to text.
+        var rawHtml = msg.Body?.ContentType == BodyType.Html ? rawBody : null;
+        rawBody = msg.Body?.ContentType == BodyType.Html
+            ? HtmlText.ToPlainText(rawBody)
+            : System.Net.WebUtility.HtmlDecode(rawBody);
         var body = rawBody.Trim();
 
         var searchText = subject + " " + body;
@@ -727,6 +706,7 @@ public class MailPollerService : BackgroundService
             {
                 Content      = string.Empty,
                 EmailBody    = body,
+                EmailBodyHtml = rawHtml,
                 SourceType   = "body",
                 JobRefs      = jobRefs,
                 EmailSubject = subject,
@@ -752,6 +732,7 @@ public class MailPollerService : BackgroundService
             {
                 Content                = extractBody[..Math.Min(extractBody.Length, 12_000)],
                 EmailBody              = body,
+                EmailBodyHtml          = rawHtml,
                 SourceType             = "body",
                 JobRefs                = jobRefs,
                 EmailSubject           = subject,
@@ -819,6 +800,7 @@ public class MailPollerService : BackgroundService
                 {
                     Content              = string.Empty,
                     EmailBody            = body,
+                    EmailBodyHtml        = rawHtml,
                     SourceType           = "attachment",
                     FileName             = fa.Name,
                     ContentType          = contentType,
@@ -845,6 +827,7 @@ public class MailPollerService : BackgroundService
                 {
                     Content              = extractBody[..Math.Min(extractBody.Length, 12_000)],
                     EmailBody            = body,
+                    EmailBodyHtml        = rawHtml,
                     SourceType           = "body",
                     JobRefs              = jobRefs,
                     EmailSubject         = subject,
@@ -892,15 +875,9 @@ public class MailPollerService : BackgroundService
 
         // Strip HTML from body
         var rawBody = msg.Body?.Content ?? string.Empty;
-        if (msg.Body?.ContentType == BodyType.Html)
-        {
-            rawBody = HtmlLineBreakRegex.Replace(rawBody, "\n");
-            rawBody = HtmlTagRegex     .Replace(rawBody, " ");
-            rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
-            rawBody = HorizontalWhitespaceRegex.Replace(rawBody, " ");
-            rawBody = ExcessiveNewlineRegex    .Replace(rawBody, "\n\n");
-        }
-        else rawBody = System.Net.WebUtility.HtmlDecode(rawBody);
+        rawBody = msg.Body?.ContentType == BodyType.Html
+            ? HtmlText.ToPlainText(rawBody)
+            : System.Net.WebUtility.HtmlDecode(rawBody);
 
         // Fetch PDF attachments via Graph
         var pdfs = new List<(string Name, byte[] Bytes)>();
