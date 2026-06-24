@@ -17,14 +17,18 @@ public sealed class MailEvalService
     private readonly SharePointService   _sp;
     private readonly MailCacheService    _cache;
     private readonly MailClassifierService _classifier;
+    private readonly MailWorkbenchService _workbench;
+    private readonly MailRuleService     _rules;
     private readonly ILogger<MailEvalService> _log;
 
-    // One concurrent run allowed (a full run can be hundreds of AI calls).
-    private readonly SemaphoreSlim _runGate = new(1, 1);
+    // One concurrent run allowed (a full run can be hundreds of AI calls) — gated by _progress.TryBegin().
     private readonly EvalProgress  _progress = new();
+    // Separate gate for the (cheap, AI-free) rule-impact run so it can run independently of an eval.
+    private readonly EvalProgress  _riProgress = new();
 
     // Results of the most recent completed run.
     private volatile EvalRunResults? _lastResults;
+    private volatile RuleImpactReport? _lastImpact;
 
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
@@ -33,11 +37,14 @@ public sealed class MailEvalService
     };
 
     public MailEvalService(SharePointService sp, MailCacheService cache,
-        MailClassifierService classifier, ILogger<MailEvalService> log)
+        MailClassifierService classifier, MailWorkbenchService workbench,
+        MailRuleService rules, ILogger<MailEvalService> log)
     {
         _sp         = sp;
         _cache      = cache;
         _classifier = classifier;
+        _workbench  = workbench;
+        _rules      = rules;
         _log        = log;
     }
 
@@ -57,6 +64,42 @@ public sealed class MailEvalService
     public EvalRunResults? GetResults() => _lastResults;
 
     public EvalReport? GetReport() => _lastResults is null ? null : _lastResults.Report;
+
+    // ── Golden-set inspection (read-only, no AI) ────────────────────────────────────
+
+    /// <summary>
+    /// Read-only snapshot of the MailGoldenLabels corpus: counts by labeler (bootstrap vs human)
+    /// and by category, plus the rows. No AI, no SP writes — answers "how complete is the labeling?"
+    /// before a (token-spending) run. A row is human-labeled when LabeledBy is set to anything other
+    /// than "bootstrap"; bootstrap rows are the AI's own guess and still need correction.
+    /// </summary>
+    public async Task<GoldenStatus> GetGoldenStatusAsync(CancellationToken ct)
+    {
+        var rows = await _sp.ReadGoldenLabelsAsync(ct);
+        bool IsBootstrap(MailGoldenLabelRow r) =>
+            r.LabeledBy.Length == 0 || string.Equals(r.LabeledBy, "bootstrap", StringComparison.OrdinalIgnoreCase);
+
+        return new GoldenStatus
+        {
+            Total         = rows.Count,
+            Bootstrap     = rows.Count(IsBootstrap),
+            HumanLabeled  = rows.Count(r => !IsBootstrap(r)),
+            BlankCategory = rows.Count(r => r.GoldenCategory.Length == 0),
+            ByLabeledBy   = rows.GroupBy(r => r.LabeledBy.Length == 0 ? "(blank)" : r.LabeledBy)
+                                .ToDictionary(g => g.Key, g => g.Count()),
+            ByCategory    = rows.Where(r => r.GoldenCategory.Length > 0)
+                                .GroupBy(r => r.GoldenCategory)
+                                .OrderByDescending(g => g.Count())
+                                .ToDictionary(g => g.Key, g => g.Count()),
+            Rows          = rows.Select(r => new GoldenRowLite
+            {
+                MailItemId     = r.MailItemId,
+                Subject        = r.Subject,
+                GoldenCategory = r.GoldenCategory,
+                LabeledBy      = r.LabeledBy,
+            }).ToList(),
+        };
+    }
 
     // ── Seed golden set from current AI classifications ─────────────────────────────
 
@@ -127,10 +170,25 @@ public sealed class MailEvalService
                 ? l.ToHashSet(StringComparer.OrdinalIgnoreCase)
                 : null;
 
+            // Evaluate ONLY human-corrected rows by default. Bootstrap rows are the AI's own past
+            // guess, so scoring against them measures the model agreeing with itself (~100%, useless).
+            // IncludeBootstrap=true is a plumbing smoke-test escape hatch only.
+            static bool IsHuman(MailGoldenLabelRow g) =>
+                g.LabeledBy.Length > 0 && !string.Equals(g.LabeledBy, "bootstrap", StringComparison.OrdinalIgnoreCase);
+
             var corpus = labels
                 .Where(g => g.GoldenCategory.Length > 0
+                    && (req.IncludeBootstrap || IsHuman(g))
                     && (leafFilter is null || leafFilter.Contains(g.GoldenCategory)))
                 .ToList();
+
+            if (corpus.Count == 0)
+            {
+                _log.LogWarning("[MailEval] {Total} golden rows but 0 are human-labeled — nothing to score. " +
+                    "Correct some labels in the eval UI first (a run over bootstrap labels is self-agreement).", labels.Count);
+                _progress.End();
+                return;
+            }
 
             if (req.SampleSize.HasValue && req.SampleSize.Value < corpus.Count)
                 corpus = Stratified(corpus, req.SampleSize.Value);
@@ -149,8 +207,7 @@ public sealed class MailEvalService
                 await sem.WaitAsync(ct);
                 try
                 {
-                    var item = itemLookup.GetValueOrDefault(label.MailItemId);
-                    var input = item is null ? MinimalInput(label) : ItemToInput(item);
+                    var input = await BuildInputAsync(label, itemLookup, ct);
                     MailClassificationResult? pred = null;
                     string? rawResponse = null;
                     string  provider    = "";
@@ -167,7 +224,7 @@ public sealed class MailEvalService
                     var r = new EvalResultItem
                     {
                         MailItemId  = label.MailItemId,
-                        Subject     = item?.Subject ?? "",
+                        Subject     = input.Subject ?? "",
                         Gold        = label.GoldenCategory,
                         Predicted   = pred?.Category ?? "",
                         Confidence  = pred?.Confidence ?? 0,
@@ -193,7 +250,111 @@ public sealed class MailEvalService
             _log.LogInformation("[MailEval] run DONE: {N} items, accuracy {Acc:P1}", allResults.Count, report.OverallAccuracy);
         }
         catch (Exception ex) { _log.LogError(ex, "[MailEval] run failed"); }
-        finally { _progress.End(); _runGate.Release(); }
+        finally { _progress.End(); }
+    }
+
+    // ── Rule impact: deterministic re-run of the CURRENT ruleset over existing items ─────
+    // Answers "if I add/edit a rule, what flips?" with ZERO AI cost — it builds the SAME signals
+    // production builds on capture and runs the pure rule engine. Reports old→new category per matched
+    // item + the resulting distribution. Optionally APPLIES (writes a versioned classification,
+    // AiProvider="rule") for changed items — no matcher kick (analysis context, not a capture).
+    // This is the toolset reuse the user asked for: corrections become rules, the engine re-runs.
+
+    public EvalRunStart StartRuleImpact(RuleImpactRequest req)
+    {
+        if (!_riProgress.TryBegin()) return new EvalRunStart { AlreadyRunning = true };
+        _ = Task.Run(() => RuleImpactAsync(req, CancellationToken.None));
+        return new EvalRunStart { AlreadyRunning = false };
+    }
+
+    public EvalSnapshot      GetImpactSnapshot() => _riProgress.SnapshotNow();
+    public RuleImpactReport? GetImpactReport()   => _lastImpact;
+
+    private async Task RuleImpactAsync(RuleImpactRequest req, CancellationToken ct)
+    {
+        try
+        {
+            var currents = _cache.GetCurrents().ToDictionary(c => c.MailItemId, c => c.CategoryPath ?? "", StringComparer.Ordinal);
+            var scopeCat = string.IsNullOrWhiteSpace(req.Category) ? null : req.Category.Trim();
+            var items = _cache.GetItems()
+                .Where(i => scopeCat is null
+                    || string.Equals(currents.GetValueOrDefault(i.MailItemId, ""), scopeCat, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            _riProgress.SetTotal(items.Count);
+            _log.LogInformation("[MailEval] rule-impact start: {N} items (scope={Scope}, dryRun={Dry})",
+                items.Count, scopeCat ?? "ALL", req.DryRun);
+
+            var changes = new ConcurrentBag<RuleImpactItem>();
+            var newDist = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            int matched = 0, changed = 0, applied = 0;
+            var sem = new SemaphoreSlim(4, 4);
+
+            var tasks = items.Select(i => Task.Run(async () =>
+            {
+                await sem.WaitAsync(ct);
+                try
+                {
+                    var cur = currents.GetValueOrDefault(i.MailItemId, "");
+                    MailRule? rule = null;
+                    try
+                    {
+                        var input = await _sp.GetClassifyInputAsync(i.MailItemId, ct);
+                        if (input is not null)
+                            rule = await _rules.FirstMatchAsync(
+                                _workbench.BuildRuleSignals(input.FromAddress, input.Subject, input.BodyText, input.AttachmentNames), ct);
+                    }
+                    catch (Exception ex) { _log.LogDebug(ex, "[MailEval] impact eval failed for {Id}", i.MailItemId); }
+
+                    // No rule match → would fall through to the AI; in a deterministic preview the item is
+                    // shown unchanged (we do NOT re-run the AI here — that's the eval runner's job).
+                    var newCat = rule?.CategoryPath ?? cur;
+                    newDist.AddOrUpdate(newCat, 1, (_, n) => n + 1);
+                    bool flip = rule is not null && !string.Equals(newCat, cur, StringComparison.OrdinalIgnoreCase);
+                    if (rule is not null) Interlocked.Increment(ref matched);
+                    if (flip)
+                    {
+                        Interlocked.Increment(ref changed);
+                        changes.Add(new RuleImpactItem
+                        {
+                            MailItemId = i.MailItemId, Subject = i.Subject, FromAddress = i.FromAddress,
+                            OldCategory = cur, NewCategory = newCat, Rule = rule!.Name,
+                        });
+                        if (!req.DryRun)
+                        {
+                            try
+                            {
+                                await _sp.WriteClassificationAsync(i.MailItemId, new MailClassificationResult
+                                {
+                                    Category = newCat, Confidence = 1.0, AiProvider = "rule", AiModel = rule.Name,
+                                    Reasoning = $"Rule '{rule.Name}' applied via eval reclassify",
+                                }, ct);
+                                Interlocked.Increment(ref applied);
+                            }
+                            catch (Exception ex) { _log.LogWarning(ex, "[MailEval] apply write failed for {Id}", i.MailItemId); }
+                        }
+                    }
+                    _riProgress.Record(flip);
+                }
+                finally { sem.Release(); }
+            }, ct)).ToList();
+            await Task.WhenAll(tasks);
+
+            _lastImpact = new RuleImpactReport
+            {
+                Scope           = scopeCat ?? "ALL",
+                DryRun          = req.DryRun,
+                TotalScanned    = items.Count,
+                RuleMatched     = matched,
+                Changed         = changed,
+                Applied         = applied,
+                Changes         = changes.OrderBy(c => c.OldCategory, StringComparer.OrdinalIgnoreCase)
+                                         .ThenBy(c => c.NewCategory, StringComparer.OrdinalIgnoreCase).ToList(),
+                NewDistribution = newDist.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value),
+            };
+            _log.LogInformation("[MailEval] rule-impact DONE: {M} matched, {C} changed, {A} applied", matched, changed, applied);
+        }
+        catch (Exception ex) { _log.LogError(ex, "[MailEval] rule-impact failed"); }
+        finally { _riProgress.End(); }
     }
 
     // ── Metrics (pure — unit-testable) ──────────────────────────────────────────────
@@ -302,6 +463,49 @@ public sealed class MailEvalService
         BodyText    = "",
     };
 
+    /// <summary>
+    /// Build the classifier input with the SAME signal production gets — subject, from, to, BODY, and
+    /// attachment names — via GetClassifyInputAsync (the exact path the production reclassify uses, body
+    /// read from the MailItems list — no .eml parse). Falls back to the L1 cache (subject/from only)
+    /// then a minimal input. Without the body the eval would score a weaker classifier than the one that
+    /// actually runs on capture, making the baseline misleading.
+    /// </summary>
+    private async Task<MailClassifyInput> BuildInputAsync(MailGoldenLabelRow label,
+        Dictionary<string, MailItemRow> itemLookup, CancellationToken ct)
+    {
+        try
+        {
+            var input = await _sp.GetClassifyInputAsync(label.MailItemId, ct);
+            if (input is not null) return input;
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "[MailEval] classify-input fetch failed for {Id}; using cache fallback", label.MailItemId); }
+
+        var item = itemLookup.GetValueOrDefault(label.MailItemId);
+        return item is null ? MinimalInput(label) : ItemToInput(item);
+    }
+
+    /// <summary>
+    /// Apply a single human correction to the golden set: set GoldenCategory + LabeledBy (the row stops
+    /// being "bootstrap" and becomes eligible for scoring). Subject/From are passed through from the
+    /// caller (the UI already has them) so we don't re-read the whole list per save.
+    /// </summary>
+    public async Task PatchGoldenAsync(string mailItemId, string goldenCategory,
+        string? subject, string? fromAddress, string? labeledBy, CancellationToken ct)
+    {
+        await _sp.UpsertGoldenLabelAsync(new MailGoldenLabelRow
+        {
+            MailItemId     = mailItemId,
+            GoldenCategory = goldenCategory,
+            Subject        = subject ?? "",
+            FromAddress    = fromAddress ?? "",
+            LabeledBy      = string.IsNullOrWhiteSpace(labeledBy) ? "human" : labeledBy,
+            LabeledAt      = DateTimeOffset.UtcNow.ToString("o"),
+            Notes          = "Human-corrected via eval UI.",
+        }, ct);
+        _log.LogInformation("[MailEval] golden patched: {Id} -> {Cat} by {By}", mailItemId, goldenCategory,
+            string.IsNullOrWhiteSpace(labeledBy) ? "human" : labeledBy);
+    }
+
     private static List<MailGoldenLabelRow> Stratified(List<MailGoldenLabelRow> corpus, int n)
     {
         var byLeaf = corpus.GroupBy(r => r.GoldenCategory).ToList();
@@ -370,9 +574,20 @@ public sealed class MailEvalService
 
 public sealed class EvalRunRequest
 {
-    public int?         SampleSize      { get; set; }
-    public List<string> Leaves          { get; set; } = [];
-    public bool         RecordResponses { get; set; } = true;
+    public int?         SampleSize       { get; set; }
+    public List<string> Leaves           { get; set; } = [];
+    public bool         RecordResponses  { get; set; } = true;
+    /// <summary>Smoke-test escape hatch only: score bootstrap (AI-guess) rows too. Default false.</summary>
+    public bool         IncludeBootstrap { get; set; }
+}
+
+public sealed class GoldenPatchRequest
+{
+    public string  MailItemId     { get; set; } = "";
+    public string  GoldenCategory { get; set; } = "";
+    public string? Subject        { get; set; }
+    public string? FromAddress    { get; set; }
+    public string? LabeledBy      { get; set; }
 }
 
 public sealed class EvalRunStart
@@ -449,4 +664,53 @@ public sealed class SeedGoldenResult
 {
     public int Written { get; set; }
     public int Skipped { get; set; }
+}
+
+public sealed class GoldenStatus
+{
+    public int Total         { get; set; }
+    public int Bootstrap     { get; set; }   // LabeledBy blank/"bootstrap" — AI guess, needs human review
+    public int HumanLabeled  { get; set; }   // LabeledBy set to a real labeler
+    public int BlankCategory { get; set; }   // GoldenCategory empty (unusable until labeled)
+    public Dictionary<string, int> ByLabeledBy { get; set; } = [];
+    public Dictionary<string, int> ByCategory  { get; set; } = [];
+    public List<GoldenRowLite>     Rows        { get; set; } = [];
+}
+
+public sealed class GoldenRowLite
+{
+    public string MailItemId     { get; set; } = "";
+    public string Subject        { get; set; } = "";
+    public string GoldenCategory { get; set; } = "";
+    public string LabeledBy      { get; set; } = "";
+}
+
+public sealed class RuleImpactRequest
+{
+    /// <summary>Restrict to items currently in this category; null/empty = the whole corpus.</summary>
+    public string? Category { get; set; }
+    /// <summary>Preview only (default). False = write the rule result for changed items (no matcher kick).</summary>
+    public bool    DryRun   { get; set; } = true;
+}
+
+public sealed class RuleImpactItem
+{
+    public string MailItemId  { get; set; } = "";
+    public string Subject     { get; set; } = "";
+    public string FromAddress { get; set; } = "";
+    public string OldCategory { get; set; } = "";
+    public string NewCategory { get; set; } = "";
+    public string Rule        { get; set; } = "";
+}
+
+public sealed class RuleImpactReport
+{
+    public string Scope        { get; set; } = "";
+    public bool   DryRun       { get; set; }
+    public int    TotalScanned { get; set; }
+    public int    RuleMatched  { get; set; }   // items a rule fired on
+    public int    Changed      { get; set; }   // items whose category would flip
+    public int    Applied      { get; set; }   // items actually written (apply runs only)
+    public List<RuleImpactItem>     Changes         { get; set; } = [];
+    public Dictionary<string, int>  NewDistribution { get; set; } = [];
 }

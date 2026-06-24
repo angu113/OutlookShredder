@@ -64,12 +64,19 @@ public sealed class ProxyAuthService
         ("*",    "/api/phone-search"),   // Chrome extension RPA relay
     };
 
+    // Dev-only mail-eval labeling/report UI is served by the proxy and called same-origin from a
+    // browser, which can't read the DPAPI token to sign requests. Exempt its prefix so the page works.
+    // Gated by config (default on) and harmless beyond that: the proxy binds loopback only, and the
+    // surface is eval tooling (read golden/items, patch a golden label, run an offline eval).
+    private static volatile bool _mailEvalDevUi = true;
+
     public ProxyAuthService(IConfiguration config, ILogger<ProxyAuthService> log)
     {
         _log = log;
         Enforce          = config.GetValue("Proxy:AuthEnforce", false);
         _skewMs          = config.GetValue("Proxy:AuthSkewSeconds", 30) * 1000L;
         _rateLimitPerSec = config.GetValue("Proxy:RateLimitPerSecond", 300);
+        _mailEvalDevUi   = config.GetValue("Proxy:MailEvalDevUi", true);
     }
 
     // ── Token lifecycle ───────────────────────────────────────────────────────
@@ -126,6 +133,8 @@ public sealed class ProxyAuthService
         if (HttpMethods.IsOptions(ctx.Request.Method)) return true;   // CORS preflight
         var path   = ctx.Request.Path;
         var method = ctx.Request.Method;
+        if (_mailEvalDevUi && path.StartsWithSegments("/api/mail-eval", StringComparison.OrdinalIgnoreCase))
+            return true;   // dev-only labeling/report UI (browser can't sign)
         foreach (var (m, prefix) in Exempt)
             if ((m == "*" || string.Equals(m, method, StringComparison.OrdinalIgnoreCase))
                 && path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))

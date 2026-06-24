@@ -321,17 +321,25 @@ public sealed class MailWorkbenchService
     /// <summary>Extracts the signals a rule evaluates from an email. AttachmentContent is left empty
     /// until Phase 2 wires PDF-text / OCR attachment extraction.</summary>
     private MailRuleSignals BuildRuleSignals(MailboxMessageBody body, List<string> attachmentNames)
+        => BuildRuleSignals(body.FromAddress ?? "", body.Subject ?? "", body.BodyText ?? "", attachmentNames);
+
+    /// <summary>
+    /// Build rule signals from raw fields. Public so the eval tool can re-run the rule engine over an
+    /// already-captured item (the same signals production builds on capture) without re-capturing —
+    /// the basis of the deterministic "rule impact" preview. Read-only.
+    /// </summary>
+    public MailRuleSignals BuildRuleSignals(string fromAddress, string subject, string bodyText, List<string> attachmentNames)
     {
-        var from   = (body.FromAddress ?? "").Trim();
+        var from   = (fromAddress ?? "").Trim();
         var at     = from.LastIndexOf('@');
         var domain = at >= 0 && at < from.Length - 1 ? from[(at + 1)..].Trim() : "";
         return new MailRuleSignals
         {
             SenderAddress         = from,
             SenderDomain          = domain,
-            Subject               = body.Subject ?? "",
-            Body                  = body.BodyText ?? "",
-            AttachmentNames       = attachmentNames,
+            Subject               = subject ?? "",
+            Body                  = bodyText ?? "",
+            AttachmentNames       = attachmentNames ?? [],
             AttachmentContent     = "",
             SenderIsKnownSupplier = IsKnownSupplierDomain(domain),
         };
