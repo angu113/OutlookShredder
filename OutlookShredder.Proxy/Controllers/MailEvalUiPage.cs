@@ -194,6 +194,7 @@ async function pick(i){
     <div class="labelbar">
       <select id="leafPick">${opts}</select>
       <button onclick="save()">Save (Enter)</button>
+      <button class="ghost" onclick="addCategory()" title="Create a new category and select it">＋ New category</button>
       <button class="ghost" onclick="pick(Math.min((window._view.length-1), IDX+1))">Skip →</button>
     </div>
     <div class="hint">Critical leaves (over-sample these): ${CRIT.join(' · ')}</div>
@@ -223,6 +224,21 @@ async function createRule(){
                  conditions:[{ signal:sig, operator:op, values:[val], minMatches:1 }] };
   try { await jpost('/rules?by='+encodeURIComponent(by), rule); toast('Rule created · '+name); }
   catch(e){ alert('Create failed: '+e.message); }
+}
+
+async function addCategory(){
+  let path = prompt('New category path (Top/Sub, e.g. "Other/Voicemail"):', 'Other/');
+  if(path === null) return;                      // cancelled
+  path = path.trim().replace(/^\/+|\/+$/g,'').trim();
+  if(!path){ alert('Enter a category path, e.g. "Other/Voicemail".'); return; }
+  const desc = (prompt('Optional one-line description (helps the classifier target it):', '') || '').trim();
+  try {
+    const res = await jpost('/leaves', { categoryPath: path, description: desc });
+    LEAVES = res.leaves; buildLeafPickers();
+    toast(res.added ? ('Category added · '+res.path) : ('Already exists · '+res.path));
+    // re-render the detail so both pickers include the new leaf, then pre-select it (Save still commits).
+    if(CUR){ await pick(IDX); const sel=document.getElementById('leafPick'); if(sel) sel.value = res.path; }
+  } catch(e){ alert('Add failed: '+e.message); }
 }
 
 async function save(){

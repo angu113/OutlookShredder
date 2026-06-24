@@ -74,6 +74,36 @@ public sealed class MailEvalController : ControllerBase
     public async Task<IActionResult> Leaves(CancellationToken ct)
         => Ok((await _taxonomy.GetLeavesAsync(ct)).Select(l => l.Path).Where(p => !string.IsNullOrEmpty(p)).ToList());
 
+    /// <summary>
+    /// Add a new taxonomy leaf from the labeling UI (e.g. "Other/Voicemail"). Writes an SP taxonomy
+    /// hint so the leaf reflects everywhere on the next use: the labeling dropdown (this /leaves list),
+    /// the classifier prompt, and the coerce/valid-path set — no code deploy. Idempotent: an existing
+    /// leaf is a no-op (no redundant hint row). Returns the updated leaf-path list so the UI can
+    /// repopulate its picker and select the new leaf.
+    /// </summary>
+    [HttpPost("leaves")]
+    public async Task<IActionResult> AddLeaf([FromBody] AddLeafRequest req, CancellationToken ct)
+    {
+        var (ok, path, error) = MailTaxonomyService.NormalizeLeafPath(req?.CategoryPath);
+        if (!ok) return BadRequest(new { error });
+
+        var existing = await _taxonomy.GetLeavesAsync(ct);
+        bool already = existing.Any(l => string.Equals(l.Path, path, StringComparison.OrdinalIgnoreCase));
+        if (!already)
+            await _taxonomy.AddLeafHintAsync(path, req?.Description, "eval-ui", ct);
+
+        var leaves = (await _taxonomy.GetLeavesAsync(ct))
+            .Select(l => l.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
+        return Ok(new { ok = true, path, added = !already, leaves });
+    }
+
+    public sealed class AddLeafRequest
+    {
+        public string  CategoryPath { get; set; } = "";
+        /// <summary>Optional one-line guidance fed to the classifier prompt so the AI can target the leaf.</summary>
+        public string? Description  { get; set; }
+    }
+
     /// <summary>One captured item's detail incl. body, for the labeler to read while correcting.</summary>
     [HttpGet("item/{mailItemId}")]
     public async Task<IActionResult> Item(string mailItemId, CancellationToken ct)

@@ -28,6 +28,21 @@ public sealed class MailTaxonomyService
 
     public MailTaxonomyService(SharePointService sp, ILogger<MailTaxonomyService> log) { _sp = sp; _log = log; }
 
+    /// <summary>
+    /// Normalizes a user-entered leaf path for the "add category" surface: trims, strips surrounding
+    /// slashes, and rejects empties + the reserved "@sender:" prefix (those rows are processor→supplier
+    /// maps, not taxonomy leaves). Pure — unit-tested in MailTaxonomyLeafTests.
+    /// </summary>
+    public static (bool Ok, string Path, string? Error) NormalizeLeafPath(string? raw)
+    {
+        var path = (raw ?? "").Trim().Trim('/').Trim();
+        if (path.Length == 0)
+            return (false, "", "categoryPath is required (e.g. \"Other/Voicemail\").");
+        if (path.StartsWith(SenderPrefix, StringComparison.OrdinalIgnoreCase))
+            return (false, "", "categoryPath cannot start with the reserved \"@sender:\" prefix.");
+        return (true, path, null);
+    }
+
     private async Task EnsureFreshAsync(CancellationToken ct)
     {
         if (DateTimeOffset.UtcNow - _loadedAt < Ttl) return;
