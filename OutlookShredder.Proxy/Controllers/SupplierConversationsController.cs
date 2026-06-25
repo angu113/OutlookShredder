@@ -116,6 +116,31 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
+    /// RFQ Mailbox: all inbound + outbound messages across the given RFQs (comma-separated rfqIds — the live
+    /// set), newest-first, capped at limit. Each message carries from/subject/body + read state; the client
+    /// renders the From, Subject, a 3-line preview and the sent/received time.
+    /// </summary>
+    [HttpGet("rfq-mailbox")]
+    public async Task<IActionResult> RfqMailbox(
+        [FromQuery] string? rfqIds,
+        [FromQuery] int     limit  = 200,
+        [FromQuery] string? userId = null)
+    {
+        var ids = (rfqIds ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (ids.Length == 0) return Ok(new { messages = Array.Empty<object>() });
+        try
+        {
+            var messages = await _sp.ReadRfqMailboxAsync(userId ?? "", ids, Math.Clamp(limit, 1, 1000));
+            return Ok(new { messages });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Mailbox] read failed ({N} rfqs)", ids.Length);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Marks one inbound supplier message read/unread FOR THE CALLING USER (per-user read state, keyed by
     /// UserId) by MessageId, then publishes a user-scoped "SupplierMsgRead" bus event so only THAT user's
     /// other machines update the message + the unread badge cascade — never anyone else's.

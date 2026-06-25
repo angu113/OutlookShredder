@@ -8762,6 +8762,52 @@ public partial class SharePointService
     }
 
     /// <summary>
+    /// RFQ Mailbox: ALL inbound + outbound messages across a set of RFQs (all suppliers), newest-first.
+    /// One indexed `RFQ_ID eq` read per RFQ (reusing the thread row-readers) run in parallel — index-friendly,
+    /// no risky multi-OR filter. Deduped by MessageId per RFQ, merged, capped at `limit`, read-state applied.
+    /// </summary>
+    public async Task<List<Models.ConversationMessage>> ReadRfqMailboxAsync(
+        string userId, IReadOnlyList<string> rfqIds, int limit)
+    {
+        var ids = rfqIds.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (ids.Count == 0) return [];
+
+        var siteId     = await GetSiteIdAsync();
+        var convListId = await GetConversationsListIdAsync();
+        var srListId   = await GetSupplierResponsesListIdAsync();
+
+        var sem = new SemaphoreSlim(8, 8);
+        var perRfq = await Task.WhenAll(ids.Select(async rfq =>
+        {
+            await sem.WaitAsync();
+            try
+            {
+                var f        = $"fields/RFQ_ID eq '{rfq.Replace("'", "''")}'";
+                var convTask = ReadConversationRowsAsync(siteId, convListId, f, rfq, "");
+                var srTask   = ReadInboundSrRowsAsync(siteId, srListId, f, rfq, "");
+                await Task.WhenAll(convTask, srTask);
+
+                var convRows = convTask.Result;
+                var srRows   = srTask.Result;
+                if (convRows.Count > 0)   // drop SR rows already logged as conv rows (same MessageId)
+                {
+                    var seen = convRows.Where(r => !string.IsNullOrEmpty(r.MessageId))
+                                       .Select(r => r.MessageId!).ToHashSet(StringComparer.Ordinal);
+                    srRows = srRows.Where(r => string.IsNullOrEmpty(r.MessageId) || !seen.Contains(r.MessageId!)).ToList();
+                }
+                return convRows.Concat(srRows).ToList();
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Mailbox] read failed for {Rfq}", rfq); return new List<Models.ConversationMessage>(); }
+            finally { sem.Release(); }
+        }));
+
+        var merged = perRfq.SelectMany(x => x).OrderByDescending(m => m.SentAt).Take(limit).ToList();
+        await ApplyUserReadStateAsync(userId, merged);
+        return merged;
+    }
+
+    /// <summary>
     /// Returns one summary entry per MSG conversation (RFQ_ID starting with "MSG"),
     /// ordered most-recently-updated first.
     /// </summary>
