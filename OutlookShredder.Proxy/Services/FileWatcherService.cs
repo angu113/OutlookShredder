@@ -535,7 +535,7 @@ public class FileWatcherService : BackgroundService
 
         // For PickingSlips: enrich (ship-to name, delivery method, process ops) from the raw PDF via
         // PdfPig — fast and deterministic, independent of the slow AI call.
-        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone)>? enrichTask = null;
+        Task<(byte[] Enriched, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone, string? CustomerEmail)>? enrichTask = null;
         if (erpInfo.DocumentType == "PickingSlip")
             enrichTask = Task.Run(() => PickingSlipEnricher.EnrichPickingSlip(bytes, null, _log, _processingKeywords), ct);
 
@@ -564,7 +564,7 @@ public class FileWatcherService : BackgroundService
         {
             try
             {
-                var (enriched, shipToName, ops, deliveryMethod, contactName, contactPhone) = await enrichTask;
+                var (enriched, shipToName, ops, deliveryMethod, contactName, contactPhone, customerEmail) = await enrichTask;
                 _log.LogInformation("[FW] Timing {File}: enrich={Ms}ms", fileName, sw.ElapsedMilliseconds);
                 sw.Restart();
                 if (!string.IsNullOrWhiteSpace(shipToName))
@@ -583,6 +583,13 @@ public class FileWatcherService : BackgroundService
                 // AI misses it on the jumbled slip layout), so it's the primary source for the card's contact.
                 if (!string.IsNullOrWhiteSpace(contactName))  extraction.ContactName  = contactName;
                 if (!string.IsNullOrWhiteSpace(contactPhone)) extraction.ContactPhone = contactPhone;
+                // Customer email: deterministic "Email:" / "E-Mail:" parse (store address excluded), same
+                // reliability story as the contact above. AI fills it for non-slip docs as a fallback.
+                if (!string.IsNullOrWhiteSpace(customerEmail))
+                {
+                    _log.LogInformation("[FW] Customer email from PDF: '{Email}'", customerEmail);
+                    extraction.CustomerEmail = customerEmail;
+                }
                 if (!ReferenceEquals(enriched, bytes))
                 {
                     bytes = enriched;

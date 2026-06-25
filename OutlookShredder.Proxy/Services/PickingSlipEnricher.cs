@@ -92,6 +92,19 @@ internal static class PickingSlipEnricher
     private static readonly Regex _serviceLineRegex =
         new(@"^[A-Z]{3,}(?:\s+[A-Z]{2,})*(?:\s+[A-Z][a-z]|\s*$)", RegexOptions.Compiled);
 
+    private static readonly Regex _emailRegex =
+        new(@"[\w.+\-]+@[\w\-]+\.[\w.\-]+", RegexOptions.Compiled);
+
+    /// <summary>Pulls the first email address out of an "Email:" / "E-Mail:" value, EXCLUDING our own
+    /// store addresses (@metalsupermarkets.com) — those print on the slip but aren't the customer.</summary>
+    private static string? NonStoreEmail(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        var m = _emailRegex.Match(s);
+        if (!m.Success) return null;
+        return m.Value.Contains("@metalsupermarkets.com", StringComparison.OrdinalIgnoreCase) ? null : m.Value;
+    }
+
     // ── Data records ─────────────────────────────────────────────────────────
 
     private sealed record CommentBlock(
@@ -108,6 +121,7 @@ internal static class PickingSlipEnricher
         string? CustomerName,
         string? Attention,      // "Attention: "
         string? ContactPhone,   // "Contact Phone: "
+        string? Email,          // "Email:" / "E-Mail:" — the customer's, not our store address
         string? RepName,        // "Customer Rep: " (full name)
         string? OrderDate,      // "Order Date: "
         string? DeliveryMethod, // "Delivery Method: "
@@ -125,7 +139,7 @@ internal static class PickingSlipEnricher
     /// AI extractor doesn't capture this field, so the deterministic parse is the only source
     /// the auto-create Delivery rule has.
     /// </summary>
-    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone) EnrichPickingSlip(
+    public static (byte[] Bytes, string? ShipToName, IReadOnlyList<string> ProcessOps, string? DeliveryMethod, string? ContactName, string? ContactPhone, string? CustomerEmail) EnrichPickingSlip(
         byte[] pdfBytes,
         string? knownCustomerName = null,
         ILogger? log = null,
@@ -190,7 +204,7 @@ internal static class PickingSlipEnricher
         var processOps = ScanProcessingKeywords(allLinesAcrossPages, processingKeywords, log);
 
         if (!hasHeaderBounds && blocks.Count == 0 && pdfPageCount <= 1)
-            return (pdfBytes, shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone);
+            return (pdfBytes, shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone, header.Email);
 
         // ── PdfSharp pass: apply all modifications in one shot ────────────────
         using var ms  = new MemoryStream(pdfBytes);
@@ -215,7 +229,7 @@ internal static class PickingSlipEnricher
 
         using var outMs = new MemoryStream();
         doc.Save(outMs);
-        return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone);
+        return (outMs.ToArray(), shipToName, processOps, header.DeliveryMethod, header.Attention, header.ContactPhone, header.Email);
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -493,6 +507,7 @@ internal static class PickingSlipEnricher
     {
         string? attention      = null;
         string? contactPhone   = null;
+        string? email          = null;
         string? repName        = null;
         string? orderDate      = null;
         string? deliveryMethod = null;
@@ -528,6 +543,7 @@ internal static class PickingSlipEnricher
 
             attention      ??= After(text, "Attention:");
             contactPhone   ??= After(text, "Contact Phone:");
+            email          ??= NonStoreEmail(After(text, "Email:")) ?? NonStoreEmail(After(text, "E-Mail:"));
             repName        ??= After(text, "Customer Rep:");
             orderDate      ??= After(text, "Order Date:");
             deliveryMethod ??= After(text, "Delivery Method:");
@@ -570,7 +586,7 @@ internal static class PickingSlipEnricher
             log?.LogWarning("[PSE] Header cell bounds not detected — PICKING SLIP={PS} MSPC={M}",
                 pickingSlipLine?.Text ?? "(not found)", mspcLine?.Text ?? "(not found)");
 
-        var h = new SlipHeader(customerName, attention?.Trim(), contactPhone?.Trim(),
+        var h = new SlipHeader(customerName, attention?.Trim(), contactPhone?.Trim(), email,
             repName?.Trim(), orderDate?.Trim(), deliveryMethod?.Trim(),
             carrier?.Trim(), poNumber?.Trim());
 
