@@ -29,6 +29,13 @@ public class ConversationMessage
     /// <summary>Comma-separated BCC addresses used on this outbound message.</summary>
     public string? BccAddresses { get; set; }
 
+    /// <summary>
+    /// AI-generated terse (≤2-line) summary of an INBOUND email, shown in the RFQ Mailbox in place of the
+    /// raw body preview. "Regret" when the supplier declined. Null for outbound / unsummarized rows
+    /// (the client then falls back to the body preview). Generated once at write time and persisted.
+    /// </summary>
+    public string? Summary { get; set; }
+
     // ── Per-message read state (team-wide; inbound messages only) ────────────
     /// <summary>True when this inbound supplier message has been marked read by someone. Outbound = always false.</summary>
     public bool IsRead { get; set; }

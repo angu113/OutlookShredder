@@ -36,6 +36,26 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
+    /// Backfills the AI summary on inbound conversation rows from the last <paramref name="days"/> days
+    /// (day 1 = today) that don't have one yet — for messages that predate the auto-summary write path.
+    /// Idempotent (rows with a summary are skipped). Returns { days, scanned, generated, skipped }.
+    /// </summary>
+    [HttpPost("supplier-conversations/backfill-summaries")]
+    public async Task<IActionResult> BackfillSummaries([FromQuery] int days = 1, CancellationToken ct = default)
+    {
+        try
+        {
+            var (scanned, generated, skipped) = await _sp.BackfillInboundSummariesAsync(days, ct);
+            return Ok(new { days, scanned, generated, skipped });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[SummaryBackfill] failed (days={Days})", days);
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Returns the ORIGINAL HTML body for one supplier message so the conversation view can render it
     /// richly (suppliers like Peerless reply with QuickBooks/Intuit HTML that our stored plain-text
     /// flattening can't reproduce). Prefers the stored EmailBodyHtml (Tier 2, no Graph round-trip) when

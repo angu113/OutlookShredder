@@ -27,6 +27,7 @@ public partial class SharePointService
     private readonly SupplierCacheService          _suppliers;
     private readonly ProductCatalogService         _catalog;
     private readonly Lazy<CatalogAnalysisService>  _catalogAnalysis;
+    private readonly Lazy<RfqSummaryService>       _emailSummary;
 
     private GraphServiceClient?     _graph;
     private ClientSecretCredential? _spCredential;
@@ -150,13 +151,14 @@ public partial class SharePointService
 
     public SharePointService(IConfiguration config, ILogger<SharePointService> log,
         SupplierCacheService suppliers, ProductCatalogService catalog,
-        Lazy<CatalogAnalysisService> catalogAnalysis)
+        Lazy<CatalogAnalysisService> catalogAnalysis, Lazy<RfqSummaryService> emailSummary)
     {
         _config          = config;
         _log             = log;
         _suppliers       = suppliers;
         _catalog         = catalog;
         _catalogAnalysis = catalogAnalysis;
+        _emailSummary    = emailSummary;
     }
 
     // ??"?????"??? Graph client (lazy init) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
@@ -5426,6 +5428,8 @@ public partial class SharePointService
                 ("GraphConversationId", "text"),
                 ("ContactEmail",        "text"),
                 ("BccAddresses",        "note"),
+                // AI-generated terse summary of an inbound email (shown in the Mailbox in place of the body preview).
+                ("Summary",             "note"),
                 // Per-message read state (team-wide), for inbound (Direction=in) rows.
                 ("IsRead",              "boolean"),
                 ("ReadAt",              "dateTime"),
@@ -8621,6 +8625,18 @@ public partial class SharePointService
             }
         }
 
+        // Inbound emails get a terse AI summary (shown in the Mailbox in place of the body preview).
+        // Generated here — the single post-dedup chokepoint for every inbound conversation writer — so it
+        // costs at most one AI call per distinct message. Best-effort: a null summary just falls back to
+        // the body preview on the client.
+        string? summary = msg.Summary;
+        if (string.IsNullOrWhiteSpace(summary) &&
+            string.Equals(msg.Direction, "in", StringComparison.OrdinalIgnoreCase))
+        {
+            try { summary = await _emailSummary.Value.SummarizeIncomingEmailAsync(msg.Subject, msg.BodyText, default); }
+            catch (Exception ex) { _log.LogWarning(ex, "[Conv] Inbound summary generation failed for {Id}", msg.MessageId); }
+        }
+
         var title = $"[{msg.RfqId}] {msg.SupplierName} {msg.Direction}";
         var data  = new Dictionary<string, object?>
         {
@@ -8641,6 +8657,7 @@ public partial class SharePointService
             ["SliVersionAtSend"]     = msg.SliVersionAtSend,
             ["ContactEmail"]         = msg.ContactEmail,
             ["BccAddresses"]         = msg.BccAddresses,
+            ["Summary"]              = summary,
         };
 
         var item = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -8651,6 +8668,61 @@ public partial class SharePointService
         if (string.Equals(msg.Direction, "in", StringComparison.OrdinalIgnoreCase))
             InboundChanged?.Invoke();   // new inbound row -> refresh the in-memory unread index (debounced)
         return item?.Id;
+    }
+
+    /// <summary>
+    /// Backfills the <c>Summary</c> column on INBOUND SupplierConversations rows that don't have one yet,
+    /// within the last <paramref name="days"/> days (day 1 = today). Generates the terse AI summary the
+    /// write path now produces automatically, for messages that predate the feature. Idempotent: rows that
+    /// already carry a summary are skipped (no AI cost). Returns (scanned, generated, skipped).
+    /// </summary>
+    public async Task<(int Scanned, int Generated, int Skipped)> BackfillInboundSummariesAsync(
+        int days, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetConversationsListIdAsync();
+        // Window floor = start of (today - (days-1)), in UTC.
+        var cutoff = DateTime.UtcNow.Date.AddDays(-Math.Max(0, days - 1));
+        int scanned = 0, generated = 0, skipped = 0;
+
+        // SentAt isn't indexed, so page the list and filter in memory rather than risk an unindexed $filter.
+        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
+        {
+            req.QueryParameters.Expand = ["fields($select=Direction,SentAt,EmailSubject,BodyText,Summary,MessageId)"];
+            req.QueryParameters.Top    = 1000;
+        });
+
+        while (page?.Value is not null)
+        {
+            foreach (var item in page.Value)
+            {
+                ct.ThrowIfCancellationRequested();
+                var f = item.Fields?.AdditionalData;
+                if (f is null) continue;
+                if (!string.Equals(GetStr(f, "Direction"), "in", StringComparison.OrdinalIgnoreCase)) continue;
+                var sentAt = SupplierReadModel.ParseSpInstant(GetStr(f, "SentAt"));
+                if (sentAt is null || sentAt.Value.UtcDateTime < cutoff) continue;
+                scanned++;
+                if (!string.IsNullOrWhiteSpace(GetStr(f, "Summary"))) { skipped++; continue; }
+
+                var summary = await _emailSummary.Value.SummarizeIncomingEmailAsync(
+                    GetStr(f, "EmailSubject"), GetStr(f, "BodyText"), ct);
+                if (string.IsNullOrWhiteSpace(summary)) { skipped++; continue; }
+
+                await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields.PatchAsync(
+                    new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["Summary"] = summary } },
+                    cancellationToken: ct);
+                generated++;
+                _log.LogInformation("[SummaryBackfill] progress: {Gen} generated / {Skip} skipped / {Scan} scanned",
+                    generated, skipped, scanned);
+            }
+            if (page.OdataNextLink is null) break;
+            page = await GetGraph().Sites[siteId].Lists[listId].Items.WithUrl(page.OdataNextLink).GetAsync();
+        }
+
+        _log.LogInformation("[SummaryBackfill] DONE days={Days}: {Gen} generated, {Skip} skipped, {Scan} scanned",
+            days, generated, skipped, scanned);
+        return (scanned, generated, skipped);
     }
 
     /// <summary>
@@ -8913,7 +8985,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[convListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing,ContactEmail,BccAddresses,IsRead,ReadAt,ReadBy)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,SupplierResponseId,Direction,MessageId,InReplyTo,SentAt,EmailSubject,BodyText,HasAttachments,AttachmentName,ExtractedPricing,ContactEmail,BccAddresses,Summary,IsRead,ReadAt,ReadBy)"];
                 req.QueryParameters.Top    = 500;
                 req.QueryParameters.Filter = filter;
             });
@@ -8941,6 +9013,7 @@ public partial class SharePointService
                     ExtractedPricing   = f.TryGetValue("ExtractedPricing", out var ep) && ep is bool epb && epb,
                     ContactEmail       = GetStr(f, "ContactEmail"),
                     BccAddresses       = GetStr(f, "BccAddresses"),
+                    Summary            = GetStr(f, "Summary"),
                     IsRead             = f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb,
                     ReadAt             = GetStr(f, "ReadAt"),
                     ReadBy             = GetStr(f, "ReadBy"),
@@ -8961,7 +9034,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[srListId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ContactEmail,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile,IsRead,ReadAt,ReadBy)"];
+                req.QueryParameters.Expand = ["fields($select=RFQ_ID,SupplierName,EmailFrom,ContactEmail,ReceivedAt,EmailSubject,EmailBody,MessageId,SourceFile,IsRegret,IsRead,ReadAt,ReadBy)"];
                 req.QueryParameters.Top    = 200;
                 req.QueryParameters.Filter = filter;
             });
@@ -8987,6 +9060,9 @@ public partial class SharePointService
                     AttachmentName     = GetStr(f, "SourceFile"),
                     ExtractedPricing   = true,
                     ContactEmail       = GetStr(f, "ContactEmail"),
+                    // SR rows reaching the Mailbox have no logged conv row (rare). Surface the cheap terse
+                    // regret signal; priced ones fall back to the body preview on the client.
+                    Summary            = (f.TryGetValue("IsRegret", out var rg) && rg is bool rgb && rgb) ? "Regret" : null,
                     IsRead             = f.TryGetValue("IsRead", out var ir) && ir is bool irb && irb,
                     ReadAt             = GetStr(f, "ReadAt"),
                     ReadBy             = GetStr(f, "ReadBy"),

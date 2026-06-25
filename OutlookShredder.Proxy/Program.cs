@@ -209,6 +209,8 @@ try
     builder.Services.AddSingleton<PaymentReconciliationService>();
     builder.Services.AddSingleton<CatalogAnalysisService>();
     builder.Services.AddSingleton(sp => new Lazy<CatalogAnalysisService>(() => sp.GetRequiredService<CatalogAnalysisService>()));
+    // Lazy wrapper so SharePointService can generate inbound-email summaries without a construction cycle.
+    builder.Services.AddSingleton(sp => new Lazy<RfqSummaryService>(() => sp.GetRequiredService<RfqSummaryService>()));
     builder.Services.AddSingleton(sp => new Lazy<SalesOrderHistoryService>(() => sp.GetRequiredService<SalesOrderHistoryService>()));
     builder.Services.AddSingleton<SupplierProductMappingsCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SupplierProductMappingsCacheService>());

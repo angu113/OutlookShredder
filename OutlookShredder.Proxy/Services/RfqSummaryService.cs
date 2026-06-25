@@ -33,11 +33,88 @@ public class RfqSummaryService
         "non-responder as needing a chase once it is past 60 minutes since the RFQ was sent. " +
         "Output ONLY the bullets, each starting with '- '.";
 
+    private const string EmailSummaryPrompt =
+        "You write a one-or-two-line summary of an INCOMING supplier email for a purchasing rep's mailbox " +
+        "list. Output ONLY the summary — no preamble, no label, no quotes, at most two short lines. " +
+        "Be terse and concrete: what the supplier actually said (quoted/priced, has questions, needs info, " +
+        "lead time, etc.). Cut every word that doesn't earn its place. " +
+        "If the supplier is DECLINING or cannot quote (a regret / 'no stock' / 'unable to supply' / " +
+        "out-of-office with no quote), output the single word: Regret — nothing else. " +
+        "If the body is empty or only says to see an attachment, say so in a few words " +
+        "(e.g. \"Quote attached\"). Never invent details that aren't in the email.";
+
     public RfqSummaryService(IHttpClientFactory http, IConfiguration config, ILogger<RfqSummaryService> log)
     {
         _http   = http;
         _config = config;
         _log    = log;
+    }
+
+    /// <summary>
+    /// Terse (≤2-line) summary of one INCOMING supplier email for the Mailbox list — returns "Regret"
+    /// for a decline, or null on empty input / any AI failure (caller falls back to the body preview).
+    /// Reuses the same Claude plumbing as <see cref="SummarizeAsync"/>.
+    /// </summary>
+    public async Task<string?> SummarizeIncomingEmailAsync(string? subject, string? body, CancellationToken ct)
+    {
+        var apiKey = _config["Anthropic:ApiKey"];
+        var text   = $"{(string.IsNullOrWhiteSpace(subject) ? "" : $"Subject: {subject}\n\n")}{body}".Trim();
+        if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(text))
+            return null;
+
+        // Cap the body sent to the model — a two-line summary never needs the full quoted thread.
+        if (text.Length > 6000) text = text[..6000];
+
+        var model = _config["Claude:Model"] ?? "claude-sonnet-4-6";
+        var reqBody = JsonSerializer.Serialize(new
+        {
+            model,
+            max_tokens = 120,
+            system     = EmailSummaryPrompt,
+            messages   = new[] { new { role = "user", content = text } },
+        });
+
+        try
+        {
+            using var http = _http.CreateClient();
+            http.Timeout = TimeSpan.FromSeconds(30);
+            http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+
+            var resp = await http.PostAsync(
+                "https://api.anthropic.com/v1/messages",
+                new StringContent(reqBody, Encoding.UTF8, "application/json"), ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.LogWarning("[EmailSummary] Claude returned {Status}", resp.StatusCode);
+                return null;
+            }
+
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+
+            var sb = new StringBuilder();
+            foreach (var block in doc.RootElement.GetProperty("content").EnumerateArray())
+                if (block.TryGetProperty("type", out var t) && t.GetString() == "text" &&
+                    block.TryGetProperty("text", out var txt))
+                    sb.Append(txt.GetString());
+
+            // Collapse to at most two non-empty lines and trim any stray bullet/quote markers.
+            var lines = sb.ToString()
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(l => l.TrimStart('-', '*', '•', ' ').Trim('"', ' ').Trim())
+                .Where(l => l.Length > 0)
+                .Take(2)
+                .ToList();
+            var summary = string.Join("\n", lines);
+            return string.IsNullOrWhiteSpace(summary) ? null : summary;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[EmailSummary] summarize failed");
+            return null;
+        }
     }
 
     public async Task<List<string>> SummarizeAsync(string input, CancellationToken ct)
