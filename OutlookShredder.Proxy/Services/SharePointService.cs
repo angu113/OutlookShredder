@@ -10231,6 +10231,8 @@ public partial class SharePointService
         {
             ("DocumentType",   "text"),
             ("CustomerName",   "text"),
+            ("CustomerEmail",  "text"),
+            ("ContactName",    "text"),
             ("CustomerRef",    "text"),
             ("DocumentDate",   "text"),
             ("TotalAmount",    "text"),
@@ -10314,6 +10316,8 @@ public partial class SharePointService
             ["Title"]          = extraction.DocumentNumber ?? Path.GetFileNameWithoutExtension(fileName),
             ["DocumentType"]   = extraction.DocumentType,
             ["CustomerName"]   = extraction.CustomerName,
+            ["CustomerEmail"]  = extraction.CustomerEmail,
+            ["ContactName"]    = extraction.ContactName,
             ["CustomerRef"]    = extraction.CustomerReference,
             ["DocumentDate"]   = extraction.DocumentDate,
             ["TotalAmount"]    = extraction.TotalAmount,
@@ -10376,6 +10380,8 @@ public partial class SharePointService
         var fields = new Dictionary<string, object?>
         {
             ["CustomerName"]    = extraction.CustomerName,
+            ["CustomerEmail"]   = extraction.CustomerEmail,
+            ["ContactName"]     = extraction.ContactName,
             ["CustomerRef"]     = extraction.CustomerReference,
             ["DocumentDate"]    = extraction.DocumentDate,
             ["TotalAmount"]     = extraction.TotalAmount,
@@ -10599,7 +10605,7 @@ public partial class SharePointService
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerEmail,ContactName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
                 r.QueryParameters.Top    = top;
             }, ct);
 
@@ -10623,6 +10629,8 @@ public partial class SharePointService
                 DocumentType      = Get("DocumentType"),
                 DocumentDate      = Get("DocumentDate"),
                 CustomerName      = Get("CustomerName"),
+                CustomerEmail     = Get("CustomerEmail"),
+                ContactName       = Get("ContactName"),
                 CustomerReference = Get("CustomerRef"),
                 TotalAmount       = Get("TotalAmount"),
                 Currency          = Get("Currency"),
@@ -10663,7 +10671,7 @@ public partial class SharePointService
         var item = await GetGraph().Sites[siteId].Lists[listId].Items[spItemId]
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
+                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerEmail,ContactName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
             }, ct);
 
         var d = item?.Fields?.AdditionalData;
@@ -10680,6 +10688,8 @@ public partial class SharePointService
             DocumentType      = Get("DocumentType"),
             DocumentDate      = Get("DocumentDate"),
             CustomerName      = Get("CustomerName"),
+            CustomerEmail     = Get("CustomerEmail"),
+            ContactName       = Get("ContactName"),
             CustomerReference = Get("CustomerRef"),
             TotalAmount       = Get("TotalAmount"),
             Currency          = Get("Currency"),

@@ -16,6 +16,11 @@ public class ErpExtraction
     [JsonPropertyName("customer_name")]
     public string? CustomerName { get; set; }
 
+    /// <summary>The customer's email address if printed on the document (header/contact block). Null if
+    /// absent. Drives the ERP-preview "email the customer" chip — the to: address comes from the doc.</summary>
+    [JsonPropertyName("customer_email")]
+    public string? CustomerEmail { get; set; }
+
     [JsonPropertyName("customer_reference")]
     public string? CustomerReference { get; set; }
 
@@ -74,6 +79,9 @@ public class ErpDocumentRecord
     public string? DocumentType { get; set; }
     public string? DocumentDate { get; set; }
     public string? CustomerName { get; set; }
+    public string? CustomerEmail { get; set; }
+    /// <summary>The customer's contact person (the "Attention:" name), used for the email greeting.</summary>
+    public string? ContactName { get; set; }
     public string? CustomerReference { get; set; }
     public string? TotalAmount { get; set; }
     public string? Currency    { get; set; }

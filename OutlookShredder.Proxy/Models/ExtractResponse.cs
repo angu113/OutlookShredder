@@ -171,6 +171,8 @@ public class ErpBusRecord
     public string? DocumentType      { get; set; }
     public string? DocumentDate      { get; set; }
     public string? CustomerName      { get; set; }
+    public string? CustomerEmail     { get; set; }
+    public string? ContactName       { get; set; }
     public string? CustomerReference { get; set; }
     public string? TotalAmount       { get; set; }
     public string? Currency          { get; set; }

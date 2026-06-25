@@ -687,6 +687,8 @@ public class FileWatcherService : BackgroundService
             DocumentNumber    = extraction.DocumentNumber,
             DocumentType      = extraction.DocumentType,
             CustomerName      = extraction.CustomerName,
+            CustomerEmail     = extraction.CustomerEmail,
+            ContactName       = extraction.ContactName,
             FileName          = fileName,
             PdfUrl            = notifyPath,
             ReceivedAt        = receivedAt,
@@ -723,6 +725,8 @@ public class FileWatcherService : BackgroundService
             extraction.LineItems         = aiResult.LineItems;
             if (string.IsNullOrWhiteSpace(extraction.CustomerName))
                 extraction.CustomerName = aiResult.CustomerName;
+            if (string.IsNullOrWhiteSpace(extraction.CustomerEmail))
+                extraction.CustomerEmail = aiResult.CustomerEmail;
             if (string.IsNullOrWhiteSpace(extraction.DeliveryAddress))
                 extraction.DeliveryAddress = aiResult.DeliveryAddress;
             // Contact is normally set deterministically from the enrichment above; fall back to the AI's
@@ -789,6 +793,8 @@ public class FileWatcherService : BackgroundService
             DocumentType      = extraction.DocumentType,
             DocumentDate      = extraction.DocumentDate,
             CustomerName      = extraction.CustomerName,
+            CustomerEmail     = extraction.CustomerEmail,
+            ContactName       = extraction.ContactName,
             CustomerReference = extraction.CustomerReference,
             TotalAmount       = extraction.TotalAmount,
             Currency          = extraction.Currency ?? "USD",
@@ -818,6 +824,8 @@ public class FileWatcherService : BackgroundService
             DocumentType      = extraction.DocumentType,
             DocumentDate      = extraction.DocumentDate,
             CustomerName      = extraction.CustomerName,
+            CustomerEmail     = extraction.CustomerEmail,
+            ContactName       = extraction.ContactName,
             CustomerReference = extraction.CustomerReference,
             TotalAmount       = extraction.TotalAmount,
             Currency          = extraction.Currency ?? "USD",
