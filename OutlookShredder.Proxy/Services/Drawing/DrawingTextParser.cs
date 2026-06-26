@@ -273,13 +273,21 @@ public static class DrawingTextParser
                 if (lm.Success) leftEnd = NumOf(lm.Groups[1].Value);
                 var rm = Regex.Match(lower, $@"\brhs\s*[:=]?\s*({Num})");
                 if (rm.Success) rightEnd = NumOf(rm.Groups[1].Value);
+                // Edge distance from the long edges to the hole rows. NEVER combine the two values with a
+                // "/" — Num matches "2/2" as the fraction 1.0 (the old "always 1 inch, input ignored" bug),
+                // exactly like the end offsets above. So use a non-fraction number and independent keywords:
+                // "edge X" sets both rows; "topedge X" / "botedge Y" override each. (Dec = decimal/integer.)
+                const string Dec = @"\d+(?:\.\d+)?";
                 double topEdge = 0, bottomEdge = 0;
-                var em = Regex.Match(lower, $@"\bedge\s*[:=]?\s*({Num})(?:\s*/\s*({Num}))?");
-                if (em.Success)
-                {
-                    topEdge = NumOf(em.Groups[1].Value);
-                    bottomEdge = em.Groups[2].Success && em.Groups[2].Value.Length > 0 ? NumOf(em.Groups[2].Value) : topEdge;
-                }
+                var em = Regex.Match(lower, $@"\bedge\s*[:=]?\s*({Dec})");
+                if (em.Success) topEdge = bottomEdge = NumOf(em.Groups[1].Value);
+                var tem = Regex.Match(lower, $@"\btop\s*edge\s*[:=]?\s*({Dec})");
+                if (tem.Success) topEdge = NumOf(tem.Groups[1].Value);
+                var bem = Regex.Match(lower, $@"\bbot(?:tom)?\s*edge\s*[:=]?\s*({Dec})");
+                if (bem.Success) bottomEdge = NumOf(bem.Groups[1].Value);
+
+                bool singleRow = Regex.IsMatch(lower, @"\bsingle[\s-]?row\b");
+
                 holes = new HoleSpec
                 {
                     Diameter = NumOf(hm.Groups[1].Value),
@@ -289,6 +297,7 @@ public static class DrawingTextParser
                     RightEndOffset = rightEnd,
                     TopEdge = topEdge,
                     BottomEdge = bottomEdge,
+                    SingleRow = singleRow,
                 };
             }
         }
@@ -311,11 +320,16 @@ public static class DrawingTextParser
 
         if (L <= 0 || W <= 0) throw new DrawingParseException("Plate dimensions must be positive.");
 
+        // Base-plate rounded corners: "radius 0.5" / "radius-corners 0.5" (decimal/integer, no fraction).
+        double cornerRadius = 0;
+        var rcm = Regex.Match(lower, @"\bradius(?:[\s-]*corners?)?\s*[:=]?\s*(\d+(?:\.\d+)?)");
+        if (rcm.Success) cornerRadius = NumOf(rcm.Groups[1].Value);
+
         return new PartSpec
         {
             Type = type, Length = L, Width = W, Thickness = thickness,
             InsideRadius = ri, KFactor = k, Material = material, Holes = holes, Units = "in",
-            PolishDirection = polish,
+            PolishDirection = polish, CornerRadius = cornerRadius,
         };
     }
 

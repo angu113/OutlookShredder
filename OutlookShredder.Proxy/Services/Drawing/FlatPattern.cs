@@ -597,12 +597,13 @@ public static class FlatPattern
         double L = spec.Length, W = spec.Width;
         var holes = ComputeHoles(spec, L, W);
 
+        // Square corners by default; rounded (tessellated-arc) outline when a base-plate corner radius is set.
+        var outline = spec.CornerRadius > 0
+            ? RectVerts(L / 2.0, W / 2.0, L / 2.0, W / 2.0, spec.CornerRadius)
+            : new List<CutVertex> { new(0, 0), new(L, 0), new(L, W), new(0, W) };
         var entities = new List<CutEntity>
         {
-            CutEntity.Polyline(CutLayer, closed: true, new[]
-            {
-                new CutVertex(0, 0), new CutVertex(L, 0), new CutVertex(L, W), new CutVertex(0, W),
-            }),
+            CutEntity.Polyline(CutLayer, closed: true, outline),
         };
         foreach (var (hx, hy, dia) in holes)
             entities.Add(CutEntity.Circle(CutLayer, hx, hy, dia / 2.0));
@@ -680,6 +681,11 @@ public static class FlatPattern
             for (int i = 0; i < xs.Count; i++)
             {
                 double x = xs[i];
+                if (h.SingleRow)
+                {
+                    list.Add((x, rowTop, h.Diameter));   // one line of holes only
+                    continue;
+                }
                 bool ends = i == 0 || i == xs.Count - 1;
                 if (h.Pattern == HolePattern.Paired || ends)
                 {

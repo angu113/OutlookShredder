@@ -530,7 +530,14 @@ public static class DrawingPdfRenderer
         double oy = area.Y + (area.Height - drawH) / 2;
         XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
 
-        gfx.DrawRectangle(cutPen, new XRect(ox, oy, drawW, drawH));
+        if (fp.Spec.CornerRadius > 0)
+        {
+            // Rounded corners (base plate): ellipse axis = 2 x radius, clamped to half the shorter side.
+            double er = Math.Min(fp.Spec.CornerRadius * scale, Math.Min(drawW, drawH) / 2.0) * 2.0;
+            gfx.DrawRoundedRectangle(cutPen, ox, oy, drawW, drawH, er, er);
+        }
+        else
+            gfx.DrawRectangle(cutPen, new XRect(ox, oy, drawW, drawH));
         foreach (var (hx, hy, dia) in fp.Holes)
         {
             double r = dia / 2.0 * scale;
@@ -550,7 +557,8 @@ public static class DrawingPdfRenderer
             double botEdge = hsr.BottomEdge > 0 ? hsr.BottomEdge : W * 0.25;
             double rowTop = W - topEdge, rowBot = botEdge;
             DimV(gfx, dimFont, ox, ox - 22, P(0, W).Y, P(0, rowTop).Y, Fq(topEdge), false);
-            DimV(gfx, dimFont, ox, ox - 22, P(0, 0).Y, P(0, rowBot).Y, Fq(botEdge), false);
+            if (!hsr.SingleRow)
+                DimV(gfx, dimFont, ox, ox - 22, P(0, 0).Y, P(0, rowBot).Y, Fq(botEdge), false);
         }
 
         if (fp.Holes.Count > 0)

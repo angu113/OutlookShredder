@@ -58,6 +58,7 @@ public sealed class HoleSpec
     public double RightEndOffset { get; init; }  // flitch: RHS edge -> last hole (may differ from left)
     public double TopEdge { get; init; }       // flitch: top material edge -> top row
     public double BottomEdge { get; init; }    // flitch: bottom material edge -> bottom row
+    public bool SingleRow { get; init; }       // flitch: drill the top row only (no bottom row)
 }
 
 /// <summary>Whether a stated dimension is measured to the outside or the inside of the form.</summary>
@@ -97,6 +98,10 @@ public sealed class PartSpec
     /// <summary>Plate width (for flat plates; Length is the plate length). Also the pan base width.
     /// For a <see cref="PartType.Sheet"/> this is the horizontal extent (paired with <see cref="Height"/>).</summary>
     public double Width { get; init; }
+
+    /// <summary>Base-plate corner radius in inches (0 = square corners). When &gt; 0 the plate outline is
+    /// drawn with rounded corners in both the DXF and the PDF top view.</summary>
+    public double CornerRadius { get; init; }
 
     // ── Sheet (plain flat rectangle, no bends) ──────────────────────────────
     /// <summary>Sheet vertical extent. Paired with <see cref="Width"/> (horizontal).</summary>
