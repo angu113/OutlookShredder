@@ -52,8 +52,9 @@ public class ErpAiService
                             store / franchise name. Leave null if absent.
         contact_phone:      The customer contact's phone number, printed after "Contact Phone:". Return the
                             digits as shown, e.g. "929 355 6805". Leave null if absent.
-        customer_email:     The CUSTOMER'S email address, printed after an "Email:" or "E-Mail:" label.
-                            Return just the address, exactly as shown. NEVER return
+        customer_email:     ALL of the CUSTOMER'S email addresses printed on the document (after an
+                            "Email:" or "E-Mail:" label, or elsewhere). If more than one is present,
+                            join them with "; ". Return each address exactly as shown. NEVER return
                             hackensack@metalsupermarkets.com or ANY @metalsupermarkets.com address — that
                             is OUR store, not the customer. Leave null if no customer email is printed.
 
@@ -105,7 +106,7 @@ public class ErpAiService
               "document_type":      { "type": ["string","null"],   "description": "Leave null — set from filename automatically.", "enum": ["Quotation","SalesOrder","PickingSlip","PurchaseOrder","Invoice","CreditNote","Payment","ShippingNote","Unknown",null] },
               "document_number":    { "type": ["string","null"],   "description": "Our ERP reference (HSK-... or 020803-...). Leave null for most documents — set from filename. Only populate if the filename did not contain a record number (e.g. a bare PurchaseOrder.pdf)." },
               "customer_name":      { "type": ["string","null"],   "description": "Company the document is addressed to. On picking slips: the company name on the line BELOW 'Ship To:' (not the text to the right of it on the same line). Not the Customer Rep or store name." },
-              "customer_email":     { "type": ["string","null"],   "description": "The customer's email after an 'Email:'/'E-Mail:' label. NEVER an @metalsupermarkets.com address (that is our store). Null if no customer email is printed." },
+              "customer_email":     { "type": ["string","null"],   "description": "ALL the customer's email addresses printed on the document, joined by '; ' when more than one. NEVER an @metalsupermarkets.com address (that is our store). Null if none printed." },
               "customer_reference": { "type": ["string","null"],   "description": "Customer's own PO or reference number. Never our own ERP reference." },
               "sales_rep":          { "type": ["string","null"],   "description": "Our sales rep / order taker, from the 'Customer Rep:' field (most docs) or 'Requested By:' (purchase orders). Name as printed; null if absent." },
               "contact_name":       { "type": ["string","null"],   "description": "Customer's contact person after 'Attention:' (colon + name on the SAME line, paired with 'Contact Phone:'), e.g. 'Sam B'. NOT the standalone 'Attention' header above the ship-to address, the Customer Rep, or the store name. Null if absent." },

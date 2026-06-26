@@ -96,14 +96,27 @@ internal static class PickingSlipEnricher
     private static readonly Regex _emailRegex =
         new(@"[\w.+\-]+@[\w\-]+\.[\w.\-]+", RegexOptions.Compiled);
 
-    /// <summary>Pulls the first email address out of an "Email:" / "E-Mail:" value, EXCLUDING our own
-    /// store addresses (@metalsupermarkets.com) — those print on the slip but aren't the customer.</summary>
-    private static string? NonStoreEmail(string? s)
+    /// <summary>All non-store email addresses in an "Email:" / "E-Mail:" value. EXCLUDES our own store
+    /// addresses (@metalsupermarkets.com) — those print on the slip but aren't the customer. A document
+    /// may carry more than one customer email.</summary>
+    private static IEnumerable<string> NonStoreEmails(string? s)
     {
-        if (string.IsNullOrWhiteSpace(s)) return null;
-        var m = _emailRegex.Match(s);
-        if (!m.Success) return null;
-        return m.Value.Contains("@metalsupermarkets.com", StringComparison.OrdinalIgnoreCase) ? null : m.Value;
+        if (string.IsNullOrWhiteSpace(s)) yield break;
+        foreach (Match m in _emailRegex.Matches(s))
+            if (!m.Value.Contains("@metalsupermarkets.com", StringComparison.OrdinalIgnoreCase))
+                yield return m.Value;
+    }
+
+    /// <summary>Folds newly-found emails into a "; "-joined list, deduped (case-insensitive), so a To:
+    /// field can be filled with every address found across the slip's header lines.</summary>
+    private static string? AppendEmails(string? current, IEnumerable<string> found)
+    {
+        var list = new List<string>();
+        if (!string.IsNullOrWhiteSpace(current))
+            list.AddRange(current.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        foreach (var e in found)
+            if (!list.Contains(e, StringComparer.OrdinalIgnoreCase)) list.Add(e);
+        return list.Count > 0 ? string.Join("; ", list) : null;
     }
 
     // ── Data records ─────────────────────────────────────────────────────────
@@ -544,7 +557,8 @@ internal static class PickingSlipEnricher
 
             attention      ??= After(text, "Attention:");
             contactPhone   ??= After(text, "Contact Phone:");
-            email          ??= NonStoreEmail(After(text, "Email:")) ?? NonStoreEmail(After(text, "E-Mail:"));
+            email            = AppendEmails(email, NonStoreEmails(After(text, "Email:")));
+            email            = AppendEmails(email, NonStoreEmails(After(text, "E-Mail:")));
             repName        ??= After(text, "Customer Rep:");
             orderDate      ??= After(text, "Order Date:");
             deliveryMethod ??= After(text, "Delivery Method:");
