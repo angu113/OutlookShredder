@@ -276,8 +276,9 @@ public static class DrawingTextParser
                 // Edge distance from the long edges to the hole rows. NEVER combine the two values with a
                 // "/" — Num matches "2/2" as the fraction 1.0 (the old "always 1 inch, input ignored" bug),
                 // exactly like the end offsets above. So use a non-fraction number and independent keywords:
-                // "edge X" sets both rows; "topedge X" / "botedge Y" override each. (Dec = decimal/integer.)
-                const string Dec = @"\d+(?:\.\d+)?";
+                // "edge X" sets both rows; "topedge X" / "botedge Y" override each. Dec accepts a
+                // no-leading-zero decimal (".5" == "0.5"), like the main Num grammar.
+                const string Dec = @"\d*\.\d+|\d+";
                 double topEdge = 0, bottomEdge = 0;
                 var em = Regex.Match(lower, $@"\bedge\s*[:=]?\s*({Dec})");
                 if (em.Success) topEdge = bottomEdge = NumOf(em.Groups[1].Value);
@@ -322,7 +323,7 @@ public static class DrawingTextParser
 
         // Base-plate rounded corners: "radius 0.5" / "radius-corners 0.5" (decimal/integer, no fraction).
         double cornerRadius = 0;
-        var rcm = Regex.Match(lower, @"\bradius(?:[\s-]*corners?)?\s*[:=]?\s*(\d+(?:\.\d+)?)");
+        var rcm = Regex.Match(lower, @"\bradius(?:[\s-]*corners?)?\s*[:=]?\s*(\d*\.\d+|\d+)");
         if (rcm.Success) cornerRadius = NumOf(rcm.Groups[1].Value);
 
         return new PartSpec
