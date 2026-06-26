@@ -21,9 +21,11 @@ namespace OutlookShredder.Proxy.Services;
 /// A signal counts only when it resolves to EXACTLY ONE candidate PO; otherwise the bill is left
 /// unmatched/ambiguous (surfaced, never silently mis-flagged).
 ///
-/// SUGGEST-first: by default (BillMatcher:Auto=false) it only proposes matches (logged + returned by
-/// the on-demand endpoint). Set Auto=true (or call the endpoint with apply=true) to write
-/// PaymentStatus=Required. POs already Paid/Required and POs with no derivable total/ref (rfqId
+/// Auto-apply by default (BillMatcher:Auto=true): a CONFIDENT single match (supplier+amount, or
+/// supplier-ref = 100%) writes PaymentStatus=Required automatically; ambiguous/low-confidence bills
+/// are only proposed (logged + returned by the on-demand endpoint), never silently mis-flagged. Set
+/// BillMatcher:Auto=false to suppress all auto-writes and require apply=true on the endpoint.
+/// POs already Paid/Required and POs with no derivable total/ref (rfqId
 /// UNKNOWN/000000, raised outside the RFQ flow) can only be matched by an explicit Po# on the bill.
 /// </summary>
 public sealed class BillToPoMatcherService : IHostedService, IDisposable

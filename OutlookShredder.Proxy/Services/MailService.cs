@@ -394,7 +394,8 @@ public class MailService
     }
 
     /// <summary>
-    /// Returns messages tagged with "RFQ-Processed" across inbox and any ExtraFolders (newest first).
+    /// Returns messages tagged with "RFQ-Processed" across the inbox and all its descendant folders
+    /// (minus any Mail:ExcludeFolders), newest first.
     /// Used to populate the Reprocess Supplier Emails scan list.
     /// </summary>
     public async Task<List<ProcessedEmailDto>> GetProcessedMessagesAsync(string mailbox, int top = 200)
@@ -477,8 +478,9 @@ public class MailService
     }
 
     /// <summary>
-    /// Returns unprocessed messages received at or after <paramref name="since"/> across
-    /// inbox and any Mail:ExtraFolders. Filtering is done server-side per folder.
+    /// Returns unprocessed messages received at or after <paramref name="since"/> across the
+    /// inbox and all its descendant folders (minus any Mail:ExcludeFolders). Filtering is done
+    /// server-side per folder.
     /// </summary>
     public async Task<List<Message>> GetMessagesAsync(string mailbox, DateTimeOffset since)
     {
@@ -559,7 +561,7 @@ public class MailService
 
         var mailbox = GetMailbox();
 
-        // Multiple emails from the same sender can fall within the ±2 min window.
+        // Multiple emails from the same sender can fall within the search window (±30s, widened to ±10 min on retry).
         // Scan each candidate (that has attachments) until we find the one with the named file.
         foreach (var msg in messages.Where(m => m.HasAttachments == true && m.Id is not null))
         {
@@ -692,8 +694,9 @@ public class MailService
     }
 
     /// <summary>
-    /// Removes "RFQ-Processed" (and "Unknown") categories from every message in inbox
-    /// and any Mail:ExtraFolders so the next poll cycle will reprocess all emails.
+    /// Removes "RFQ-Processed" (and "Unknown") categories from every message in the inbox
+    /// and all its descendant folders (minus any Mail:ExcludeFolders) so the next poll cycle
+    /// will reprocess all emails.
     /// Returns the count of messages that were un-marked.
     /// </summary>
     public async Task<int> UnmarkAllAsync(string mailbox)

@@ -70,8 +70,8 @@ public class CacheController : ControllerBase
     public IActionResult PatchConfig([FromBody] CacheConfigDto patch)
     {
         // Write to the proxy's appsettings via in-memory config override.
-        // Values persist for the session; a full appsettings.json write would
-        // require file I/O with locking — not needed for the initial version.
+        // Currently a no-op (runtime patch not wired — see below); a full
+        // appsettings.json write would require file I/O with locking.
         ((IConfigurationRoot)_config).Providers
             .OfType<Microsoft.Extensions.Configuration.Json.JsonConfigurationProvider>()
             .FirstOrDefault(); // placeholder — runtime patch not wired; restart reads appsettings

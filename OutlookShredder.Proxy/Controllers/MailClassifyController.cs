@@ -6,7 +6,8 @@ namespace OutlookShredder.Proxy.Controllers;
 
 /// <summary>
 /// Phase 1a of the mail workbench (wip/mail-classification.md): validate classification quality
-/// on real forwarded mail BEFORE building SP persistence. Preview only — no writes.
+/// on real forwarded mail. Beyond preview/test endpoints, this also performs writes
+/// (setup-lists, capture, claim, complete, amend, purge, etc.).
 /// </summary>
 [ApiController]
 [Route("api/mail-classify")]

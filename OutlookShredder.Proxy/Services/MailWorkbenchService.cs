@@ -484,10 +484,12 @@ public sealed class MailWorkbenchService
     }
 
     /// <summary>
-    /// Uploads an item's attachments + the raw .eml to the SP document library under
-    /// MailArchive/{category}/{yyyy-MM}/{mailItemId}/, then patches the item's manifest with the
-    /// resulting webUrls + the .eml pointer. Best-effort per file. (Reclassify does NOT relocate
-    /// already-stored files; the webUrl pointer stays valid regardless of the folder.)
+    /// Writes an item's attachments + the raw .eml to the local OneDrive-synced archive folder
+    /// (ItemFolder = {archiveRoot}/{category}/{yyyy-MM-dd}_{subject}_{shortId}/) via
+    /// File.WriteAllBytesAsync — OneDrive syncs them to the document library; there is no direct
+    /// Graph/SP upload. Each manifest entry's WebUrl holds the local file path; the item's manifest
+    /// + .eml pointer are then patched. Best-effort per file. (Reclassify relocates stored files via
+    /// MoveItemFilesAsync, which rewrites the local paths.)
     /// </summary>
     private async Task StoreFilesAsync(string watchedUpn, MailboxMessageBody body, string mailItemId,
         string category, string receivedAtIso, CancellationToken ct, bool outbound = false)

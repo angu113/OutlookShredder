@@ -234,7 +234,7 @@ public class ClaudeExtractionService : IAiExtractionService
           "input_schema": {
             "type": "object",
             "properties": {
-              "jobReference":   { "type": ["string","null"], "description": "Metal Supermarkets job ID — 7-char initials+base32 (e.g. AW00001), 8-char HQ-prefixed (e.g. HQ4RCAPR), or 6-char legacy. Found as [AWXXXXX] in subject/body or 'JOB: AWXXXXX' in supplier PDFs. Return the ID only, no brackets." },
+              "jobReference":   { "type": ["string","null"], "description": "Metal Supermarkets job ID — exactly 6 chars: 2 letters (user initials) followed by 4 Crockford Base32 chars (e.g. AW0001). Found as [AWXXXX] in subject/body or 'JOB: AWXXXX' in supplier PDFs. Return the ID only, no brackets." },
               "quoteReference": { "type": ["string","null"], "description": "Supplier's own quote/reference number" },
               "supplierName":   { "type": ["string","null"], "description": "Company providing the quote" },
               "freightTerms":   { "type": ["string","null"], "description": "Verbatim freight terms, e.g. FOB Origin / Prepaid & Add / Included" },
@@ -581,8 +581,8 @@ public class ClaudeExtractionService : IAiExtractionService
         ── RFQ JOB REFERENCE ──────────────────────────────────────────────────────
         Look for a Metal Supermarkets job reference in [...] brackets anywhere in the
         document (subject line, PO header, line item descriptions, or email body context).
-        Three valid formats: 7-char initials+base32 (e.g. [AW00001]), 8-char HQ-prefixed
-        (e.g. [HQ4RCAPR]), or 6-char legacy (e.g. [BX9EWM]). Extract the ID without brackets.
+        Format: exactly 6 chars — 2 letters (user initials) followed by 4 Crockford Base32
+        chars (e.g. [AW0001]). Extract the ID without brackets.
 
         ── SUPPLIER NAME ──────────────────────────────────────────────────────────
         The company this PO is addressed TO (the vendor/supplier receiving the order).

@@ -12,7 +12,7 @@ namespace OutlookShredder.Proxy.Services;
 ///
 /// Config keys (appsettings.secrets.json):
 ///   OutlookCom:Mailbox              — display name or email of the Outlook store to read, e.g. "hackensack@metalsupermarkets.com"
-///   OutlookCom:PollIntervalSeconds  — how often to poll (default: 60)
+///   OutlookCom:PollIntervalSeconds  — how often to poll (default: 300)
 ///   OutlookCom:ProcessedCategory    — Outlook category stamped on processed items (default: "PO-COM-Processed")
 /// </summary>
 public class OutlookComPollerService : BackgroundService

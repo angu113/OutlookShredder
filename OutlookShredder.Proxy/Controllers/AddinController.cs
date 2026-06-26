@@ -35,7 +35,7 @@ public class AddinController : ControllerBase
     /// Receives a full email payload pushed by the VSTO add-in when a new message
     /// arrives in a monitored mailbox.  Publishes an AddinNewEmail Service Bus event
     /// so connected Shredder clients are notified in real time.
-    /// Large payloads (50 MB body limit) are accepted; attachment bytes are carried
+    /// Large payloads (100 MB body limit) are accepted; attachment bytes are carried
     /// in the payload for the caller to consume — the proxy does not persist them.
     /// </summary>
     [HttpPost("email-received")]

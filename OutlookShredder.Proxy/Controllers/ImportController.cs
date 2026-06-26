@@ -28,6 +28,7 @@ public class ImportController(
     /// Import\processed\{timestamp}_{filename}.
     ///
     /// File type detection (first match wins):
+    ///   - Filename contains "customer info" / "customerinfo" → customer info (enrichment)
     ///   - Filename contains "partner" or "bp"  → business partners
     ///   - Filename contains "sales order"       → order contacts (mined from the Sales-Orders export)
     ///   - Filename contains "contact"           → contacts

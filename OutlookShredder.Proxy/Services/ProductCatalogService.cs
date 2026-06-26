@@ -11,7 +11,7 @@ namespace OutlookShredder.Proxy.Services;
 /// names to their canonical catalog name and search key via fuzzy matching.
 ///
 /// Matching strategy (in priority order):
-///   1. Containment — catalog non-dim tokens cover ≥ 55% of vendor tokens (≥ 2 overlap).
+///   1. Containment — vendor tokens cover ≥ 55% of catalog non-dim tokens (≥ 2 overlap).
 ///      Composite score = overlap_count × (1 + dim_overlap_fraction) breaks ties.
 ///   2. Jaccard ≥ 0.30 on non-dimension tokens only, with all compatibility checks.
 ///

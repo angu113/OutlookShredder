@@ -14,7 +14,8 @@ namespace OutlookShredder.Proxy.Services;
 ///   1. Stamps both header cells: left = customer name + attention + contact phone;
 ///      right = sales rep + order date + delivery method + carrier + PO# (if present).
 ///   2. Bolds shop-comment lines in-place (white rect + bold redraw).
-///   3. Appends a callout page with geometric drawings for bend/cut keywords.
+///   3. Stamps page numbers and returns matched shop-op keywords as ProcessOps. (Geometric FAB
+///      drawings are no longer appended here — PickingSlipFabAppender does that at display time.)
 ///
 /// EnrichPickingSlip does all three in a single PdfPig read + single PdfSharp write.
 /// </summary>
@@ -1124,7 +1125,6 @@ internal static class PickingSlipEnricher
     // ── Stamp-bounds detection (for WPF UI overlay) ───────────────────────────
 
     /// <summary>
-    /// Finds the "Description (Special Instructions)" box on the first page that contains it
     /// Returns the dimensions of every page in the PDF, in points (1 pt = 1/72").
     /// Useful for diagnosing stamp coordinate mismatches.
     /// </summary>

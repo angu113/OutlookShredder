@@ -41,8 +41,8 @@ public class RfqSummaryController : ControllerBase
     }
 
     // ── GET /api/rfq/{rfqId}/state-of-play ────────────────────────────────────
-    /// <summary>The cached AI "state of play" comparison for an RFQ. Generates on demand when the cache
-    /// is missing or its InputsHash is stale (then persists it). `summary` is null when there are no
+    /// <summary>The cached AI "state of play" comparison for an RFQ. Returns any cached summary;
+    /// generates on demand only when nothing is cached (then persists it). `summary` is null when there are no
     /// quotes yet / AI is unavailable and nothing was cached. <paramref name="force"/>=true (the UI's
     /// refresh icon) skips the cache, regenerates from current SLI data, and persists the result.</summary>
     [HttpGet("{rfqId}/state-of-play")]

@@ -13,7 +13,7 @@ namespace OutlookShredder.Proxy.Services;
 ///      Once authenticated the token is cached to disk and all future calls are silent.
 ///
 /// Config keys (appsettings.json / secrets):
-///   HackensackMail:ClientId       — optional override (default: Graph Command Line Tools app)
+///   HackensackMail:ClientId       — optional override (default: Outlook Mobile app)
 ///   HackensackMail:TokenCachePath — optional override; default: {exeDir}/hackensack-msal-cache.bin
 /// </summary>
 public class DelegatedTokenProvider

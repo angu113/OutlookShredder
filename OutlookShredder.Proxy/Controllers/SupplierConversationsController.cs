@@ -245,8 +245,9 @@ public class SupplierConversationsController : ControllerBase
     }
 
     /// <summary>
-    /// One-time clean-slate: stamp every existing inbound supplier message read (no reader attribution),
-    /// so only messages arriving after this start unread. Idempotent.
+    /// Deprecated no-op (returns stamped=0, deprecated=true). The team-wide clean-slate is replaced
+    /// by the per-user lazy watermark — each user's profile is created with AdoptedAt=now on their
+    /// first unread fetch.
     /// </summary>
     [HttpPost("supplier-conversations/backfill-read")]
     public IActionResult BackfillRead() =>

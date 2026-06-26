@@ -9,11 +9,11 @@ namespace OutlookShredder.Proxy.Services;
 ///
 /// Type (case-insensitive):
 ///   Invoice | Order | SalesConfirmation | Sales | PaymentIn |
-///   PickingSlip | ShippingSlip | GoodsShipment | Purchase_Order | PurchaseOrder
+///   PickingSlip | PickList | ShippingSlip | GoodsShipment | Purchase_Order | PurchaseOrder
 ///
 /// Organization:  020803  |  HSK
 ///
-/// RecordType:    2–5 uppercase letters, e.g. SI, SO, ARR, GS, PO
+/// RecordType:    1–5 letters, case-insensitive, e.g. SI, SO, ARR, GS, PO
 /// RecordNumber:  exactly 7 digits
 ///
 /// DocumentNumber (the unique ERP key stored in SharePoint):

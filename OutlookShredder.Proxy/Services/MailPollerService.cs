@@ -17,7 +17,7 @@ namespace OutlookShredder.Proxy.Services;
 ///   Mail:MailboxAddress       — UPN of the inbox to watch, e.g. "rfq@example.com"
 ///   Mail:PollIntervalSeconds  — how often to poll (default: 30)
 ///   Mail:LookbackHours        — rolling lookback window per poll (default: 24)
-///   Mail:MaxEmailsPerMinute   — max AI API calls per minute (default: 5)
+///   Mail:MaxEmailsPerMinute   — max AI API calls per minute (default: 100)
 /// </summary>
 public class MailPollerService : BackgroundService
 {

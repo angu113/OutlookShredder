@@ -10,7 +10,7 @@ namespace OutlookShredder.Proxy.Services;
 /// The richer "state of play" AI comparison for an RFQ's competing quotes — supersedes the ≤3-bullet
 /// summarize call. Builds an input from the STRUCTURED supplier line items (the supplier's own product
 /// names + specs + prices + lead time / certs / comments / regret flags) plus each supplier's email
-/// body, and asks Claude for a tight narrative on who to buy from and why.
+/// body, and asks Claude for ONLY a markdown comparison table — no narrative, no recommendation.
 ///
 /// Deliberately code-free: MSPC / ProductSearchKey / CatalogProductName are NEVER sent — our MSPCs can
 /// be custom-generated on close matches, so the same item can carry different codes across suppliers.

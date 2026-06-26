@@ -6,8 +6,9 @@ namespace OutlookShredder.Proxy.Controllers;
 
 /// <summary>
 /// Token-match diagnostic review endpoints.
-/// All write endpoints automatically trigger a cache refresh on SupplierProductMappingsCacheService
+/// PromoteMapping triggers a cache refresh on SupplierProductMappingsCacheService
 /// so promoted mappings are visible immediately without waiting for the 5-minute refresh.
+/// (Review/ClearDiagnostics do not refresh the cache.)
 /// </summary>
 [ApiController]
 [Route("api/token-match")]

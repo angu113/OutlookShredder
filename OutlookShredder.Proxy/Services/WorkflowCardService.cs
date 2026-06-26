@@ -183,7 +183,7 @@ public class WorkflowCardService : IHostedService
     /// Called by FileWatcherService after a PickingSlip is written to SP.
     /// Routes into the Trigger "Prioritize" intake (AssignedDate="") so the user can schedule it.
     ///   Worklist lane (Tab="Worklist"): created for EVERY picking slip so nothing is missed; any matched
-    ///     shop-operation keywords ride along on the card's Notes for context.
+    ///     shop-operation keywords ride along on the card's ProcessOps (Notes is left empty for the user).
     ///   Delivery: created for any delivery method that isn't a customer pickup / will-call
     ///     (see <see cref="IsDeliveryMethod"/>) — e.g. "Our Truck", "UPS Ground", "Delivery".
     /// Both are deduped against existing non-completed cards for the same doc + tab.

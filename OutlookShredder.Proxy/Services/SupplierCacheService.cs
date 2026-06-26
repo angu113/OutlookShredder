@@ -57,7 +57,8 @@ public class SupplierCacheService : BackgroundService, ICacheStatusProvider
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Ensure ManagerContact and OooContact columns exist before first read.
+        // Ensure the contact columns (ManagerContact, OooContact, PrimaryContactFirstName,
+        // ManagerContactFirstName, OooContactFirstName) exist before first read.
         await EnsureColumnsAsync();
 
         // Refresh immediately on startup, then every hour.
@@ -221,8 +222,8 @@ public class SupplierCacheService : BackgroundService, ICacheStatusProvider
     /// Returns the canonical supplier name from the Suppliers list if a fuzzy
     /// match is found (Jaccard token similarity ≥ 0.35).
     /// Returns <see langword="null"/> when the cache is loaded and no match exists.
-    /// Returns <paramref name="rawName"/> unchanged only when the cache is empty
-    /// (not yet loaded), so startup processing is not blocked.
+    /// Also returns <see langword="null"/> when the cache is empty (not yet loaded) — the
+    /// raw name is skipped rather than used, so an unresolved name is never cached.
     /// </summary>
     public string? ResolveSupplierName(string? rawName)
     {

@@ -58,7 +58,7 @@ public class QcController : ControllerBase
     /// Query params (pick one):
     ///   date=2026-05-08          — single day (defaults to yesterday)
     ///   startDate=&amp;endDate=  — explicit range
-    ///   days=N                   — last N calendar days ending yesterday (default 1)
+    ///   days=N                   — last N calendar days ending yesterday (default 7)
     /// Response: PricingReport — grouped by metal/shape/conditions with avg/min/max $/lb.
     /// Only high-confidence quotes contribute to the average; low/medium are logged separately.
     /// </summary>

@@ -3,7 +3,9 @@ namespace OutlookShredder.Proxy.Services;
 /// <summary>
 /// Distributed single-instance coordinator via SharePoint lease.
 /// Ensures that exactly one proxy across all machines holds each named lease at a time.
-/// Other services (e.g. ZoomCallWatcherService) query IsLeaseHolder before starting.
+/// Currently has no active consumer — vestigial scaffolding for the rejected lease-based
+/// ingestion approach (ZoomCallWatcherService now runs all-sources/no-lease and never
+/// queries IsLeaseHolder).
 ///
 /// Lease duration: 60 s.  Renewal interval: 30 s.
 /// If the holder crashes the lease expires in ≤60 s and another proxy claims it.
