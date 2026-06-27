@@ -12524,21 +12524,66 @@ public partial class SharePointService
         return _workflowCardsListId = listId;
     }
 
-    public async Task<List<Models.WorkflowCard>> ReadWorkflowCardsAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Reads EVERY item in a list, following Graph's <c>@odata.nextLink</c> to the end so a growing list
+    /// is never silently truncated by a single <c>Top=N</c> page (the bug class behind worklist cards
+    /// vanishing once the list crossed 500 rows). <paramref name="pageSize"/> is the per-round-trip cap,
+    /// not a total limit; an optional <paramref name="filter"/> must reference indexed columns.
+    /// SharePoint list items don't support <c>$skip</c> — cursor pagination via nextLink is the only way.
+    /// </summary>
+    private async Task<List<Microsoft.Graph.Models.ListItem>> ReadAllListItemsAsync(
+        string listId, string[]? expand = null, string? filter = null, string[]? orderby = null,
+        int pageSize = 2000, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();
+        var all    = new List<Microsoft.Graph.Models.ListItem>();
+        var resp   = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(r =>
+        {
+            if (expand  is not null) r.QueryParameters.Expand  = expand;
+            if (filter  is not null) r.QueryParameters.Filter  = filter;
+            if (orderby is not null) r.QueryParameters.Orderby = orderby;
+            r.QueryParameters.Top = pageSize;
+        }, ct);
+        while (resp is not null)
+        {
+            if (resp.Value is { Count: > 0 }) all.AddRange(resp.Value);
+            if (string.IsNullOrEmpty(resp.OdataNextLink)) break;
+            // The nextLink URL carries auth + all query params; the SDK just follows it.
+            var builder = new Microsoft.Graph.Sites.Item.Lists.Item.Items.ItemsRequestBuilder(
+                resp.OdataNextLink, GetGraph().RequestAdapter);
+            resp = await builder.GetAsync(cancellationToken: ct);
+        }
+        return all;
+    }
+
+    /// <summary>Returns <paramref name="from"/> minus <paramref name="businessDays"/> weekdays
+    /// (Saturdays/Sundays skipped). Used to window time-series reads to a recent working span.</summary>
+    internal static DateTime SubtractBusinessDays(DateTime from, int businessDays)
+    {
+        var d = from.Date;
+        for (int remaining = Math.Max(0, businessDays); remaining > 0; )
+        {
+            d = d.AddDays(-1);
+            if (d.DayOfWeek is not DayOfWeek.Saturday and not DayOfWeek.Sunday) remaining--;
+        }
+        return d;
+    }
+
+    public async Task<List<Models.WorkflowCard>> ReadWorkflowCardsAsync(CancellationToken ct = default)
+    {
         var listId = await GetOrCreateWorkflowCardsListIdAsync(ct);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Expand = ["fields"];
-                r.QueryParameters.Top    = 500;
-            }, ct);
+        // Window the cached board to a recent working span so it stays bounded as the list grows.
+        // Read EVERY row (paginated) — this is what fixes the silent Top=500 truncation that hid
+        // newly-added cards — then keep undated (Prioritize) cards plus anything in-window or future.
+        int windowDays = _config.GetValue("Workflow:ReadWindowBusinessDays", 5);
+        var cutoff     = SubtractBusinessDays(DateTime.Today, windowDays).ToString("yyyy-MM-dd");
+
+        var rawItems = await ReadAllListItemsAsync(listId, expand: ["fields"], ct: ct);
 
         var cards = new List<Models.WorkflowCard>();
         var processingToMigrate = new List<int>();   // legacy Tab="Processing" → backfill to "Worklist"
-        foreach (var item in items?.Value ?? [])
+        foreach (var item in rawItems)
         {
             if (item.Id is null) continue;
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
@@ -12550,7 +12595,7 @@ public partial class SharePointService
             var laneTab = (string.IsNullOrEmpty(rawTab) || rawTab == "Processing") ? "Worklist" : rawTab;
             if (rawTab == "Processing") processingToMigrate.Add(spId);
 
-            cards.Add(new Models.WorkflowCard
+            var card = new Models.WorkflowCard
             {
                 SpItemId       = spId,
                 DocumentNumber = d.TryGetValue("Title",        out var t)  ? t?.ToString() ?? "" : "",
@@ -12589,7 +12634,13 @@ public partial class SharePointService
                                           : loc is decimal lm  ? (int?)lm
                                           : int.TryParse(loc.ToString(), out var lp) ? (int?)lp : null)
                                        : null,
-            });
+            };
+
+            // Window filter: undated Prioritize cards always load; dated cards only if within the
+            // configured business-day window or in the future (ISO yyyy-MM-dd compares lexically).
+            if (!string.IsNullOrWhiteSpace(card.AssignedDate) &&
+                string.CompareOrdinal(card.AssignedDate, cutoff) < 0) continue;
+            cards.Add(card);
         }
 
         // One-time backfill: rewrite any legacy Tab="Processing" cards to "Worklist" in SP. Idempotent +
