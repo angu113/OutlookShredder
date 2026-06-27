@@ -47,7 +47,7 @@ public static class DrawingPdfRenderer
     // customerName: non-null triggers fab/picking-slip context for columns — draws the BOM header instead
     // of the regular Pixar title/spec table, and suppresses the Technics footnote.
     public static byte[] Render(FlatPatternResult fp, bool calibrate = false, bool polishBilingual = true,
-        string? customerName = null)
+        string? customerName = null, string? itemTag = null)
     {
         PickingSlipEnricher.EnsureFontResolver();
 
@@ -66,9 +66,14 @@ public static class DrawingPdfRenderer
             bool fabColumn = fp.IsColumn && customerName != null;
             double top, footTop, footH;
 
+            // FAB-note item letter (A, B, C…) drawn in the title block so it matches the lettered
+            // note list in the ERP viewer and survives the 90° append rotation (it rides the title).
+            double tagW = itemTag is not null ? 24 : 0;
+
             if (fabColumn)
             {
-                // BOM header replaces the Pixar title + spec table.
+                // BOM header replaces the Pixar title + spec table; letter sits in the top-left margin above it.
+                if (itemTag is not null) DrawItemTag(gfx, itemTag, M, M - 12);
                 double bomBottom = DrawColumnBomHeader(gfx, fp, customerName!, M, M, usable);
                 top = bomBottom + 8;
                 footH = 92;   // info box only (technics suppressed)
@@ -76,13 +81,14 @@ public static class DrawingPdfRenderer
             }
             else
             {
+                if (itemTag is not null) DrawItemTag(gfx, itemTag, M, M - 10);
                 var titleFont = new XFont("Arial", 16, XFontStyleEx.Bold);
-                double maxTitleW = usable;
+                double maxTitleW = usable - tagW;
                 double titleW = gfx.MeasureString(fp.Title, titleFont).Width;
                 if (titleW > maxTitleW)
                     titleFont = new XFont("Arial", Math.Max(11.0, 16.0 * maxTitleW / titleW), XFontStyleEx.Bold);
                 gfx.DrawString(fp.Title, titleFont, XBrushes.Black,
-                    new XRect(M, M - 10, maxTitleW, 22), XStringFormats.TopLeft);
+                    new XRect(M + tagW, M - 10, maxTitleW, 22), XStringFormats.TopLeft);
                 double tableBottom = DrawSpecTable(gfx, fp, M, M + 16, maxTitleW);
                 top = tableBottom + 10;
                 int footLines = fp.Summary.Split('\n').Length;
@@ -1202,6 +1208,9 @@ public static class DrawingPdfRenderer
         // (web/flanges/legs/section/holes/material) is already labelled on the drawing itself.
         var rows = new List<(string Label, string Value)>();
 
+        // Quantity — always first, every drawing type.
+        rows.Add((Bi.T("spec.quantity"), fp.Qty.ToString()));
+
         // Length (or a column's overall height); paddle blinds / circles / sheets have no single "length".
         if (fp.IsColumn)                                          rows.Add((Bi.T("spec.height"), Frac(s.ColumnFullHeight)));
         else if (!fp.IsPaddle && !fp.IsCircle && s.Length > 0)    rows.Add((Bi.T("spec.length"), Frac(s.Length)));
@@ -1617,6 +1626,16 @@ public static class DrawingPdfRenderer
             gfx.DrawString(tag, new XFont("Arial", 9, XFontStyleEx.Bold), new XSolidBrush(XColors.Red),
                 new XRect(c.X - r, c.Y - r, 2 * r, 2 * r), XStringFormats.Center);
         }
+    }
+
+    /// <summary>FAB-note item stamp: a black circled letter (A, B, C…) at (x, y), matching the lettered
+    /// note list in the ERP viewer. Drawn in the title block of each appended FAB drawing page.</summary>
+    private static void DrawItemTag(XGraphics gfx, string tag, double x, double y)
+    {
+        const double r = 9;
+        var box = new XRect(x, y, 2 * r, 2 * r);
+        gfx.DrawEllipse(new XPen(XColors.Black, 1.2), box);
+        gfx.DrawString(tag, new XFont("Arial", 10, XFontStyleEx.Bold), XBrushes.Black, box, XStringFormats.Center);
     }
 
     // A label carried off a feature point by a leader, placed clear of the part + other labels.

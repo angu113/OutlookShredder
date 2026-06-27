@@ -52,6 +52,7 @@ internal static class Bi
         ["toEnd"]                = ("to end",                    "al extremo"),
 
         // ── spec table (attribute labels) ───────────────────────────────────
+        ["spec.quantity"]        = ("Quantity",                  "Cantidad"),
         ["spec.web"]             = ("Web",                       "Alma"),
         ["spec.flanges"]         = ("Flanges",                   "Alas"),
         ["spec.legs"]            = ("Legs",                       "Patas"),

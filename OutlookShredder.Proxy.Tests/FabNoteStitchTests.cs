@@ -29,6 +29,19 @@ public class FabNoteStitchTests
         Assert.DoesNotContain("SETUP", descs[0]);   // must not swallow the next line-item
     }
 
+    // The FAB-note item letter (drawn on each appended drawing page AND shown in the ERP viewer's note
+    // list) must follow deduped order identically on both sides: A…Z, then AA, AB, … This is the
+    // client/proxy consistency contract — the letter on the page must match the letter in the list.
+    [Theory]
+    [InlineData(0,  "A")]
+    [InlineData(25, "Z")]
+    [InlineData(26, "AA")]
+    [InlineData(27, "AB")]
+    [InlineData(51, "AZ")]
+    [InlineData(52, "BA")]
+    public void FabLetter_follows_deduped_order(int index, string expected)
+        => Assert.Equal(expected, PickingSlipFabAppender.FabLetter(index));
+
     [Fact]
     public void Rejoined_note_parses_with_finish_outside()
     {

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using OutlookShredder.Proxy.Services.Drawing;
@@ -42,8 +43,23 @@ internal static class PickingSlipFabAppender
         if (distinct.Count == 0) return slipBytes;
 
         PickingSlipEnricher.EnsureFontResolver();   // drawings embed Arial, same as enrichment
-        var drawings = distinct.Select(d => RenderFab(d, log, customerName)).Where(b => b is not null).Cast<byte[]>().ToList();
+        // Letter each page (A, B, C…) by deduped order. The SAME letter is stamped beside the FAB: note
+        // in the slip body, so a part's note and its drawing page share one letter. Map slug -> letter.
+        var slugToLetter = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < distinct.Count; i++)
+        {
+            var slug = DevelopSlug(distinct[i]);
+            if (!string.IsNullOrEmpty(slug)) slugToLetter.TryAdd(slug!, FabLetter(i));
+        }
+
+        var drawings = distinct.Select((d, i) => RenderFab(d, log, customerName, FabLetter(i)))
+            .Where(b => b is not null).Cast<byte[]>().ToList();
         if (drawings.Count == 0) return slipBytes;
+
+        // Where each FAB: note sits in the slip body — for the in-place letter stamps.
+        List<FabAnchor> anchors;
+        try { using var pig = PigDoc.Open(slipBytes); anchors = ExtractFabAnchors(pig); }
+        catch { anchors = new List<FabAnchor>(); }
 
         try
         {
@@ -51,6 +67,9 @@ internal static class PickingSlipFabAppender
             ms.Write(slipBytes, 0, slipBytes.Length);
             ms.Position = 0;
             using var outDoc = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
+            // Stamp the item letter beside each FAB: note BEFORE appending drawings, so the anchor page
+            // indices still line up with the slip's original pages.
+            StampFabLetters(outDoc, anchors, slugToLetter, log);
             foreach (var d in drawings)
             {
                 using var dms = new MemoryStream(d);
@@ -151,16 +170,22 @@ internal static class PickingSlipFabAppender
         return result;
     }
 
-    private static byte[]? RenderFab(string desc, ILogger? log, string? customerName = null)
+    /// <summary>Item letter for the FAB note at <paramref name="index"/> in deduped order: A…Z, then AA, AB…</summary>
+    internal static string FabLetter(int index) =>
+        index < 26
+            ? ((char)('A' + index)).ToString()
+            : $"{(char)('A' + index / 26 - 1)}{(char)('A' + index % 26)}";
+
+    private static byte[]? RenderFab(string desc, ILogger? log, string? customerName = null, string? itemTag = null)
     {
-        // Include customerName in cache key — column drawings differ when a BOM header is requested.
-        var cacheKey = string.IsNullOrWhiteSpace(customerName) ? desc : $"{desc}|{customerName}";
+        // Cache key includes customerName (column BOM header) and the item letter (drawn in the title block).
+        var cacheKey = $"{desc}|{customerName}|{itemTag}";
         if (_cache.TryGetValue(cacheKey, out var cached)) return cached;
         try
         {
             var spec = DrawingTextParser.Parse(desc);
             var fp = FlatPattern.Develop(spec);
-            var pdf = DrawingPdfRenderer.Render(fp, polishBilingual: false, customerName: customerName);
+            var pdf = DrawingPdfRenderer.Render(fp, polishBilingual: false, customerName: customerName, itemTag: itemTag);
             _cache[cacheKey] = pdf;
             return pdf;
         }
@@ -189,51 +214,66 @@ internal static class PickingSlipFabAppender
     /// <c>(N)</c> prefix (defaults to 1) so the DXF can label each part "xN".</summary>
     internal static List<FabNote> ExtractFabNotes(List<(string Text, double Left)> rows)
     {
+        var texts = rows.Select(r => r.Text).ToList();
+        var lefts = rows.Select(r => r.Left).ToList();
         var notes = new List<FabNote>();
         for (int i = 0; i < rows.Count; i++)
         {
-            var m = FabRx.Match(rows[i].Text);
+            var m = FabRx.Match(texts[i]);
             if (!m.Success) continue;
             int qty  = int.TryParse(m.Groups[1].Value, out var q) && q > 0 ? q : 1;
-            var desc = m.Groups[2].Value.Trim();
-
-            if (desc.StartsWith("["))
-            {
-                // Bracket-bounded note: capture everything from '[' to the matching ']', stitching
-                // across wrapped rows until the terminator (cap at 10 rows; stop on a blank or a new
-                // FAB note in case the ']' was forgotten). Anything after ']' (e.g. a hand-typed
-                // "Laser # …" line) is excluded.
-                desc = desc.Substring(1);
-                int close = desc.IndexOf(']');
-                for (int j = i + 1; close < 0 && j < rows.Count && j <= i + 10; j++)
-                {
-                    var next = rows[j];
-                    if (string.IsNullOrWhiteSpace(next.Text)) break;
-                    if (FabRx.IsMatch(next.Text)) break;
-                    desc += " " + next.Text.Trim();
-                    i = j;                                // consume the continuation
-                    close = desc.IndexOf(']');
-                }
-                if (close >= 0) desc = desc.Substring(0, close);
-                desc = desc.Trim();
-            }
-            else
-            {
-                double fabLeft = rows[i].Left;
-                for (int j = i + 1; j < rows.Count; j++)
-                {
-                    var next = rows[j];
-                    if (string.IsNullOrWhiteSpace(next.Text)) break;
-                    if (FabRx.IsMatch(next.Text)) break;
-                    if (next.Left < fabLeft - 12.0) break;   // reaches a left column (MSPC) → new line-item
-                    desc += " " + next.Text.Trim();
-                    i = j;                                    // consume the continuation
-                }
-            }
-
+            var desc = StitchFabDesc(texts, lefts, i, m.Groups[2].Value.Trim(), out int consumed);
+            i = consumed;                                 // skip the rows folded into this note
             if (desc.Length >= 3) notes.Add(new FabNote(qty, desc));
         }
         return notes;
+    }
+
+    /// <summary>
+    /// Stitches one FAB note that begins at <paramref name="startIndex"/> into its full description,
+    /// mirroring the rules in <see cref="ExtractFabNotes"/>: a bracket-bounded note (<c>FAB: [ … ]</c>)
+    /// captures everything to the matching <c>]</c> (across wrapped rows, cap 10); a bracket-less note
+    /// folds in continuation rows that stay in the FAB cell's column. <paramref name="lastConsumed"/>
+    /// is the last row index folded in (== startIndex when nothing wrapped).
+    /// </summary>
+    private static string StitchFabDesc(IReadOnlyList<string> texts, IReadOnlyList<double> lefts,
+        int startIndex, string firstDesc, out int lastConsumed)
+    {
+        lastConsumed = startIndex;
+        var desc = firstDesc;
+        if (desc.StartsWith("["))
+        {
+            desc = desc.Substring(1);
+            int close = desc.IndexOf(']');
+            for (int j = startIndex + 1; close < 0 && j < texts.Count && j <= startIndex + 10; j++)
+            {
+                if (string.IsNullOrWhiteSpace(texts[j])) break;
+                if (FabRx.IsMatch(texts[j])) break;
+                desc += " " + texts[j].Trim();
+                lastConsumed = j;
+                close = desc.IndexOf(']');
+            }
+            if (close >= 0) desc = desc.Substring(0, close);
+            return desc.Trim();
+        }
+
+        double fabLeft = lefts[startIndex];
+        for (int j = startIndex + 1; j < texts.Count; j++)
+        {
+            if (string.IsNullOrWhiteSpace(texts[j])) break;
+            if (FabRx.IsMatch(texts[j])) break;
+            if (lefts[j] < fabLeft - 12.0) break;   // reaches a left column (MSPC) → new line-item
+            desc += " " + texts[j].Trim();
+            lastConsumed = j;
+        }
+        return desc;
+    }
+
+    /// <summary>Develops a FAB note description to its part slug (e.g. <c>flitch_109x7.25</c>), or null
+    /// if it doesn't parse/develop. The slug keys the item letter to both the drawing page and the note.</summary>
+    private static string? DevelopSlug(string desc)
+    {
+        try { return FlatPattern.Develop(DrawingTextParser.Parse(desc)).Cut.Part; } catch { return null; }
     }
 
     /// <summary>
@@ -301,5 +341,80 @@ internal static class PickingSlipFabAppender
             }
         }
         return result;
+    }
+
+    /// <summary>Where a FAB: note sits in the slip body: its page, the FAB: row's left edge and vertical
+    /// span (PDF points, bottom-left origin), and the note's developed part slug. Used to stamp the item
+    /// letter beside the note. Slug is empty when the note didn't develop (e.g. a clipped footer echo).</summary>
+    private sealed record FabAnchor(int PageIndex, double Left, double Top, double Bottom, string Slug);
+
+    /// <summary>Finds every FAB: note occurrence in the slip with its page + position, so the item letter
+    /// can be stamped beside it. Mirrors the row grouping in <see cref="ExtractRows"/> but keeps the FAB
+    /// row's bounding box and page; the note is stitched (via <see cref="StitchFabDesc"/>) and developed
+    /// to a slug so the same letter lands on the note and its drawing page.</summary>
+    private static List<FabAnchor> ExtractFabAnchors(PigDoc doc)
+    {
+        var anchors = new List<FabAnchor>();
+        var pages = doc.GetPages().ToList();
+        for (int p = 0; p < pages.Count; p++)
+        {
+            var rows = pages[p].GetWords()
+                .GroupBy(w => (int)Math.Round(w.BoundingBox.Bottom / 2.0))   // ~2pt baseline tolerance
+                .OrderByDescending(g => g.Key)
+                .Select(g =>
+                {
+                    var ws = g.OrderBy(w => w.BoundingBox.Left).ToList();
+                    return (
+                        Text:   string.Join(" ", ws.Select(w => w.Text)),
+                        Left:   ws.Min(w => w.BoundingBox.Left),
+                        Top:    ws.Max(w => w.BoundingBox.Top),
+                        Bottom: ws.Min(w => w.BoundingBox.Bottom));
+                })
+                .ToList();
+
+            var texts = rows.Select(r => r.Text).ToList();
+            var lefts = rows.Select(r => r.Left).ToList();
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var m = FabRx.Match(texts[i]);
+                if (!m.Success) continue;
+                var desc = StitchFabDesc(texts, lefts, i, m.Groups[2].Value.Trim(), out _);
+                if (desc.Length < 3) continue;
+                anchors.Add(new FabAnchor(p, rows[i].Left, rows[i].Top, rows[i].Bottom, DevelopSlug(desc) ?? ""));
+            }
+        }
+        return anchors;
+    }
+
+    /// <summary>Draws the item letter (black circled glyph) just left of each FAB: note in the slip body,
+    /// keyed by part slug so it matches the letter on the note's drawing page. Best-effort per anchor —
+    /// a draw failure (or an undeveloped/clipped echo with no slug) is skipped, never fatal.</summary>
+    private static void StampFabLetters(PdfDocument outDoc, List<FabAnchor> anchors,
+        Dictionary<string, string> slugToLetter, ILogger? log)
+    {
+        // One letter per note: OpenBravo prints each FAB note more than once (inline line-item +
+        // special-instructions footer), so a slug can have several anchors. Stamp only the first
+        // occurrence (reading order) — otherwise the same letter lands two-plus times on the slip.
+        var stamped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var a in anchors)
+        {
+            if (string.IsNullOrEmpty(a.Slug) || !slugToLetter.TryGetValue(a.Slug, out var letter)) continue;
+            if (!stamped.Add(a.Slug)) continue;          // already stamped this note's letter
+            if (a.PageIndex < 0 || a.PageIndex >= outDoc.PageCount) continue;
+            try
+            {
+                var page = outDoc.Pages[a.PageIndex];
+                using var gfx = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
+                double ph = page.Height.Point;
+                const double r = 7, gap = 4;
+                double cy = ph - (a.Top + a.Bottom) / 2.0;     // FAB: row centre, flipped to top-left origin
+                double cx = a.Left - gap - r;                  // just left of the FAB: text
+                if (cx < r + 2) cx = a.Left + gap + r;         // no room on the left → sit just right of it
+                var box = new XRect(cx - r, cy - r, 2 * r, 2 * r);
+                gfx.DrawEllipse(new XPen(XColors.Black, 1.2), box);
+                gfx.DrawString(letter, new XFont("Arial", 9, XFontStyleEx.Bold), XBrushes.Black, box, XStringFormats.Center);
+            }
+            catch (Exception ex) { log?.LogWarning(ex, "[FAB] could not stamp letter on slip page {Page}", a.PageIndex); }
+        }
     }
 }

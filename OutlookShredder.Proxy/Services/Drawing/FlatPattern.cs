@@ -30,6 +30,9 @@ public static class FlatPattern
     public static FlatPatternResult Develop(PartSpec spec, int? quantity = null)
     {
         var fp = DevelopShape(spec);
+        // Header-table quantity: columns carry their own ColumnQty; every other type takes the caller's
+        // quantity (the Pixar QtyBox / FAB-note qty), defaulting to 1.
+        fp.Qty = fp.IsColumn ? Math.Max(1, fp.ColumnQty) : Math.Max(1, quantity ?? 1);
         PartLabel.AddTo(fp.Cut, quantity, spec.Material, spec.Thickness);
         PolishLabel.AddTo(fp.Cut, spec.PolishDirection);
         return fp;
@@ -1206,4 +1209,8 @@ public sealed class FlatPatternResult
 
     public required string Summary { get; init; }
     public string Title { get; init; } = "";
+
+    /// <summary>Drawing quantity (parts to make) — shown as the first header-table row on every drawing
+    /// type. Populated by <see cref="FlatPattern.Develop"/>; columns carry it via <see cref="ColumnQty"/>.</summary>
+    public int Qty { get; set; } = 1;
 }
