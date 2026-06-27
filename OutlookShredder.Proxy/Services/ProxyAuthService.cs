@@ -62,6 +62,7 @@ public sealed class ProxyAuthService
         ("POST", "/api/addin/heartbeat"),// add-in heartbeat
         ("*",    "/api/steve"),          // Chrome extension RPA relay
         ("*",    "/api/phone-search"),   // Chrome extension RPA relay
+        ("*",    "/api/sms"),            // SignalWire inbound/status webhooks — gated by SW signature instead
     };
 
     // Dev-only mail-eval labeling/report UI is served by the proxy and called same-origin from a

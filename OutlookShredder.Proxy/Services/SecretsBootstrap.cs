@@ -33,6 +33,7 @@ public static class SecretsBootstrap
         "SharePoint:ClientId",
         "SharePoint:ClientSecret",
         "ServiceBus:ConnectionString",
+        "SignalWire:ApiToken",   // SMS send + inbound-webhook signature validation
     };
 
     /// <summary>"keyvault" or "file" — surfaced by HealthController.</summary>

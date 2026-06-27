@@ -201,6 +201,9 @@ try
     builder.Services.AddSingleton<RfqStateOfPlayService>();
     builder.Services.AddSingleton<RfqSummaryQueue>();
     builder.Services.AddHostedService<RfqSummaryQueueProcessor>();
+    // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
+    builder.Services.AddSingleton<SmsInboundQueue>();
+    builder.Services.AddHostedService<SmsInboundQueueProcessor>();
     builder.Services.AddSingleton<ForgeSchedulerQueue>();
     builder.Services.AddSingleton<ForgeTaskService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ForgeTaskService>());
