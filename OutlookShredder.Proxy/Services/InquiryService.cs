@@ -96,8 +96,8 @@ public sealed class InquiryService : IHostedService
         try { await _store.UpsertContactAsync(contact, ct); }
         catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] contact upsert failed for {Phone}", phone); }
 
-        var inquiries = await _store.GetInquiriesByPhoneAsync(phone, ct);
-        var latest    = inquiries.FirstOrDefault();   // store returns most-recent first
+        var inquiries        = await _store.GetInquiriesByPhoneAsync(phone, ct);
+        var (action, latest) = InquiryRules.DecideThread(inquiries);   // latest = most-recent ACTIVE inquiry (null if none)
 
         // 2. Carrier keyword (STOP/HELP/START family): a compliance/info signal, not a sales question — do
         //    NOT mint a CINQ or bump unread. Record it against the existing thread (if any) for audit, and
@@ -114,7 +114,6 @@ public sealed class InquiryService : IHostedService
         // 3. Normal customer message → thread it. Resolve the customer from CRM (denormalised for the list +
         //    "first-time caller" detection); inbound always leaves us owing a reply (AwaitingReply).
         var crm = _crm.LookupByPhone(from);
-        var action = InquiryRules.DecideThread(latest);
         Inquiry inquiry;
         bool isNew = false;
         if (action == InquiryRules.ThreadAction.CreateNew)

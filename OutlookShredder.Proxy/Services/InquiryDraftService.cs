@@ -111,10 +111,42 @@ public static class InquiryDraftPrompt
         only — never force it onto a greeting or a general message.)
         Use the `options` field only for a small discrete choice (e.g. material); leave it empty otherwise. If the
         message isn't a product request (order status, general question), a brief helpful acknowledgement is fine.
+
+        IMPORTANT — we quote BOTH plain metal sales AND fabrication/finishing. Our capabilities are listed below.
+        NEVER tell a customer we can't do something we actually offer, and never refer them elsewhere for work we
+        do (cutting, bending, laser, drilling, threading, miter, rolling, welding, fabrication, finishing, design).
+        If a request fits our services, say we can do it and the team will quote it. If it's outside our services
+        or you're unsure of a limit, don't refuse — say the team will check and confirm.
+        """;
+
+    // Shop capabilities fed into every draft so the AI quotes fab/finishing (not just metal sales) and never
+    // wrongly declines work we do. EDIT HERE (or override at runtime via InquiryDraft:ShopServices) as services
+    // change — e.g. the upcoming deburr/polish timesaver, lathes, mills, tube lasers, water jets.
+    private const string DefaultShopServices =
+        """
+        OUR SHOP SERVICES (Metal Supermarkets Hackensack) — we quote plain metal sales AND fabrication:
+        - Cut-to-size and full-length (mill-length) material — steel, stainless, aluminium and more
+        - Delivery
+        - Sheet-metal bending — up to 12' long; ~1/4" max thickness at 8', 3/8" at ~1' bend depth (bend reaches
+          12" to the brake frame, 9' clear of the frame; larger bends possible — confirm with the team)
+        - Laser cutting — up to 1" mild steel, 1/2" aluminium, 1/2" stainless
+        - Drilling
+        - Tube & pipe BENDING — up to 2" OD on fixed radii (NOT tube/pipe rolling — that's a different process)
+        - Pipe threading — up to 4" NPS
+        - Miter cutting
+        - Sheet rolling — 16ga mild steel, up to 48" wide
+        - Plate rolling
+        - Welding, fabrication and custom fab projects — we DO take these on and quote them
+        - Design services
+        - Finishing: galvanizing, powder coating, general finishing
         """;
 
     public static string SystemPrompt(IConfiguration config)
-        => config["InquiryDraft:SystemPrompt"] is { Length: > 0 } sp ? sp : DefaultSystemPrompt;
+    {
+        var basePrompt = config["InquiryDraft:SystemPrompt"]  is { Length: > 0 } sp ? sp : DefaultSystemPrompt;
+        var services   = config["InquiryDraft:ShopServices"]  is { Length: > 0 } sv ? sv : DefaultShopServices;
+        return basePrompt + "\n\n" + services;
+    }
 
     /// <summary>Renders thread messages as a transcript ("Customer:" / "Shop:" lines), oldest-first, keeping
     /// the most recent <paramref name="max"/>. Inbound (Direction="in") is the customer; everything else is us.</summary>

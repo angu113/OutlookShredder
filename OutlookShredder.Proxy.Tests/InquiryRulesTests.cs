@@ -104,20 +104,32 @@ public class InquiryRulesTests
     // ── Threading decisions ───────────────────────────────────────────────────
     [Fact]
     public void No_prior_inquiry_creates_new()
-        => Assert.Equal(InquiryRules.ThreadAction.CreateNew, InquiryRules.DecideThread(null));
+        => Assert.Equal(InquiryRules.ThreadAction.CreateNew, InquiryRules.DecideThread([]).Action);
 
     [Theory]
     [InlineData(InquiryStatus.Open)]
     [InlineData(InquiryStatus.Quoted)]
     [InlineData(InquiryStatus.Spam)]
-    public void Live_inquiry_appends(string status)
+    public void Active_inquiry_appends(string status)
         => Assert.Equal(InquiryRules.ThreadAction.Append,
-            InquiryRules.DecideThread(new Inquiry { Status = status }));
+            InquiryRules.DecideThread([new Inquiry { Status = status }]).Action);
 
     [Fact]
-    public void Closed_inquiry_starts_new()   // closed is terminal — never reopen
+    public void Only_closed_starts_new()   // closed is terminal — never reopen
         => Assert.Equal(InquiryRules.ThreadAction.CreateNew,
-            InquiryRules.DecideThread(new Inquiry { Status = InquiryStatus.Closed }));
+            InquiryRules.DecideThread([new Inquiry { Status = InquiryStatus.Closed }]).Action);
+
+    [Fact]
+    public void Appends_to_open_even_when_a_closed_is_more_recent()
+    {
+        // most-recent-first: a Closed inquiry is newer than an Open one — must STILL append to the open one,
+        // not spawn a duplicate (the "created a new CX when one was already open" bug).
+        var (action, target) = InquiryRules.DecideThread(
+            [new Inquiry { Status = InquiryStatus.Closed, Id = "CINQ-CLOSED" },
+             new Inquiry { Status = InquiryStatus.Open,   Id = "CINQ-OPEN" }]);
+        Assert.Equal(InquiryRules.ThreadAction.Append, action);
+        Assert.Equal("CINQ-OPEN", target!.Id);
+    }
 
     // ── Phone normalisation ───────────────────────────────────────────────────
     [Theory]

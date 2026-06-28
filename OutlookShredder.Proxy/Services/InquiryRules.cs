@@ -170,16 +170,16 @@ public static partial class InquiryRules
 
     public enum ThreadAction { CreateNew, Append, Reopen }
 
-    /// <summary>Decides where an inbound message threads. We append to the customer's latest inquiry while it's
-    /// active (Open/Quoted) — SMS is serial with no deterministic boundary. A **Closed** inquiry is terminal:
-    /// a new message starts a FRESH inquiry (closed conversations are closed for a reason — never reopen them).
-    /// No prior inquiry → start a new one. A Spam thread stays Spam (append, no resurrection / no new active
-    /// inquiry). (Multiple concurrent open threads for one customer is a future "split" concern.)</summary>
-    public static ThreadAction DecideThread(Inquiry? latest)
+    /// <summary>Decides where an inbound message threads, given the customer's inquiries (most-recent first).
+    /// We append to the most-recent **active** (non-Closed) inquiry — SMS is serial with no deterministic
+    /// boundary, and an open conversation must continue, not spawn a duplicate. A **Closed** inquiry is terminal:
+    /// it's skipped, so a new message lands on an older open one if present, else starts a FRESH inquiry. No
+    /// active inquiry → start a new one. (Spam counts as active so new spam stays in its thread, out of the
+    /// inbox. Multiple concurrent open threads for one customer is a future "split" concern.)</summary>
+    public static (ThreadAction Action, Inquiry? Target) DecideThread(IReadOnlyList<Inquiry> existing)
     {
-        if (latest is null) return ThreadAction.CreateNew;
-        if (string.Equals(latest.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase))
-            return ThreadAction.CreateNew;   // closed is terminal — start fresh, never reopen
-        return ThreadAction.Append;          // Open/Quoted continue; Spam stays Spam (no new active inquiry)
+        var active = existing.FirstOrDefault(i =>
+            !string.Equals(i.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase));
+        return active is null ? (ThreadAction.CreateNew, null) : (ThreadAction.Append, active);
     }
 }

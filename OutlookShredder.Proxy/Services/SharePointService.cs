@@ -12351,8 +12351,10 @@ public partial class SharePointService
         {
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
             string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
-            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
-                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            // SharePoint Boolean comes back as a native bool via Kiota, NOT a JsonElement — check bool first or
+            // IsRead always reads false (the per-message read state would never survive an SP round-trip).
+            bool GetBool(string k) => d.TryGetValue(k, out var v) && v is not null &&
+                (v is bool vb ? vb : v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True);
 
             var convId = Get("ConvId");
             var dir    = Get("Direction");
@@ -12421,8 +12423,10 @@ public partial class SharePointService
         {
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
             string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
-            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
-                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            // SharePoint Boolean comes back as a native bool via Kiota, NOT a JsonElement — check bool first or
+            // IsRead always reads false (the per-message read state would never survive an SP round-trip).
+            bool GetBool(string k) => d.TryGetValue(k, out var v) && v is not null &&
+                (v is bool vb ? vb : v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True);
 
             result.Add(new Models.MessageRecord
             {
@@ -12457,8 +12461,10 @@ public partial class SharePointService
         {
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
             string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
-            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
-                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            // SharePoint Boolean comes back as a native bool via Kiota, NOT a JsonElement — check bool first or
+            // IsRead always reads false (the per-message read state would never survive an SP round-trip).
+            bool GetBool(string k) => d.TryGetValue(k, out var v) && v is not null &&
+                (v is bool vb ? vb : v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True);
             result.Add(new Models.MessageRecord
             {
                 SpItemId       = int.TryParse(item.Id, out var id) ? id : null,
@@ -12499,8 +12505,8 @@ public partial class SharePointService
             if (item.Id is null) continue;
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
             var dir    = d.TryGetValue("Direction", out var di) ? di?.ToString() : "";
-            var isRead = d.TryGetValue("IsRead",    out var ir) &&
-                         ir is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            var isRead = d.TryGetValue("IsRead",    out var ir) && ir is not null &&
+                         (ir is bool irb ? irb : ir is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True);
             if (dir != "in" || isRead) continue;
             try
             {
