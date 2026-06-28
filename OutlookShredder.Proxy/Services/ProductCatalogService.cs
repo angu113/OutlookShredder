@@ -900,6 +900,29 @@ public class ProductCatalogService : BackgroundService, ICacheStatusProvider
     public IReadOnlyList<(string Name, string? SearchKey)> CachedEntries =>
         _cache.Select(e => (e.Name, e.SearchKey)).ToList().AsReadOnly();
 
+    /// <summary>Top catalog candidates for a free-text request (reuses the same tokenizer + composite score as
+    /// <see cref="ResolveProduct"/>). Used by the SMS inquiry clarifier (Phase 6) to give the AI the real
+    /// product families to compare against. Returns name + MSPC + score, best first; empty when nothing scores.</summary>
+    public IReadOnlyList<(string Name, string? SearchKey, double Score)> TopCandidates(string? rawName, int topN = 6)
+    {
+        if (string.IsNullOrWhiteSpace(rawName)) return [];
+        var vendorTokens = Tokenize(rawName);
+        var vendorNonDim = NonDimTokens(vendorTokens);
+        if (vendorNonDim.Count == 0) return [];
+        return _cache.Select(e =>
+            {
+                var catNonDim = NonDimTokens(e.Tokens);
+                var overlap   = catNonDim.Count(t => vendorNonDim.Contains(t));
+                var composite = overlap * (1.0 + DimOverlapFraction(e.Tokens, vendorTokens));
+                return (e.Name, e.SearchKey, Score: composite);
+            })
+            .Where(x => x.Score > 0)
+            .OrderByDescending(x => x.Score)
+            .Take(topN)
+            .Select(x => (x.Name, x.SearchKey, Math.Round(x.Score, 2)))
+            .ToList();
+    }
+
     /// <summary>
     /// Diagnostic: returns the tokenised non-dim tokens for a raw string, and the top-N
     /// containment/Jaccard scores against the catalog. Useful for debugging mismatches.

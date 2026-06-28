@@ -45,6 +45,7 @@ public sealed class GeminiDraftProvider : IInquiryDraftProvider
                 ["intent"]     = new { type = "string", @enum = InquiryDraftPrompt.Intents },
                 ["urgency"]    = new { type = "string", @enum = InquiryDraftPrompt.Urgencies },
                 ["needsQuote"] = new { type = "boolean" },
+                ["options"]    = new { type = "array", items = new { type = "string" } },
             }
         };
         var body = new

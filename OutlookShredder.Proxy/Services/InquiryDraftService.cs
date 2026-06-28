@@ -13,7 +13,8 @@ public sealed record InquiryDraftInput(
     string Transcript,
     IReadOnlyList<string> LinkedHsk,
     string? Notes,
-    IReadOnlyList<DraftAttachment>? Attachments = null);
+    IReadOnlyList<DraftAttachment>? Attachments = null,
+    string? CatalogContext = null);
 
 /// <summary>One attachment passed to the model (image or PDF only — CAD/other are not vision-readable).</summary>
 public sealed record DraftAttachment(string MimeType, string Base64, string? FileName);
@@ -81,12 +82,25 @@ public static class InquiryDraftPrompt
     // ("Content still needed: shop-knowledge system prompt"). Override at runtime via InquiryDraft:SystemPrompt.
     private const string DefaultSystemPrompt =
         """
-        You are a sales assistant for Metal Supermarkets Hackensack, a metals distribution shop that cuts and
-        supplies steel, aluminium, stainless and other metals to walk-in and trade customers. You are drafting
-        a reply to an inbound customer SMS. Be warm, concise, and helpful — one or two short sentences suitable
-        for a text message. Never invent prices, stock, or lead times; if a quote or stock check is needed, say
-        the team will confirm. If the customer asks about an existing order, acknowledge and say we'll check the
-        status. Do not promise anything you cannot know.
+        You are a sales assistant for Metal Supermarkets Hackensack, a metals shop that cuts and supplies steel,
+        aluminium, stainless and other metals to walk-in and trade customers. You draft SMS replies to inbound
+        customer texts. Be warm and concise — one or two short sentences fit for a text. Never invent prices,
+        stock, or lead times; if a quote or stock check is needed, say the team will confirm.
+
+        On a PRODUCT request your job is to decide whether we have enough to identify the exact product, and if
+        not, ask for the SINGLE most important missing detail (echo the customer's own dimensions + quantity so
+        they know you understood). You may be given the closest catalog product families — use them.
+
+        Read terse requests with product understanding, not just the literal words:
+        - MATERIAL is required. If the text doesn't say Steel, Stainless, or Aluminum, ask which — and list those
+          three in the `options` field.
+        - "box" / "square tube" with ONE dimension is a SQUARE cross-section: "2 box" = 2x2 square tube. Do NOT
+          ask for a second dimension — only the WALL THICKNESS is missing.
+        - "angle" with ONE dimension is an EQUAL angle: "2 angle" = 2x2 angle. Only the THICKNESS is missing.
+        - Rectangular tube and unequal angle genuinely need both face dimensions.
+        - If two details are truly missing (e.g. material AND thickness), ask both in one short message.
+        Use the `options` field only for a small discrete choice (e.g. material); leave it empty otherwise. If the
+        message isn't a product request (order status, general question), a brief helpful acknowledgement is fine.
         """;
 
     public static string SystemPrompt(IConfiguration config)
@@ -117,6 +131,9 @@ public static class InquiryDraftPrompt
             sb.Append("Linked order/quote refs: ").AppendLine(string.Join(", ", input.LinkedHsk));
         if (!string.IsNullOrWhiteSpace(input.Notes))
             sb.Append("Operator notes: ").AppendLine(input.Notes);
+        if (!string.IsNullOrWhiteSpace(input.CatalogContext))
+            sb.AppendLine("Closest catalog product families (compare the request to these to spot the missing detail):")
+              .AppendLine(input.CatalogContext).AppendLine();
         sb.AppendLine().AppendLine("Latest customer message:").Append(input.InboundBody);
         return sb.ToString();
     }
@@ -137,15 +154,17 @@ public static class InquiryDraftPrompt
             Intent     = CoerceIntent(raw.Intent),
             Urgency    = CoerceUrgency(raw.Urgency),
             NeedsQuote = raw.NeedsQuote,
+            Options    = (raw.Options ?? []).Where(o => !string.IsNullOrWhiteSpace(o)).Select(o => o.Trim()).Take(4).ToList(),
             AiModel    = model,
         };
     }
 
     private sealed class RawDraft
     {
-        public string? Reply      { get; set; }
-        public string? Intent     { get; set; }
-        public string? Urgency    { get; set; }
-        public bool    NeedsQuote { get; set; }
+        public string?       Reply      { get; set; }
+        public string?       Intent     { get; set; }
+        public string?       Urgency    { get; set; }
+        public bool          NeedsQuote { get; set; }
+        public List<string>? Options    { get; set; }
     }
 }

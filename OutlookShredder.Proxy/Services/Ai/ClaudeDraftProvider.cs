@@ -101,6 +101,7 @@ public sealed class ClaudeDraftProvider : IInquiryDraftProvider
                 ["intent"]     = new { type = "string", @enum = InquiryDraftPrompt.Intents, description = "The customer's primary intent." },
                 ["urgency"]    = new { type = "string", @enum = InquiryDraftPrompt.Urgencies, description = "How time-sensitive the message is." },
                 ["needsQuote"] = new { type = "boolean", description = "True if answering requires raising a price quotation." },
+                ["options"]    = new { type = "array", items = new { type = "string" }, description = "Small discrete choices for the customer (e.g. [\"Steel\",\"Stainless\",\"Aluminum\"]) when asking them to pick one. Empty otherwise." },
             },
         },
     };

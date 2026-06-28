@@ -434,6 +434,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
             ("SuggestedIntent",     "text"),
             ("SuggestedUrgency",    "text"),
             ("NeedsQuote",          "boolean"),
+            ("OptionsJson",         "note"),
             ("DraftStatus",         "text"),
             ("CreatedAt",           "text"),
         ];
@@ -491,6 +492,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
                     ["SuggestedIntent"]     = draft.SuggestedIntent,
                     ["SuggestedUrgency"]    = draft.SuggestedUrgency,
                     ["NeedsQuote"]          = draft.NeedsQuote,
+                    ["OptionsJson"]         = draft.OptionsJson,
                     ["DraftStatus"]         = draft.Status,
                     ["CreatedAt"]           = draft.CreatedAt,
                 },
@@ -528,6 +530,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
                 SuggestedIntent     = S("SuggestedIntent") is { Length: > 0 } si ? si : null,
                 SuggestedUrgency    = S("SuggestedUrgency") is { Length: > 0 } su ? su : null,
                 NeedsQuote          = B("NeedsQuote"),
+                OptionsJson         = S("OptionsJson") is { Length: > 0 } oj ? oj : null,
                 Status              = S("DraftStatus") is { Length: > 0 } st ? st : DraftStatus.Pending,
                 CreatedAt           = S("CreatedAt"),
             });

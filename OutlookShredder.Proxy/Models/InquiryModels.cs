@@ -96,6 +96,9 @@ public sealed class InquiryDraft
     public string? SuggestedUrgency    { get; set; }
     /// <summary>AI signal that the inquiry needs a quotation raised.</summary>
     public bool    NeedsQuote          { get; set; }
+    /// <summary>JSON array of small discrete clarification options (e.g. materials) the operator can tap to
+    /// append. Persisted on the Drafts list; null/empty for a plain reply.</summary>
+    public string? OptionsJson         { get; set; }
     public string  Status              { get; set; } = DraftStatus.Pending;
     public string  CreatedAt           { get; set; } = "";
 }
@@ -137,5 +140,8 @@ public sealed class InquiryDraftResult
     public string  Intent     { get; set; } = "Other";
     public string  Urgency    { get; set; } = "Normal";
     public bool    NeedsQuote { get; set; }
+    /// <summary>Small discrete clarification choices (e.g. Steel/Stainless/Aluminum) the operator can tap to
+    /// append to the reply — the "option table" when we're close to a match. Empty otherwise.</summary>
+    public List<string> Options { get; set; } = [];
     public string? AiModel    { get; set; }
 }

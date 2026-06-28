@@ -149,6 +149,25 @@ public static partial class InquiryRules
         !string.IsNullOrWhiteSpace(name) && name.IndexOfAny(['/', '\\']) < 0 && !name.Contains("..")
         && name.Length <= 200;
 
+    /// <summary>Light shape inference for catalog matching (Phase 6): a square tube/box or an equal angle given
+    /// with a SINGLE dimension implies a square/equal cross-section ("2 box" → also 2x2, "2 angle" → also 2x2),
+    /// which a literal token parse misses. Appends the inferred square dims so the matcher finds the right
+    /// family (only the thickness is then missing). Best-effort; returns the text unchanged when it doesn't apply.</summary>
+    public static string ExpandTerseDims(string? text)
+    {
+        var t = (text ?? "").Trim();
+        if (t.Length == 0) return t;
+        var lower = t.ToLowerInvariant();
+        var squareLike = lower.Contains("box") || lower.Contains("square tube") || lower.Contains("sq tube")
+                      || lower.Contains("square tubing") || lower.Contains("angle");
+        if (!squareLike) return t;
+        if (Regex.IsMatch(t, @"\d\s*[xX]\s*\d")) return t;                                  // already has two dims
+        var m = Regex.Match(t, @"\b\d+(?:[-\s]?\d+/\d+|\.\d+|/\d+)?\b");                     // first numeric dimension
+        if (!m.Success) return t;
+        var dim = m.Value;
+        return $"{t} {dim}x{dim}";                                                          // give the tokenizer the square cross-section
+    }
+
     public enum ThreadAction { CreateNew, Append, Reopen }
 
     /// <summary>Decides where an inbound message threads. SMS is serial with no deterministic

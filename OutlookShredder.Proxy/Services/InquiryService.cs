@@ -24,6 +24,7 @@ public sealed class InquiryService : IHostedService
     private readonly InquiryDraftService     _drafts;
     private readonly CustomerCacheService    _crm;
     private readonly SmsInquiryCacheService  _cache;
+    private readonly ProductCatalogService   _catalog;
     private readonly IConfiguration          _config;
     private readonly ILogger<InquiryService> _log;
 
@@ -43,7 +44,7 @@ public sealed class InquiryService : IHostedService
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
         ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, SmsInquiryCacheService cache,
-        IConfiguration config, ILogger<InquiryService> log)
+        ProductCatalogService catalog, IConfiguration config, ILogger<InquiryService> log)
     {
         _store    = store;
         _messages = messages;
@@ -51,6 +52,7 @@ public sealed class InquiryService : IHostedService
         _sms      = sms;
         _drafts   = drafts;
         _cache    = cache;
+        _catalog  = catalog;
         _crm      = crm;
         _config   = config;
         _log      = log;
@@ -179,10 +181,22 @@ public sealed class InquiryService : IHostedService
             var prior      = history.Count > 0 ? history.Take(history.Count - 1).ToList() : history;
             var transcript = InquiryDraftPrompt.BuildTranscript(prior);
 
+            // Phase 6: reuse the RFQ catalog token-matcher for the product heavy-lifting — feed the AI the
+            // closest catalog families so its clarifier compares against real products (not prompt heuristics).
+            // The terse-dim expansion turns "2 box"/"2 angle" into a square/equal cross-section for the match.
+            string? catalogContext = null;
+            try
+            {
+                var candidates = _catalog.TopCandidates(InquiryRules.ExpandTerseDims(inboundBody), 6);
+                if (candidates.Count > 0)
+                    catalogContext = string.Join("\n", candidates.Select(c => "- " + c.Name));
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] catalog match failed for {Id}", inquiryId); }
+
             // Linked HSK# / notes arrive in Phase 3 (quotation linking + notes) — empty for now. Image/PDF
             // attachments (when present) are fed to the model so it can read a sketch / spec sheet.
             var result = await _drafts.DraftAsync(
-                new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null, attachments), ct);
+                new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null, attachments, catalogContext), ct);
             if (result is null) return;
 
             var draft = new InquiryDraft
@@ -194,6 +208,7 @@ public sealed class InquiryService : IHostedService
                 SuggestedIntent     = result.Intent,
                 SuggestedUrgency    = result.Urgency,
                 NeedsQuote          = result.NeedsQuote,
+                OptionsJson         = result.Options.Count > 0 ? JsonSerializer.Serialize(result.Options) : null,
                 Status              = DraftStatus.Pending,
                 CreatedAt           = DateTimeOffset.UtcNow.ToString("o"),
             };
