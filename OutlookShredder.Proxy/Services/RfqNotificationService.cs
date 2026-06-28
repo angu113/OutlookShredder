@@ -36,6 +36,7 @@ public class RfqNotificationService
     private readonly SliCacheService                             _sliCache;
     private readonly SupplierUnreadIndexService                  _unreadIndex;
     private readonly MailCacheService                            _mailCache;
+    private readonly Lazy<SmsInquiryCacheService>                _inquiryCache;
     private readonly Lazy<ForgeTaskService>                      _forgeTasks;
     private readonly Lazy<SalesOrderHistoryService>              _soHistory;
     private readonly IConfiguration                              _config;
@@ -54,15 +55,17 @@ public class RfqNotificationService
         SliCacheService sliCache,
         SupplierUnreadIndexService unreadIndex,
         MailCacheService mailCache,
+        Lazy<SmsInquiryCacheService> inquiryCache,
         Lazy<ForgeTaskService> forgeTasks,
         Lazy<SalesOrderHistoryService> soHistory,
         ILogger<RfqNotificationService> log)
     {
-        _config      = config;
-        _sliCache    = sliCache;
-        _unreadIndex = unreadIndex;
-        _mailCache   = mailCache;
-        _forgeTasks  = forgeTasks;
+        _config       = config;
+        _sliCache     = sliCache;
+        _unreadIndex  = unreadIndex;
+        _mailCache    = mailCache;
+        _inquiryCache = inquiryCache;
+        _forgeTasks   = forgeTasks;
         _soHistory   = soHistory;
         _log         = log;
 
@@ -215,6 +218,17 @@ public class RfqNotificationService
                 });
                 _log.LogDebug("[ServiceBus] Proxy received ERP SalesOrder {Order} from {PeerId} — merged into cache",
                     erp.DocumentNumber, msg.ProxyId);
+            }
+
+            // Keep the local SMS-inquiry cache coherent when a PEER proxy writes/sends/changes status. We don't
+            // have the mutated objects here, so do a targeted SP re-read (the publisher updated its own cache
+            // in place). Evicts if the inquiry became Closed/Spam.
+            if (msg is not null && msg.ProxyId != ProxyId && !string.IsNullOrEmpty(msg.InquiryId) &&
+                msg.EventType is "Inquiry" or "InquiryMessage" or "InquiryDraft")
+            {
+                _ = _inquiryCache.Value.RefreshOneAsync(msg.InquiryId!);
+                _log.LogDebug("[ServiceBus] Proxy received {Type} from {PeerId} for {Id} — refreshing inquiry cache",
+                    msg.EventType, msg.ProxyId, msg.InquiryId);
             }
         }
         catch (Exception ex)

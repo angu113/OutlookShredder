@@ -23,6 +23,7 @@ public sealed class InquiryService : IHostedService
     private readonly ISmsGateway             _sms;
     private readonly InquiryDraftService     _drafts;
     private readonly CustomerCacheService    _crm;
+    private readonly SmsInquiryCacheService  _cache;
     private readonly IConfiguration          _config;
     private readonly ILogger<InquiryService> _log;
 
@@ -41,14 +42,15 @@ public sealed class InquiryService : IHostedService
         "inquiries. Msg & data rates may apply. Reply HELP for help, STOP to unsubscribe.";
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
-        ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, IConfiguration config,
-        ILogger<InquiryService> log)
+        ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, SmsInquiryCacheService cache,
+        IConfiguration config, ILogger<InquiryService> log)
     {
         _store    = store;
         _messages = messages;
         _notify   = notify;
         _sms      = sms;
         _drafts   = drafts;
+        _cache    = cache;
         _crm      = crm;
         _config   = config;
         _log      = log;
@@ -102,7 +104,7 @@ public sealed class InquiryService : IHostedService
         {
             var kwMsg = await AppendMessageAsync(from, to, body, sid, latest?.Id, now, null, ct);
             await SendComplianceReplyAsync(keyword, from, contact.OptOut, ct);
-            if (latest is not null) _notify.NotifyInquiryMessage(latest.Id, kwMsg);
+            if (latest is not null) { _notify.NotifyInquiryMessage(latest.Id, kwMsg); _ = _cache.RefreshOneAsync(latest.Id); }
             _log.LogInformation("[Inquiry] {Keyword} from {Phone} (optOut={OptOut})", keyword, phone, contact.OptOut);
             return;
         }
@@ -153,6 +155,7 @@ public sealed class InquiryService : IHostedService
 
         _notify.NotifyInquiry(isNew ? "Created" : "Updated", inquiry);
         _notify.NotifyInquiryMessage(inquiry.Id, msg);
+        _ = _cache.RefreshOneAsync(inquiry.Id);   // full populate (contact + new message); off the read path
         _log.LogInformation("[Inquiry] {Action} {Id} from {Phone} (unread={Unread}, media={Media})",
             action, inquiry.Id, phone, inquiry.UnreadCount, msg.Media.Count);
 
@@ -195,6 +198,7 @@ public sealed class InquiryService : IHostedService
                 CreatedAt           = DateTimeOffset.UtcNow.ToString("o"),
             };
             await _store.CreateDraftAsync(draft, ct);
+            _cache.ApplyDraft(draft);
             _notify.NotifyInquiryDraft(draft);
             _log.LogInformation("[Inquiry] AI draft for {Id} (intent={Intent} urgency={Urgency} needsQuote={NeedsQuote})",
                 inquiryId, draft.SuggestedIntent, draft.SuggestedUrgency, draft.NeedsQuote);
@@ -301,9 +305,10 @@ public sealed class InquiryService : IHostedService
         return (effectiveBody, storedJson, ai);
     }
 
-    /// <summary>Serves a stored inquiry media file (preview / download). Name is an opaque key we minted.</summary>
+    /// <summary>Serves a stored inquiry media file (preview / download) from the local disk cache (SP fallback
+    /// inside the cache). Name is an opaque key we minted.</summary>
     public async Task<(string ContentType, byte[] Bytes)?> GetMediaAsync(string inquiryId, string fileName, CancellationToken ct = default)
-        => InquiryRules.IsSafeMediaName(fileName) ? await _messages.GetMediaAsync(inquiryId, fileName, ct) : null;
+        => InquiryRules.IsSafeMediaName(fileName) ? await _cache.GetMediaAsync(inquiryId, fileName, ct) : null;
 
     /// <summary>Media backfill/recovery: re-runs media processing for a known message SID against the supplied
     /// carrier media descriptors and patches the existing row's body + media. Repairs messages that ingested
@@ -342,27 +347,12 @@ public sealed class InquiryService : IHostedService
 
     // ── Phase 3 operator actions (called by InquiriesController) ──────────────────────────────────
 
+    // Reads are served from the in-memory cache (active inquiries; Closed/Spam fall through to SP inside it).
     public Task<IReadOnlyList<Inquiry>> ListAsync(string? status, string? query, CancellationToken ct = default)
-        => _store.GetInquiriesAsync(status, query, ct);
+        => _cache.ListAsync(status, query, ct);
 
-    public async Task<InquiryDetail?> GetDetailAsync(string inquiryId, CancellationToken ct = default)
-    {
-        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
-        if (inquiry is null) return null;
-        var messages   = await _messages.GetByInquiryAsync(inquiryId, 200, ct);
-        var notes      = await _store.GetNotesByInquiryAsync(inquiryId, ct);
-        var quotations = await _store.GetQuotationsByInquiryAsync(inquiryId, ct);
-        var drafts     = await _store.GetDraftsByInquiryAsync(inquiryId, ct);
-        var contact    = await _store.GetContactAsync(inquiry.CustomerPhone, ct);
-
-        var crm  = _crm.LookupByPhone(inquiry.CustomerPhone);
-        var card = new CustomerCard(
-            crm?.BusinessPartner ?? inquiry.CustomerName,
-            crm?.ContactName ?? inquiry.ContactName,
-            crm?.PopupMessage,
-            IsFirstTime: crm is null);
-        return new InquiryDetail(inquiry, [.. messages], [.. notes], [.. quotations], [.. drafts], contact, card);
-    }
+    public Task<InquiryDetail?> GetDetailAsync(string inquiryId, CancellationToken ct = default)
+        => _cache.GetDetailAsync(inquiryId, ct);
 
     /// <summary>Sends an operator reply to the customer (suppressed if opted out), records the outbound
     /// message, advances the inquiry, optionally marks the source draft Used, and pushes live updates.
@@ -412,6 +402,9 @@ public sealed class InquiryService : IHostedService
             catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] mark draft {Id} Used failed", dsid); }
         }
 
+        _cache.ApplyInquiry(inquiry);
+        _cache.ApplyMessage(inquiry.Id, msg);
+        if (fromDraftSpItemId is int usedDraft) _cache.SetDraftStatus(inquiry.Id, usedDraft, DraftStatus.Used);
         _notify.NotifyInquiry("Updated", inquiry);
         _notify.NotifyInquiryMessage(inquiry.Id, msg);
         _log.LogInformation("[Inquiry] outbound reply on {Id} by {User} (sid={Sid})", inquiry.Id, operatorUser ?? "?", sid);
@@ -428,14 +421,18 @@ public sealed class InquiryService : IHostedService
         return await SendOperatorReplyAsync(inquiryId, draft.Body, draftSpItemId, operatorUser, ct);
     }
 
-    public Task DismissDraftAsync(int draftSpItemId, CancellationToken ct = default)
-        => _store.UpdateDraftStatusAsync(draftSpItemId, DraftStatus.Dismissed, ct);
+    public async Task DismissDraftAsync(string inquiryId, int draftSpItemId, CancellationToken ct = default)
+    {
+        await _store.UpdateDraftStatusAsync(draftSpItemId, DraftStatus.Dismissed, ct);
+        _cache.SetDraftStatus(inquiryId, draftSpItemId, DraftStatus.Dismissed);
+    }
 
     public async Task<InquiryNote?> AddNoteAsync(string inquiryId, string author, string body, CancellationToken ct = default)
     {
         if (await _store.GetInquiryByIdAsync(inquiryId, ct) is null) return null;
         var note = new InquiryNote { InquiryId = inquiryId, Author = author, Body = body, CreatedAt = DateTimeOffset.UtcNow.ToString("o") };
         await _store.CreateNoteAsync(note, ct);
+        _cache.ApplyNote(note);
         return note;
     }
 
@@ -457,12 +454,14 @@ public sealed class InquiryService : IHostedService
             return quotation;   // already linked — idempotent
 
         await _store.CreateQuotationAsync(quotation, ct);
+        _cache.ApplyQuotation(quotation);
         if (!string.Equals(inquiry.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(inquiry.Status, InquiryStatus.Quoted, StringComparison.OrdinalIgnoreCase))
         {
             inquiry.Status    = InquiryStatus.Quoted;
             inquiry.UpdatedAt = DateTimeOffset.UtcNow.ToString("o");
             await _store.UpdateInquiryAsync(inquiry, ct);
+            _cache.ApplyInquiry(inquiry);
             _notify.NotifyInquiry("Updated", inquiry);
         }
         return quotation;
@@ -476,6 +475,7 @@ public sealed class InquiryService : IHostedService
         if (assignedTo is not null) inquiry.AssignedTo = assignedTo.Length == 0 ? null : assignedTo;
         inquiry.UpdatedAt = DateTimeOffset.UtcNow.ToString("o");
         await _store.UpdateInquiryAsync(inquiry, ct);
+        _cache.ApplyInquiry(inquiry);   // evicts if status moved to Closed/Spam
         _notify.NotifyInquiry("Updated", inquiry);
         return inquiry;
     }
@@ -489,6 +489,7 @@ public sealed class InquiryService : IHostedService
             inquiry.UnreadCount = 0;
             inquiry.UpdatedAt   = DateTimeOffset.UtcNow.ToString("o");
             await _store.UpdateInquiryAsync(inquiry, ct);
+            _cache.ApplyInquiry(inquiry);
             _notify.NotifyInquiry("Updated", inquiry);
         }
         return inquiry;

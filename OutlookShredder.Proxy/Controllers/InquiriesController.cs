@@ -151,7 +151,7 @@ public class InquiriesController : ControllerBase
     [HttpPost("{id}/drafts/{draftId:int}/dismiss")]
     public async Task<IActionResult> DismissDraft(string id, int draftId, CancellationToken ct)
     {
-        try { await _inquiries.DismissDraftAsync(draftId, ct); return Ok(); }
+        try { await _inquiries.DismissDraftAsync(id, draftId, ct); return Ok(); }
         catch (Exception ex) { return Fail(ex, "dismiss-draft"); }
     }
 

@@ -217,8 +217,13 @@ try
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Ai.IInquiryDraftProvider,
                                   OutlookShredder.Proxy.Services.Ai.GeminiDraftProvider>();
     builder.Services.AddSingleton<InquiryDraftService>();
+    // Active-inquiry cache (L1 memory + L2 disk) — Pulse reads come from here; Lazy<> breaks the
+    // RfqNotificationService -> cache construction order (the notifier refreshes peers' writes into it).
+    builder.Services.AddSingleton<SmsInquiryCacheService>();
+    builder.Services.AddSingleton(sp => new Lazy<SmsInquiryCacheService>(() => sp.GetRequiredService<SmsInquiryCacheService>()));
     builder.Services.AddSingleton<InquiryService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<InquiryService>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<SmsInquiryCacheService>());
     // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
     builder.Services.AddSingleton<SmsInboundQueue>();
     builder.Services.AddHostedService<SmsInboundQueueProcessor>();
@@ -244,6 +249,7 @@ try
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SupplierUnreadIndexService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<MailCacheService>());
     builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<CustomerCacheService>());
+    builder.Services.AddSingleton<ICacheStatusProvider>(sp => sp.GetRequiredService<SmsInquiryCacheService>());
     builder.Services.AddSingleton<ArchiveCacheService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ArchiveCacheService>());
 
