@@ -611,8 +611,10 @@ public sealed class SharePointInquiryStore : IInquiryStore
     }
 
     private async Task<string> GetNotesListIdAsync(CancellationToken ct)
+        // "NoteAuthor" not "Author" — Author is a RESERVED SharePoint internal field (built-in "Created By"),
+        // so a text column named Author silently collides with it and writes to it fail (500).
         => _notesListId ??= await GetChildListIdAsync("InquiryNotes",
-            [("InquiryId", "text"), ("Author", "text"), ("Body", "note"), ("CreatedAt", "text")],
+            [("InquiryId", "text"), ("NoteAuthor", "text"), ("Body", "note"), ("CreatedAt", "text")],
             ["InquiryId", "CreatedAt"], ct);
 
     private async Task<string> GetQuotationsListIdAsync(CancellationToken ct)
@@ -631,11 +633,11 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 AdditionalData = new Dictionary<string, object?>
                 {
-                    ["Title"]     = note.InquiryId,
-                    ["InquiryId"] = note.InquiryId,
-                    ["Author"]    = note.Author,
-                    ["Body"]      = note.Body,
-                    ["CreatedAt"] = note.CreatedAt,
+                    ["Title"]      = note.InquiryId,
+                    ["InquiryId"]  = note.InquiryId,
+                    ["NoteAuthor"] = note.Author,
+                    ["Body"]       = note.Body,
+                    ["CreatedAt"]  = note.CreatedAt,
                 },
             },
         };
@@ -659,7 +661,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 SpItemId  = int.TryParse(item.Id, out var id) ? id : null,
                 InquiryId = S("InquiryId"),
-                Author    = S("Author"),
+                Author    = S("NoteAuthor"),
                 Body      = S("Body"),
                 CreatedAt = S("CreatedAt"),
             };
