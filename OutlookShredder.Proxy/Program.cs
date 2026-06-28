@@ -224,6 +224,10 @@ try
     builder.Services.AddSingleton<InquiryService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<InquiryService>());
     builder.Services.AddHostedService(sp => sp.GetRequiredService<SmsInquiryCacheService>());
+    // SharePoint data-contract self-check — exercises the real Graph round-trip at startup so a typed-field
+    // mismatch (e.g. the Kiota Boolean gotcha) fails loud, not silently in production. /api/diag/sp-contract runs it.
+    builder.Services.AddSingleton<SharePointContractCheckService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<SharePointContractCheckService>());
     // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
     builder.Services.AddSingleton<SmsInboundQueue>();
     builder.Services.AddHostedService<SmsInboundQueueProcessor>();

@@ -580,6 +580,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var have = existing?.Value?.Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
         foreach (var (name, type) in cols)
         {
+            if (SpColumns.IsReserved(name))
+            {
+                // Fail loud at construction — a reserved name silently shadows a read-only system field and 500s on write.
+                _log.LogError("[Inquiry] Column '{Name}' on {List} collides with a RESERVED SharePoint field — rename it (e.g. {Name2}). Skipping.",
+                    name, listName, "Note" + name);
+                continue;
+            }
             if (have.Contains(name)) continue;
             try
             {

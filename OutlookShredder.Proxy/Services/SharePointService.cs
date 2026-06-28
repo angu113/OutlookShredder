@@ -12181,6 +12181,11 @@ public partial class SharePointService
 
         foreach (var (name, type) in cols)
         {
+            if (SpColumns.IsReserved(name))
+            {
+                _log.LogError("[SP] Messages column '{Name}' collides with a RESERVED SharePoint field — rename it. Skipping.", name);
+                continue;
+            }
             if (existingNames.Contains(name)) continue;
             try
             {
@@ -12243,6 +12248,15 @@ public partial class SharePointService
         var created = await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } }, cancellationToken: ct);
         msg.SpItemId = int.TryParse(created?.Id, out var id) ? id : null;
+    }
+
+    /// <summary>Deletes a Messages-list item by id (used by the SharePoint contract self-check to clean up its
+    /// probe row).</summary>
+    public async Task DeleteMessageItemAsync(int spItemId, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+        await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()].DeleteAsync(cancellationToken: ct);
     }
 
     /// <summary>Updates an outbound SMS row's delivery status by its SignalWire MessageSid (stored in

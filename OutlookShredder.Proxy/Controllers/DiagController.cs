@@ -13,12 +13,23 @@ public class DiagController : ControllerBase
 {
     private readonly SharePointService        _sp;
     private readonly MailService              _mail;
+    private readonly SharePointContractCheckService _contract;
     private readonly IConfiguration           _config;
     private readonly ILogger<DiagController>  _log;
 
-    public DiagController(SharePointService sp, MailService mail, IConfiguration config, ILogger<DiagController> log)
+    public DiagController(SharePointService sp, MailService mail, SharePointContractCheckService contract,
+        IConfiguration config, ILogger<DiagController> log)
     {
-        _sp = sp; _mail = mail; _config = config; _log = log;
+        _sp = sp; _mail = mail; _contract = contract; _config = config; _log = log;
+    }
+
+    /// <summary>Runs the SharePoint data-contract self-check on demand (write→read→assert each typed field
+    /// round-trips through the real Graph boundary). Use after touching any SP-backed schema.</summary>
+    [HttpGet("/api/diag/sp-contract")]
+    public async Task<IActionResult> SpContract(CancellationToken ct)
+    {
+        var r = await _contract.RunAsync(ct);
+        return r.AllOk ? Ok(r) : StatusCode(500, r);
     }
 
     private static readonly Regex BracketRef = new(@"\[([A-Za-z]{2}[A-Za-z0-9]{4})\]", RegexOptions.Compiled);
