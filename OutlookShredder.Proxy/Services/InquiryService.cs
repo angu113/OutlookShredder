@@ -26,10 +26,19 @@ public sealed class InquiryService : IHostedService
     private readonly IConfiguration          _config;
     private readonly ILogger<InquiryService> _log;
 
-    // Stub default — real copy is tracked in wip/customer-experience-sms-inquiry.md ("Content still needed").
+    // Default copy (override per key in appsettings). Straight apostrophes only — see DefaultOptInReply note.
     private const string DefaultHelpReply =
-        "Mithril Metals: text us your question and our team will help. Msg & data rates may apply. " +
-        "Reply STOP to opt out.";
+        "Mithril Metals Corp., Authorized Metal Supermarkets Franchisee (Hackensack). For assistance, call " +
+        "(201) 957-7955 or email hackensack@metalsupermarkets.com. Reply STOP to unsubscribe. Msg & data rates may apply.";
+    private const string DefaultOptOutReply =
+        "Mithril Metals Corp., Authorized Metal Supermarkets Franchisee (Hackensack). You have been successfully " +
+        "unsubscribed and will no longer receive SMS messages from us. Reply START to resubscribe.";
+    // Straight apostrophe (not curly) keeps the message GSM-7, not UCS-2 — UCS-2 cuts the segment size to 67
+    // chars and would turn this ~290-char message into ~5 billable segments instead of ~2.
+    private const string DefaultOptInReply =
+        "Mithril Metals Corp., Authorized Metal Supermarkets Franchisee (Hackensack). You're now subscribed to " +
+        "receive SMS replies regarding quotes, orders, and store inquiries. Message frequency varies based on your " +
+        "inquiries. Msg & data rates may apply. Reply HELP for help, STOP to unsubscribe.";
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
         ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, IConfiguration config,
@@ -92,8 +101,7 @@ public sealed class InquiryService : IHostedService
         if (keyword != InquiryRules.Keyword.None)
         {
             var kwMsg = await AppendMessageAsync(from, to, body, sid, latest?.Id, now, null, ct);
-            if (keyword == InquiryRules.Keyword.Help && !contact.OptOut)
-                await SendHelpReplyAsync(from, ct);
+            await SendComplianceReplyAsync(keyword, from, contact.OptOut, ct);
             if (latest is not null) _notify.NotifyInquiryMessage(latest.Id, kwMsg);
             _log.LogInformation("[Inquiry] {Keyword} from {Phone} (optOut={OptOut})", keyword, phone, contact.OptOut);
             return;
@@ -308,21 +316,28 @@ public sealed class InquiryService : IHostedService
         return ok;
     }
 
-    private async Task SendHelpReplyAsync(string to, CancellationToken ct)
+    /// <summary>Sends the carrier-style confirmation for a STOP/START/HELP keyword. APP-OWNED while
+    /// <c>SignalWire:AppHelpReply</c> is true (the default) — when SignalWire's 10DLC campaign is registered to
+    /// auto-send the templates, set it false to hand compliance back to the carrier (avoids double-texting).
+    /// Sent directly via the gateway (not the opt-out-suppressed reply path) because the STOP confirmation is
+    /// the one message a carrier permits after opt-out; a HELP to an already-opted-out number is suppressed.</summary>
+    private async Task SendComplianceReplyAsync(InquiryRules.Keyword keyword, string to, bool optedOut, CancellationToken ct)
     {
-        // Compliance auto-replies (STOP/HELP/START confirmations) are owned by SignalWire's 10DLC campaign by
-        // default — it sends the carrier-registered templates AND enforces opt-out at the network level. We only
-        // send our own HELP reply when SignalWire's auto-handling is deliberately disabled and the app is the
-        // single owner (set SignalWire:AppHelpReply=true). Off by default so a HELP isn't answered twice.
-        if (!_config.GetValue("SignalWire:AppHelpReply", false))
+        if (!_config.GetValue("SignalWire:AppHelpReply", true)) return;   // SignalWire's campaign owns it when false
+        if (keyword == InquiryRules.Keyword.Help && optedOut) return;      // they asked us to stop — stay silent
+        if (!_sms.IsConfigured) { _log.LogWarning("[Inquiry] {Kw} received but SMS gateway not configured", keyword); return; }
+
+        var reply = keyword switch
         {
-            _log.LogInformation("[Inquiry] HELP reply left to SignalWire (SignalWire:AppHelpReply not set)");
-            return;
-        }
-        if (!_sms.IsConfigured) { _log.LogWarning("[Inquiry] HELP received but SMS gateway not configured"); return; }
-        var reply = _config["SignalWire:HelpReply"] is { Length: > 0 } cfg ? cfg : DefaultHelpReply;
+            InquiryRules.Keyword.Help   => _config["SignalWire:HelpReply"]   is { Length: > 0 } h ? h : DefaultHelpReply,
+            InquiryRules.Keyword.OptOut => _config["SignalWire:OptOutReply"] is { Length: > 0 } o ? o : DefaultOptOutReply,
+            InquiryRules.Keyword.OptIn  => _config["SignalWire:OptInReply"]  is { Length: > 0 } i ? i : DefaultOptInReply,
+            _ => null,
+        };
+        if (reply is null) return;
+
         try { await _sms.SendAsync(to, reply, ct: ct); }
-        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] HELP auto-reply failed to {To}", to); }
+        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] {Kw} confirmation failed to {To}", keyword, to); }
     }
 
     // ── Phase 3 operator actions (called by InquiriesController) ──────────────────────────────────
