@@ -12293,6 +12293,44 @@ public partial class SharePointService
         return true;
     }
 
+    /// <summary>Sets one message's IsRead flag by SP item id (Phase 7 per-message read toggle). False on miss.</summary>
+    public async Task<bool> SetMessageReadAsync(int spItemId, bool read, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+        try
+        {
+            await GetGraph().Sites[siteId].Lists[listId].Items[spItemId.ToString()].Fields
+                .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["IsRead"] = read } },
+                    cancellationToken: ct);
+            return true;
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[SP] set message {Id} read={Read} failed", spItemId, read); return false; }
+    }
+
+    /// <summary>Sets IsRead on every message in an inquiry (Phase 7 mark-all). Returns the number patched.</summary>
+    public async Task<int> SetMessagesReadByInquiryAsync(string inquiryId, bool read, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+        var items  = await ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'", ct: ct);
+        int n = 0;
+        foreach (var item in items)
+        {
+            if (item.Id is null) continue;
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+                    .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["IsRead"] = read } },
+                        cancellationToken: ct);
+                n++;
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] mark message {Id} read={Read} failed", item.Id, read); }
+        }
+        return n;
+    }
+
     public async Task<List<Models.ConversationSummary>> GetConversationSummariesAsync(int top = 200, CancellationToken ct = default)
     {
         var siteId = await GetSiteIdAsync();

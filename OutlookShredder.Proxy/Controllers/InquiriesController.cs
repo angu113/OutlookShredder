@@ -136,6 +136,30 @@ public class InquiriesController : ControllerBase
         catch (Exception ex) { return Fail(ex, "read"); }
     }
 
+    /// <summary>Phase 7: set one message's read flag (per-message Mark Read/Unread toggle). Body: { read }.</summary>
+    [HttpPost("{id}/messages/{messageSpItemId:int}/read")]
+    public async Task<IActionResult> SetMessageRead(string id, int messageSpItemId, [FromBody] ReadFlagRequest? req, CancellationToken ct)
+    {
+        try
+        {
+            var inquiry = await _inquiries.SetMessageReadAsync(id, messageSpItemId, req?.Read ?? true, ct);
+            return inquiry is null ? NotFound() : Ok(inquiry);
+        }
+        catch (Exception ex) { return Fail(ex, "msg-read"); }
+    }
+
+    /// <summary>Phase 7: mark every message in the inquiry read/unread (Mark all read / Mark all unread). Body: { read }.</summary>
+    [HttpPost("{id}/read-all")]
+    public async Task<IActionResult> MarkAll(string id, [FromBody] ReadFlagRequest? req, CancellationToken ct)
+    {
+        try
+        {
+            var inquiry = await _inquiries.MarkAllAsync(id, req?.Read ?? true, ct);
+            return inquiry is null ? NotFound() : Ok(inquiry);
+        }
+        catch (Exception ex) { return Fail(ex, "read-all"); }
+    }
+
     [HttpPost("{id}/drafts/{draftId:int}/accept")]
     public async Task<IActionResult> AcceptDraft(string id, int draftId, [FromBody] AcceptDraftRequest? req, CancellationToken ct)
     {
@@ -163,6 +187,7 @@ public class InquiriesController : ControllerBase
 
     public sealed class SendReplyRequest     { public string? Body { get; set; } public int? FromDraftSpItemId { get; set; } public string? From { get; set; } }
     public sealed class AcceptDraftRequest   { public string? From { get; set; } }
+    public sealed class ReadFlagRequest      { public bool Read { get; set; } }
     public sealed class AddNoteRequest       { public string? Author { get; set; } public string? Body { get; set; } }
     public sealed class LinkQuotationRequest { public string? HskNumber { get; set; } public string? LinkedBy { get; set; } }
     public sealed class PatchInquiryRequest  { public string? Status { get; set; } public string? AssignedTo { get; set; } }

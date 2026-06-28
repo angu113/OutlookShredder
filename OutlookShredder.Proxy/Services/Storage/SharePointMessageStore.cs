@@ -31,4 +31,10 @@ public sealed class SharePointMessageStore : IMessageStore
 
     public Task<bool> PatchBodyMediaBySidAsync(string sid, string body, string? mediaJson, CancellationToken ct = default)
         => _sp.PatchMessageBodyMediaBySidAsync(sid, body, mediaJson, ct);
+
+    public Task<bool> SetMessageReadAsync(int spItemId, bool read, CancellationToken ct = default)
+        => _sp.SetMessageReadAsync(spItemId, read, ct);
+
+    public Task<int> SetAllReadByInquiryAsync(string inquiryId, bool read, CancellationToken ct = default)
+        => _sp.SetMessagesReadByInquiryAsync(inquiryId, read, ct);
 }

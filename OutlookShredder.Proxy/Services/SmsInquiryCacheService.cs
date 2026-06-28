@@ -245,6 +245,28 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
         MarkDirty();
     }
 
+    // ── Unread state (Phase 7) — IsRead is button-only; the inquiry counter = unread INBOUND messages ─────
+    public void SetMessageRead(string inquiryId, int spItemId, bool read)
+    {
+        if (!_entries.TryGetValue(inquiryId, out var e)) return;
+        lock (e) { var m = e.Messages.FirstOrDefault(x => x.SpItemId == spItemId); if (m is not null) m.IsRead = read; }
+        MarkDirty();
+    }
+
+    public void SetAllRead(string inquiryId, bool read)
+    {
+        if (!_entries.TryGetValue(inquiryId, out var e)) return;
+        lock (e) { foreach (var m in e.Messages) m.IsRead = read; }
+        MarkDirty();
+    }
+
+    /// <summary>Count of unread INBOUND messages for an inquiry (the badge/counter source); -1 if not cached.</summary>
+    public int UnreadCount(string inquiryId)
+    {
+        if (!_entries.TryGetValue(inquiryId, out var e)) return -1;
+        lock (e) { return e.Messages.Count(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase) && !m.IsRead); }
+    }
+
     public void Evict(string inquiryId)
     {
         if (_entries.TryRemove(inquiryId, out _)) MarkDirty();

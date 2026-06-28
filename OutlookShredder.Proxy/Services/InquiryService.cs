@@ -495,6 +495,41 @@ public sealed class InquiryService : IHostedService
         return inquiry;
     }
 
+    // ── Phase 7: unread state (button-only — no auto-read-on-open) ─────────────────────────────────
+    /// <summary>Sets one message's read flag, recounts the inquiry's unread INBOUND total, and pushes it live.</summary>
+    public async Task<Inquiry?> SetMessageReadAsync(string inquiryId, int messageSpItemId, bool read, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+        await _messages.SetMessageReadAsync(messageSpItemId, read, ct);
+        _cache.SetMessageRead(inquiryId, messageSpItemId, read);
+        return await RecountUnreadAsync(inquiry, ct);
+    }
+
+    /// <summary>Marks every message in the inquiry read or unread (mark-all), then recounts + pushes live.</summary>
+    public async Task<Inquiry?> MarkAllAsync(string inquiryId, bool read, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+        await _messages.SetAllReadByInquiryAsync(inquiryId, read, ct);
+        _cache.SetAllRead(inquiryId, read);
+        return await RecountUnreadAsync(inquiry, ct);
+    }
+
+    private async Task<Inquiry> RecountUnreadAsync(Inquiry inquiry, CancellationToken ct)
+    {
+        var uc = _cache.UnreadCount(inquiry.Id);
+        if (uc < 0)   // not cached (Closed/Spam) — count from the store
+            uc = (await _messages.GetByInquiryAsync(inquiry.Id, 500, ct))
+                 .Count(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase) && !m.IsRead);
+        inquiry.UnreadCount = uc;
+        inquiry.UpdatedAt   = DateTimeOffset.UtcNow.ToString("o");
+        await _store.UpdateInquiryAsync(inquiry, ct);
+        _cache.ApplyInquiry(inquiry);
+        _notify.NotifyInquiry("Updated", inquiry);
+        return inquiry;
+    }
+
     private string? StatusCallbackUrl()
     {
         var b = _config["SignalWire:WebhookBaseUrl"];

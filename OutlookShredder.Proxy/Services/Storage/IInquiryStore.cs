@@ -68,4 +68,9 @@ public interface IMessageStore
     /// <summary>Patches an existing message's body + media by provider SID (media backfill/recovery). False if
     /// no row matched.</summary>
     Task<bool> PatchBodyMediaBySidAsync(string sid, string body, string? mediaJson, CancellationToken ct = default);
+
+    /// <summary>Sets one message's read flag by id (Phase 7 per-message toggle). False on miss.</summary>
+    Task<bool> SetMessageReadAsync(int spItemId, bool read, CancellationToken ct = default);
+    /// <summary>Sets the read flag on every message in an inquiry (Phase 7 mark-all). Returns the count patched.</summary>
+    Task<int> SetAllReadByInquiryAsync(string inquiryId, bool read, CancellationToken ct = default);
 }
