@@ -26,6 +26,11 @@ public class SignalWireService
     public string? FromNumber => _config["SignalWire:FromNumber"];
 
     public async Task<string?> SendSmsAsync(string to, string body, CancellationToken ct = default)
+        => await SendSmsAsync(to, body, null, ct);
+
+    /// <summary>Sends an SMS; when <paramref name="statusCallback"/> is set, SignalWire POSTs delivery-status
+    /// updates there (our /api/sms/status). Returns the MessageSid, or null on failure.</summary>
+    public async Task<string?> SendSmsAsync(string to, string body, string? statusCallback, CancellationToken ct = default)
     {
         var projectId  = _config["SignalWire:ProjectId"]!;
         var apiToken   = _config["SignalWire:ApiToken"]!;
@@ -35,14 +40,17 @@ public class SignalWireService
         var url  = $"https://{spaceUrl}/api/laml/2010-04-01/Accounts/{projectId}/Messages.json";
         var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{projectId}:{apiToken}"));
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, url);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
-        req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        var form = new Dictionary<string, string>
         {
             ["From"] = fromNumber,
             ["To"]   = to,
             ["Body"] = body,
-        });
+        };
+        if (!string.IsNullOrWhiteSpace(statusCallback)) form["StatusCallback"] = statusCallback;
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, url);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        req.Content = new FormUrlEncodedContent(form);
 
         try
         {

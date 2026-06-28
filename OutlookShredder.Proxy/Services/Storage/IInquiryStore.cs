@@ -24,6 +24,9 @@ public interface IInquiryStore
 
     /// <summary>The phone's inquiries, most-recent (LastMessageAt) first.</summary>
     Task<IReadOnlyList<Inquiry>> GetInquiriesByPhoneAsync(string phone, CancellationToken ct = default);
+    /// <summary>All inquiries (most-recent first), optionally filtered by <paramref name="status"/> and a
+    /// free-text <paramref name="query"/> over phone/id.</summary>
+    Task<IReadOnlyList<Inquiry>> GetInquiriesAsync(string? status = null, string? query = null, CancellationToken ct = default);
     Task<Inquiry?> GetInquiryByIdAsync(string cinqId, CancellationToken ct = default);
     Task<int> CreateInquiryAsync(Inquiry inquiry, CancellationToken ct = default);
     Task UpdateInquiryAsync(Inquiry inquiry, CancellationToken ct = default);
@@ -32,6 +35,12 @@ public interface IInquiryStore
     Task<int> CreateDraftAsync(InquiryDraft draft, CancellationToken ct = default);
     Task<IReadOnlyList<InquiryDraft>> GetDraftsByInquiryAsync(string inquiryId, CancellationToken ct = default);
     Task UpdateDraftStatusAsync(int spItemId, string status, CancellationToken ct = default);
+
+    // Notes (append-only) + linked quotations (HSK# references).
+    Task<int> CreateNoteAsync(InquiryNote note, CancellationToken ct = default);
+    Task<IReadOnlyList<InquiryNote>> GetNotesByInquiryAsync(string inquiryId, CancellationToken ct = default);
+    Task<int> CreateQuotationAsync(InquiryQuotation quotation, CancellationToken ct = default);
+    Task<IReadOnlyList<InquiryQuotation>> GetQuotationsByInquiryAsync(string inquiryId, CancellationToken ct = default);
 }
 
 /// <summary>

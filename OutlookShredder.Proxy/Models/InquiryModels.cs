@@ -23,15 +23,27 @@ public sealed class Inquiry
     /// <summary>Customer phone in E.164-ish form ("+15551234567"). Indexed.</summary>
     public string CustomerPhone { get; set; } = "";
     public string Status        { get; set; } = InquiryStatus.Open;
-    /// <summary>Shredder username this inquiry is assigned to (null = unassigned).</summary>
+    /// <summary>Shredder username this inquiry is assigned to (null = unassigned). First responder or claimer
+    /// auto-takes it; any user can reassign/steal afterwards.</summary>
     public string? AssignedTo   { get; set; }
+    /// <summary>Resolved CRM business-partner name (denormalised from CustomerCacheService at ingest for fast
+    /// list display). Null = first-time / unknown caller.</summary>
+    public string? CustomerName { get; set; }
+    /// <summary>Resolved CRM contact name, if matched. Null = unknown.</summary>
+    public string? ContactName  { get; set; }
     public string CreatedAt     { get; set; } = "";
     public string UpdatedAt     { get; set; } = "";
     /// <summary>UTC ISO timestamp of the most recent message in the thread. Indexed (latest-first).</summary>
     public string LastMessageAt { get; set; } = "";
     /// <summary>Inbound messages not yet read by an operator.</summary>
     public int    UnreadCount   { get; set; }
+    /// <summary>True when the latest activity is an unanswered inbound (we owe the customer a reply). Set on
+    /// inbound, cleared on our outbound — drives the "waiting on us for N" aging indicator.</summary>
+    public bool   AwaitingReply { get; set; }
 }
+
+/// <summary>CRM context for the inquiry detail panel (v1: what LookupByPhone gives us).</summary>
+public sealed record CustomerCard(string? BpName, string? ContactName, string? PopupMessage, bool IsFirstTime);
 
 /// <summary>
 /// A messaging contact keyed by phone (E.164). Tracks consent + carrier opt-out so outbound is suppressed
@@ -87,6 +99,36 @@ public sealed class InquiryDraft
     public string  Status              { get; set; } = DraftStatus.Pending;
     public string  CreatedAt           { get; set; } = "";
 }
+
+/// <summary>An append-only operator note on an inquiry (author + timestamp; no edit/delete in v1).</summary>
+public sealed class InquiryNote
+{
+    public int?   SpItemId  { get; set; }
+    public string InquiryId { get; set; } = "";
+    public string Author    { get; set; } = "";
+    public string Body      { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+}
+
+/// <summary>A quotation (HSK#) linked to an inquiry — we store the reference only, not a duplicate quote.</summary>
+public sealed class InquiryQuotation
+{
+    public int?   SpItemId  { get; set; }
+    public string InquiryId { get; set; } = "";
+    public string HskNumber { get; set; } = "";
+    public string LinkedAt  { get; set; } = "";
+    public string LinkedBy  { get; set; } = "";
+}
+
+/// <summary>Everything an operator needs to render one inquiry thread (GET /api/inquiries/{id}).</summary>
+public sealed record InquiryDetail(
+    Inquiry Inquiry,
+    List<MessageRecord> Messages,
+    List<InquiryNote> Notes,
+    List<InquiryQuotation> Quotations,
+    List<InquiryDraft> Drafts,
+    MessagingContact? Contact,
+    CustomerCard? Customer);
 
 /// <summary>The structured result of one AI draft call: a reply plus classification fields.</summary>
 public sealed class InquiryDraftResult

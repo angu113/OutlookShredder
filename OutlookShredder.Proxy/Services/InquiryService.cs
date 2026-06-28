@@ -1,4 +1,5 @@
 using OutlookShredder.Proxy.Models;
+using OutlookShredder.Proxy.Services.Sms;
 using OutlookShredder.Proxy.Services.Storage;
 
 namespace OutlookShredder.Proxy.Services;
@@ -17,8 +18,9 @@ public sealed class InquiryService : IHostedService
     private readonly IInquiryStore           _store;
     private readonly IMessageStore           _messages;
     private readonly RfqNotificationService  _notify;
-    private readonly SignalWireService       _sw;
+    private readonly ISmsGateway             _sms;
     private readonly InquiryDraftService     _drafts;
+    private readonly CustomerCacheService    _crm;
     private readonly IConfiguration          _config;
     private readonly ILogger<InquiryService> _log;
 
@@ -28,13 +30,15 @@ public sealed class InquiryService : IHostedService
         "Reply STOP to opt out.";
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
-        SignalWireService sw, InquiryDraftService drafts, IConfiguration config, ILogger<InquiryService> log)
+        ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, IConfiguration config,
+        ILogger<InquiryService> log)
     {
         _store    = store;
         _messages = messages;
         _notify   = notify;
-        _sw       = sw;
+        _sms      = sms;
         _drafts   = drafts;
+        _crm      = crm;
         _config   = config;
         _log      = log;
     }
@@ -92,7 +96,9 @@ public sealed class InquiryService : IHostedService
             return;
         }
 
-        // 3. Normal customer message → thread it.
+        // 3. Normal customer message → thread it. Resolve the customer from CRM (denormalised for the list +
+        //    "first-time caller" detection); inbound always leaves us owing a reply (AwaitingReply).
+        var crm = _crm.LookupByPhone(from);
         var action = InquiryRules.DecideThread(latest);
         Inquiry inquiry;
         bool isNew = false;
@@ -103,10 +109,13 @@ public sealed class InquiryService : IHostedService
                 Id            = await GenerateCinqIdAsync(ct),
                 CustomerPhone = phone,
                 Status        = InquiryStatus.Open,
+                CustomerName  = crm?.BusinessPartner,
+                ContactName   = crm?.ContactName,
                 CreatedAt     = now,
                 UpdatedAt     = now,
                 LastMessageAt = now,
                 UnreadCount   = 1,
+                AwaitingReply = true,
             };
             await _store.CreateInquiryAsync(inquiry, ct);
             isNew = true;
@@ -118,6 +127,9 @@ public sealed class InquiryService : IHostedService
             inquiry.LastMessageAt = now;
             inquiry.UpdatedAt     = now;
             inquiry.UnreadCount  += 1;
+            inquiry.AwaitingReply = true;
+            inquiry.CustomerName ??= crm?.BusinessPartner;   // backfill if not resolved before
+            inquiry.ContactName  ??= crm?.ContactName;
             await _store.UpdateInquiryAsync(inquiry, ct);
         }
 
@@ -199,10 +211,170 @@ public sealed class InquiryService : IHostedService
 
     private async Task SendHelpReplyAsync(string to, CancellationToken ct)
     {
-        if (!_sw.IsConfigured) { _log.LogWarning("[Inquiry] HELP received but SignalWire not configured"); return; }
+        if (!_sms.IsConfigured) { _log.LogWarning("[Inquiry] HELP received but SMS gateway not configured"); return; }
         var reply = _config["SignalWire:HelpReply"] is { Length: > 0 } cfg ? cfg : DefaultHelpReply;
-        try { await _sw.SendSmsAsync(to, reply, ct); }
+        try { await _sms.SendAsync(to, reply, ct: ct); }
         catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] HELP auto-reply failed to {To}", to); }
+    }
+
+    // ── Phase 3 operator actions (called by InquiriesController) ──────────────────────────────────
+
+    public Task<IReadOnlyList<Inquiry>> ListAsync(string? status, string? query, CancellationToken ct = default)
+        => _store.GetInquiriesAsync(status, query, ct);
+
+    public async Task<InquiryDetail?> GetDetailAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+        var messages   = await _messages.GetByInquiryAsync(inquiryId, 200, ct);
+        var notes      = await _store.GetNotesByInquiryAsync(inquiryId, ct);
+        var quotations = await _store.GetQuotationsByInquiryAsync(inquiryId, ct);
+        var drafts     = await _store.GetDraftsByInquiryAsync(inquiryId, ct);
+        var contact    = await _store.GetContactAsync(inquiry.CustomerPhone, ct);
+
+        var crm  = _crm.LookupByPhone(inquiry.CustomerPhone);
+        var card = new CustomerCard(
+            crm?.BusinessPartner ?? inquiry.CustomerName,
+            crm?.ContactName ?? inquiry.ContactName,
+            crm?.PopupMessage,
+            IsFirstTime: crm is null);
+        return new InquiryDetail(inquiry, [.. messages], [.. notes], [.. quotations], [.. drafts], contact, card);
+    }
+
+    /// <summary>Sends an operator reply to the customer (suppressed if opted out), records the outbound
+    /// message, advances the inquiry, optionally marks the source draft Used, and pushes live updates.
+    /// Throws <see cref="InvalidOperationException"/> when the contact opted out or no gateway is configured.</summary>
+    public async Task<MessageRecord?> SendOperatorReplyAsync(
+        string inquiryId, string body, int? fromDraftSpItemId, string? operatorUser, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+
+        var contact = await _store.GetContactAsync(inquiry.CustomerPhone, ct);
+        if (contact?.OptOut == true)
+            throw new InvalidOperationException("Contact has opted out — outbound suppressed.");
+        if (!_sms.IsConfigured)
+            throw new InvalidOperationException("SMS gateway not configured.");
+
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        var sid = await _sms.SendAsync(inquiry.CustomerPhone, body, StatusCallbackUrl(), ct);
+
+        var msg = new MessageRecord
+        {
+            From           = _sms.FromNumber ?? "",
+            To             = inquiry.CustomerPhone,
+            Channel        = "sms",
+            Direction      = "out",
+            Body           = body,
+            ConversationId = MessagingService.SmsConvId(inquiry.CustomerPhone),
+            TimestampUtc   = now,
+            IsRead         = true,
+            ExternalId     = sid,
+            InquiryId      = inquiry.Id,
+            Status         = sid is null ? "failed" : "queued",
+        };
+        await _messages.AppendAsync(msg, ct);
+
+        inquiry.LastMessageAt = now;   // outbound advances the thread but never adds unread
+        inquiry.UpdatedAt     = now;
+        inquiry.AwaitingReply = false; // we've replied — no longer owe the customer
+        // Auto-assign on first response: the first person to reply (or claim) owns it; stealable later.
+        if (string.IsNullOrWhiteSpace(inquiry.AssignedTo) && !string.IsNullOrWhiteSpace(operatorUser))
+            inquiry.AssignedTo = operatorUser;
+        await _store.UpdateInquiryAsync(inquiry, ct);
+
+        if (fromDraftSpItemId is int dsid)
+        {
+            try { await _store.UpdateDraftStatusAsync(dsid, DraftStatus.Used, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] mark draft {Id} Used failed", dsid); }
+        }
+
+        _notify.NotifyInquiry("Updated", inquiry);
+        _notify.NotifyInquiryMessage(inquiry.Id, msg);
+        _log.LogInformation("[Inquiry] outbound reply on {Id} by {User} (sid={Sid})", inquiry.Id, operatorUser ?? "?", sid);
+        return msg;
+    }
+
+    /// <summary>Accepts an AI draft: sends its body to the customer and marks it Used. Returns null when the
+    /// inquiry/draft isn't found.</summary>
+    public async Task<MessageRecord?> AcceptDraftAsync(string inquiryId, int draftSpItemId, string? operatorUser, CancellationToken ct = default)
+    {
+        var drafts = await _store.GetDraftsByInquiryAsync(inquiryId, ct);
+        var draft  = drafts.FirstOrDefault(d => d.SpItemId == draftSpItemId);
+        if (draft is null) return null;
+        return await SendOperatorReplyAsync(inquiryId, draft.Body, draftSpItemId, operatorUser, ct);
+    }
+
+    public Task DismissDraftAsync(int draftSpItemId, CancellationToken ct = default)
+        => _store.UpdateDraftStatusAsync(draftSpItemId, DraftStatus.Dismissed, ct);
+
+    public async Task<InquiryNote?> AddNoteAsync(string inquiryId, string author, string body, CancellationToken ct = default)
+    {
+        if (await _store.GetInquiryByIdAsync(inquiryId, ct) is null) return null;
+        var note = new InquiryNote { InquiryId = inquiryId, Author = author, Body = body, CreatedAt = DateTimeOffset.UtcNow.ToString("o") };
+        await _store.CreateNoteAsync(note, ct);
+        return note;
+    }
+
+    /// <summary>Links an HSK# quotation to the inquiry (deduped per inquiry) and advances a non-closed
+    /// inquiry to Quoted.</summary>
+    public async Task<InquiryQuotation?> LinkQuotationAsync(string inquiryId, string hskNumber, string linkedBy, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+
+        var hsk = hskNumber.Trim();
+        var existing = await _store.GetQuotationsByInquiryAsync(inquiryId, ct);
+        var quotation = new InquiryQuotation
+        {
+            InquiryId = inquiryId, HskNumber = hsk,
+            LinkedAt  = DateTimeOffset.UtcNow.ToString("o"), LinkedBy = linkedBy,
+        };
+        if (existing.Any(e => string.Equals(e.HskNumber, hsk, StringComparison.OrdinalIgnoreCase)))
+            return quotation;   // already linked — idempotent
+
+        await _store.CreateQuotationAsync(quotation, ct);
+        if (!string.Equals(inquiry.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(inquiry.Status, InquiryStatus.Quoted, StringComparison.OrdinalIgnoreCase))
+        {
+            inquiry.Status    = InquiryStatus.Quoted;
+            inquiry.UpdatedAt = DateTimeOffset.UtcNow.ToString("o");
+            await _store.UpdateInquiryAsync(inquiry, ct);
+            _notify.NotifyInquiry("Updated", inquiry);
+        }
+        return quotation;
+    }
+
+    public async Task<Inquiry?> UpdateInquiryAsync(string inquiryId, string? status, string? assignedTo, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+        if (status is not null)     inquiry.Status     = status;
+        if (assignedTo is not null) inquiry.AssignedTo = assignedTo.Length == 0 ? null : assignedTo;
+        inquiry.UpdatedAt = DateTimeOffset.UtcNow.ToString("o");
+        await _store.UpdateInquiryAsync(inquiry, ct);
+        _notify.NotifyInquiry("Updated", inquiry);
+        return inquiry;
+    }
+
+    public async Task<Inquiry?> MarkReadAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
+        if (inquiry.UnreadCount != 0)
+        {
+            inquiry.UnreadCount = 0;
+            inquiry.UpdatedAt   = DateTimeOffset.UtcNow.ToString("o");
+            await _store.UpdateInquiryAsync(inquiry, ct);
+            _notify.NotifyInquiry("Updated", inquiry);
+        }
+        return inquiry;
+    }
+
+    private string? StatusCallbackUrl()
+    {
+        var b = _config["SignalWire:WebhookBaseUrl"];
+        return string.IsNullOrWhiteSpace(b) ? null : b.TrimEnd('/') + "/api/sms/status";
     }
 
     private async Task<string> GenerateCinqIdAsync(CancellationToken ct)

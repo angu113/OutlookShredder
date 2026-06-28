@@ -85,6 +85,9 @@ public class RfqProcessedNotification
     public string? InquiryPhone         { get; set; }
     public int?    InquiryUnread        { get; set; }
     public string? InquiryLastMessageAt { get; set; }
+    public string? InquiryCustomerName  { get; set; }
+    public string? InquiryAssignedTo    { get; set; }
+    public bool?   InquiryAwaitingReply { get; set; }
     // Populated when EventType = "InquiryDraft" (an AI reply suggestion was created for InquiryId).
     public int?    DraftSpItemId        { get; set; }
     public string? DraftBody            { get; set; }

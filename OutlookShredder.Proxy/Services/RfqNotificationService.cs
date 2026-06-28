@@ -310,6 +310,9 @@ public class RfqNotificationService
             InquiryPhone         = inq.CustomerPhone,
             InquiryUnread        = inq.UnreadCount,
             InquiryLastMessageAt = inq.LastMessageAt,
+            InquiryCustomerName  = inq.CustomerName,
+            InquiryAssignedTo    = inq.AssignedTo,
+            InquiryAwaitingReply = inq.AwaitingReply,
         });
 
     /// <summary>Publishes an "InquiryMessage" event so an open CX thread appends the new bubble live.</summary>

@@ -22,6 +22,8 @@ public sealed class SharePointInquiryStore : IInquiryStore
     private string? _inquiriesListId;
     private string? _contactsListId;
     private string? _draftsListId;
+    private string? _notesListId;
+    private string? _quotationsListId;
 
     public SharePointInquiryStore(SharePointService sp, ILogger<SharePointInquiryStore> log)
     {
@@ -34,6 +36,8 @@ public sealed class SharePointInquiryStore : IInquiryStore
         await GetInquiriesListIdAsync(ct);
         await GetContactsListIdAsync(ct);
         await GetDraftsListIdAsync(ct);
+        await GetNotesListIdAsync(ct);
+        await GetQuotationsListIdAsync(ct);
     }
 
     // ── Inquiries ─────────────────────────────────────────────────────────────
@@ -75,10 +79,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
             ("CustomerPhone", "text"),
             ("IqStatus",      "text"),
             ("AssignedTo",    "text"),
+            ("CustomerName",  "text"),
+            ("ContactName",   "text"),
             ("CreatedAt",     "text"),
             ("UpdatedAt",     "text"),
             ("LastMessageAt", "text"),
             ("UnreadCount",   "number"),
+            ("AwaitingReply", "boolean"),
         ];
         foreach (var (name, type) in cols)
         {
@@ -87,8 +94,9 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 var col = type switch
                 {
-                    "number" => new Graph.ColumnDefinition { Name = name, Number = new Graph.NumberColumn() },
-                    _        => new Graph.ColumnDefinition { Name = name, Text   = new Graph.TextColumn() },
+                    "number"  => new Graph.ColumnDefinition { Name = name, Number  = new Graph.NumberColumn() },
+                    "boolean" => new Graph.ColumnDefinition { Name = name, Boolean = new Graph.BooleanColumn() },
+                    _         => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn() },
                 };
                 await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
                 _log.LogInformation("[Inquiry] Created Inquiries column '{Name}'", name);
@@ -124,10 +132,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
                 ["CustomerPhone"] = inq.CustomerPhone,
                 ["IqStatus"]      = inq.Status,
                 ["AssignedTo"]    = inq.AssignedTo,
+                ["CustomerName"]  = inq.CustomerName,
+                ["ContactName"]   = inq.ContactName,
                 ["CreatedAt"]     = inq.CreatedAt,
                 ["UpdatedAt"]     = inq.UpdatedAt,
                 ["LastMessageAt"] = inq.LastMessageAt,
                 ["UnreadCount"]   = (double)inq.UnreadCount,
+                ["AwaitingReply"] = inq.AwaitingReply,
             },
         },
     };
@@ -136,6 +147,8 @@ public sealed class SharePointInquiryStore : IInquiryStore
     {
         var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
         string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+        bool B(string k) => d.TryGetValue(k, out var v) && v is not null &&
+            (v is JsonElement je ? je.ValueKind == JsonValueKind.True : v is bool b && b);
         return new Inquiry
         {
             SpItemId      = int.TryParse(item.Id, out var id) ? id : null,
@@ -143,10 +156,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
             CustomerPhone = S("CustomerPhone"),
             Status        = S("IqStatus") is { Length: > 0 } st ? st : InquiryStatus.Open,
             AssignedTo    = S("AssignedTo") is { Length: > 0 } at ? at : null,
+            CustomerName  = S("CustomerName") is { Length: > 0 } cn ? cn : null,
+            ContactName   = S("ContactName") is { Length: > 0 } con ? con : null,
             CreatedAt     = S("CreatedAt"),
             UpdatedAt     = S("UpdatedAt"),
             LastMessageAt = S("LastMessageAt"),
             UnreadCount   = ReadInt(d, "UnreadCount") ?? 0,
+            AwaitingReply = B("AwaitingReply"),
         };
     }
 
@@ -186,9 +202,12 @@ public sealed class SharePointInquiryStore : IInquiryStore
         {
             ["IqStatus"]      = inquiry.Status,
             ["AssignedTo"]    = inquiry.AssignedTo,
+            ["CustomerName"]  = inquiry.CustomerName,
+            ["ContactName"]   = inquiry.ContactName,
             ["UpdatedAt"]     = inquiry.UpdatedAt,
             ["LastMessageAt"] = inquiry.LastMessageAt,
             ["UnreadCount"]   = (double)inquiry.UnreadCount,
+            ["AwaitingReply"] = inquiry.AwaitingReply,
         };
         await graph.Sites[siteId].Lists[listId].Items[inquiry.SpItemId.Value.ToString()].Fields
             .PatchAsync(new Graph.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
@@ -201,6 +220,24 @@ public sealed class SharePointInquiryStore : IInquiryStore
             filter: $"fields/CustomerPhone eq '{phone.Replace("'", "''")}'",
             orderby: ["fields/LastMessageAt desc"], ct: ct);
         return items.Select(ItemToInquiry).ToList();
+    }
+
+    public async Task<IReadOnlyList<Inquiry>> GetInquiriesAsync(string? status = null, string? query = null, CancellationToken ct = default)
+    {
+        var listId = await GetInquiriesListIdAsync(ct);
+        // Status is indexed → filter server-side when given; free-text query is a small in-memory pass.
+        var filter = string.IsNullOrWhiteSpace(status) ? null : $"fields/IqStatus eq '{status.Replace("'", "''")}'";
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: filter, orderby: ["fields/LastMessageAt desc"], ct: ct);
+        var all = items.Select(ItemToInquiry);
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            var q = query.Trim();
+            all = all.Where(i =>
+                i.CustomerPhone.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                i.Id.Contains(q, StringComparison.OrdinalIgnoreCase));
+        }
+        return all.ToList();
     }
 
     public async Task<Inquiry?> GetInquiryByIdAsync(string cinqId, CancellationToken ct = default)
@@ -506,5 +543,167 @@ public sealed class SharePointInquiryStore : IInquiryStore
         await graph.Sites[siteId].Lists[listId].Items[spItemId.ToString()].Fields
             .PatchAsync(new Graph.FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["DraftStatus"] = status } },
                 cancellationToken: ct);
+    }
+
+    // ── Inquiry child lists (Notes, Quotations) — same shape: a genericList keyed + indexed on InquiryId ──
+
+    /// <summary>Gets/creates a simple inquiry child list with the given extra columns, indexing InquiryId.</summary>
+    private async Task<string> GetChildListIdAsync(string listName, (string Name, string Type)[] cols, CancellationToken ct)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+
+        var lists = await graph.Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+        }
+        else
+        {
+            _log.LogInformation("[Inquiry] Creating {List} list", listName);
+            var created = await graph.Sites[siteId].Lists.PostAsync(new Graph.List
+            {
+                DisplayName = listName,
+                ListProp    = new Graph.ListInfo { Template = "genericList" },
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception($"Failed to create {listName} list");
+            _log.LogInformation("[Inquiry] Created {List} list -> {Id}", listName, listId);
+        }
+
+        var existing = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var have = existing?.Value?.Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+        foreach (var (name, type) in cols)
+        {
+            if (have.Contains(name)) continue;
+            try
+            {
+                var col = type switch
+                {
+                    "note" => new Graph.ColumnDefinition { Name = name, Text = new Graph.TextColumn { AllowMultipleLines = true } },
+                    _      => new Graph.ColumnDefinition { Name = name, Text = new Graph.TextColumn() },
+                };
+                await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Created {List} column '{Name}'", listName, name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to create {List} column '{Name}'", listName, name); }
+        }
+
+        var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        foreach (var col in allCols?.Value ?? [])
+        {
+            if (col.Name != "InquiryId") continue;
+            if (col.Indexed == true || col.Id is null) continue;
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Indexed {List} column 'InquiryId'", listName);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index {List} column 'InquiryId'", listName); }
+        }
+        return listId;
+    }
+
+    private async Task<string> GetNotesListIdAsync(CancellationToken ct)
+        => _notesListId ??= await GetChildListIdAsync("InquiryNotes",
+            [("InquiryId", "text"), ("Author", "text"), ("Body", "note"), ("CreatedAt", "text")], ct);
+
+    private async Task<string> GetQuotationsListIdAsync(CancellationToken ct)
+        => _quotationsListId ??= await GetChildListIdAsync("InquiryQuotations",
+            [("InquiryId", "text"), ("HskNumber", "text"), ("LinkedAt", "text"), ("LinkedBy", "text")], ct);
+
+    public async Task<int> CreateNoteAsync(InquiryNote note, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetNotesListIdAsync(ct);
+        var item = new Graph.ListItem
+        {
+            Fields = new Graph.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]     = note.InquiryId,
+                    ["InquiryId"] = note.InquiryId,
+                    ["Author"]    = note.Author,
+                    ["Body"]      = note.Body,
+                    ["CreatedAt"] = note.CreatedAt,
+                },
+            },
+        };
+        var created = await graph.Sites[siteId].Lists[listId].Items.PostAsync(item, cancellationToken: ct);
+        if (created?.Id is null || !int.TryParse(created.Id, out var id)) throw new Exception("InquiryNotes write returned no item ID");
+        note.SpItemId = id;
+        return id;
+    }
+
+    public async Task<IReadOnlyList<InquiryNote>> GetNotesByInquiryAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var listId = await GetNotesListIdAsync(ct);
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
+            orderby: ["fields/CreatedAt asc"], ct: ct);
+        return items.Select(item =>
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            return new InquiryNote
+            {
+                SpItemId  = int.TryParse(item.Id, out var id) ? id : null,
+                InquiryId = S("InquiryId"),
+                Author    = S("Author"),
+                Body      = S("Body"),
+                CreatedAt = S("CreatedAt"),
+            };
+        }).ToList();
+    }
+
+    public async Task<int> CreateQuotationAsync(InquiryQuotation quotation, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetQuotationsListIdAsync(ct);
+        var item = new Graph.ListItem
+        {
+            Fields = new Graph.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]     = quotation.HskNumber,
+                    ["InquiryId"] = quotation.InquiryId,
+                    ["HskNumber"] = quotation.HskNumber,
+                    ["LinkedAt"]  = quotation.LinkedAt,
+                    ["LinkedBy"]  = quotation.LinkedBy,
+                },
+            },
+        };
+        var created = await graph.Sites[siteId].Lists[listId].Items.PostAsync(item, cancellationToken: ct);
+        if (created?.Id is null || !int.TryParse(created.Id, out var id)) throw new Exception("InquiryQuotations write returned no item ID");
+        quotation.SpItemId = id;
+        return id;
+    }
+
+    public async Task<IReadOnlyList<InquiryQuotation>> GetQuotationsByInquiryAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var listId = await GetQuotationsListIdAsync(ct);
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
+            orderby: ["fields/LinkedAt asc"], ct: ct);
+        return items.Select(item =>
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            return new InquiryQuotation
+            {
+                SpItemId  = int.TryParse(item.Id, out var id) ? id : null,
+                InquiryId = S("InquiryId"),
+                HskNumber = S("HskNumber"),
+                LinkedAt  = S("LinkedAt"),
+                LinkedBy  = S("LinkedBy"),
+            };
+        }).ToList();
     }
 }

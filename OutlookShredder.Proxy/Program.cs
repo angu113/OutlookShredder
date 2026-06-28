@@ -207,6 +207,9 @@ try
                                   OutlookShredder.Proxy.Services.Storage.SharePointInquiryStore>();
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Storage.IMessageStore,
                                   OutlookShredder.Proxy.Services.Storage.SharePointMessageStore>();
+    // SMS carrier adapter seam — swap carriers = another ISmsGateway impl + this line.
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Sms.ISmsGateway,
+                                  OutlookShredder.Proxy.Services.Sms.SignalWireSmsGateway>();
     // AI draft providers — adapter seam (Claude primary, Gemini fallback by registration order). Add a
     // provider = implement IInquiryDraftProvider + add a line here; the orchestrator/pipeline are untouched.
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Ai.IInquiryDraftProvider,
