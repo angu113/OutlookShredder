@@ -30,6 +30,10 @@ public class InquiriesController : ControllerBase
         catch (Exception ex) { return Fail(ex, "list"); }
     }
 
+    /// <summary>Phase 7b: total unread inbound across active inquiries — the app-level (taskbar + Pulse-icon) badge.</summary>
+    [HttpGet("unread-total")]
+    public IActionResult UnreadTotal() => Ok(new { total = _inquiries.UnreadTotal() });
+
     [HttpGet("{id}")]
     public async Task<IActionResult> Get(string id, CancellationToken ct)
     {

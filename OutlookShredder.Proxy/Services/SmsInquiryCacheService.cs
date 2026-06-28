@@ -267,6 +267,15 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
         lock (e) { return e.Messages.Count(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase) && !m.IsRead); }
     }
 
+    /// <summary>Total unread INBOUND messages across all active inquiries — the app-level badge (Phase 7b).</summary>
+    public int TotalUnread()
+    {
+        var total = 0;
+        foreach (var e in _entries.Values)
+            lock (e) total += e.Messages.Count(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase) && !m.IsRead);
+        return total;
+    }
+
     public void Evict(string inquiryId)
     {
         if (_entries.TryRemove(inquiryId, out _)) MarkDirty();

@@ -516,6 +516,9 @@ public sealed class InquiryService : IHostedService
         return await RecountUnreadAsync(inquiry, ct);
     }
 
+    /// <summary>Total unread inbound across all active inquiries — the app-level badge source (Phase 7b).</summary>
+    public int UnreadTotal() => _cache.TotalUnread();
+
     private async Task<Inquiry> RecountUnreadAsync(Inquiry inquiry, CancellationToken ct)
     {
         var uc = _cache.UnreadCount(inquiry.Id);
