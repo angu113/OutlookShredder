@@ -115,8 +115,8 @@ public class InquiryRulesTests
             InquiryRules.DecideThread(new Inquiry { Status = status }));
 
     [Fact]
-    public void Closed_inquiry_reopens()
-        => Assert.Equal(InquiryRules.ThreadAction.Reopen,
+    public void Closed_inquiry_starts_new()   // closed is terminal — never reopen
+        => Assert.Equal(InquiryRules.ThreadAction.CreateNew,
             InquiryRules.DecideThread(new Inquiry { Status = InquiryStatus.Closed }));
 
     // ── Phone normalisation ───────────────────────────────────────────────────

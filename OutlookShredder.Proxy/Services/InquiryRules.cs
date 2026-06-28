@@ -170,15 +170,16 @@ public static partial class InquiryRules
 
     public enum ThreadAction { CreateNew, Append, Reopen }
 
-    /// <summary>Decides where an inbound message threads. SMS is serial with no deterministic
-    /// conversation boundary, so we always append to the customer's latest inquiry — reopening it if it
-    /// was Closed. No prior inquiry → start a new one. A Spam thread stays Spam (append, no resurrection);
-    /// an operator "split to new thread" action is the explicit way to break a thread.</summary>
+    /// <summary>Decides where an inbound message threads. We append to the customer's latest inquiry while it's
+    /// active (Open/Quoted) — SMS is serial with no deterministic boundary. A **Closed** inquiry is terminal:
+    /// a new message starts a FRESH inquiry (closed conversations are closed for a reason — never reopen them).
+    /// No prior inquiry → start a new one. A Spam thread stays Spam (append, no resurrection / no new active
+    /// inquiry). (Multiple concurrent open threads for one customer is a future "split" concern.)</summary>
     public static ThreadAction DecideThread(Inquiry? latest)
     {
         if (latest is null) return ThreadAction.CreateNew;
         if (string.Equals(latest.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase))
-            return ThreadAction.Reopen;
-        return ThreadAction.Append;
+            return ThreadAction.CreateNew;   // closed is terminal — start fresh, never reopen
+        return ThreadAction.Append;          // Open/Quoted continue; Spam stays Spam (no new active inquiry)
     }
 }

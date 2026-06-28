@@ -135,10 +135,9 @@ public sealed class InquiryService : IHostedService
             await _store.CreateInquiryAsync(inquiry, ct);
             isNew = true;
         }
-        else
+        else   // ThreadAction.Append — latest is an active (Open/Quoted) or Spam inquiry; closed never lands here
         {
             inquiry = latest!;
-            if (action == InquiryRules.ThreadAction.Reopen) inquiry.Status = InquiryStatus.Open;
             inquiry.LastMessageAt = now;
             inquiry.UpdatedAt     = now;
             inquiry.UnreadCount  += 1;
