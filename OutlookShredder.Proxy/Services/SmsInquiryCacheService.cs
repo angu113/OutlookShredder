@@ -309,6 +309,10 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
         var quotations = await _store.GetQuotationsByInquiryAsync(inquiry.Id, ct);
         var drafts     = await _store.GetDraftsByInquiryAsync(inquiry.Id, ct);
         var contact    = await _store.GetContactAsync(inquiry.CustomerPhone, ct);
+        // Phase 7: per-message IsRead is the source of truth — derive the inquiry counter from it so the list
+        // counter and the app badge always agree (reconciles pre-Phase-7 rows where UnreadCount was zeroed
+        // on open without marking the messages read).
+        inquiry.UnreadCount = messages.Count(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase) && !m.IsRead);
         return new InquiryCacheEntry
         {
             Inquiry = inquiry, Messages = [.. messages], Notes = [.. notes],
