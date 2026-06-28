@@ -160,6 +160,32 @@ public class SmsWebhookController : ControllerBase
         return Content("<Response/>", "application/xml");
     }
 
+    /// <summary>
+    /// DEV-ONLY seed: injects an inbound message straight into the inquiry pipeline (bypassing the SignalWire
+    /// signature) so a populated inquiry/thread can be eyeballed without a live webhook + tunnel. Gated by
+    /// <c>SignalWire:AllowDevSeed</c> (default false) — returns 404 unless explicitly enabled, so it's
+    /// prod-safe. <c>/api/sms</c> is auth-exempt + loopback-bound, so it needs no request signing.
+    /// </summary>
+    [HttpPost("dev-seed")]
+    public async Task<IActionResult> DevSeed([FromBody] DevSeedRequest req, CancellationToken ct)
+    {
+        if (!_config.GetValue("SignalWire:AllowDevSeed", false)) return NotFound();
+        if (string.IsNullOrWhiteSpace(req?.From) || string.IsNullOrWhiteSpace(req.Body))
+            return BadRequest(new { error = "from and body are required" });
+
+        var to  = _config["SignalWire:FromNumber"] ?? "+15550000000";
+        var sid = "DEVSEED-" + Guid.NewGuid().ToString("N")[..12];
+        _log.LogInformation("[SMS] dev-seed inbound from {From}", req.From);
+        await _inquiry.IngestInboundAsync(req.From!, to, req.Body!, sid, ct);
+        return Ok(new { ok = true, sid });
+    }
+
+    public sealed class DevSeedRequest
+    {
+        public string? From { get; set; }
+        public string? Body { get; set; }
+    }
+
     /// <summary>Validates the SignalWire HMAC-SHA1 webhook signature. Fails closed when no token is
     /// configured unless SignalWire:AllowUnsignedWebhooks=true (local dev only).</summary>
     private bool ValidateSignature(IFormCollection form)

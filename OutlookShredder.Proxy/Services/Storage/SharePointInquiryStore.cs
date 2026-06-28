@@ -457,15 +457,15 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name != "InquiryId") continue;
+            if (col.Name is not ("InquiryId" or "CreatedAt")) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
                 await graph.Sites[siteId].Lists[listId].Columns[col.Id]
                     .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
-                _log.LogInformation("[Inquiry] Indexed Drafts column 'InquiryId'");
+                _log.LogInformation("[Inquiry] Indexed Drafts column '{Col}'", col.Name);
             }
-            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index Drafts column 'InquiryId'"); }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index Drafts column '{Col}'", col.Name); }
         }
 
         return _draftsListId = listId;
@@ -548,7 +548,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
     // ── Inquiry child lists (Notes, Quotations) — same shape: a genericList keyed + indexed on InquiryId ──
 
     /// <summary>Gets/creates a simple inquiry child list with the given extra columns, indexing InquiryId.</summary>
-    private async Task<string> GetChildListIdAsync(string listName, (string Name, string Type)[] cols, CancellationToken ct)
+    private async Task<string> GetChildListIdAsync(string listName, (string Name, string Type)[] cols, string[] indexCols, CancellationToken ct)
     {
         var graph  = _sp.GetGraph();
         var siteId = await _sp.GetSiteIdAsync();
@@ -594,26 +594,28 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name != "InquiryId") continue;
+            if (col.Name is null || !indexCols.Contains(col.Name)) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
                 await graph.Sites[siteId].Lists[listId].Columns[col.Id]
                     .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
-                _log.LogInformation("[Inquiry] Indexed {List} column 'InquiryId'", listName);
+                _log.LogInformation("[Inquiry] Indexed {List} column '{Col}'", listName, col.Name);
             }
-            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index {List} column 'InquiryId'", listName); }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index {List} column '{Col}'", listName, col.Name); }
         }
         return listId;
     }
 
     private async Task<string> GetNotesListIdAsync(CancellationToken ct)
         => _notesListId ??= await GetChildListIdAsync("InquiryNotes",
-            [("InquiryId", "text"), ("Author", "text"), ("Body", "note"), ("CreatedAt", "text")], ct);
+            [("InquiryId", "text"), ("Author", "text"), ("Body", "note"), ("CreatedAt", "text")],
+            ["InquiryId", "CreatedAt"], ct);
 
     private async Task<string> GetQuotationsListIdAsync(CancellationToken ct)
         => _quotationsListId ??= await GetChildListIdAsync("InquiryQuotations",
-            [("InquiryId", "text"), ("HskNumber", "text"), ("LinkedAt", "text"), ("LinkedBy", "text")], ct);
+            [("InquiryId", "text"), ("HskNumber", "text"), ("LinkedAt", "text"), ("LinkedBy", "text")],
+            ["InquiryId", "LinkedAt"], ct);
 
     public async Task<int> CreateNoteAsync(InquiryNote note, CancellationToken ct = default)
     {
