@@ -199,6 +199,17 @@ public sealed class InquiryService : IHostedService
                 new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null, attachments, catalogContext), ct);
             if (result is null) return;
 
+            // Each new message re-clarifies with the updated conversation context, so this fresh suggestion
+            // SUPERSEDES any prior pending draft — only the latest stays Pending (the cached suggestion always
+            // reflects the most recent message, moving the conversation toward a quote).
+            foreach (var d in (await _store.GetDraftsByInquiryAsync(inquiryId, ct))
+                              .Where(x => string.Equals(x.Status, DraftStatus.Pending, StringComparison.OrdinalIgnoreCase) && x.SpItemId is int))
+            {
+                try { await _store.UpdateDraftStatusAsync(d.SpItemId!.Value, DraftStatus.Dismissed, ct);
+                      _cache.SetDraftStatus(inquiryId, d.SpItemId!.Value, DraftStatus.Dismissed); }
+                catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] supersede prior draft {Id} failed", d.SpItemId); }
+            }
+
             var draft = new InquiryDraft
             {
                 InquiryId           = inquiryId,
@@ -224,6 +235,17 @@ public sealed class InquiryService : IHostedService
     /// <summary>Updates an outbound message's delivery status by SID (SignalWire status callback).</summary>
     public Task<bool> UpdateMessageStatusAsync(string sid, string status, CancellationToken ct = default)
         => _messages.UpdateStatusBySidAsync(sid, status, ct);
+
+    /// <summary>Operator-triggered: dismiss any prior pending drafts and generate a FRESH AI suggestion for the
+    /// latest inbound message (so a stale/early draft can be replaced on demand). False if no inbound exists.</summary>
+    public async Task<bool> RegenerateDraftAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var messages    = await _messages.GetByInquiryAsync(inquiryId, 12, ct);
+        var lastInbound = messages.LastOrDefault(m => string.Equals(m.Direction, "in", StringComparison.OrdinalIgnoreCase));
+        if (lastInbound is null) return false;
+        await GenerateDraftAsync(inquiryId, lastInbound.Body, lastInbound.ExternalId, null);  // supersedes prior pending
+        return true;
+    }
 
     private async Task<MessageRecord> AppendMessageAsync(
         string from, string to, string body, string? sid, string? inquiryId, string now,

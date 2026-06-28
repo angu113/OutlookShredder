@@ -99,6 +99,9 @@ public static class InquiryDraftPrompt
         - "angle" with ONE dimension is an EQUAL angle: "2 angle" = 2x2 angle. Only the THICKNESS is missing.
         - Rectangular tube and unequal angle genuinely need both face dimensions.
         - If two details are truly missing (e.g. material AND thickness), ask both in one short message.
+        Always move the conversation toward a quote/sale: while details are missing, ask for them; once the
+        product is fully specified, confirm we'll price it up / the team will send a quote. Each reply should
+        advance the customer's requirements, not just acknowledge.
         Use the `options` field only for a small discrete choice (e.g. material); leave it empty otherwise. If the
         message isn't a product request (order status, general question), a brief helpful acknowledgement is fine.
         """;

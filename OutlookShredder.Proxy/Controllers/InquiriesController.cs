@@ -164,6 +164,18 @@ public class InquiriesController : ControllerBase
         catch (Exception ex) { return Fail(ex, "read-all"); }
     }
 
+    /// <summary>Operator: regenerate the AI suggestion for the latest inbound (dismisses prior pending drafts).</summary>
+    [HttpPost("{id}/regenerate-draft")]
+    public async Task<IActionResult> RegenerateDraft(string id, CancellationToken ct)
+    {
+        try
+        {
+            var ok = await _inquiries.RegenerateDraftAsync(id, ct);
+            return ok ? Ok(new { ok = true }) : NotFound(new { error = "no inbound message to draft from" });
+        }
+        catch (Exception ex) { return Fail(ex, "regenerate-draft"); }
+    }
+
     [HttpPost("{id}/drafts/{draftId:int}/accept")]
     public async Task<IActionResult> AcceptDraft(string id, int draftId, [FromBody] AcceptDraftRequest? req, CancellationToken ct)
     {
