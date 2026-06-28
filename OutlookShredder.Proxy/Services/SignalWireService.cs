@@ -70,4 +70,36 @@ public class SignalWireService
             return null;
         }
     }
+
+    /// <summary>Downloads an inbound MMS media part from SignalWire's media store (Basic auth, ProjectId:ApiToken).
+    /// Returns (contentType, bytes), or null on failure. The media URLs arrive on the inbound webhook and expire
+    /// after the carrier's retention window — callers store the bytes durably at ingest.</summary>
+    public async Task<(string ContentType, byte[] Bytes)?> DownloadMediaAsync(string mediaUrl, CancellationToken ct = default)
+    {
+        var projectId = _config["SignalWire:ProjectId"];
+        var apiToken  = _config["SignalWire:ApiToken"];
+        if (string.IsNullOrWhiteSpace(mediaUrl) || string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(apiToken))
+            return null;
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, mediaUrl);
+        var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{projectId}:{apiToken}"));
+        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        try
+        {
+            using var resp = await _http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.LogWarning("[SignalWire] media GET {Status} for {Url}", (int)resp.StatusCode, mediaUrl);
+                return null;
+            }
+            var contentType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+            var bytes       = await resp.Content.ReadAsByteArrayAsync(ct);
+            return (contentType, bytes);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SignalWire] media download failed for {Url}", mediaUrl);
+            return null;
+        }
+    }
 }

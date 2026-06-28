@@ -22,4 +22,13 @@ public sealed class SharePointMessageStore : IMessageStore
 
     public async Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default)
         => await _sp.ReadMessagesByInquiryAsync(inquiryId, take, ct);
+
+    public Task SaveMediaAsync(string inquiryId, string fileName, byte[] bytes, CancellationToken ct = default)
+        => _sp.UpsertInquiryMediaAsync(inquiryId, fileName, bytes, ct);
+
+    public Task<(string ContentType, byte[] Bytes)?> GetMediaAsync(string inquiryId, string fileName, CancellationToken ct = default)
+        => _sp.GetInquiryMediaAsync(inquiryId, fileName, ct);
+
+    public Task<bool> PatchBodyMediaBySidAsync(string sid, string body, string? mediaJson, CancellationToken ct = default)
+        => _sp.PatchMessageBodyMediaBySidAsync(sid, body, mediaJson, ct);
 }

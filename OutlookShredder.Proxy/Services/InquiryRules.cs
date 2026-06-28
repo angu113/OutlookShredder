@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using OutlookShredder.Proxy.Models;
@@ -71,6 +72,82 @@ public static partial class InquiryRules
         }
         throw new InvalidOperationException("CINQ id generation exhausted its retry budget");
     }
+
+    // ── Inbound media (MMS now; email attachments later — channel-agnostic) ──────────────────────────
+    public enum MediaKind { Ignore, Caption, Image, Pdf, Cad, File }
+
+    private static readonly HashSet<string> CadExts = new(StringComparer.OrdinalIgnoreCase)
+    { "dxf", "dwg", "dwf", "dgn", "step", "stp", "iges", "igs", "stl", "sat", "x_t", "x_b", "3dm", "ipt", "sldprt", "catpart", "prt" };
+
+    /// <summary>Classifies one inbound media part by content-type (+ optional name). An MMS delivers the
+    /// message text as a <c>text/plain</c> part (promoted to the body) and a SMIL layout as
+    /// <c>application/smil</c>/<c>text/html</c> (dropped). Binary parts route to inline preview (image/pdf),
+    /// a "Save to CAD" download (drawing files), or a generic "Download" (everything else).</summary>
+    public static MediaKind ClassifyMedia(string? contentType, string? name)
+    {
+        var ct  = (contentType ?? "").ToLowerInvariant();
+        var ext = (Path.GetExtension(name ?? "")).TrimStart('.').ToLowerInvariant();
+        if (ct.Contains("smil") || ct == "text/html")            return MediaKind.Ignore;
+        if (ct.StartsWith("text/plain"))                          return MediaKind.Caption;
+        if (ct.StartsWith("image/") && !ct.Contains("dxf") && !ct.Contains("dwg"))
+        {
+            // image/vnd.dxf / image/vnd.dwg masquerade as images but are CAD drawings.
+            return CadExts.Contains(ext) ? MediaKind.Cad : MediaKind.Image;
+        }
+        if (ct.Contains("pdf") || ext == "pdf")                   return MediaKind.Pdf;
+        if (IsCad(ct, ext))                                       return MediaKind.Cad;
+        return MediaKind.File;
+    }
+
+    private static bool IsCad(string ct, string ext) =>
+        CadExts.Contains(ext) || ct.Contains("dxf") || ct.Contains("dwg") || ct.Contains("autocad")
+        || ct.Contains("acad") || ct.Contains("step") || ct.Contains("iges") || ct.Contains("x-step");
+
+    /// <summary>A storage file extension for a media part — prefers any extension on the name, else maps the
+    /// content type (MMS parts carry no filename, so the content type is usually all we have).</summary>
+    public static string ExtForContentType(string? contentType, string? name = null)
+    {
+        var ext = (Path.GetExtension(name ?? "")).TrimStart('.').ToLowerInvariant();
+        if (ext.Length > 0) return ext;
+        var ct = (contentType ?? "").ToLowerInvariant();
+        return ct switch
+        {
+            "image/jpeg" or "image/jpg" => "jpg",
+            "image/png"  => "png",
+            "image/gif"  => "gif",
+            "image/webp" => "webp",
+            "image/heic" => "heic",
+            "application/pdf" => "pdf",
+            _ when ct.Contains("dxf")      => "dxf",
+            _ when ct.Contains("dwg")      => "dwg",
+            _ when ct.StartsWith("image/") => ct[6..],
+            _ => "bin",
+        };
+    }
+
+    /// <summary>The content type to serve a stored media file back with, derived from its extension.</summary>
+    public static string MimeForName(string name)
+    {
+        var ext = (Path.GetExtension(name)).TrimStart('.').ToLowerInvariant();
+        return ext switch
+        {
+            "jpg" or "jpeg" => "image/jpeg",
+            "png"  => "image/png",
+            "gif"  => "image/gif",
+            "webp" => "image/webp",
+            "heic" => "image/heic",
+            "pdf"  => "application/pdf",
+            "dxf"  => "image/vnd.dxf",
+            "dwg"  => "image/vnd.dwg",
+            _      => "application/octet-stream",
+        };
+    }
+
+    /// <summary>Guards a media file name used as a drive path segment — opaque keys we mint
+    /// (<c>{sid}-{i}.{ext}</c>) only; rejects traversal / separators.</summary>
+    public static bool IsSafeMediaName(string? name) =>
+        !string.IsNullOrWhiteSpace(name) && name.IndexOfAny(['/', '\\']) < 0 && !name.Contains("..")
+        && name.Length <= 200;
 
     public enum ThreadAction { CreateNew, Append, Reopen }
 

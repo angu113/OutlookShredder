@@ -5,13 +5,18 @@ using OutlookShredder.Proxy.Services.Ai;
 
 namespace OutlookShredder.Proxy.Services;
 
-/// <summary>Input for one AI draft: the triggering inbound text, the prior thread transcript, and any
-/// linked HSK# / operator notes for context.</summary>
+/// <summary>Input for one AI draft: the triggering inbound text, the prior thread transcript, any linked
+/// HSK# / operator notes for context, and any inbound attachments (images/PDFs the customer sent — fed to
+/// the model so it can read a sketch or spec sheet when drafting).</summary>
 public sealed record InquiryDraftInput(
     string InboundBody,
     string Transcript,
     IReadOnlyList<string> LinkedHsk,
-    string? Notes);
+    string? Notes,
+    IReadOnlyList<DraftAttachment>? Attachments = null);
+
+/// <summary>One attachment passed to the model (image or PDF only — CAD/other are not vision-readable).</summary>
+public sealed record DraftAttachment(string MimeType, string Base64, string? FileName);
 
 /// <summary>
 /// Generates a suggested reply + intent/urgency/needsQuote classification for an inbound customer message.

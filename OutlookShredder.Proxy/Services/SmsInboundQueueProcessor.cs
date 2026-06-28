@@ -53,7 +53,7 @@ public sealed class SmsInboundQueueProcessor : IHostedService, IAsyncDisposable
                 return;
             }
 
-            await _inquiry.IngestInboundAsync(job.From, job.To ?? "", job.Body ?? "", job.Sid, args.CancellationToken);
+            await _inquiry.IngestInboundAsync(job.From, job.To ?? "", job.Body ?? "", job.Sid, job.MediaUrls, args.CancellationToken);
             await args.CompleteMessageAsync(args.Message);
         }
         catch (Exception ex)

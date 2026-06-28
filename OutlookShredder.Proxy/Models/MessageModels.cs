@@ -1,7 +1,11 @@
+using System.Text.Json;
+
 namespace OutlookShredder.Proxy.Models;
 
 public sealed class MessageRecord
 {
+    private static readonly JsonSerializerOptions _mediaJson = new() { PropertyNameCaseInsensitive = true };
+
     public int?    SpItemId       { get; set; }
     public string  From           { get; set; } = "";
     public string  To             { get; set; } = "";
@@ -19,6 +23,25 @@ public sealed class MessageRecord
     /// <summary>Delivery status for outbound SMS, updated by the SignalWire status callback (queued →
     /// sent → delivered / failed / undelivered). Null for inbound + non-SMS rows.</summary>
     public string? Status         { get; set; }
+    /// <summary>Persisted JSON array of <see cref="MessageMedia"/> — the attachments (MMS / future email)
+    /// stored durably under <c>InquiryMedia/{InquiryId}/</c>. Null/empty for text-only messages.</summary>
+    public string? MediaJson      { get; set; }
+
+    /// <summary>Typed view of <see cref="MediaJson"/> for the client (image/pdf/cad/file each carry a
+    /// stored file name the client fetches via <c>GET /api/inquiries/{id}/media?name=</c>).</summary>
+    public IReadOnlyList<MessageMedia> Media =>
+        string.IsNullOrWhiteSpace(MediaJson)
+            ? []
+            : (JsonSerializer.Deserialize<List<MessageMedia>>(MediaJson, _mediaJson) ?? []);
+}
+
+/// <summary>One stored attachment on a message. <see cref="Kind"/> drives the client UI: image/pdf preview
+/// inline; cad → "Save to CAD" (OneDrive); file → "Download" (Downloads folder, for inspection).</summary>
+public sealed class MessageMedia
+{
+    public string Name        { get; set; } = "";   // stored file name under InquiryMedia/{inquiryId}/
+    public string ContentType { get; set; } = "";
+    public string Kind        { get; set; } = "file"; // image | pdf | cad | file
 }
 
 public sealed class ConversationSummary

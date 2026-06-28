@@ -50,9 +50,19 @@ public sealed class GeminiDraftProvider : IInquiryDraftProvider
         var body = new
         {
             systemInstruction = new { parts = new[] { new { text = InquiryDraftPrompt.SystemPrompt(_config) } } },
-            contents = new[] { new { role = "user", parts = new[] { new { text = InquiryDraftPrompt.BuildUserText(input) } } } },
+            contents = new[] { new { role = "user", parts = BuildParts(input) } },
             generationConfig = new { responseMimeType = "application/json", responseSchema = schema }
         };
+
+        object[] BuildParts(InquiryDraftInput inp)
+        {
+            var parts = new List<object> { new { text = InquiryDraftPrompt.BuildUserText(inp) } };
+            foreach (var a in inp.Attachments ?? [])
+                if (a.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                    || a.MimeType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+                    parts.Add(new { inlineData = new { mimeType = a.MimeType, data = a.Base64 } });
+            return parts.ToArray();
+        }
 
         var bodyJson   = JsonSerializer.Serialize(body);
         var maxRetries = int.TryParse(_config["Gemini:MaxRetries"], out var mr) ? mr : 3;

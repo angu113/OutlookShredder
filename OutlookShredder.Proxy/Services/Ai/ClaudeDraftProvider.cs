@@ -46,7 +46,7 @@ public sealed class ClaudeDraftProvider : IInquiryDraftProvider
             system      = new object[] { new { type = "text", text = InquiryDraftPrompt.SystemPrompt(_config), cache_control = new { type = "ephemeral" } } },
             tools       = new[] { ToolDefinition() },
             tool_choice = new { type = "tool", name = "draft_reply" },
-            messages    = new[] { new { role = "user", content = InquiryDraftPrompt.BuildUserText(input) } },
+            messages    = new[] { new { role = "user", content = BuildContent(input) } },
         };
 
         HttpResponseMessage response;
@@ -66,6 +66,24 @@ public sealed class ClaudeDraftProvider : IInquiryDraftProvider
         }
         _log.LogWarning("[InquiryDraft] Claude returned no draft_reply block");
         return null;
+    }
+
+    /// <summary>User-turn content: plain text when there are no attachments (cheapest), else a content-block
+    /// array with the text plus an image/document block per attachment (mirrors ClaudeExtractionService).</summary>
+    private static object BuildContent(InquiryDraftInput input)
+    {
+        var text = InquiryDraftPrompt.BuildUserText(input);
+        if (input.Attachments is not { Count: > 0 }) return text;
+
+        var blocks = new List<object> { new { type = "text", text } };
+        foreach (var a in input.Attachments)
+        {
+            if (a.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                blocks.Add(new { type = "image", source = new { type = "base64", media_type = a.MimeType, data = a.Base64 } });
+            else if (a.MimeType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+                blocks.Add(new { type = "document", source = new { type = "base64", media_type = "application/pdf", data = a.Base64 }, title = a.FileName ?? "attachment" });
+        }
+        return blocks.ToArray();
     }
 
     private static object ToolDefinition() => new

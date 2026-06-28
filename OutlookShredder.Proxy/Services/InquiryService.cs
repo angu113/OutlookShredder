@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services.Sms;
 using OutlookShredder.Proxy.Services.Storage;
@@ -63,7 +65,8 @@ public sealed class InquiryService : IHostedService
     /// dedup queue guarantees exactly-once). Upserts the contact + consent, handles carrier keywords, then
     /// either records a compliance/info message or threads a real customer message into an inquiry.
     /// </summary>
-    public async Task IngestInboundAsync(string from, string to, string body, string? sid, CancellationToken ct = default)
+    public async Task IngestInboundAsync(string from, string to, string body, string? sid, string? mediaJson = null,
+        CancellationToken ct = default)
     {
         var phone   = InquiryRules.NormalizeE164(from);
         var now     = DateTimeOffset.UtcNow.ToString("o");
@@ -88,7 +91,7 @@ public sealed class InquiryService : IHostedService
         //    answer HELP unless opted out.
         if (keyword != InquiryRules.Keyword.None)
         {
-            var kwMsg = await AppendMessageAsync(from, to, body, sid, latest?.Id, now, ct);
+            var kwMsg = await AppendMessageAsync(from, to, body, sid, latest?.Id, now, null, ct);
             if (keyword == InquiryRules.Keyword.Help && !contact.OptOut)
                 await SendHelpReplyAsync(from, ct);
             if (latest is not null) _notify.NotifyInquiryMessage(latest.Id, kwMsg);
@@ -133,21 +136,27 @@ public sealed class InquiryService : IHostedService
             await _store.UpdateInquiryAsync(inquiry, ct);
         }
 
-        var msg = await AppendMessageAsync(from, to, body, sid, inquiry.Id, now, ct);
+        // Inbound media (MMS attachments; email attachments later): download from the carrier, store durably,
+        // promote a text/plain caption to an empty body, and collect image/PDF parts for the AI draft.
+        var (effectiveBody, mediaStored, aiAttachments) =
+            await ProcessInboundMediaAsync(inquiry.Id, body, sid, mediaJson, ct);
+
+        var msg = await AppendMessageAsync(from, to, effectiveBody, sid, inquiry.Id, now, mediaStored, ct);
 
         _notify.NotifyInquiry(isNew ? "Created" : "Updated", inquiry);
         _notify.NotifyInquiryMessage(inquiry.Id, msg);
-        _log.LogInformation("[Inquiry] {Action} {Id} from {Phone} (unread={Unread})",
-            action, inquiry.Id, phone, inquiry.UnreadCount);
+        _log.LogInformation("[Inquiry] {Action} {Id} from {Phone} (unread={Unread}, media={Media})",
+            action, inquiry.Id, phone, inquiry.UnreadCount, msg.Media.Count);
 
         // Phase 2: AI reply suggestion — async, never auto-sent, and detached from the queue consumer's
         // token so a slow Claude call neither blocks ingest nor is cancelled when the SB message completes.
-        _ = GenerateDraftAsync(inquiry.Id, body, sid);
+        _ = GenerateDraftAsync(inquiry.Id, effectiveBody, sid, aiAttachments);
     }
 
     /// <summary>Builds + persists an AI reply suggestion for the inquiry and pushes it live. Fire-and-forget:
     /// it owns its own timeout and swallows all errors (a draft is a non-critical suggestion).</summary>
-    private async Task GenerateDraftAsync(string inquiryId, string inboundBody, string? triggeringSid)
+    private async Task GenerateDraftAsync(string inquiryId, string inboundBody, string? triggeringSid,
+        IReadOnlyList<DraftAttachment>? attachments = null)
     {
         try
         {
@@ -159,9 +168,10 @@ public sealed class InquiryService : IHostedService
             var prior      = history.Count > 0 ? history.Take(history.Count - 1).ToList() : history;
             var transcript = InquiryDraftPrompt.BuildTranscript(prior);
 
-            // Linked HSK# / notes arrive in Phase 3 (quotation linking + notes) — empty for now.
+            // Linked HSK# / notes arrive in Phase 3 (quotation linking + notes) — empty for now. Image/PDF
+            // attachments (when present) are fed to the model so it can read a sketch / spec sheet.
             var result = await _drafts.DraftAsync(
-                new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null), ct);
+                new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null, attachments), ct);
             if (result is null) return;
 
             var draft = new InquiryDraft
@@ -189,7 +199,8 @@ public sealed class InquiryService : IHostedService
         => _messages.UpdateStatusBySidAsync(sid, status, ct);
 
     private async Task<MessageRecord> AppendMessageAsync(
-        string from, string to, string body, string? sid, string? inquiryId, string now, CancellationToken ct)
+        string from, string to, string body, string? sid, string? inquiryId, string now,
+        string? mediaJson, CancellationToken ct)
     {
         var msg = new MessageRecord
         {
@@ -203,10 +214,98 @@ public sealed class InquiryService : IHostedService
             IsRead         = false,
             ExternalId     = sid,
             InquiryId      = inquiryId,
+            MediaJson      = mediaJson,
         };
         try { await _messages.AppendAsync(msg, ct); }
         catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] message append failed for {From}", from); }
         return msg;
+    }
+
+    private static readonly JsonSerializerOptions _mediaJsonOpts = new() { PropertyNameCaseInsensitive = true };
+
+    /// <summary>The descriptor the SMS webhook (Azure Function) forwards for each inbound media part.</summary>
+    private sealed record InboundMediaPart(string? Url, string? ContentType);
+
+    /// <summary>
+    /// Downloads each inbound media part from the carrier and stores the binary parts durably under the
+    /// inquiry (so previews + AI survive the carrier's short retention). Returns the effective body (a
+    /// text/plain part is promoted when the body is empty — MMS delivers the caption as media), the stored
+    /// media JSON for the message row, and the image/PDF attachments to feed the AI draft. SMIL/HTML layout
+    /// parts are dropped. Best-effort: a failed part is skipped, never fatal to ingest.
+    /// </summary>
+    private async Task<(string Body, string? MediaJson, IReadOnlyList<DraftAttachment> AiAttachments)>
+        ProcessInboundMediaAsync(string inquiryId, string body, string? sid, string? mediaJson, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(mediaJson)) return (body, null, []);
+
+        List<InboundMediaPart>? parts;
+        try { parts = JsonSerializer.Deserialize<List<InboundMediaPart>>(mediaJson, _mediaJsonOpts); }
+        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] bad media payload"); return (body, null, []); }
+        if (parts is null || parts.Count == 0) return (body, null, []);
+
+        var stored   = new List<MessageMedia>();
+        var ai       = new List<DraftAttachment>();
+        string? caption = null;
+        var index = 0;
+
+        foreach (var part in parts)
+        {
+            var i = index++;
+            if (string.IsNullOrWhiteSpace(part.Url)) continue;
+            var kind = InquiryRules.ClassifyMedia(part.ContentType, null);
+            if (kind == InquiryRules.MediaKind.Ignore) continue;
+
+            var dl = await _sms.DownloadMediaAsync(part.Url!, ct);
+            if (dl is null) continue;
+            var (servedType, bytes) = dl.Value;
+            var contentType = string.IsNullOrWhiteSpace(part.ContentType) ? servedType : part.ContentType!;
+
+            if (kind == InquiryRules.MediaKind.Caption)
+            {
+                try { var txt = Encoding.UTF8.GetString(bytes).Trim(); if (caption is null && txt.Length > 0) caption = txt; }
+                catch { /* not decodable as text — skip */ }
+                continue;
+            }
+
+            var ext  = InquiryRules.ExtForContentType(contentType);
+            var name = $"{(string.IsNullOrEmpty(sid) ? "msg" : sid)}-{i}.{ext}";
+            try { await _messages.SaveMediaAsync(inquiryId, name, bytes, ct); }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] media store failed for {Name}", name); continue; }
+
+            var kindStr = kind switch
+            {
+                InquiryRules.MediaKind.Image => "image",
+                InquiryRules.MediaKind.Pdf   => "pdf",
+                InquiryRules.MediaKind.Cad   => "cad",
+                _                            => "file",
+            };
+            stored.Add(new MessageMedia { Name = name, ContentType = contentType, Kind = kindStr });
+
+            // Feed only vision-readable parts to the model, and only mime types it accepts.
+            var mime = kind == InquiryRules.MediaKind.Pdf ? "application/pdf" : contentType.ToLowerInvariant();
+            if (mime == "image/jpg") mime = "image/jpeg";
+            if (kind == InquiryRules.MediaKind.Pdf || mime is "image/jpeg" or "image/png" or "image/gif" or "image/webp")
+                ai.Add(new DraftAttachment(mime, Convert.ToBase64String(bytes), name));
+        }
+
+        var effectiveBody = !string.IsNullOrWhiteSpace(body) ? body : (caption ?? "");
+        var storedJson    = stored.Count > 0 ? JsonSerializer.Serialize(stored, _mediaJsonOpts) : null;
+        return (effectiveBody, storedJson, ai);
+    }
+
+    /// <summary>Serves a stored inquiry media file (preview / download). Name is an opaque key we minted.</summary>
+    public async Task<(string ContentType, byte[] Bytes)?> GetMediaAsync(string inquiryId, string fileName, CancellationToken ct = default)
+        => InquiryRules.IsSafeMediaName(fileName) ? await _messages.GetMediaAsync(inquiryId, fileName, ct) : null;
+
+    /// <summary>Media backfill/recovery: re-runs media processing for a known message SID against the supplied
+    /// carrier media descriptors and patches the existing row's body + media. Repairs messages that ingested
+    /// before media handling existed (or whose media download failed). False if no row matched the SID.</summary>
+    public async Task<bool> BackfillMessageMediaAsync(string inquiryId, string sid, string mediaJson, CancellationToken ct = default)
+    {
+        var (body, stored, _) = await ProcessInboundMediaAsync(inquiryId, "", sid, mediaJson, ct);
+        var ok = await _messages.PatchBodyMediaBySidAsync(sid, body, stored, ct);
+        if (ok) _log.LogInformation("[Inquiry] backfilled media for sid {Sid} on {Id}", sid, inquiryId);
+        return ok;
     }
 
     private async Task SendHelpReplyAsync(string to, CancellationToken ct)

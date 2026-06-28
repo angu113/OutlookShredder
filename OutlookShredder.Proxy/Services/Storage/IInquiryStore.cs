@@ -57,4 +57,15 @@ public interface IMessageStore
     Task<bool> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default);
     /// <summary>The inquiry's messages, oldest-first, capped at <paramref name="take"/> — for AI thread context.</summary>
     Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default);
+
+    /// <summary>Stores one attachment's bytes durably under the inquiry (so previews/AI survive the carrier's
+    /// short media-retention window). <paramref name="fileName"/> is an opaque, path-safe key.</summary>
+    Task SaveMediaAsync(string inquiryId, string fileName, byte[] bytes, CancellationToken ct = default);
+
+    /// <summary>Reads back a stored attachment (content-type + bytes), or null if absent.</summary>
+    Task<(string ContentType, byte[] Bytes)?> GetMediaAsync(string inquiryId, string fileName, CancellationToken ct = default);
+
+    /// <summary>Patches an existing message's body + media by provider SID (media backfill/recovery). False if
+    /// no row matched.</summary>
+    Task<bool> PatchBodyMediaBySidAsync(string sid, string body, string? mediaJson, CancellationToken ct = default);
 }

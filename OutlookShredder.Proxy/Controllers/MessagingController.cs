@@ -176,7 +176,7 @@ public class SmsWebhookController : ControllerBase
         var to  = _config["SignalWire:FromNumber"] ?? "+15550000000";
         var sid = "DEVSEED-" + Guid.NewGuid().ToString("N")[..12];
         _log.LogInformation("[SMS] dev-seed inbound from {From}", req.From);
-        await _inquiry.IngestInboundAsync(req.From!, to, req.Body!, sid, ct);
+        await _inquiry.IngestInboundAsync(req.From!, to, req.Body!, sid, null, ct);
         return Ok(new { ok = true, sid });
     }
 

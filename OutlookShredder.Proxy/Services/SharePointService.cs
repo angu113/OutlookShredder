@@ -3637,6 +3637,39 @@ public partial class SharePointService
             fileName, bytes.Length, spItemId);
     }
 
+    /// <summary>Stores an inbound inquiry media part (MMS attachment / future email attachment) durably under
+    /// <c>InquiryMedia/{inquiryId}/{fileName}</c> in the site drive — so previews + AI vision survive the
+    /// carrier's short media-retention window. App-only PUT (works without a delegated token).</summary>
+    public async Task UpsertInquiryMediaAsync(string inquiryId, string fileName, byte[] bytes, CancellationToken ct = default)
+    {
+        var driveId = await GetRfqDriveIdAsync();
+        var itemKey = $"root:/InquiryMedia/{inquiryId}/{fileName}:";
+        using var stream = new MemoryStream(bytes);
+        await GetGraph().Drives[driveId].Items[itemKey].Content.PutAsync(stream, cancellationToken: ct);
+        _log.LogInformation("[SP] Uploaded inquiry media '{File}' ({Bytes} bytes) for {Id}", fileName, bytes.Length, inquiryId);
+    }
+
+    /// <summary>Reads back a stored inquiry media part (content-type derived from the file extension), or null
+    /// if absent. Served to the client via <c>GET /api/inquiries/{id}/media?name=</c>.</summary>
+    public async Task<(string ContentType, byte[] Bytes)?> GetInquiryMediaAsync(string inquiryId, string fileName, CancellationToken ct = default)
+    {
+        var driveId = await GetRfqDriveIdAsync();
+        var itemKey = $"root:/InquiryMedia/{inquiryId}/{fileName}:";
+        try
+        {
+            using var stream = await GetGraph().Drives[driveId].Items[itemKey].Content.GetAsync(cancellationToken: ct);
+            if (stream is null) return null;
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms, ct);
+            return (InquiryRules.MimeForName(fileName), ms.ToArray());
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+        {
+            _log.LogWarning("[SP] Inquiry media not found: {Id}/{File}", inquiryId, fileName);
+            return null;
+        }
+    }
+
     // ??"?????"??? Backfill: write CatalogProductName / ProductSearchKey for existing SLI rows ??"?????"?????"?????"?????"???
 
     /// <summary>
@@ -12143,6 +12176,7 @@ public partial class SharePointService
             ("ExternalId", "text"),
             ("InquiryId",  "text"),    // CINQ thread this message belongs to (SMS inquiry pipeline)
             ("MsgStatus",  "text"),    // outbound SMS delivery status (queued/sent/delivered/failed)
+            ("MediaJson",  "note"),    // JSON array of stored attachments (MMS/email media); not filtered → no index
         ];
 
         foreach (var (name, type) in cols)
@@ -12203,6 +12237,7 @@ public partial class SharePointService
             ["ExternalId"] = msg.ExternalId,
             ["InquiryId"]  = msg.InquiryId,
             ["MsgStatus"]  = msg.Status,
+            ["MediaJson"]  = msg.MediaJson,
         };
 
         var created = await GetGraph().Sites[siteId].Lists[listId].Items
@@ -12231,6 +12266,30 @@ public partial class SharePointService
         await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
             .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["MsgStatus"] = status } },
                 cancellationToken: ct);
+        return true;
+    }
+
+    /// <summary>Patches an existing message row's Body + MediaJson by its provider SID (ExternalId) — used by
+    /// media backfill/recovery to repair a row that ingested before media handling existed. False if no match.</summary>
+    public async Task<bool> PatchMessageBodyMediaBySidAsync(string sid, string body, string? mediaJson, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(sid)) return false;
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+
+        var match = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(r =>
+        {
+            r.QueryParameters.Expand = ["fields"];
+            r.QueryParameters.Filter = $"fields/ExternalId eq '{sid.Replace("'", "''")}'";
+            r.QueryParameters.Top    = 1;
+        }, ct);
+
+        var item = match?.Value?.FirstOrDefault();
+        if (item?.Id is null) return false;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?>
+                { ["Body"] = body, ["MediaJson"] = mediaJson } }, cancellationToken: ct);
         return true;
     }
 
@@ -12377,6 +12436,7 @@ public partial class SharePointService
                 ExternalId     = d.TryGetValue("ExternalId", out var ex) ? ex?.ToString() : null,
                 InquiryId      = d.TryGetValue("InquiryId", out var iq) ? iq?.ToString() : null,
                 Status         = d.TryGetValue("MsgStatus", out var ms) ? ms?.ToString() : null,
+                MediaJson      = d.TryGetValue("MediaJson", out var mj) ? mj?.ToString() : null,
             });
         }
         return take > 0 && result.Count > take ? result.GetRange(result.Count - take, take) : result;

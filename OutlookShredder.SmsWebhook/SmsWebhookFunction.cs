@@ -159,12 +159,19 @@ public class SmsWebhookFunction
     private static string Decode(string s) => Uri.UnescapeDataString(s.Replace('+', ' '));
     private static string Get(IReadOnlyDictionary<string, string> f, string k) => f.TryGetValue(k, out var v) ? v : "";
 
+    // Forwards each MMS media part as {url, contentType}. The proxy downloads them at ingest (carrier auth),
+    // stores them durably, promotes a text/plain caption to the body, and drops the SMIL layout part.
     private static string? CollectMediaUrls(IReadOnlyDictionary<string, string> form)
     {
         if (!int.TryParse(Get(form, "NumMedia"), out var n) || n <= 0) return null;
-        var urls = new List<string>();
-        for (int i = 0; i < n; i++) { var u = Get(form, $"MediaUrl{i}"); if (!string.IsNullOrWhiteSpace(u)) urls.Add(u); }
-        return urls.Count > 0 ? JsonSerializer.Serialize(urls) : null;
+        var parts = new List<object>();
+        for (int i = 0; i < n; i++)
+        {
+            var u = Get(form, $"MediaUrl{i}");
+            if (string.IsNullOrWhiteSpace(u)) continue;
+            parts.Add(new { url = u, contentType = Get(form, $"MediaContentType{i}") });
+        }
+        return parts.Count > 0 ? JsonSerializer.Serialize(parts) : null;
     }
 
     private static string? Header(HttpRequestData req, string name)

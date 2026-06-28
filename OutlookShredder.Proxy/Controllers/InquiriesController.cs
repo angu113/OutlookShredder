@@ -13,11 +13,13 @@ namespace OutlookShredder.Proxy.Controllers;
 public class InquiriesController : ControllerBase
 {
     private readonly InquiryService            _inquiries;
+    private readonly IConfiguration            _config;
     private readonly ILogger<InquiriesController> _log;
 
-    public InquiriesController(InquiryService inquiries, ILogger<InquiriesController> log)
+    public InquiriesController(InquiryService inquiries, IConfiguration config, ILogger<InquiriesController> log)
     {
         _inquiries = inquiries;
+        _config    = config;
         _log       = log;
     }
 
@@ -37,6 +39,41 @@ public class InquiriesController : ControllerBase
             return detail is null ? NotFound() : Ok(detail);
         }
         catch (Exception ex) { return Fail(ex, "get"); }
+    }
+
+    /// <summary>Streams a stored inbound media file (image/pdf preview, or cad/file download). The proxy holds
+    /// the bytes durably (app-only Graph creds) so the client never needs the carrier's auth or expiring URL.</summary>
+    [HttpGet("{id}/media")]
+    public async Task<IActionResult> GetMedia(string id, [FromQuery] string name, CancellationToken ct)
+    {
+        try
+        {
+            var res = await _inquiries.GetMediaAsync(id, name, ct);
+            return res is null ? NotFound() : File(res.Value.Bytes, res.Value.ContentType);
+        }
+        catch (Exception ex) { return Fail(ex, "media"); }
+    }
+
+    /// <summary>Dev/recovery: re-pull + attach media for an existing message by SID (gated by SignalWire:AllowDevSeed).
+    /// Body: { sid, mediaJson } where mediaJson is a [{url,contentType}] array of carrier media parts.</summary>
+    [HttpPost("{id}/backfill-media")]
+    public async Task<IActionResult> BackfillMedia(string id, [FromBody] BackfillMediaRequest? req, CancellationToken ct)
+    {
+        if (!_config.GetValue("SignalWire:AllowDevSeed", false)) return NotFound();
+        if (string.IsNullOrWhiteSpace(req?.Sid) || string.IsNullOrWhiteSpace(req.MediaJson))
+            return BadRequest(new { error = "sid and mediaJson are required" });
+        try
+        {
+            var ok = await _inquiries.BackfillMessageMediaAsync(id, req.Sid!, req.MediaJson!, ct);
+            return ok ? Ok(new { ok = true }) : NotFound(new { error = "no message matched that sid" });
+        }
+        catch (Exception ex) { return Fail(ex, "backfill-media"); }
+    }
+
+    public sealed class BackfillMediaRequest
+    {
+        public string? Sid       { get; set; }
+        public string? MediaJson { get; set; }
     }
 
     [HttpPost("{id}/messages")]
