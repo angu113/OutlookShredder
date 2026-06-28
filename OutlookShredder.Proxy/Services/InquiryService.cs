@@ -211,6 +211,15 @@ public sealed class InquiryService : IHostedService
 
     private async Task SendHelpReplyAsync(string to, CancellationToken ct)
     {
+        // Compliance auto-replies (STOP/HELP/START confirmations) are owned by SignalWire's 10DLC campaign by
+        // default — it sends the carrier-registered templates AND enforces opt-out at the network level. We only
+        // send our own HELP reply when SignalWire's auto-handling is deliberately disabled and the app is the
+        // single owner (set SignalWire:AppHelpReply=true). Off by default so a HELP isn't answered twice.
+        if (!_config.GetValue("SignalWire:AppHelpReply", false))
+        {
+            _log.LogInformation("[Inquiry] HELP reply left to SignalWire (SignalWire:AppHelpReply not set)");
+            return;
+        }
         if (!_sms.IsConfigured) { _log.LogWarning("[Inquiry] HELP received but SMS gateway not configured"); return; }
         var reply = _config["SignalWire:HelpReply"] is { Length: > 0 } cfg ? cfg : DefaultHelpReply;
         try { await _sms.SendAsync(to, reply, ct: ct); }

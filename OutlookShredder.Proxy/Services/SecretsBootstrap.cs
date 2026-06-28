@@ -53,8 +53,23 @@ public static class SecretsBootstrap
         if (!string.IsNullOrWhiteSpace(path) && !_localSecretFiles.Contains(path)) _localSecretFiles.Add(path);
     }
 
-    public static string ConfigKeyToVaultName(string configKey) => configKey.Replace(":", "--");
-    public static string VaultNameToConfigKey(string vaultName) => vaultName.Replace("--", ":");
+    /// <summary>Config keys whose vault secret name does NOT follow the ':'→'--' convention. Lets a secret be
+    /// named for its purpose in the vault (e.g. the SignalWire token lives as <c>silmaril-sms-channel</c>)
+    /// while still overlaying onto the standard config key the code reads (<c>SignalWire:ApiToken</c>).</summary>
+    private static readonly Dictionary<string, string> VaultNameOverrides = new(StringComparer.Ordinal)
+    {
+        ["SignalWire:ApiToken"] = "silmaril-sms-channel",
+    };
+
+    public static string ConfigKeyToVaultName(string configKey) =>
+        VaultNameOverrides.TryGetValue(configKey, out var name) ? name : configKey.Replace(":", "--");
+
+    public static string VaultNameToConfigKey(string vaultName)
+    {
+        foreach (var kv in VaultNameOverrides)
+            if (string.Equals(kv.Value, vaultName, StringComparison.Ordinal)) return kv.Key;
+        return vaultName.Replace("--", ":");
+    }
 
     /// <summary>
     /// Try to overlay vault secrets onto <paramref name="config"/>. Must run AFTER the JSON file

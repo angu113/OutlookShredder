@@ -1,0 +1,7 @@
+bin/
+obj/
+publish_out/
+functionapp.zip
+# local.settings.json holds connection strings/secrets for local `func` runs — never commit it.
+# Production settings live in the Function App's configuration (see wip/customer-experience-sms-inquiry.md).
+local.settings.json
