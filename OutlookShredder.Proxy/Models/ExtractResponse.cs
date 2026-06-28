@@ -85,6 +85,12 @@ public class RfqProcessedNotification
     public string? InquiryPhone         { get; set; }
     public int?    InquiryUnread        { get; set; }
     public string? InquiryLastMessageAt { get; set; }
+    // Populated when EventType = "InquiryDraft" (an AI reply suggestion was created for InquiryId).
+    public int?    DraftSpItemId        { get; set; }
+    public string? DraftBody            { get; set; }
+    public string? DraftIntent          { get; set; }
+    public string? DraftUrgency         { get; set; }
+    public bool?   DraftNeedsQuote      { get; set; }
     /// <summary>
     /// All CRM matches when the caller's phone number appears at more than one company.
     /// Null when there is 0 or 1 match (legacy BpName/ContactName/PopupMessage fields cover those cases).

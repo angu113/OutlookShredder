@@ -21,6 +21,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
 
     private string? _inquiriesListId;
     private string? _contactsListId;
+    private string? _draftsListId;
 
     public SharePointInquiryStore(SharePointService sp, ILogger<SharePointInquiryStore> log)
     {
@@ -32,6 +33,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
     {
         await GetInquiriesListIdAsync(ct);
         await GetContactsListIdAsync(ct);
+        await GetDraftsListIdAsync(ct);
     }
 
     // ── Inquiries ─────────────────────────────────────────────────────────────
@@ -350,5 +352,159 @@ public sealed class SharePointInquiryStore : IInquiryStore
             throw new Exception("MessagingContacts write returned no item ID");
         contact.SpItemId = id;
         return id;
+    }
+
+    // ── Drafts ────────────────────────────────────────────────────────────────
+
+    private async Task<string> GetDraftsListIdAsync(CancellationToken ct)
+    {
+        if (_draftsListId is not null) return _draftsListId;
+
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        const string listName = "Drafts";
+
+        var lists = await graph.Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+        }
+        else
+        {
+            _log.LogInformation("[Inquiry] Creating Drafts list");
+            var created = await graph.Sites[siteId].Lists.PostAsync(new Graph.List
+            {
+                DisplayName = listName,
+                ListProp    = new Graph.ListInfo { Template = "genericList" },
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("Failed to create Drafts list");
+            _log.LogInformation("[Inquiry] Created Drafts list -> {Id}", listId);
+        }
+
+        var existing = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var have = existing?.Value?.Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        (string Name, string Type)[] cols =
+        [
+            ("InquiryId",           "text"),
+            ("TriggeringMessageId", "text"),
+            ("DraftSource",         "text"),
+            ("TemplateId",          "text"),
+            ("Body",                "note"),
+            ("SuggestedIntent",     "text"),
+            ("SuggestedUrgency",    "text"),
+            ("NeedsQuote",          "boolean"),
+            ("DraftStatus",         "text"),
+            ("CreatedAt",           "text"),
+        ];
+        foreach (var (name, type) in cols)
+        {
+            if (have.Contains(name)) continue;
+            try
+            {
+                var col = type switch
+                {
+                    "boolean" => new Graph.ColumnDefinition { Name = name, Boolean = new Graph.BooleanColumn() },
+                    "note"    => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn { AllowMultipleLines = true } },
+                    _         => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn() },
+                };
+                await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Created Drafts column '{Name}'", name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to create Drafts column '{Name}'", name); }
+        }
+
+        var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        foreach (var col in allCols?.Value ?? [])
+        {
+            if (col.Name != "InquiryId") continue;
+            if (col.Indexed == true || col.Id is null) continue;
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Indexed Drafts column 'InquiryId'");
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index Drafts column 'InquiryId'"); }
+        }
+
+        return _draftsListId = listId;
+    }
+
+    public async Task<int> CreateDraftAsync(InquiryDraft draft, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetDraftsListIdAsync(ct);
+        var item   = new Graph.ListItem
+        {
+            Fields = new Graph.FieldValueSet
+            {
+                AdditionalData = new Dictionary<string, object?>
+                {
+                    ["Title"]               = draft.InquiryId,
+                    ["InquiryId"]           = draft.InquiryId,
+                    ["TriggeringMessageId"] = draft.TriggeringMessageId,
+                    ["DraftSource"]         = draft.Source,
+                    ["TemplateId"]          = draft.TemplateId,
+                    ["Body"]                = draft.Body,
+                    ["SuggestedIntent"]     = draft.SuggestedIntent,
+                    ["SuggestedUrgency"]    = draft.SuggestedUrgency,
+                    ["NeedsQuote"]          = draft.NeedsQuote,
+                    ["DraftStatus"]         = draft.Status,
+                    ["CreatedAt"]           = draft.CreatedAt,
+                },
+            },
+        };
+        var created = await graph.Sites[siteId].Lists[listId].Items.PostAsync(item, cancellationToken: ct);
+        if (created?.Id is null || !int.TryParse(created.Id, out var id))
+            throw new Exception("Drafts write returned no item ID");
+        draft.SpItemId = id;
+        return id;
+    }
+
+    public async Task<IReadOnlyList<InquiryDraft>> GetDraftsByInquiryAsync(string inquiryId, CancellationToken ct = default)
+    {
+        var listId = await GetDraftsListIdAsync(ct);
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
+            orderby: ["fields/CreatedAt desc"], ct: ct);
+
+        var result = new List<InquiryDraft>();
+        foreach (var item in items)
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            bool B(string k) => d.TryGetValue(k, out var v) && v is not null &&
+                (v is JsonElement je ? je.ValueKind == JsonValueKind.True : v is bool b && b);
+            result.Add(new InquiryDraft
+            {
+                SpItemId            = int.TryParse(item.Id, out var id) ? id : null,
+                InquiryId           = S("InquiryId"),
+                TriggeringMessageId = S("TriggeringMessageId") is { Length: > 0 } tm ? tm : null,
+                Source              = S("DraftSource") is { Length: > 0 } src ? src : DraftSource.Ai,
+                TemplateId          = S("TemplateId") is { Length: > 0 } ti ? ti : null,
+                Body                = S("Body"),
+                SuggestedIntent     = S("SuggestedIntent") is { Length: > 0 } si ? si : null,
+                SuggestedUrgency    = S("SuggestedUrgency") is { Length: > 0 } su ? su : null,
+                NeedsQuote          = B("NeedsQuote"),
+                Status              = S("DraftStatus") is { Length: > 0 } st ? st : DraftStatus.Pending,
+                CreatedAt           = S("CreatedAt"),
+            });
+        }
+        return result;
+    }
+
+    public async Task UpdateDraftStatusAsync(int spItemId, string status, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetDraftsListIdAsync(ct);
+        await graph.Sites[siteId].Lists[listId].Items[spItemId.ToString()].Fields
+            .PatchAsync(new Graph.FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["DraftStatus"] = status } },
+                cancellationToken: ct);
     }
 }

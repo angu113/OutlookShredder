@@ -18,6 +18,7 @@ public sealed class InquiryService : IHostedService
     private readonly IMessageStore           _messages;
     private readonly RfqNotificationService  _notify;
     private readonly SignalWireService       _sw;
+    private readonly InquiryDraftService     _drafts;
     private readonly IConfiguration          _config;
     private readonly ILogger<InquiryService> _log;
 
@@ -27,12 +28,13 @@ public sealed class InquiryService : IHostedService
         "Reply STOP to opt out.";
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
-        SignalWireService sw, IConfiguration config, ILogger<InquiryService> log)
+        SignalWireService sw, InquiryDraftService drafts, IConfiguration config, ILogger<InquiryService> log)
     {
         _store    = store;
         _messages = messages;
         _notify   = notify;
         _sw       = sw;
+        _drafts   = drafts;
         _config   = config;
         _log      = log;
     }
@@ -125,6 +127,49 @@ public sealed class InquiryService : IHostedService
         _notify.NotifyInquiryMessage(inquiry.Id, msg);
         _log.LogInformation("[Inquiry] {Action} {Id} from {Phone} (unread={Unread})",
             action, inquiry.Id, phone, inquiry.UnreadCount);
+
+        // Phase 2: AI reply suggestion — async, never auto-sent, and detached from the queue consumer's
+        // token so a slow Claude call neither blocks ingest nor is cancelled when the SB message completes.
+        _ = GenerateDraftAsync(inquiry.Id, body, sid);
+    }
+
+    /// <summary>Builds + persists an AI reply suggestion for the inquiry and pushes it live. Fire-and-forget:
+    /// it owns its own timeout and swallows all errors (a draft is a non-critical suggestion).</summary>
+    private async Task GenerateDraftAsync(string inquiryId, string inboundBody, string? triggeringSid)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var ct = cts.Token;
+
+            // Prior transcript = the thread minus the just-appended inbound (passed separately as "latest").
+            var history    = await _messages.GetByInquiryAsync(inquiryId, 12, ct);
+            var prior      = history.Count > 0 ? history.Take(history.Count - 1).ToList() : history;
+            var transcript = InquiryDraftPrompt.BuildTranscript(prior);
+
+            // Linked HSK# / notes arrive in Phase 3 (quotation linking + notes) — empty for now.
+            var result = await _drafts.DraftAsync(
+                new InquiryDraftInput(inboundBody, transcript, Array.Empty<string>(), null), ct);
+            if (result is null) return;
+
+            var draft = new InquiryDraft
+            {
+                InquiryId           = inquiryId,
+                TriggeringMessageId = triggeringSid,
+                Source              = DraftSource.Ai,
+                Body                = result.Reply,
+                SuggestedIntent     = result.Intent,
+                SuggestedUrgency    = result.Urgency,
+                NeedsQuote          = result.NeedsQuote,
+                Status              = DraftStatus.Pending,
+                CreatedAt           = DateTimeOffset.UtcNow.ToString("o"),
+            };
+            await _store.CreateDraftAsync(draft, ct);
+            _notify.NotifyInquiryDraft(draft);
+            _log.LogInformation("[Inquiry] AI draft for {Id} (intent={Intent} urgency={Urgency} needsQuote={NeedsQuote})",
+                inquiryId, draft.SuggestedIntent, draft.SuggestedUrgency, draft.NeedsQuote);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] AI draft generation failed for {Id}", inquiryId); }
     }
 
     /// <summary>Updates an outbound message's delivery status by SID (SignalWire status callback).</summary>

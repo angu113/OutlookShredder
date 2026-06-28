@@ -12345,6 +12345,43 @@ public partial class SharePointService
         return result;
     }
 
+    /// <summary>The messages threaded into one inquiry (CINQ), oldest-first, for AI draft context. Filters on
+    /// the indexed InquiryId column; paginated so a long thread isn't silently truncated.</summary>
+    public async Task<List<Models.MessageRecord>> ReadMessagesByInquiryAsync(
+        string inquiryId, int take = 20, CancellationToken ct = default)
+    {
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+        var items  = await ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
+            orderby: ["fields/MsgTime asc"], ct: ct);
+
+        var result = new List<Models.MessageRecord>();
+        foreach (var item in items)
+        {
+            var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+            string Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+            bool GetBool(string k) => d.TryGetValue(k, out var v) &&
+                v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.True;
+            result.Add(new Models.MessageRecord
+            {
+                SpItemId       = int.TryParse(item.Id, out var id) ? id : null,
+                From           = Get("MsgFrom"),
+                To             = Get("MsgTo"),
+                Channel        = Get("Channel"),
+                Direction      = Get("Direction"),
+                Subject        = d.TryGetValue("Subject", out var sv) ? sv?.ToString() : null,
+                Body           = Get("Body"),
+                ConversationId = Get("ConvId"),
+                TimestampUtc   = Get("MsgTime"),
+                IsRead         = GetBool("IsRead"),
+                ExternalId     = d.TryGetValue("ExternalId", out var ex) ? ex?.ToString() : null,
+                InquiryId      = d.TryGetValue("InquiryId", out var iq) ? iq?.ToString() : null,
+                Status         = d.TryGetValue("MsgStatus", out var ms) ? ms?.ToString() : null,
+            });
+        }
+        return take > 0 && result.Count > take ? result.GetRange(result.Count - take, take) : result;
+    }
+
     public async Task MarkConversationReadAsync(string conversationId, CancellationToken ct = default)
     {
         var siteId  = await GetSiteIdAsync();

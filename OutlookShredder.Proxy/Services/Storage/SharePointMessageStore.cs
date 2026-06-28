@@ -19,4 +19,7 @@ public sealed class SharePointMessageStore : IMessageStore
 
     public Task<bool> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default)
         => _sp.UpdateMessageStatusBySidAsync(sid, status, ct);
+
+    public async Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default)
+        => await _sp.ReadMessagesByInquiryAsync(inquiryId, take, ct);
 }

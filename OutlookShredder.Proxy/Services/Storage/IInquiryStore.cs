@@ -27,6 +27,11 @@ public interface IInquiryStore
     Task<Inquiry?> GetInquiryByIdAsync(string cinqId, CancellationToken ct = default);
     Task<int> CreateInquiryAsync(Inquiry inquiry, CancellationToken ct = default);
     Task UpdateInquiryAsync(Inquiry inquiry, CancellationToken ct = default);
+
+    // Drafts — AI-suggested replies (Phase 2). Never auto-sent; an operator accepts/dismisses.
+    Task<int> CreateDraftAsync(InquiryDraft draft, CancellationToken ct = default);
+    Task<IReadOnlyList<InquiryDraft>> GetDraftsByInquiryAsync(string inquiryId, CancellationToken ct = default);
+    Task UpdateDraftStatusAsync(int spItemId, string status, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -41,4 +46,6 @@ public interface IMessageStore
     Task AppendAsync(MessageRecord message, CancellationToken ct = default);
     /// <summary>Updates an outbound message's delivery status by its provider SID. False if no row matched.</summary>
     Task<bool> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default);
+    /// <summary>The inquiry's messages, oldest-first, capped at <paramref name="take"/> — for AI thread context.</summary>
+    Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default);
 }

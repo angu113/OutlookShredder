@@ -49,3 +49,51 @@ public sealed class MessagingContact
     public bool    OptOut            { get; set; }
     public string? OptOutAt          { get; set; }
 }
+
+/// <summary>Draft lifecycle: Pending (suggested, awaiting operator) → Used (sent) | Dismissed.</summary>
+public static class DraftStatus
+{
+    public const string Pending   = "Pending";
+    public const string Used      = "Used";
+    public const string Dismissed = "Dismissed";
+}
+
+/// <summary>Where a draft came from: an AI suggestion or a fixed template.</summary>
+public static class DraftSource
+{
+    public const string Ai       = "AI";
+    public const string Template = "Template";
+}
+
+/// <summary>
+/// A suggested outbound reply for an inquiry. AI-generated on every inbound (Phase 2) but NEVER auto-sent —
+/// an operator explicitly accepts (→ Used) or dismisses it. Persisted to the SharePoint <c>Drafts</c> list.
+/// </summary>
+public sealed class InquiryDraft
+{
+    public int?    SpItemId            { get; set; }
+    public string  InquiryId           { get; set; } = "";
+    /// <summary>The inbound message (SID) this draft was generated in response to, if known.</summary>
+    public string? TriggeringMessageId { get; set; }
+    public string  Source              { get; set; } = DraftSource.Ai;
+    public string? TemplateId          { get; set; }
+    public string  Body                { get; set; } = "";
+    /// <summary>AI-classified intent (e.g. Quote / OrderStatus / Question / Complaint / Other).</summary>
+    public string? SuggestedIntent     { get; set; }
+    /// <summary>AI-classified urgency (Low / Normal / High).</summary>
+    public string? SuggestedUrgency    { get; set; }
+    /// <summary>AI signal that the inquiry needs a quotation raised.</summary>
+    public bool    NeedsQuote          { get; set; }
+    public string  Status              { get; set; } = DraftStatus.Pending;
+    public string  CreatedAt           { get; set; } = "";
+}
+
+/// <summary>The structured result of one AI draft call: a reply plus classification fields.</summary>
+public sealed class InquiryDraftResult
+{
+    public string  Reply      { get; set; } = "";
+    public string  Intent     { get; set; } = "Other";
+    public string  Urgency    { get; set; } = "Normal";
+    public bool    NeedsQuote { get; set; }
+    public string? AiModel    { get; set; }
+}

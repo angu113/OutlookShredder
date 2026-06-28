@@ -327,6 +327,19 @@ public class RfqNotificationService
             MsgTimestamp      = msg.TimestampUtc,
         });
 
+    /// <summary>Publishes an "InquiryDraft" event so an open CX thread surfaces the AI reply suggestion.</summary>
+    public void NotifyInquiryDraft(Models.InquiryDraft draft) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType       = "InquiryDraft",
+            InquiryId       = draft.InquiryId,
+            DraftSpItemId   = draft.SpItemId,
+            DraftBody       = draft.Body,
+            DraftIntent     = draft.SuggestedIntent,
+            DraftUrgency    = draft.SuggestedUrgency,
+            DraftNeedsQuote = draft.NeedsQuote,
+        });
+
     /// <summary>Publishes a "MessageRead" event so other Shredder instances clear the unread badge.</summary>
     public void NotifyMessageRead(string conversationId) =>
         NotifyRfqProcessed(new RfqProcessedNotification

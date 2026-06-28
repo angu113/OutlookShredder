@@ -207,6 +207,13 @@ try
                                   OutlookShredder.Proxy.Services.Storage.SharePointInquiryStore>();
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Storage.IMessageStore,
                                   OutlookShredder.Proxy.Services.Storage.SharePointMessageStore>();
+    // AI draft providers — adapter seam (Claude primary, Gemini fallback by registration order). Add a
+    // provider = implement IInquiryDraftProvider + add a line here; the orchestrator/pipeline are untouched.
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Ai.IInquiryDraftProvider,
+                                  OutlookShredder.Proxy.Services.Ai.ClaudeDraftProvider>();
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Ai.IInquiryDraftProvider,
+                                  OutlookShredder.Proxy.Services.Ai.GeminiDraftProvider>();
+    builder.Services.AddSingleton<InquiryDraftService>();
     builder.Services.AddSingleton<InquiryService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<InquiryService>());
     // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
