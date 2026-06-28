@@ -53,8 +53,23 @@ public class HealthController : ControllerBase
             CheckFileWatcher(),
             CheckMailboxBridge(),
             CheckStatementsTask(),
+            CheckSignalWire(),
         };
         return Ok(new HealthReport(services));
+    }
+
+    // SMS (SignalWire) — "ok" + the customer-facing FromNumber once the channel is fully configured (Pulse's
+    // Home-tab bubble surfaces the number from this); "disabled" until then. Mirrors SignalWireService.IsConfigured.
+    private ServiceHealth CheckSignalWire()
+    {
+        var configured =
+            !string.IsNullOrWhiteSpace(_config["SignalWire:ProjectId"])  &&
+            !string.IsNullOrWhiteSpace(_config["SignalWire:ApiToken"])   &&
+            !string.IsNullOrWhiteSpace(_config["SignalWire:FromNumber"]) &&
+            !string.IsNullOrWhiteSpace(_config["SignalWire:SpaceUrl"]);
+        return configured
+            ? new("signalwire", "Messaging", "ok", _config["SignalWire:FromNumber"] ?? "")
+            : new("signalwire", "Messaging", "disabled", "SMS not configured");
     }
 
     // WS1 — where the proxy's secrets came from this launch (Key Vault vs the cleartext file fallback).
