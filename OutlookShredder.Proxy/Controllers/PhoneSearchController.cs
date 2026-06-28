@@ -28,6 +28,7 @@ public class PhoneSearchController : ControllerBase
     private static string? _pendingDocument;
     private static string? _pendingPoDocument;
     private static string? _pendingNewPo;
+    private static string? _pendingNewSo;
 
     [HttpOptions]
     [HttpOptions("pending")]
@@ -44,6 +45,9 @@ public class PhoneSearchController : ControllerBase
     [HttpOptions("new-po")]
     [HttpOptions("pending-new-po")]
     [HttpOptions("consume-new-po")]
+    [HttpOptions("new-so")]
+    [HttpOptions("pending-new-so")]
+    [HttpOptions("consume-new-so")]
     [HttpOptions("scan")]
     [HttpOptions("scan-result")]
     public IActionResult Preflight() => NoContent();
@@ -173,6 +177,24 @@ public class PhoneSearchController : ControllerBase
     public IActionResult ConsumeNewPo()
     {
         Volatile.Write(ref _pendingNewPo, null);
+        return Ok(new { ok = true });
+    }
+
+    // ── New Sales Order (open a fresh blank SO record) — mirrors new-po, window 143 ─────────────────
+    [HttpPost("new-so")]
+    public IActionResult SetNewSo()
+    {
+        Volatile.Write(ref _pendingNewSo, "1");   // presence is the trigger (no pre-fill)
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("pending-new-so")]
+    public IActionResult GetPendingNewSo() => Ok(new { newSo = Volatile.Read(ref _pendingNewSo) });
+
+    [HttpPost("consume-new-so")]
+    public IActionResult ConsumeNewSo()
+    {
+        Volatile.Write(ref _pendingNewSo, null);
         return Ok(new { ok = true });
     }
 

@@ -466,10 +466,12 @@ public sealed class InquiryService : IHostedService
 
     public async Task<InquiryNote?> AddNoteAsync(string inquiryId, string author, string body, CancellationToken ct = default)
     {
-        if (await _store.GetInquiryByIdAsync(inquiryId, ct) is null) return null;
+        var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
+        if (inquiry is null) return null;
         var note = new InquiryNote { InquiryId = inquiryId, Author = author, Body = body, CreatedAt = DateTimeOffset.UtcNow.ToString("o") };
         await _store.CreateNoteAsync(note, ct);
         _cache.ApplyNote(note);
+        _notify.NotifyInquiry("Updated", inquiry);   // broadcast so other proxies refresh (and pick up the note)
         return note;
     }
 
