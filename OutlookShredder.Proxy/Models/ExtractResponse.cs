@@ -77,6 +77,14 @@ public class RfqProcessedNotification
     public string? MsgChannel        { get; set; }
     public string? MsgDirection      { get; set; }
     public string? MsgTimestamp      { get; set; }
+    // Populated when EventType = "Inquiry" (the inquiry header changed) or "InquiryMessage" (a message was
+    // threaded; the Msg* fields above carry the message body). SMS customer-inquiry pipeline.
+    public string? InquiryId            { get; set; }
+    public string? InquiryAction        { get; set; }  // Created | Updated
+    public string? InquiryStatus        { get; set; }  // Open | Quoted | Closed | Spam
+    public string? InquiryPhone         { get; set; }
+    public int?    InquiryUnread        { get; set; }
+    public string? InquiryLastMessageAt { get; set; }
     /// <summary>
     /// All CRM matches when the caller's phone number appears at more than one company.
     /// Null when there is 0 or 1 match (legacy BpName/ContactName/PopupMessage fields cover those cases).

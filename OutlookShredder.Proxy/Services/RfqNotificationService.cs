@@ -298,6 +298,35 @@ public class RfqNotificationService
             MsgTimestamp      = msg.TimestampUtc,
         });
 
+    /// <summary>Publishes an "Inquiry" event so CX clients refresh the inquiry header (status / unread /
+    /// last-message). SMS customer-inquiry pipeline.</summary>
+    public void NotifyInquiry(string action, Models.Inquiry inq) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType            = "Inquiry",
+            InquiryAction        = action,
+            InquiryId            = inq.Id,
+            InquiryStatus        = inq.Status,
+            InquiryPhone         = inq.CustomerPhone,
+            InquiryUnread        = inq.UnreadCount,
+            InquiryLastMessageAt = inq.LastMessageAt,
+        });
+
+    /// <summary>Publishes an "InquiryMessage" event so an open CX thread appends the new bubble live.</summary>
+    public void NotifyInquiryMessage(string inquiryId, Models.MessageRecord msg) =>
+        NotifyRfqProcessed(new RfqProcessedNotification
+        {
+            EventType         = "InquiryMessage",
+            InquiryId         = inquiryId,
+            MsgFrom           = msg.From,
+            MsgTo             = msg.To,
+            MsgBody           = msg.Body,
+            MsgConversationId = msg.ConversationId,
+            MsgChannel        = msg.Channel,
+            MsgDirection      = msg.Direction,
+            MsgTimestamp      = msg.TimestampUtc,
+        });
+
     /// <summary>Publishes a "MessageRead" event so other Shredder instances clear the unread badge.</summary>
     public void NotifyMessageRead(string conversationId) =>
         NotifyRfqProcessed(new RfqProcessedNotification

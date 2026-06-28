@@ -7,23 +7,22 @@ namespace OutlookShredder.Proxy.Services;
 /// <summary>
 /// Consumes <c>sms-inbound-jobs</c> (competing-consumers — exactly one proxy per inbound SMS) and processes
 /// each message once, with auto-failover (a crashed consumer's lock expires and another proxy picks it up).
-/// Phase 0 routes to <see cref="MessagingService.HandleInboundSmsAsync"/> (store + notify); Phase 1 repoints
-/// this to <c>InquiryService.IngestInboundAsync</c> (inquiry threading + opt-out + AI draft).
-/// Mirrors <see cref="RfqSummaryQueueProcessor"/>.
+/// Routes to <see cref="InquiryService.IngestInboundAsync"/> (contact consent + opt-out keywords + inquiry
+/// threading + live notify). Mirrors <see cref="RfqSummaryQueueProcessor"/>.
 /// </summary>
 public sealed class SmsInboundQueueProcessor : IHostedService, IAsyncDisposable
 {
     private readonly SmsInboundQueue  _queue;
-    private readonly MessagingService _messaging;
+    private readonly InquiryService   _inquiry;
     private readonly ILogger<SmsInboundQueueProcessor> _log;
     private ServiceBusProcessor? _processor;
 
     private static readonly JsonSerializerOptions _json = new() { PropertyNameCaseInsensitive = true };
 
-    public SmsInboundQueueProcessor(SmsInboundQueue queue, MessagingService messaging,
+    public SmsInboundQueueProcessor(SmsInboundQueue queue, InquiryService inquiry,
         ILogger<SmsInboundQueueProcessor> log)
     {
-        _queue = queue; _messaging = messaging; _log = log;
+        _queue = queue; _inquiry = inquiry; _log = log;
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -54,7 +53,7 @@ public sealed class SmsInboundQueueProcessor : IHostedService, IAsyncDisposable
                 return;
             }
 
-            await _messaging.HandleInboundSmsAsync(job.From, job.To ?? "", job.Body ?? "", job.Sid, args.CancellationToken);
+            await _inquiry.IngestInboundAsync(job.From, job.To ?? "", job.Body ?? "", job.Sid, args.CancellationToken);
             await args.CompleteMessageAsync(args.Message);
         }
         catch (Exception ex)

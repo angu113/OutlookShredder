@@ -1,0 +1,354 @@
+using System.Text.Json;
+using OutlookShredder.Proxy.Models;
+using Graph = Microsoft.Graph.Models;
+
+namespace OutlookShredder.Proxy.Services.Storage;
+
+/// <summary>
+/// SharePoint-backed <see cref="IInquiryStore"/>: the <c>Inquiries</c> + <c>MessagingContacts</c> lists. Owns
+/// all the inquiry-specific Graph code so it stays out of the <see cref="SharePointService"/> connection
+/// class; it reuses that connection only for the shared primitives (Graph client, site id, paginated read).
+/// Columns that are $filtered/$ordered are indexed AT construction (per the SP rule — a brand-new column
+/// can't be observed first, and SP 500s on an unindexed $filter even on a tiny list).
+///
+/// To port to Azure SQL: implement <see cref="IInquiryStore"/> against SQL and swap the DI registration —
+/// nothing else in the pipeline changes.
+/// </summary>
+public sealed class SharePointInquiryStore : IInquiryStore
+{
+    private readonly SharePointService             _sp;
+    private readonly ILogger<SharePointInquiryStore> _log;
+
+    private string? _inquiriesListId;
+    private string? _contactsListId;
+
+    public SharePointInquiryStore(SharePointService sp, ILogger<SharePointInquiryStore> log)
+    {
+        _sp  = sp;
+        _log = log;
+    }
+
+    public async Task EnsureProvisionedAsync(CancellationToken ct = default)
+    {
+        await GetInquiriesListIdAsync(ct);
+        await GetContactsListIdAsync(ct);
+    }
+
+    // ── Inquiries ─────────────────────────────────────────────────────────────
+
+    private async Task<string> GetInquiriesListIdAsync(CancellationToken ct)
+    {
+        if (_inquiriesListId is not null) return _inquiriesListId;
+
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        const string listName = "Inquiries";
+
+        var lists = await graph.Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+        }
+        else
+        {
+            _log.LogInformation("[Inquiry] Creating Inquiries list");
+            var created = await graph.Sites[siteId].Lists.PostAsync(new Graph.List
+            {
+                DisplayName = listName,
+                ListProp    = new Graph.ListInfo { Template = "genericList" },
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("Failed to create Inquiries list");
+            _log.LogInformation("[Inquiry] Created Inquiries list -> {Id}", listId);
+        }
+
+        var existing = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var have = existing?.Value?.Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        (string Name, string Type)[] cols =
+        [
+            ("CinqId",        "text"),    // = Title; the indexed lookup key for collision checks
+            ("CustomerPhone", "text"),
+            ("IqStatus",      "text"),
+            ("AssignedTo",    "text"),
+            ("CreatedAt",     "text"),
+            ("UpdatedAt",     "text"),
+            ("LastMessageAt", "text"),
+            ("UnreadCount",   "number"),
+        ];
+        foreach (var (name, type) in cols)
+        {
+            if (have.Contains(name)) continue;
+            try
+            {
+                var col = type switch
+                {
+                    "number" => new Graph.ColumnDefinition { Name = name, Number = new Graph.NumberColumn() },
+                    _        => new Graph.ColumnDefinition { Name = name, Text   = new Graph.TextColumn() },
+                };
+                await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Created Inquiries column '{Name}'", name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to create Inquiries column '{Name}'", name); }
+        }
+
+        var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        foreach (var col in allCols?.Value ?? [])
+        {
+            if (col.Name is not ("CinqId" or "CustomerPhone" or "LastMessageAt" or "IqStatus")) continue;
+            if (col.Indexed == true || col.Id is null) continue;
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Indexed Inquiries column '{Name}'", col.Name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index Inquiries column '{Name}'", col.Name); }
+        }
+
+        return _inquiriesListId = listId;
+    }
+
+    private static Graph.ListItem InquiryToItem(Inquiry inq) => new()
+    {
+        Fields = new Graph.FieldValueSet
+        {
+            AdditionalData = new Dictionary<string, object?>
+            {
+                ["Title"]         = inq.Id,
+                ["CinqId"]        = inq.Id,
+                ["CustomerPhone"] = inq.CustomerPhone,
+                ["IqStatus"]      = inq.Status,
+                ["AssignedTo"]    = inq.AssignedTo,
+                ["CreatedAt"]     = inq.CreatedAt,
+                ["UpdatedAt"]     = inq.UpdatedAt,
+                ["LastMessageAt"] = inq.LastMessageAt,
+                ["UnreadCount"]   = (double)inq.UnreadCount,
+            },
+        },
+    };
+
+    private static Inquiry ItemToInquiry(Graph.ListItem item)
+    {
+        var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+        string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+        return new Inquiry
+        {
+            SpItemId      = int.TryParse(item.Id, out var id) ? id : null,
+            Id            = S("CinqId") is { Length: > 0 } cinq ? cinq : S("Title"),
+            CustomerPhone = S("CustomerPhone"),
+            Status        = S("IqStatus") is { Length: > 0 } st ? st : InquiryStatus.Open,
+            AssignedTo    = S("AssignedTo") is { Length: > 0 } at ? at : null,
+            CreatedAt     = S("CreatedAt"),
+            UpdatedAt     = S("UpdatedAt"),
+            LastMessageAt = S("LastMessageAt"),
+            UnreadCount   = ReadInt(d, "UnreadCount") ?? 0,
+        };
+    }
+
+    private static int? ReadInt(IDictionary<string, object?> d, string key)
+    {
+        if (!d.TryGetValue(key, out var v) || v is null) return null;
+        return v switch
+        {
+            JsonElement je when je.ValueKind == JsonValueKind.Number => (int)je.GetDouble(),
+            double dd  => (int)dd,
+            decimal dm => (int)dm,
+            long l     => (int)l,
+            int i      => i,
+            _ => int.TryParse(v.ToString(), out var p) ? p : null,
+        };
+    }
+
+    public async Task<int> CreateInquiryAsync(Inquiry inquiry, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetInquiriesListIdAsync(ct);
+        var item   = await graph.Sites[siteId].Lists[listId].Items.PostAsync(InquiryToItem(inquiry), cancellationToken: ct);
+        if (item?.Id is null || !int.TryParse(item.Id, out var id))
+            throw new Exception("Inquiries write returned no item ID");
+        inquiry.SpItemId = id;
+        return id;
+    }
+
+    public async Task UpdateInquiryAsync(Inquiry inquiry, CancellationToken ct = default)
+    {
+        if (inquiry.SpItemId is null) return;
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetInquiriesListIdAsync(ct);
+        var fields = new Dictionary<string, object?>
+        {
+            ["IqStatus"]      = inquiry.Status,
+            ["AssignedTo"]    = inquiry.AssignedTo,
+            ["UpdatedAt"]     = inquiry.UpdatedAt,
+            ["LastMessageAt"] = inquiry.LastMessageAt,
+            ["UnreadCount"]   = (double)inquiry.UnreadCount,
+        };
+        await graph.Sites[siteId].Lists[listId].Items[inquiry.SpItemId.Value.ToString()].Fields
+            .PatchAsync(new Graph.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+    }
+
+    public async Task<IReadOnlyList<Inquiry>> GetInquiriesByPhoneAsync(string phone, CancellationToken ct = default)
+    {
+        var listId = await GetInquiriesListIdAsync(ct);
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
+            filter: $"fields/CustomerPhone eq '{phone.Replace("'", "''")}'",
+            orderby: ["fields/LastMessageAt desc"], ct: ct);
+        return items.Select(ItemToInquiry).ToList();
+    }
+
+    public async Task<Inquiry?> GetInquiryByIdAsync(string cinqId, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetInquiriesListIdAsync(ct);
+        var match  = await graph.Sites[siteId].Lists[listId].Items.GetAsync(r =>
+        {
+            r.QueryParameters.Expand = ["fields"];
+            r.QueryParameters.Filter = $"fields/CinqId eq '{cinqId.Replace("'", "''")}'";
+            r.QueryParameters.Top    = 1;
+        }, ct);
+        var item = match?.Value?.FirstOrDefault();
+        return item is null ? null : ItemToInquiry(item);
+    }
+
+    // ── MessagingContacts ─────────────────────────────────────────────────────
+
+    private async Task<string> GetContactsListIdAsync(CancellationToken ct)
+    {
+        if (_contactsListId is not null) return _contactsListId;
+
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        const string listName = "MessagingContacts";
+
+        var lists = await graph.Sites[siteId].Lists
+            .GetAsync(r => r.QueryParameters.Filter = $"displayName eq '{listName}'", ct);
+
+        string listId;
+        if (lists?.Value?.FirstOrDefault()?.Id is string eid)
+        {
+            listId = eid;
+        }
+        else
+        {
+            _log.LogInformation("[Inquiry] Creating MessagingContacts list");
+            var created = await graph.Sites[siteId].Lists.PostAsync(new Graph.List
+            {
+                DisplayName = listName,
+                ListProp    = new Graph.ListInfo { Template = "genericList" },
+            }, cancellationToken: ct);
+            listId = created?.Id ?? throw new Exception("Failed to create MessagingContacts list");
+            _log.LogInformation("[Inquiry] Created MessagingContacts list -> {Id}", listId);
+        }
+
+        var existing = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var have = existing?.Value?.Select(c => c.Name ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+
+        (string Name, string Type)[] cols =
+        [
+            ("Phone",             "text"),   // = Title (the contact key)
+            ("DisplayName",       "text"),
+            ("ConsentCapturedAt", "text"),
+            ("ConsentMethod",     "text"),
+            ("OptOut",            "boolean"),
+            ("OptOutAt",          "text"),
+        ];
+        foreach (var (name, type) in cols)
+        {
+            if (have.Contains(name)) continue;
+            try
+            {
+                var col = type switch
+                {
+                    "boolean" => new Graph.ColumnDefinition { Name = name, Boolean = new Graph.BooleanColumn() },
+                    _         => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn() },
+                };
+                await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Created MessagingContacts column '{Name}'", name);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to create MessagingContacts column '{Name}'", name); }
+        }
+
+        var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        foreach (var col in allCols?.Value ?? [])
+        {
+            if (col.Name != "Phone") continue;
+            if (col.Indexed == true || col.Id is null) continue;
+            try
+            {
+                await graph.Sites[siteId].Lists[listId].Columns[col.Id]
+                    .PatchAsync(new Graph.ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[Inquiry] Indexed MessagingContacts column 'Phone'");
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] Failed to index MessagingContacts column 'Phone'"); }
+        }
+
+        return _contactsListId = listId;
+    }
+
+    public async Task<MessagingContact?> GetContactAsync(string phone, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetContactsListIdAsync(ct);
+        var match  = await graph.Sites[siteId].Lists[listId].Items.GetAsync(r =>
+        {
+            r.QueryParameters.Expand = ["fields"];
+            r.QueryParameters.Filter = $"fields/Phone eq '{phone.Replace("'", "''")}'";
+            r.QueryParameters.Top    = 1;
+        }, ct);
+        var item = match?.Value?.FirstOrDefault();
+        if (item is null) return null;
+
+        var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+        string S(string k) => d.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+        bool B(string k) => d.TryGetValue(k, out var v) && v is not null &&
+            (v is JsonElement je ? je.ValueKind == JsonValueKind.True : v is bool b && b);
+        return new MessagingContact
+        {
+            SpItemId          = int.TryParse(item.Id, out var id) ? id : null,
+            Phone             = S("Phone") is { Length: > 0 } p ? p : S("Title"),
+            DisplayName       = S("DisplayName") is { Length: > 0 } dn ? dn : null,
+            ConsentCapturedAt = S("ConsentCapturedAt") is { Length: > 0 } cc ? cc : null,
+            ConsentMethod     = S("ConsentMethod") is { Length: > 0 } cm ? cm : null,
+            OptOut            = B("OptOut"),
+            OptOutAt          = S("OptOutAt") is { Length: > 0 } oa ? oa : null,
+        };
+    }
+
+    public async Task<int> UpsertContactAsync(MessagingContact contact, CancellationToken ct = default)
+    {
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var listId = await GetContactsListIdAsync(ct);
+        var fields = new Dictionary<string, object?>
+        {
+            ["Title"]             = contact.Phone,
+            ["Phone"]             = contact.Phone,
+            ["DisplayName"]       = contact.DisplayName,
+            ["ConsentCapturedAt"] = contact.ConsentCapturedAt,
+            ["ConsentMethod"]     = contact.ConsentMethod,
+            ["OptOut"]            = contact.OptOut,
+            ["OptOutAt"]          = contact.OptOutAt,
+        };
+
+        if (contact.SpItemId is int existingId)
+        {
+            await graph.Sites[siteId].Lists[listId].Items[existingId.ToString()].Fields
+                .PatchAsync(new Graph.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+            return existingId;
+        }
+
+        var created = await graph.Sites[siteId].Lists[listId].Items
+            .PostAsync(new Graph.ListItem { Fields = new Graph.FieldValueSet { AdditionalData = fields } }, cancellationToken: ct);
+        if (created?.Id is null || !int.TryParse(created.Id, out var id))
+            throw new Exception("MessagingContacts write returned no item ID");
+        contact.SpItemId = id;
+        return id;
+    }
+}

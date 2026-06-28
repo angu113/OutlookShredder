@@ -201,6 +201,14 @@ try
     builder.Services.AddSingleton<RfqStateOfPlayService>();
     builder.Services.AddSingleton<RfqSummaryQueue>();
     builder.Services.AddHostedService<RfqSummaryQueueProcessor>();
+    // SMS customer-inquiry pipeline. DAO seam (storage-agnostic) so it can port to Azure SQL by swapping
+    // these two registrations — InquiryService + controllers depend only on the interfaces.
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Storage.IInquiryStore,
+                                  OutlookShredder.Proxy.Services.Storage.SharePointInquiryStore>();
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Storage.IMessageStore,
+                                  OutlookShredder.Proxy.Services.Storage.SharePointMessageStore>();
+    builder.Services.AddSingleton<InquiryService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<InquiryService>());
     // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
     builder.Services.AddSingleton<SmsInboundQueue>();
     builder.Services.AddHostedService<SmsInboundQueueProcessor>();

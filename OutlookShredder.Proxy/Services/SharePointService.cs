@@ -162,7 +162,9 @@ public partial class SharePointService
     }
 
     // ??"?????"??? Graph client (lazy init) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-    private GraphServiceClient GetGraph()
+    // Exposed internally so dedicated DAO stores (e.g. SharePointInquiryStore) can reuse the one
+    // SharePoint *connection* — auth, site resolution, paginated reads — without re-plumbing Graph.
+    internal GraphServiceClient GetGraph()
     {
         if (_graph is not null) return _graph;
 
@@ -262,7 +264,7 @@ public partial class SharePointService
     }
 
     // ??"?????"??? Site ID (cached) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
-    private async Task<string> GetSiteIdAsync()
+    internal async Task<string> GetSiteIdAsync()
     {
         if (_siteId is not null) return _siteId;
 
@@ -12139,6 +12141,8 @@ public partial class SharePointService
             ("MsgTime",    "text"),
             ("IsRead",     "boolean"),
             ("ExternalId", "text"),
+            ("InquiryId",  "text"),    // CINQ thread this message belongs to (SMS inquiry pipeline)
+            ("MsgStatus",  "text"),    // outbound SMS delivery status (queued/sent/delivered/failed)
         ];
 
         foreach (var (name, type) in cols)
@@ -12158,11 +12162,13 @@ public partial class SharePointService
             catch (Exception ex) { _log.LogWarning(ex, "[SP] Failed to create Messages column '{Name}'", name); }
         }
 
-        // Index ConvId and MsgTime for filtered/ordered queries
+        // Index ConvId, MsgTime, InquiryId, ExternalId for filtered/ordered queries (per-thread reads +
+        // status-callback lookup by SID). Indexed at construction per the SP rule — a $filter on an
+        // unindexed column 500s even on a tiny list.
         var allCols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name is not ("ConvId" or "MsgTime")) continue;
+            if (col.Name is not ("ConvId" or "MsgTime" or "InquiryId" or "ExternalId")) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
@@ -12195,11 +12201,37 @@ public partial class SharePointService
             ["MsgTime"]    = msg.TimestampUtc,
             ["IsRead"]     = msg.IsRead,
             ["ExternalId"] = msg.ExternalId,
+            ["InquiryId"]  = msg.InquiryId,
+            ["MsgStatus"]  = msg.Status,
         };
 
         var created = await GetGraph().Sites[siteId].Lists[listId].Items
             .PostAsync(new ListItem { Fields = new FieldValueSet { AdditionalData = data } }, cancellationToken: ct);
         msg.SpItemId = int.TryParse(created?.Id, out var id) ? id : null;
+    }
+
+    /// <summary>Updates an outbound SMS row's delivery status by its SignalWire MessageSid (stored in
+    /// ExternalId). Called from the SignalWire status callback. No-op when no row matches the SID.</summary>
+    public async Task<bool> UpdateMessageStatusBySidAsync(string sid, string status, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(sid)) return false;
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateMessagesListIdAsync(ct);
+
+        var match = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(r =>
+        {
+            r.QueryParameters.Expand = ["fields"];
+            r.QueryParameters.Filter = $"fields/ExternalId eq '{sid.Replace("'", "''")}'";
+            r.QueryParameters.Top    = 1;
+        }, ct);
+
+        var item = match?.Value?.FirstOrDefault();
+        if (item?.Id is null) return false;
+
+        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
+            .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["MsgStatus"] = status } },
+                cancellationToken: ct);
+        return true;
     }
 
     public async Task<List<Models.ConversationSummary>> GetConversationSummariesAsync(int top = 200, CancellationToken ct = default)
@@ -12531,7 +12563,7 @@ public partial class SharePointService
     /// not a total limit; an optional <paramref name="filter"/> must reference indexed columns.
     /// SharePoint list items don't support <c>$skip</c> — cursor pagination via nextLink is the only way.
     /// </summary>
-    private async Task<List<Microsoft.Graph.Models.ListItem>> ReadAllListItemsAsync(
+    internal async Task<List<Microsoft.Graph.Models.ListItem>> ReadAllListItemsAsync(
         string listId, string[]? expand = null, string? filter = null, string[]? orderby = null,
         int pageSize = 2000, CancellationToken ct = default)
     {

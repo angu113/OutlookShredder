@@ -95,14 +95,17 @@ public class MessagingController : ControllerBase
 public class SmsWebhookController : ControllerBase
 {
     private readonly SmsInboundQueue               _queue;
+    private readonly InquiryService                _inquiry;
     private readonly IConfiguration                _config;
     private readonly ILogger<SmsWebhookController> _log;
 
-    public SmsWebhookController(SmsInboundQueue queue, IConfiguration config, ILogger<SmsWebhookController> log)
+    public SmsWebhookController(SmsInboundQueue queue, InquiryService inquiry, IConfiguration config,
+        ILogger<SmsWebhookController> log)
     {
-        _queue  = queue;
-        _config = config;
-        _log    = log;
+        _queue   = queue;
+        _inquiry = inquiry;
+        _config  = config;
+        _log     = log;
     }
 
     /// <summary>
@@ -149,7 +152,11 @@ public class SmsWebhookController : ControllerBase
         var sid    = form["MessageSid"].ToString();
         var status = form["MessageStatus"].ToString();
         _log.LogInformation("[SMS] status sid {Sid} -> {Status}", sid, status);
-        // Phase 1: persist status to the message row by SID.
+        if (!string.IsNullOrWhiteSpace(sid) && !string.IsNullOrWhiteSpace(status))
+        {
+            try { await _inquiry.UpdateMessageStatusAsync(sid, status); }
+            catch (Exception ex) { _log.LogWarning(ex, "[SMS] status update failed for sid {Sid}", sid); }
+        }
         return Content("<Response/>", "application/xml");
     }
 

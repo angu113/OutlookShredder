@@ -13,6 +13,12 @@ public sealed class MessageRecord
     public string  TimestampUtc   { get; set; } = "";
     public bool    IsRead         { get; set; }
     public string? ExternalId     { get; set; }
+    /// <summary>CINQ inquiry this message threads into (SMS customer-inquiry pipeline). Null for plain
+    /// internal/email/legacy SMS rows. Indexed on the Messages list for per-thread reads.</summary>
+    public string? InquiryId      { get; set; }
+    /// <summary>Delivery status for outbound SMS, updated by the SignalWire status callback (queued →
+    /// sent → delivered / failed / undelivered). Null for inbound + non-SMS rows.</summary>
+    public string? Status         { get; set; }
 }
 
 public sealed class ConversationSummary
