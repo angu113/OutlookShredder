@@ -21,6 +21,8 @@ public sealed class InquiryService : IHostedService
     private readonly IMessageStore           _messages;
     private readonly RfqNotificationService  _notify;
     private readonly ISmsGateway             _sms;
+    private readonly OutboundMediaBlobService _blob;   // ephemeral MMS media egress (Blob+SAS)
+    private readonly PdfRasterService        _pdf;     // PDF -> per-page JPEGs for MMS
     private readonly InquiryDraftService     _drafts;
     private readonly CustomerCacheService    _crm;
     private readonly SmsInquiryCacheService  _cache;
@@ -43,13 +45,16 @@ public sealed class InquiryService : IHostedService
         "inquiries. Msg & data rates may apply. Reply HELP for help, STOP to unsubscribe.";
 
     public InquiryService(IInquiryStore store, IMessageStore messages, RfqNotificationService notify,
-        ISmsGateway sms, InquiryDraftService drafts, CustomerCacheService crm, SmsInquiryCacheService cache,
-        ProductCatalogService catalog, IConfiguration config, ILogger<InquiryService> log)
+        ISmsGateway sms, OutboundMediaBlobService blob, PdfRasterService pdf, InquiryDraftService drafts,
+        CustomerCacheService crm, SmsInquiryCacheService cache, ProductCatalogService catalog,
+        IConfiguration config, ILogger<InquiryService> log)
     {
         _store    = store;
         _messages = messages;
         _notify   = notify;
         _sms      = sms;
+        _blob     = blob;
+        _pdf      = pdf;
         _drafts   = drafts;
         _cache    = cache;
         _catalog  = catalog;
@@ -273,6 +278,44 @@ public sealed class InquiryService : IHostedService
     /// <summary>The descriptor the SMS webhook (Azure Function) forwards for each inbound media part.</summary>
     private sealed record InboundMediaPart(string? Url, string? ContentType);
 
+    /// <summary>An operator-attached outbound file (image or PDF) to send as MMS.</summary>
+    public sealed record OutboundAttachment(string FileName, string ContentType, byte[] Bytes);
+
+    /// <summary>Content types SignalWire MMS accepts as images (a PDF is rasterized to these first).</summary>
+    private static readonly HashSet<string> _mmsImageTypes = new(StringComparer.OrdinalIgnoreCase)
+        { "image/jpeg", "image/jpg", "image/png", "image/gif", "image/bmp" };
+
+    /// <summary>Stores one attachment's bytes durably under the inquiry (SharePoint InquiryMedia) and records a
+    /// <see cref="MessageMedia"/> reference — the permanent copy the app renders, independent of the blob/SAS.</summary>
+    private async Task SaveDurableAsync(string inquiryId, string name, byte[] bytes, string contentType, string kind,
+        List<MessageMedia> into, CancellationToken ct)
+    {
+        await _messages.SaveMediaAsync(inquiryId, name, bytes, ct);
+        into.Add(new MessageMedia { Name = name, ContentType = contentType, Kind = kind });
+    }
+
+    /// <summary>Greedily packs outbound media into MMS-sized batches (&lt;=8 items and ~1 MB each — the carrier
+    /// caps a message near 1.2 MB local). Yields (batch, isFirst) so the text body rides only the first send.</summary>
+    private static IEnumerable<(List<(string Name, string ContentType, byte[] Bytes)> Batch, bool IsFirst)>
+        PackForMms(List<(string Name, string ContentType, byte[] Bytes)> items)
+    {
+        const int  MaxItems = 8;
+        const long MaxBytes = 1_000_000;
+        var  cur      = new List<(string Name, string ContentType, byte[] Bytes)>();
+        long curBytes = 0;
+        var  first    = true;
+        foreach (var it in items)
+        {
+            if (cur.Count > 0 && (cur.Count >= MaxItems || curBytes + it.Bytes.Length > MaxBytes))
+            {
+                yield return (cur, first); first = false;
+                cur = new(); curBytes = 0;
+            }
+            cur.Add(it); curBytes += it.Bytes.Length;
+        }
+        if (cur.Count > 0) yield return (cur, first);
+    }
+
     /// <summary>
     /// Downloads each inbound media part from the carrier and stores the binary parts durably under the
     /// inquiry (so previews + AI survive the carrier's short retention). Returns the effective body (a
@@ -393,7 +436,8 @@ public sealed class InquiryService : IHostedService
     /// message, advances the inquiry, optionally marks the source draft Used, and pushes live updates.
     /// Throws <see cref="InvalidOperationException"/> when the contact opted out or no gateway is configured.</summary>
     public async Task<MessageRecord?> SendOperatorReplyAsync(
-        string inquiryId, string body, int? fromDraftSpItemId, string? operatorUser, CancellationToken ct = default)
+        string inquiryId, string body, int? fromDraftSpItemId, string? operatorUser,
+        IReadOnlyList<OutboundAttachment>? attachments = null, CancellationToken ct = default)
     {
         var inquiry = await _store.GetInquiryByIdAsync(inquiryId, ct);
         if (inquiry is null) return null;
@@ -404,8 +448,75 @@ public sealed class InquiryService : IHostedService
         if (!_sms.IsConfigured)
             throw new InvalidOperationException("SMS gateway not configured.");
 
-        var now = DateTimeOffset.UtcNow.ToString("o");
-        var sid = await _sms.SendAsync(inquiry.CustomerPhone, body, StatusCallbackUrl(), ct);
+        var hasAttachments = attachments is { Count: > 0 };
+        if (hasAttachments && !_blob.IsConfigured)
+            throw new InvalidOperationException("Sending images/PDFs requires MMS, which isn't configured yet.");
+
+        // Attachments: store the DURABLE copy in SharePoint (the permanent record Pulse renders — never lost)
+        // and collect the image bytes to actually send over MMS. A PDF is rasterized to per-page JPEGs (MMS
+        // rejects application/pdf); the source PDF is also kept durably. See project_outbound_mms_durability.
+        var durable = new List<MessageMedia>();
+        var toSend  = new List<(string Name, string ContentType, byte[] Bytes)>();
+        if (hasAttachments)
+        {
+            var stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var idx   = 0;
+            foreach (var att in attachments!)
+            {
+                var isPdf = (att.ContentType?.Contains("pdf", StringComparison.OrdinalIgnoreCase) ?? false)
+                            || att.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+                if (isPdf)
+                {
+                    var renderedPages = _pdf.RenderToJpegs(att.Bytes);
+                    if (renderedPages.Count == 0)
+                        throw new InvalidOperationException("Couldn't render that PDF into images to send.");
+                    await SaveDurableAsync(inquiry.Id, $"{stamp}-{idx}-src.pdf", att.Bytes, "application/pdf", "pdf", durable, ct);
+                    foreach (var pg in renderedPages)
+                    {
+                        var pageName = $"{stamp}-{idx}-p{pg.Number}.jpg";
+                        await SaveDurableAsync(inquiry.Id, pageName, pg.Jpeg, "image/jpeg", "image", durable, ct);
+                        toSend.Add((pageName, "image/jpeg", pg.Jpeg));
+                    }
+                }
+                else if (_mmsImageTypes.Contains(att.ContentType ?? ""))
+                {
+                    var name = $"{stamp}-{idx}.{InquiryRules.ExtForContentType(att.ContentType!)}";
+                    await SaveDurableAsync(inquiry.Id, name, att.Bytes, att.ContentType!, "image", durable, ct);
+                    toSend.Add((name, att.ContentType!, att.Bytes));
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Attachment type '{att.ContentType}' can't be sent over MMS (images or PDF only).");
+                }
+                idx++;
+            }
+        }
+
+        var now      = DateTimeOffset.UtcNow.ToString("o");
+        var statusCb = StatusCallbackUrl();
+        string? sid  = null;
+
+        if (toSend.Count == 0)
+        {
+            sid = await _sms.SendAsync(inquiry.CustomerPhone, body, statusCb, null, ct);
+        }
+        else
+        {
+            // Pack page/image media into MMS messages within the carrier budget (~1 MB total, <=8 items each);
+            // the operator's text rides on the first message. Multi-page PDFs may span a few messages.
+            foreach (var (batch, isFirst) in PackForMms(toSend))
+            {
+                var urls = new List<string>();
+                foreach (var m in batch)
+                {
+                    try { urls.Add(await _blob.UploadAndGetSasUrlAsync(inquiry.Id, m.Name, m.Bytes, m.ContentType, ct)); }
+                    catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] MMS media upload failed for {Name}", m.Name); }
+                }
+                if (urls.Count == 0) continue;
+                var s = await _sms.SendAsync(inquiry.CustomerPhone, isFirst ? body : "", statusCb, urls, ct);
+                sid ??= s;
+            }
+        }
 
         var msg = new MessageRecord
         {
@@ -420,6 +531,7 @@ public sealed class InquiryService : IHostedService
             ExternalId     = sid,
             InquiryId      = inquiry.Id,
             Status         = sid is null ? "failed" : "queued",
+            MediaJson      = durable.Count > 0 ? JsonSerializer.Serialize(durable, _mediaJsonOpts) : null,
         };
         await _messages.AppendAsync(msg, ct);
 
@@ -453,7 +565,7 @@ public sealed class InquiryService : IHostedService
         var drafts = await _store.GetDraftsByInquiryAsync(inquiryId, ct);
         var draft  = drafts.FirstOrDefault(d => d.SpItemId == draftSpItemId);
         if (draft is null) return null;
-        return await SendOperatorReplyAsync(inquiryId, draft.Body, draftSpItemId, operatorUser, ct);
+        return await SendOperatorReplyAsync(inquiryId, draft.Body, draftSpItemId, operatorUser, null, ct);
     }
 
     public async Task DismissDraftAsync(string inquiryId, int draftSpItemId, CancellationToken ct = default)
@@ -515,6 +627,28 @@ public sealed class InquiryService : IHostedService
         _cache.ApplyInquiry(inquiry);   // evicts if status moved to Closed/Spam
         _notify.NotifyInquiry("Updated", inquiry);
         return inquiry;
+    }
+
+    /// <summary>One-time operator-identity backfill (Windows login -> Shredder username), rewriting AssignedTo /
+    /// note author / quote linker. Dry-run by default; when applied it patches SP then refreshes the active-inquiry
+    /// cache and pushes a live update per affected inquiry so peers + open clients pick up the rename.</summary>
+    public async Task<IdentityBackfillResult> BackfillIdentityAsync(string fromName, string toName, bool apply, CancellationToken ct = default)
+    {
+        var result = await _store.BackfillIdentityAsync(fromName, toName, apply, ct);
+        if (apply)
+        {
+            foreach (var id in result.AffectedInquiryIds)
+            {
+                try
+                {
+                    await _cache.RefreshOneAsync(id, ct);   // targeted SP re-read so notes/quotes pick up the rename
+                    var inq = await _store.GetInquiryByIdAsync(id, ct);
+                    if (inq is not null) _notify.NotifyInquiry("Updated", inq);
+                }
+                catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] backfill cache refresh failed for {Id}", id); }
+            }
+        }
+        return result;
     }
 
     public async Task<Inquiry?> MarkReadAsync(string inquiryId, CancellationToken ct = default)

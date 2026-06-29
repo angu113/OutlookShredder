@@ -41,7 +41,22 @@ public interface IInquiryStore
     Task<IReadOnlyList<InquiryNote>> GetNotesByInquiryAsync(string inquiryId, CancellationToken ct = default);
     Task<int> CreateQuotationAsync(InquiryQuotation quotation, CancellationToken ct = default);
     Task<IReadOnlyList<InquiryQuotation>> GetQuotationsByInquiryAsync(string inquiryId, CancellationToken ct = default);
+
+    /// <summary>One-time identity backfill: rewrites the operator identity stored as <paramref name="fromName"/>
+    /// to <paramref name="toName"/> across <c>Inquiries.AssignedTo</c>, <c>InquiryNotes.NoteAuthor</c> and
+    /// <c>InquiryQuotations.LinkedBy</c> (case-insensitive match; rows already equal to the target are skipped).
+    /// When <paramref name="apply"/> is false it only counts the matches (dry run — no writes). Returns the
+    /// per-list match/patch counts plus the affected inquiry ids so the caller can refresh the cache.</summary>
+    Task<IdentityBackfillResult> BackfillIdentityAsync(string fromName, string toName, bool apply, CancellationToken ct = default);
 }
+
+/// <summary>Result of <see cref="IInquiryStore.BackfillIdentityAsync"/> — matches found and (when applied) rows
+/// patched per list, plus the distinct inquiry ids touched.</summary>
+public sealed record IdentityBackfillResult(
+    int AssignedMatched, int AssignedPatched,
+    int NotesMatched,    int NotesPatched,
+    int QuotesMatched,   int QuotesPatched,
+    IReadOnlyList<string> AffectedInquiryIds);
 
 /// <summary>
 /// DAO contract for thread messages. This is the existing Messages store (shared with internal/email

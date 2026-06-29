@@ -210,6 +210,10 @@ try
     // SMS carrier adapter seam — swap carriers = another ISmsGateway impl + this line.
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Sms.ISmsGateway,
                                   OutlookShredder.Proxy.Services.Sms.SignalWireSmsGateway>();
+    // Outbound MMS: ephemeral Blob+SAS egress (off until SignalWire:MmsBlobConnectionString is set) +
+    // PDF -> per-page JPEG rasterizer (PDFium). See memory project_outbound_mms_durability.
+    builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Sms.OutboundMediaBlobService>();
+    builder.Services.AddSingleton<PdfRasterService>();
     // AI draft providers — adapter seam (Claude primary, Gemini fallback by registration order). Add a
     // provider = implement IInquiryDraftProvider + add a line here; the orchestrator/pipeline are untouched.
     builder.Services.AddSingleton<OutlookShredder.Proxy.Services.Ai.IInquiryDraftProvider,

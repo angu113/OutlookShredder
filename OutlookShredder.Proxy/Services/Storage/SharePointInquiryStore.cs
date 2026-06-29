@@ -720,4 +720,51 @@ public sealed class SharePointInquiryStore : IInquiryStore
             };
         }).ToList();
     }
+
+    // ── One-time identity backfill (Windows login -> Shredder username) ──────────────────────────────
+
+    public async Task<IdentityBackfillResult> BackfillIdentityAsync(string fromName, string toName, bool apply, CancellationToken ct = default)
+    {
+        var from   = (fromName ?? "").Trim();
+        var to     = (toName ?? "").Trim();
+        var graph  = _sp.GetGraph();
+        var siteId = await _sp.GetSiteIdAsync();
+        var affected = new HashSet<string>(StringComparer.Ordinal);
+
+        // Match the old name case-insensitively, but skip rows already at the target (incl. a pure case-change
+        // is still applied, since the palette key is the exact stored string).
+        bool Matches(string? v) => from.Length > 0 &&
+            string.Equals((v ?? "").Trim(), from, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals((v ?? "").Trim(), to, StringComparison.Ordinal);
+
+        async Task<(int Matched, int Patched)> SweepAsync(string listId, string idField, string identityField)
+        {
+            var items = await _sp.ReadAllListItemsAsync(listId, ["fields"], null, null, ct: ct);
+            int matched = 0, patched = 0;
+            foreach (var it in items)
+            {
+                var d   = it.Fields?.AdditionalData ?? new Dictionary<string, object?>();
+                var cur = d.TryGetValue(identityField, out var v) ? v?.ToString() : null;
+                if (!Matches(cur)) continue;
+                matched++;
+                if (d.TryGetValue(idField, out var c) && c?.ToString() is { Length: > 0 } cinq) affected.Add(cinq);
+                if (apply && it.Id is not null)
+                {
+                    await graph.Sites[siteId].Lists[listId].Items[it.Id].Fields
+                        .PatchAsync(new Graph.FieldValueSet { AdditionalData = new Dictionary<string, object?> { [identityField] = to } },
+                            cancellationToken: ct);
+                    patched++;
+                }
+            }
+            return (matched, patched);
+        }
+
+        var (aM, aP) = await SweepAsync(await GetInquiriesListIdAsync(ct),   "CinqId",    "AssignedTo");
+        var (nM, nP) = await SweepAsync(await GetNotesListIdAsync(ct),       "InquiryId", "NoteAuthor");
+        var (qM, qP) = await SweepAsync(await GetQuotationsListIdAsync(ct),  "InquiryId", "LinkedBy");
+
+        _log.LogInformation("[Inquiry] identity backfill '{From}'->'{To}' apply={Apply}: assigned {AM}/{AP}, notes {NM}/{NP}, quotes {QM}/{QP}",
+            from, to, apply, aM, aP, nM, nP, qM, qP);
+        return new IdentityBackfillResult(aM, aP, nM, nP, qM, qP, affected.ToList());
+    }
 }

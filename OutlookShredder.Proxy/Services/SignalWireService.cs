@@ -26,11 +26,17 @@ public class SignalWireService
     public string? FromNumber => _config["SignalWire:FromNumber"];
 
     public async Task<string?> SendSmsAsync(string to, string body, CancellationToken ct = default)
-        => await SendSmsAsync(to, body, null, ct);
+        => await SendSmsAsync(to, body, null, null, ct);
 
-    /// <summary>Sends an SMS; when <paramref name="statusCallback"/> is set, SignalWire POSTs delivery-status
-    /// updates there (our /api/sms/status). Returns the MessageSid, or null on failure.</summary>
     public async Task<string?> SendSmsAsync(string to, string body, string? statusCallback, CancellationToken ct = default)
+        => await SendSmsAsync(to, body, statusCallback, null, ct);
+
+    /// <summary>Sends an SMS/MMS; when <paramref name="statusCallback"/> is set SignalWire POSTs delivery-status
+    /// updates there (our /api/sms/status). Supplying <paramref name="mediaUrls"/> (publicly-fetchable URLs —
+    /// SignalWire downloads them) sends an MMS (SendAsMms=true; up to 8). Returns the MessageSid, or null on
+    /// failure.</summary>
+    public async Task<string?> SendSmsAsync(string to, string body, string? statusCallback,
+        IReadOnlyList<string>? mediaUrls, CancellationToken ct = default)
     {
         var projectId  = _config["SignalWire:ProjectId"]!;
         var apiToken   = _config["SignalWire:ApiToken"]!;
@@ -40,13 +46,20 @@ public class SignalWireService
         var url  = $"https://{spaceUrl}/api/laml/2010-04-01/Accounts/{projectId}/Messages.json";
         var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{projectId}:{apiToken}"));
 
-        var form = new Dictionary<string, string>
+        // A List (not Dictionary) so MediaUrl can repeat — the LaML API accepts multiple MediaUrl form fields.
+        var form = new List<KeyValuePair<string, string>>
         {
-            ["From"] = fromNumber,
-            ["To"]   = to,
-            ["Body"] = body,
+            new("From", fromNumber),
+            new("To",   to),
         };
-        if (!string.IsNullOrWhiteSpace(statusCallback)) form["StatusCallback"] = statusCallback;
+        if (!string.IsNullOrEmpty(body)) form.Add(new("Body", body));   // MMS may be media-only (empty body)
+        if (mediaUrls is { Count: > 0 })
+        {
+            foreach (var u in mediaUrls)
+                if (!string.IsNullOrWhiteSpace(u)) form.Add(new("MediaUrl", u));
+            form.Add(new("SendAsMms", "true"));
+        }
+        if (!string.IsNullOrWhiteSpace(statusCallback)) form.Add(new("StatusCallback", statusCallback));
 
         using var req = new HttpRequestMessage(HttpMethod.Post, url);
         req.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);

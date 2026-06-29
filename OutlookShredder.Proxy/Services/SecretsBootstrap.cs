@@ -33,7 +33,8 @@ public static class SecretsBootstrap
         "SharePoint:ClientId",
         "SharePoint:ClientSecret",
         "ServiceBus:ConnectionString",
-        "SignalWire:ApiToken",   // SMS send + inbound-webhook signature validation
+        "SignalWire:ApiToken",                  // SMS send + inbound-webhook signature validation
+        "SignalWire:MmsBlobConnectionString",   // outbound-MMS media egress (Azure Blob; SAS handed to carrier)
     };
 
     /// <summary>"keyvault" or "file" — surfaced by HealthController.</summary>
@@ -58,7 +59,8 @@ public static class SecretsBootstrap
     /// while still overlaying onto the standard config key the code reads (<c>SignalWire:ApiToken</c>).</summary>
     private static readonly Dictionary<string, string> VaultNameOverrides = new(StringComparer.Ordinal)
     {
-        ["SignalWire:ApiToken"] = "silmaril-sms-channel",
+        ["SignalWire:ApiToken"]                = "silmaril-sms-channel",
+        ["SignalWire:MmsBlobConnectionString"] = "silmaril-sms-media",
     };
 
     public static string ConfigKeyToVaultName(string configKey) =>

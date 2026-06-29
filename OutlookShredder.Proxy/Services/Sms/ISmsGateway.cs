@@ -12,8 +12,10 @@ public interface ISmsGateway
     /// <summary>The sender number, when configured.</summary>
     string? FromNumber { get; }
     /// <summary>Sends a text; when <paramref name="statusCallback"/> is set the carrier POSTs delivery-status
-    /// updates there. Returns the provider message SID, or null on failure.</summary>
-    Task<string?> SendAsync(string to, string body, string? statusCallback = null, CancellationToken ct = default);
+    /// updates there. Supplying <paramref name="mediaUrls"/> (publicly-fetchable URLs the carrier downloads)
+    /// sends an MMS. Returns the provider message SID, or null on failure.</summary>
+    Task<string?> SendAsync(string to, string body, string? statusCallback = null,
+        IReadOnlyList<string>? mediaUrls = null, CancellationToken ct = default);
 
     /// <summary>Fetches an inbound media part (MMS attachment) from the carrier's auth-protected media store.
     /// Returns (contentType, bytes), or null if unavailable. Used at ingest to store media durably.</summary>

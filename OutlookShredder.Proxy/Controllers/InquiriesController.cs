@@ -80,17 +80,78 @@ public class InquiriesController : ControllerBase
         public string? MediaJson { get; set; }
     }
 
+    /// <summary>Admin/one-time: rewrite an operator identity (old Windows login -> Shredder app username) across
+    /// Inquiries.AssignedTo, InquiryNotes.NoteAuthor and InquiryQuotations.LinkedBy. Dry-run unless apply=true.
+    /// Body: { from, to, apply }. Returns per-list matched/patched counts + affected inquiry ids.</summary>
+    [HttpPost("backfill-identity")]
+    public async Task<IActionResult> BackfillIdentity([FromBody] BackfillIdentityRequest? req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req?.From) || string.IsNullOrWhiteSpace(req.To))
+            return BadRequest(new { error = "from and to are required" });
+        try
+        {
+            var r = await _inquiries.BackfillIdentityAsync(req.From!, req.To!, req.Apply, ct);
+            return Ok(new
+            {
+                applied  = req.Apply,
+                from     = req.From,
+                to       = req.To,
+                assigned = new { matched = r.AssignedMatched, patched = r.AssignedPatched },
+                notes    = new { matched = r.NotesMatched,    patched = r.NotesPatched },
+                quotes   = new { matched = r.QuotesMatched,   patched = r.QuotesPatched },
+                affectedInquiries = r.AffectedInquiryIds,
+            });
+        }
+        catch (Exception ex) { return Fail(ex, "backfill-identity"); }
+    }
+
+    public sealed class BackfillIdentityRequest
+    {
+        public string? From  { get; set; }
+        public string? To    { get; set; }
+        public bool    Apply { get; set; }
+    }
+
     [HttpPost("{id}/messages")]
     public async Task<IActionResult> SendMessage(string id, [FromBody] SendReplyRequest req, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Body)) return BadRequest(new { error = "Body is required" });
         try
         {
-            var msg = await _inquiries.SendOperatorReplyAsync(id, req.Body, req.FromDraftSpItemId, req.From, ct);
+            var msg = await _inquiries.SendOperatorReplyAsync(id, req.Body, req.FromDraftSpItemId, req.From, null, ct);
             return msg is null ? NotFound() : Ok(msg);
         }
         catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }   // opted out / no gateway
         catch (Exception ex) { return Fail(ex, "send"); }
+    }
+
+    /// <summary>Outbound MMS: text + image/PDF attachments (multipart/form-data; field 'files'). Images send as
+    /// MMS; a PDF is rasterized to one image per page. The durable copy is kept in SharePoint (rendered in the
+    /// thread). Form fields: body, from, fromDraftSpItemId, files[].</summary>
+    [HttpPost("{id}/messages/mms")]
+    [RequestSizeLimit(30_000_000)]
+    public async Task<IActionResult> SendMms(string id, [FromForm] string? body, [FromForm] string? from,
+        [FromForm] int? fromDraftSpItemId, CancellationToken ct)
+    {
+        try
+        {
+            var attachments = new List<InquiryService.OutboundAttachment>();
+            foreach (var f in Request.Form.Files)
+            {
+                if (f.Length <= 0) continue;
+                using var ms = new MemoryStream();
+                await f.CopyToAsync(ms, ct);
+                attachments.Add(new InquiryService.OutboundAttachment(
+                    f.FileName, string.IsNullOrWhiteSpace(f.ContentType) ? "application/octet-stream" : f.ContentType, ms.ToArray()));
+            }
+            if (string.IsNullOrWhiteSpace(body) && attachments.Count == 0)
+                return BadRequest(new { error = "Body or at least one attachment is required" });
+
+            var msg = await _inquiries.SendOperatorReplyAsync(id, body ?? "", fromDraftSpItemId, from, attachments, ct);
+            return msg is null ? NotFound() : Ok(msg);
+        }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }   // opted out / no gateway / unsupported type
+        catch (Exception ex) { return Fail(ex, "send-mms"); }
     }
 
     [HttpPost("{id}/notes")]

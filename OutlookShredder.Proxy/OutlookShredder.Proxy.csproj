@@ -50,6 +50,10 @@
          redundant and triggered NU1510. -->
     <PackageReference Include="PDFsharp" Version="6.2.4" />
     <PackageReference Include="PdfPig" Version="0.1.14" />
+    <!-- PDF page rasterization for outbound MMS (PDF -> per-page JPEGs). PDFium + SkiaSharp, win-x64 natives. -->
+    <PackageReference Include="PDFtoImage" Version="5.1.0" />
+    <!-- Outbound MMS media egress: upload page/image bytes to Blob, hand SignalWire a short-lived SAS URL. -->
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.23.0" />
     <!-- Cut optimizer flat-sheet (2D) nesting: GuillotineBinPack (shear) + MaxRectsBinPack (laser).
          Selected per machine profile behind INestStrategy (see Services/CutOptimizer). -->
     <PackageReference Include="RectangleBinPack.CSharp" Version="1.0.4" />
