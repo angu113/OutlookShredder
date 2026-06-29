@@ -171,15 +171,18 @@ public static partial class InquiryRules
     public enum ThreadAction { CreateNew, Append, Reopen }
 
     /// <summary>Decides where an inbound message threads, given the customer's inquiries (most-recent first).
-    /// We append to the most-recent **active** (non-Closed) inquiry — SMS is serial with no deterministic
-    /// boundary, and an open conversation must continue, not spawn a duplicate. A **Closed** inquiry is terminal:
-    /// it's skipped, so a new message lands on an older open one if present, else starts a FRESH inquiry. No
-    /// active inquiry → start a new one. (Spam counts as active so new spam stays in its thread, out of the
-    /// inbox. Multiple concurrent open threads for one customer is a future "split" concern.)</summary>
+    /// ONE THREAD PER CUSTOMER: a returning customer always continues their existing conversation, never spawns
+    /// a duplicate. We append to the most-recent **active** (non-Closed) inquiry if one exists (Spam counts as
+    /// active, so new spam stays in its thread, out of the inbox). If ALL the customer's threads are **Closed**,
+    /// we **reopen** the most-recent one (the caller flips it back to Open) rather than minting a new CINQ — this
+    /// reverses the old "Closed is terminal → start fresh" behavior. Only a customer with NO prior inquiry gets a
+    /// new one. (Multiple concurrent open threads for one customer is a future "split" concern.)</summary>
     public static (ThreadAction Action, Inquiry? Target) DecideThread(IReadOnlyList<Inquiry> existing)
     {
+        if (existing.Count == 0) return (ThreadAction.CreateNew, null);
         var active = existing.FirstOrDefault(i =>
             !string.Equals(i.Status, InquiryStatus.Closed, StringComparison.OrdinalIgnoreCase));
-        return active is null ? (ThreadAction.CreateNew, null) : (ThreadAction.Append, active);
+        if (active is not null) return (ThreadAction.Append, active);
+        return (ThreadAction.Reopen, existing[0]);   // all closed → continue (reopen) the most-recent thread
     }
 }

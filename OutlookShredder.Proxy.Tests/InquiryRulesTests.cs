@@ -115,9 +115,22 @@ public class InquiryRulesTests
             InquiryRules.DecideThread([new Inquiry { Status = status }]).Action);
 
     [Fact]
-    public void Only_closed_starts_new()   // closed is terminal — never reopen
-        => Assert.Equal(InquiryRules.ThreadAction.CreateNew,
-            InquiryRules.DecideThread([new Inquiry { Status = InquiryStatus.Closed }]).Action);
+    public void Only_closed_reopens()   // one thread per customer: a returning customer reopens, not a new CINQ
+    {
+        var (action, target) = InquiryRules.DecideThread([new Inquiry { Status = InquiryStatus.Closed, Id = "CINQ-CLOSED" }]);
+        Assert.Equal(InquiryRules.ThreadAction.Reopen, action);
+        Assert.Equal("CINQ-CLOSED", target!.Id);
+    }
+
+    [Fact]
+    public void All_closed_reopens_the_most_recent()   // list is most-recent-first
+    {
+        var (action, target) = InquiryRules.DecideThread(
+            [new Inquiry { Status = InquiryStatus.Closed, Id = "CINQ-NEWER" },
+             new Inquiry { Status = InquiryStatus.Closed, Id = "CINQ-OLDER" }]);
+        Assert.Equal(InquiryRules.ThreadAction.Reopen, action);
+        Assert.Equal("CINQ-NEWER", target!.Id);
+    }
 
     [Fact]
     public void Appends_to_open_even_when_a_closed_is_more_recent()
