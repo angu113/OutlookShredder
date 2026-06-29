@@ -49,6 +49,9 @@ public sealed class OptimizeRequest
     public double MinUsableOffcut { get; set; }
     public List<CutPart> Parts { get; set; } = new();
     public List<StockSize> Stock { get; set; } = new();
+    /// <summary>The requesting operator's Shredder username, stamped as "Created by" on the layout PDF.
+    /// Null/empty ⇒ the proxy falls back to its own Windows account.</summary>
+    public string? CreatedBy { get; set; }
 
     public MaterialForm ResolvedForm =>
         string.Equals(Form, "long", StringComparison.OrdinalIgnoreCase) ? MaterialForm.Long : MaterialForm.Flat;

@@ -25,6 +25,10 @@ public class DrawingController : ControllerBase
         /// <summary>Order quantity from the wizard's Qty box — printed as the "xN" line on the DXF's
         /// no-cut Notes label. Null ⇒ no quantity line.</summary>
         public int? Quantity { get; set; }
+
+        /// <summary>The requesting operator's Shredder username, stamped as "Created By:" on the drawing.
+        /// Null/empty ⇒ the proxy falls back to its own Windows account.</summary>
+        public string? CreatedBy { get; set; }
     }
 
     // Material display name + the token the canonical text uses + its gauge-table family.
@@ -82,7 +86,7 @@ public class DrawingController : ControllerBase
             var spec = DrawingTextParser.Parse(req.Text);
             var fp = FlatPattern.Develop(spec, req.Quantity);
 
-            byte[] pdf = DrawingPdfRenderer.Render(fp, req.Calibrate);
+            byte[] pdf = DrawingPdfRenderer.Render(fp, req.Calibrate, createdBy: req.CreatedBy);
             byte[] dxf = DrawingDxfWriter.Write(fp.Cut);
 
             // Calibration: the cross-section dimensions in draw order, each keyed to its drawing letter,
@@ -167,7 +171,7 @@ public class DrawingController : ControllerBase
         try
         {
             var fp = FlatPattern.Develop(DrawingTextParser.Parse(req.Text));
-            return File(DrawingPdfRenderer.Render(fp), "application/pdf");
+            return File(DrawingPdfRenderer.Render(fp, createdBy: req.CreatedBy), "application/pdf");
         }
         catch (DrawingParseException ex) { return BadRequest(new { error = ex.Message }); }
         catch (Exception ex)

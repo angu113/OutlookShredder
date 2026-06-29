@@ -47,7 +47,7 @@ public static class DrawingPdfRenderer
     // customerName: non-null triggers fab/picking-slip context for columns — draws the BOM header instead
     // of the regular Pixar title/spec table, and suppresses the Technics footnote.
     public static byte[] Render(FlatPatternResult fp, bool calibrate = false, bool polishBilingual = true,
-        string? customerName = null, string? itemTag = null)
+        string? customerName = null, string? itemTag = null, string? createdBy = null)
     {
         PickingSlipEnricher.EnsureFontResolver();
 
@@ -163,14 +163,14 @@ public static class DrawingPdfRenderer
             double infoGap = 6;
             if (fabColumn)
             {
-                DrawInfoBox(gfx, new XRect(M, footTop, usable, footH));
+                DrawInfoBox(gfx, new XRect(M, footTop, usable, footH), createdBy);
             }
             else
             {
                 double infoW = (usable - infoGap) / 3.0;
                 double techW = (usable - infoGap) * 2.0 / 3.0;
                 DrawFootnote(gfx, fp, new XRect(M, footTop, techW, footH));
-                DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH));
+                DrawInfoBox(gfx, new XRect(M + techW + infoGap, footTop, infoW, footH), createdBy);
             }
 
             // Copyright line under the footer band.
@@ -1266,7 +1266,7 @@ public static class DrawingPdfRenderer
     public static string? LogoPath { get; set; } = @"%USERPROFILE%\Mithril Metals Corp\Metal Supermarkets Hackensack - Documents\MS_Primary_Logo_C100_M44_Flattened_Preview.png";
 
     // Right 1/3 of the footnote band: Created By / Created Date / NOT TO SCALE, then the franchise logo.
-    private static void DrawInfoBox(XGraphics gfx, XRect box)
+    private static void DrawInfoBox(XGraphics gfx, XRect box, string? createdBy = null)
     {
         gfx.DrawRectangle(new XPen(XColor.FromArgb(205, 205, 205), 0.8), box);
         var clip = gfx.Save();
@@ -1282,7 +1282,7 @@ public static class DrawingPdfRenderer
             gfx.DrawString(val, valFont, XBrushes.Black, new XRect(x + labelW, y, innerW - labelW, 11), XStringFormats.TopLeft);
             y += 11;
         }
-        Row("Created By:", Capitalize(Environment.UserName));
+        Row("Created By:", Capitalize(createdBy is { Length: > 0 } cb ? cb : Environment.UserName));
         Row("Created Date:", DateTime.Now.ToString("MMM d, yyyy", CultureInfo.InvariantCulture));
         gfx.DrawString("NOT TO SCALE", valFont, XBrushes.Black, new XRect(x, y, innerW, 11), XStringFormats.TopLeft);
         y += 13;

@@ -33,7 +33,7 @@ public static class CutLayoutPdfRenderer
             .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion ?? "unknown";
 
-    public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision, double minUsableDrop = 0)
+    public static byte[] Render(OptimizeResult result, MaterialForm form, CutMethod method, bool precision, double minUsableDrop = 0, string? createdBy = null)
     {
         PickingSlipEnricher.EnsureFontResolver();
         var doc = new PdfDocument();
@@ -78,7 +78,7 @@ public static class CutLayoutPdfRenderer
 
             double footH = 26;
             double bodyBottom = phh - M - footH;
-            DrawFooter(gfx, new XRect(M, bodyBottom + 2, pw - 2 * M, footH), page);
+            DrawFooter(gfx, new XRect(M, bodyBottom + 2, pw - 2 * M, footH), page, createdBy);
 
             // ── diagram grid ──
             double gx = M, gy = bodyTop, gw = pw - 2 * M, gh = bodyBottom - bodyTop;
@@ -262,12 +262,12 @@ public static class CutLayoutPdfRenderer
     }
 
     // ── chrome bits ──
-    private static void DrawFooter(XGraphics gfx, XRect box, int page)
+    private static void DrawFooter(XGraphics gfx, XRect box, int page, string? createdBy = null)
     {
         var font = new XFont("Arial", 7, XFontStyleEx.Regular);
         var brush = new XSolidBrush(Faint);
         // Line 1: creation info (left) + page number (right)
-        string line1 = $"Created by {Cap(Environment.UserName)} • {DateTime.Now:MMM d, yyyy} • NOT TO SCALE";
+        string line1 = $"Created by {Cap(createdBy is { Length: > 0 } cb ? cb : Environment.UserName)} • {DateTime.Now:MMM d, yyyy} • NOT TO SCALE";
         gfx.DrawString(line1, font, brush, new XRect(box.X, box.Y + 2, box.Width - 60, 10), XStringFormats.TopLeft);
         gfx.DrawString($"Page {page}", font, brush, new XRect(box.X, box.Y + 2, box.Width, 10), XStringFormats.TopRight);
         // Line 2: copyright
