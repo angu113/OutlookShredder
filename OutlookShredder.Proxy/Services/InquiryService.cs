@@ -390,6 +390,77 @@ public sealed class InquiryService : IHostedService
     public async Task<(string ContentType, byte[] Bytes)?> GetMediaAsync(string inquiryId, string fileName, CancellationToken ct = default)
         => InquiryRules.IsSafeMediaName(fileName) ? await _cache.GetMediaAsync(inquiryId, fileName, ct) : null;
 
+    // ── Operator-initiated "New SMS" (start a conversation to a chosen number) ──────────────────────
+
+    /// <summary>Canonical US E.164 key ("+1" + 10 digits) matching what inbound stores, or null if the input
+    /// isn't a 10-digit US number. (NormalizeE164 alone wouldn't re-add the country code.)</summary>
+    private static string? NormalizeUsE164(string? raw)
+    {
+        var ten = CustomerImportService.NormalizePhone(raw);
+        return ten is null ? null : "+1" + ten;
+    }
+
+    /// <summary>The customer's existing one-thread inquiry id for this (raw) phone, or null if none. Read-only —
+    /// lets the client open an existing conversation instead of starting a duplicate.</summary>
+    public async Task<string?> FindInquiryIdByPhoneAsync(string rawPhone, CancellationToken ct = default)
+    {
+        var e164 = NormalizeUsE164(rawPhone);
+        if (e164 is null) return null;
+        var inquiries = await _store.GetInquiriesByPhoneAsync(e164, ct);
+        return InquiryRules.DecideThread(inquiries).Target?.Id;
+    }
+
+    /// <summary>Get-or-create-or-reopen the one-thread inquiry for a number (operator-initiated New SMS). Resolves
+    /// CRM for the denormalized name, reopens a Closed thread, ensures a MessagingContact, and warms the cache.
+    /// Returns the inquiry, or null when the phone isn't a valid US number. Creating happens here (on first send).</summary>
+    public async Task<Inquiry?> StartInquiryAsync(string rawPhone, CancellationToken ct = default)
+    {
+        var e164 = NormalizeUsE164(rawPhone);
+        if (e164 is null) return null;
+        var now = DateTimeOffset.UtcNow.ToString("o");
+
+        var inquiries        = await _store.GetInquiriesByPhoneAsync(e164, ct);
+        var (action, latest) = InquiryRules.DecideThread(inquiries);
+        var crm              = _crm.LookupByPhone(e164);
+
+        if (action != InquiryRules.ThreadAction.CreateNew && latest is not null)
+        {
+            if (action == InquiryRules.ThreadAction.Reopen)   // returning customer's closed thread
+            {
+                latest.Status    = InquiryStatus.Open;
+                latest.UpdatedAt = now;
+                await _store.UpdateInquiryAsync(latest, ct);
+            }
+            _cache.ApplyInquiry(latest);
+            _notify.NotifyInquiry("Updated", latest);
+            return latest;
+        }
+
+        var contact = await _store.GetContactAsync(e164, ct)
+                      ?? new MessagingContact { Phone = e164, ConsentCapturedAt = now, ConsentMethod = "operator-initiated" };
+        try { await _store.UpsertContactAsync(contact, ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] contact upsert failed for {Phone}", e164); }
+
+        var inquiry = new Inquiry
+        {
+            Id            = await GenerateCinqIdAsync(ct),
+            CustomerPhone = e164,
+            Status        = InquiryStatus.Open,
+            CustomerName  = crm?.BusinessPartner,
+            ContactName   = crm?.ContactName,
+            CreatedAt     = now,
+            UpdatedAt     = now,
+            LastMessageAt = now,
+            UnreadCount   = 0,       // we initiated — nothing unread from the customer
+            AwaitingReply = false,   // and we're not waiting on our own reply
+        };
+        await _store.CreateInquiryAsync(inquiry, ct);
+        try { await _cache.RefreshOneAsync(inquiry.Id, ct); } catch { /* the send + detail load re-warm it */ }
+        _notify.NotifyInquiry("Created", inquiry);
+        _log.LogInformation("[Inquiry] operator-started {Id} for {Phone}", inquiry.Id, e164);
+        return inquiry;
+    }
+
     /// <summary>Media backfill/recovery: re-runs media processing for a known message SID against the supplied
     /// carrier media descriptors and patches the existing row's body + media. Repairs messages that ingested
     /// before media handling existed (or whose media download failed). False if no row matched the SID.</summary>

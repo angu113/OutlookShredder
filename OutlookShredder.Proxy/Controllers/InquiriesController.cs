@@ -34,6 +34,31 @@ public class InquiriesController : ControllerBase
     [HttpGet("unread-total")]
     public IActionResult UnreadTotal() => Ok(new { total = _inquiries.UnreadTotal() });
 
+    /// <summary>New-SMS: does a conversation already exist for this number? Returns its id so the client opens it
+    /// instead of starting a duplicate (one thread per customer).</summary>
+    [HttpGet("find")]
+    public async Task<IActionResult> Find([FromQuery] string phone, CancellationToken ct)
+    {
+        try { var id = await _inquiries.FindInquiryIdByPhoneAsync(phone, ct); return Ok(new { found = id is not null, inquiryId = id }); }
+        catch (Exception ex) { return Fail(ex, "find"); }
+    }
+
+    /// <summary>New-SMS: get-or-create-or-reopen the one-thread inquiry for a number (operator-initiated, called on
+    /// first send). Returns the inquiry; 400 if the phone isn't a valid US number.</summary>
+    [HttpPost("start")]
+    public async Task<IActionResult> Start([FromBody] StartInquiryRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Phone)) return BadRequest(new { error = "phone is required" });
+        try
+        {
+            var inq = await _inquiries.StartInquiryAsync(req.Phone!, ct);
+            return inq is null ? BadRequest(new { error = "Not a valid US phone number" }) : Ok(inq);
+        }
+        catch (Exception ex) { return Fail(ex, "start"); }
+    }
+
+    public sealed class StartInquiryRequest { public string? Phone { get; set; } }
+
     [HttpGet("{id}")]
     public async Task<IActionResult> Get(string id, CancellationToken ct)
     {
