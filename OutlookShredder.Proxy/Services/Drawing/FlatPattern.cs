@@ -50,6 +50,7 @@ public static class FlatPattern
         PartType.Column      => DevelopColumn(spec),
         PartType.Circle      => DevelopCircle(spec),
         PartType.Sheet       => DevelopSheet(spec),
+        PartType.Gusset      => DevelopGusset(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
 
@@ -594,6 +595,50 @@ public static class FlatPattern
         return string.Join("\n", new[] { $"Sheet (flat)  {s.Material}  (T={F(s.Thickness)}{u})", $"{F(s.Width)}{u} x {F(s.Height)}{u}" });
     }
 
+    // ── Gusset — flat right triangle (Width base x Height, right angle between them) ──
+    // The two given dimensions are the legs at a right angle; the hypotenuse joins their free ends.
+    // Origin lower-left at the right-angle corner: base runs along +X, height up +Y.
+    private static FlatPatternResult DevelopGusset(PartSpec spec)
+    {
+        double W = spec.Width, H = spec.Height;
+        var entities = new List<CutEntity>
+        {
+            CutEntity.Polyline(CutLayer, closed: true, new[]
+            {
+                new CutVertex(0, 0), new CutVertex(W, 0), new CutVertex(0, H),   // hypotenuse closes (W,0)->(0,H)
+            }),
+        };
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = $"gusset_{Trim(W)}x{Trim(H)}",
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor }, new CutLayer { Name = BendLayer, Color = BendColor } },
+            Entities = entities,
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = W, FlatHeight = H,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsGusset = true,
+            Summary = GussetSummary(spec),
+            Title = PlainTitle(spec),
+        };
+    }
+
+    private static string GussetSummary(PartSpec s)
+    {
+        string u = U(s.Units);
+        double hyp = Math.Sqrt(s.Width * s.Width + s.Height * s.Height);
+        return string.Join("\n", new[]
+        {
+            $"Gusset (right triangle)  {s.Material}  (T={F(s.Thickness)}{u})",
+            $"{F(s.Width)}{u} base x {F(s.Height)}{u} high  (hyp {F(hyp)}{u})",
+        });
+    }
+
     // ── Flat plate (Flitch / Base) — rectangle + bolt holes, no bends ────────
     private static FlatPatternResult DevelopPlate(PartSpec spec)
     {
@@ -1056,6 +1101,9 @@ public static class FlatPattern
         if (s.Type == PartType.Sheet)
             return $"{mat} Sheet — {D(s.Width)} x {D(s.Height)} x {thk} thickness".Trim();
 
+        if (s.Type == PartType.Gusset)
+            return $"{mat} Gusset — {D(s.Width)} base x {D(s.Height)} high x {thk} thickness".Trim();
+
         string shape = s.Type switch
         {
             PartType.UChannel => "U Channel",
@@ -1168,6 +1216,8 @@ public sealed class FlatPatternResult
     public bool IsPaddle { get; init; }
     /// <summary>True for circles / discs (and donuts) — drawn as a single flat face view with Ø dims.</summary>
     public bool IsCircle { get; init; }
+    /// <summary>True for gussets — drawn as a single flat right-triangle face view (base + height + hyp).</summary>
+    public bool IsGusset { get; init; }
     // Pan base rectangle (between bend lines) + flange flat length, for dimensioning.
     public double PanBaseX0 { get; init; }
     public double PanBaseX1 { get; init; }

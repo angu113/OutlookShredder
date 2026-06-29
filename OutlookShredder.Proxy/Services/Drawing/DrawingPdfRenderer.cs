@@ -139,6 +139,11 @@ public static class DrawingPdfRenderer
                 DrawCircle(gfx, fp, new XRect(M, top, usable, h));
                 DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
+            else if (fp.IsGusset)
+            {
+                DrawGusset(gfx, fp, new XRect(M, top, usable, h));
+                DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
+            }
             else if (fp.IsPlate)
             {
                 DrawPlate(gfx, fp, new XRect(M, top, usable, h));
@@ -980,6 +985,54 @@ public static class DrawingPdfRenderer
             DimH(gfx, dimFont, P(R - innerD / 2.0, iy).X, P(R + innerD / 2.0, iy).X, oy + drawSz, oy + drawSz + 22,
                  $"{Fq(innerD)} {Bi.T("dia")}", true);
         }
+    }
+
+    // ── Gusset: single flat right-triangle face view (base + height + hypotenuse) ──
+    private static void DrawGusset(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var thin = new XPen(DimColor, 0.6);
+
+        gfx.DrawString(Bi.T("flatPattern.cut"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double W = fp.FlatWidth, H = fp.FlatHeight;
+        if (W <= 0 || H <= 0) return;
+        const double band = 52;   // left/bottom bands hold the dim labels without clipping the page
+        double availW = area.Width - band * 2, availH = area.Height - band * 2;
+        double scale = Math.Min(availW / W, availH / H);
+        double drawW = W * scale, drawH = H * scale;
+        double ox = area.X + (area.Width - drawW) / 2;
+        double oy = area.Y + (area.Height - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        // Right angle at (0,0): base along the bottom, height up the left, hypotenuse joins their ends.
+        var a = P(0, 0); var b = P(W, 0); var c = P(0, H);
+        gfx.DrawPolygon(cutPen, new[] { a, b, c });
+
+        // Right-angle square marker at the (0,0) corner.
+        double sq = Math.Min(Math.Min(drawW, drawH) * 0.12, 14);
+        gfx.DrawLine(thin, a.X + sq, a.Y, a.X + sq, a.Y - sq);
+        gfx.DrawLine(thin, a.X, a.Y - sq, a.X + sq, a.Y - sq);
+
+        // Base (W) along the bottom; height (H) up the left.
+        DimH(gfx, dimFont, P(0, 0).X, P(W, 0).X, oy + drawH, oy + drawH + 22, Fq(W), true);
+        DimV(gfx, dimFont, ox, ox - 46, oy, oy + drawH, Fq(H), true);
+
+        // Hypotenuse length — boxed callout near the mid-point of the slope.
+        double hyp = Math.Sqrt(W * W + H * H);
+        var mid = new XPoint((b.X + c.X) / 2, (b.Y + c.Y) / 2);
+        string hlabel = Fq(hyp);
+        var sz = gfx.MeasureString(hlabel, dimFont);
+        double bw = sz.Width + 8, bh = sz.Height + 4;
+        var hr = new XRect(mid.X + 4, mid.Y - bh - 2, bw, bh);
+        if (hr.X + bw > area.X + area.Width) hr = new XRect(mid.X - bw - 4, mid.Y - bh - 2, bw, bh);
+        gfx.DrawRectangle(XBrushes.White, hr);
+        gfx.DrawRectangle(new XPen(XColor.FromArgb(110, 110, 110), 0.9), hr);
+        gfx.DrawString(hlabel, dimFont, TextBrush, hr, XStringFormats.Center);
     }
 
     // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──

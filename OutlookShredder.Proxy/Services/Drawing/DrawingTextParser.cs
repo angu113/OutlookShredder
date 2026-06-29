@@ -89,6 +89,8 @@ public static class DrawingTextParser
             return ParseCircle(lower, thickness, materialLabel, ri, k);
         if (type == PartType.Sheet)
             return ParseSheet(lower, thickness, materialLabel, ri, k, polish);
+        if (type == PartType.Gusset)
+            return ParseGusset(lower, thickness, materialLabel, ri, k, polish);
 
         // ── Pan — L x W x D plus which walls are present; parsed + returned here ──
         if (type == PartType.Pan)
@@ -230,6 +232,7 @@ public static class DrawingTextParser
         // Flat shapes (no bends) — distinct lead words, checked before the single-letter U/Z/L matches.
         if (Regex.IsMatch(lower, @"\b(circle|disc|disk|donut|doughnut)\b")) return PartType.Circle;
         if (Regex.IsMatch(lower, @"\bsheet\b")) return PartType.Sheet;
+        if (Regex.IsMatch(lower, @"\b(gusset|triangle)\b")) return PartType.Gusset;
         if (Regex.IsMatch(lower, @"\bu(?:-?\s?channel)?\b")) return PartType.UChannel;
         if (Regex.IsMatch(lower, @"\bz(?:-?\s?channel)?\b")) return PartType.ZChannel;
         if (Regex.IsMatch(lower, @"\bl(?:-?\s?angle)?\b"))   return PartType.LAngle;
@@ -377,6 +380,27 @@ public static class DrawingTextParser
         return new PartSpec
         {
             Type = PartType.Sheet, Width = w, Height = h,
+            Thickness = thickness, InsideRadius = ri, KFactor = k, Material = material, Units = "in",
+            PolishDirection = polish,
+        };
+    }
+
+    /// <summary>Parses a gusset — "Gusset 12 x 8, 0.25 HRS" (base width x height; right angle between
+    /// them, hypotenuse joins their free ends). Carries polish.</summary>
+    private static PartSpec ParseGusset(string lower, double thickness, string material, double ri, double k, PolishDirection polish)
+    {
+        if (thickness <= 0)
+            throw new DrawingParseException("Add a gauge or decimal thickness (e.g. \"0.25 HRS\").");
+
+        var m = Regex.Match(lower, $@"\b(?:gusset|triangle)\b\s*({Num})\s*x\s*({Num})");
+        if (!m.Success)
+            throw new DrawingParseException("Gusset needs width x height, e.g. \"Gusset 12 x 8, 0.25 HRS\".");
+        double w = NumOf(m.Groups[1].Value), h = NumOf(m.Groups[2].Value);
+        if (w <= 0 || h <= 0) throw new DrawingParseException("Gusset dimensions must be positive.");
+
+        return new PartSpec
+        {
+            Type = PartType.Gusset, Width = w, Height = h,
             Thickness = thickness, InsideRadius = ri, KFactor = k, Material = material, Units = "in",
             PolishDirection = polish,
         };

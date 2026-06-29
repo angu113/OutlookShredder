@@ -14,6 +14,7 @@ public enum PartType
     Column,
     Circle,
     Sheet,
+    Gusset,
     Custom,
 }
 
