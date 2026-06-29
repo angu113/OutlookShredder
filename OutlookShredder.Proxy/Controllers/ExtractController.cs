@@ -2398,8 +2398,13 @@ public class ExtractController : ControllerBase
                         { "red" => "red", "amber" => "amber", "stale" => "stale", _ => "awaiting" };
 
                 // "active/recent only": drop the historical backlog (unconfirmed beyond the ack window).
-                // A confirmed PO is always kept regardless of age (material genuinely inbound).
-                if (state == "stale") continue;
+                // A confirmed PO is always kept regardless of age (material genuinely inbound). A PO the
+                // user EXPLICITLY placed on the board (BoardDate set) is ALSO kept even if it went
+                // stale-unconfirmed — a deliberate placement must never silently vanish (that is exactly
+                // the dropped ball this board exists to catch). It renders on its placed day like any
+                // scheduled card; AckLevel still carries the stale truth for the card's detail.
+                bool userPlaced = !string.IsNullOrWhiteSpace(r.BoardDate);
+                if (state == "stale" && !userPlaced) continue;
 
                 bool hasPayEmail =
                     (string.Equals(r.PaymentStatus, "Required", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.BillMailItemId)) ||

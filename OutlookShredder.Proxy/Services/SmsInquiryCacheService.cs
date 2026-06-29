@@ -154,7 +154,19 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
         // The active set is cached; Closed/Spam (and any explicit closed query) fall through to SP.
         if (_warmed && status is not (InquiryStatus.Closed or InquiryStatus.Spam))
         {
-            IEnumerable<Inquiry> q = Snapshot().Entries.Select(e => e.Inquiry);
+            var all = Snapshot().Entries.Select(e => e.Inquiry).ToList();
+            // Fill the inbox display name/contact from the CRM cache where the inquiry's denormalized value is
+            // missing (e.g. ingested before the CRM cache warmed) — so the left pane shows the customer, not
+            // just the phone, exactly like the detail CRM card (ToDetail). Cheap in-memory lookup; fill-only.
+            foreach (var i in all)
+                if (string.IsNullOrWhiteSpace(i.CustomerName) && _crm.LookupByPhone(i.CustomerPhone) is { } crm)
+                {
+                    if (!string.IsNullOrWhiteSpace(crm.BusinessPartner)) i.CustomerName = crm.BusinessPartner;
+                    if (string.IsNullOrWhiteSpace(i.ContactName) && !string.IsNullOrWhiteSpace(crm.ContactName))
+                        i.ContactName = crm.ContactName;
+                }
+
+            IEnumerable<Inquiry> q = all;
             if (status is InquiryStatus.Open or InquiryStatus.Quoted)
                 q = q.Where(i => string.Equals(i.Status, status, StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(query))
