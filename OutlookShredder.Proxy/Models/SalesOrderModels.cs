@@ -6,6 +6,9 @@ namespace OutlookShredder.Proxy.Models;
 /// (<see cref="Source"/> = <c>erp-doc</c>, sparser — only Gross/customer/date populated).</summary>
 public sealed class SalesOrderRecord
 {
+    /// <summary>SharePoint list item id — set on rows read back from SP so a delta load can PATCH a changed
+    /// order in place. Null on freshly-parsed / appended rows that haven't been read back yet.</summary>
+    public string?         SpItemId        { get; set; }
     public string          OrderId         { get; set; } = "";
     public string          CustomerName    { get; set; } = "";
     public DateTimeOffset?  OrderDate       { get; set; }
@@ -21,6 +24,21 @@ public sealed class SalesOrderRecord
 
     /// <summary>The amount shown on the call card: Net, falling back to Gross for sparse erp-doc rows.</summary>
     public double? DisplayAmount => NetAmount ?? GrossAmount;
+}
+
+/// <summary>Outcome of a delta Sales-Orders load: how many rows were new (inserted), changed (patched in
+/// place) or unchanged (skipped), plus failures and the full merged row set so the serving cache can be
+/// rebuilt without re-reading SharePoint.</summary>
+public sealed record SalesOrderUpsertResult(
+    int Added, int Changed, int Unchanged, int Failed, List<SalesOrderRecord> Merged);
+
+/// <summary>On-disk serving cache for SalesOrderHistory (so startup skips the ~29s SP read). Holds the full
+/// row set plus the <see cref="LastLoadUtc"/> delta marker — when SharePoint was last fully (re)loaded.</summary>
+public sealed class SalesOrderCacheFile
+{
+    public int                   SchemaVersion { get; set; }
+    public DateTime?             LastLoadUtc   { get; set; }
+    public List<SalesOrderRecord> Rows         { get; set; } = [];
 }
 
 /// <summary>Response for <c>GET /api/sales-orders/by-customer</c> — a customer's recent orders plus a

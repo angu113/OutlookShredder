@@ -58,7 +58,7 @@ public partial class SharePointService
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=Title)"];
-                r.QueryParameters.Top    = 999;
+                r.QueryParameters.Top    = 5000;   // fewer serial nextLink round-trips on the ~35k-row dedup read
             }, ct);
 
         while (page?.Value is not null)
@@ -88,7 +88,10 @@ public partial class SharePointService
             {
                 r.QueryParameters.Expand =
                     ["fields($select=Title,CustomerName,OrderDate,Status,SecondaryStatus,CustomerPo,NetAmount,GrossAmount,PctPaid,DeliveryDate,Weight,Source)"];
-                r.QueryParameters.Top = 999;
+                // Max page size: ~35k rows at Top=999 meant ~35 SERIAL nextLink round-trips (~34s measured —
+                // the slowest startup warm). 5000/page (proven by the SR-cache read) cuts that to ~7 pages.
+                // Graph clamps to its own ceiling and the nextLink loop stays correct if it returns fewer.
+                r.QueryParameters.Top = 5000;
             }, ct);
 
         while (page?.Value is not null)
@@ -100,6 +103,7 @@ public partial class SharePointService
                 if (string.IsNullOrWhiteSpace(id)) continue;
                 result.Add(new SalesOrderRecord
                 {
+                    SpItemId        = item.Id,
                     OrderId         = id,
                     CustomerName    = GetStr(d, "CustomerName") ?? "",
                     OrderDate       = ParseSpDate(GetStr(d, "OrderDate")),
@@ -119,52 +123,6 @@ public partial class SharePointService
                 page.OdataNextLink, GetGraph().RequestAdapter).GetAsync(cancellationToken: ct);
         }
         return result;
-    }
-
-    /// <summary>Inserts the parsed rows that are not already present (by OrderId), in parallel with a
-    /// per-row timeout and throttle-retry. Resumable: it reads the existing OrderIds first and skips them,
-    /// so a crash at 20k just re-runs and inserts the remainder. <paramref name="onAdded"/> is invoked with
-    /// the running added-count for progress reporting.</summary>
-    public async Task<(int Added, int AlreadyPresent, int Failed)> InsertSalesOrdersAsync(
-        IReadOnlyList<CustomerImportService.SalesOrderRow> rows,
-        Action<int>? onAdded = null, CancellationToken ct = default)
-    {
-        var siteId = await GetSiteIdAsync();
-        var listId = await GetSalesOrderHistoryListIdAsync();
-
-        var existing = await ReadAllSalesOrderIdsAsync(ct);
-        var toInsert = rows.Where(r => !existing.Contains(r.OrderId)).ToList();
-        int already  = rows.Count - toInsert.Count;
-        _log.LogInformation("[SP] SalesOrderHistory load: {ToInsert} to insert, {Already} already present",
-            toInsert.Count, already);
-
-        int added = 0, failed = 0;
-        await Parallel.ForEachAsync(toInsert,
-            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
-            async (row, token) =>
-            {
-                using var rowCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                rowCts.CancelAfter(TimeSpan.FromSeconds(45));
-                try
-                {
-                    await PostSalesOrderWithRetryAsync(siteId, listId, BuildSalesOrderFields(row, "export"), rowCts.Token);
-                    var n = Interlocked.Increment(ref added);
-                    onAdded?.Invoke(n);
-                    if (n % 1000 == 0)
-                        _log.LogInformation("[SP] SalesOrderHistory load: {N}/{Total} inserted", n, toInsert.Count);
-                }
-                catch (Exception ex) when (!token.IsCancellationRequested)
-                {
-                    _log.LogWarning("[SP] SalesOrderHistory load: POST failed for {Order}: {Err}", row.OrderId, ex.Message);
-                    Interlocked.Increment(ref failed);
-                }
-            });
-
-        if (failed > 0)
-            _log.LogWarning("[SP] SalesOrderHistory load: {Failed} row(s) failed to insert", failed);
-        _log.LogInformation("[SP] SalesOrderHistory load complete: {Added} added, {Already} already present, {Failed} failed",
-            added, already, failed);
-        return (added, already, failed);
     }
 
     /// <summary>Appends one order as it arrives via an ERP SalesOrder doc (the FileWatcher path), insert-if-
@@ -216,21 +174,21 @@ public partial class SharePointService
         return rec;
     }
 
-    /// <summary>POSTs a new SalesOrderHistory item, retrying on SharePoint throttling (429/503/504) with
-    /// exponential backoff (mirrors <c>PatchListItemWithRetryAsync</c>).</summary>
-    private async Task PostSalesOrderWithRetryAsync(
+    /// <summary>POSTs a new SalesOrderHistory item (returns the new item id), retrying on SharePoint
+    /// throttling (429/503/504) with exponential backoff (mirrors <c>PatchListItemWithRetryAsync</c>).</summary>
+    private async Task<string?> PostSalesOrderWithRetryAsync(
         string siteId, string listId, Dictionary<string, object?> fields, CancellationToken ct, int maxAttempts = 5)
     {
         for (int attempt = 1; ; attempt++)
         {
             try
             {
-                await GetGraph().Sites[siteId].Lists[listId].Items
+                var created = await GetGraph().Sites[siteId].Lists[listId].Items
                     .PostAsync(new Microsoft.Graph.Models.ListItem
                     {
                         Fields = new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }
                     }, cancellationToken: ct);
-                return;
+                return created?.Id;
             }
             catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
                 when (attempt < maxAttempts && ex.ResponseStatusCode is 429 or 503 or 504)
@@ -242,6 +200,128 @@ public partial class SharePointService
             }
         }
     }
+
+    /// <summary>PATCHes the mutable fields of an existing SalesOrderHistory item (a delta load updating a
+    /// changed order), retrying on throttling like the POST path.</summary>
+    private async Task PatchSalesOrderWithRetryAsync(
+        string siteId, string listId, string itemId, Dictionary<string, object?> fields, CancellationToken ct, int maxAttempts = 5)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await GetGraph().Sites[siteId].Lists[listId].Items[itemId].Fields
+                    .PatchAsync(new Microsoft.Graph.Models.FieldValueSet { AdditionalData = fields }, cancellationToken: ct);
+                return;
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError ex)
+                when (attempt < maxAttempts && ex.ResponseStatusCode is 429 or 503 or 504)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+                _log.LogWarning("[SP] SalesOrderHistory PATCH throttled (HTTP {Code}) — retry {A}/{M} in {S}s",
+                    ex.ResponseStatusCode, attempt, maxAttempts, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+            }
+        }
+    }
+
+    /// <summary>Delta load: upserts the parsed export against what's already on the list. Reads the existing
+    /// rows once (the authoritative new-vs-changed comparison + SP item ids for the PATCH), then in parallel
+    /// INSERTs orders not yet present and PATCHes orders whose tracked fields changed since the last load;
+    /// unchanged orders are skipped (no write). Returns the delta counts plus the full merged row set so the
+    /// caller can rebuild its serving cache without a second SP read. This is the "delta marker" the manual
+    /// Sales-Orders load uses — only new + changed rows hit SharePoint.</summary>
+    public async Task<SalesOrderUpsertResult> UpsertSalesOrdersAsync(
+        IReadOnlyList<CustomerImportService.SalesOrderRow> rows,
+        Action<int>? onProgress = null, CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetSalesOrderHistoryListIdAsync();
+
+        var existing = await ReadAllSalesOrdersAsync(ct);
+        var byId = new Dictionary<string, SalesOrderRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in existing) byId.TryAdd(r.OrderId, r);
+
+        var toInsert = new List<CustomerImportService.SalesOrderRow>();
+        var toPatch  = new List<(SalesOrderRecord Existing, CustomerImportService.SalesOrderRow Row)>();
+        int unchanged = 0;
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.OrderId)) continue;
+            if (!byId.TryGetValue(row.OrderId, out var ex)) toInsert.Add(row);
+            else if (SalesOrderChanged(ex, row))           toPatch.Add((ex, row));
+            else                                            unchanged++;
+        }
+        _log.LogInformation("[SP] SalesOrderHistory delta: {New} new, {Changed} changed, {Same} unchanged (of {Total} parsed, {Existing} on file)",
+            toInsert.Count, toPatch.Count, unchanged, rows.Count, existing.Count);
+
+        int added = 0, changed = 0, failed = 0, done = 0;
+        var inserted = new System.Collections.Concurrent.ConcurrentBag<SalesOrderRecord>();
+        var opts = new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct };
+
+        await Parallel.ForEachAsync(toInsert, opts, async (row, token) =>
+        {
+            using var rowCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            rowCts.CancelAfter(TimeSpan.FromSeconds(45));
+            try
+            {
+                var id = await PostSalesOrderWithRetryAsync(siteId, listId, BuildSalesOrderFields(row, "export"), rowCts.Token);
+                inserted.Add(ToRecord(row, id));
+                Interlocked.Increment(ref added);
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested)
+            { _log.LogWarning("[SP] SalesOrderHistory insert failed for {Order}: {Err}", row.OrderId, ex.Message); Interlocked.Increment(ref failed); }
+            finally { var n = Interlocked.Increment(ref done); if (n % 250 == 0) onProgress?.Invoke(n); }
+        });
+
+        await Parallel.ForEachAsync(toPatch, opts, async (pair, token) =>
+        {
+            using var rowCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            rowCts.CancelAfter(TimeSpan.FromSeconds(45));
+            try
+            {
+                await PatchSalesOrderWithRetryAsync(siteId, listId, pair.Existing.SpItemId!, BuildSalesOrderFields(pair.Row, pair.Existing.Source ?? "export"), rowCts.Token);
+                ApplyRow(pair.Existing, pair.Row);   // reflect the change in the merged set (in-place on the byId record)
+                Interlocked.Increment(ref changed);
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested)
+            { _log.LogWarning("[SP] SalesOrderHistory patch failed for {Order}: {Err}", pair.Row.OrderId, ex.Message); Interlocked.Increment(ref failed); }
+            finally { var n = Interlocked.Increment(ref done); if (n % 250 == 0) onProgress?.Invoke(n); }
+        });
+
+        var merged = byId.Values.Concat(inserted).ToList();
+        _log.LogInformation("[SP] SalesOrderHistory delta complete: {Added} added, {Changed} changed, {Same} unchanged, {Failed} failed",
+            added, changed, unchanged, failed);
+        return new SalesOrderUpsertResult(added, changed, unchanged, failed, merged);
+    }
+
+    // Tracked-field comparison for the delta: any difference in the export-carried fields = a changed order.
+    private static bool SalesOrderChanged(SalesOrderRecord ex, CustomerImportService.SalesOrderRow row) =>
+        !StrEq(ex.CustomerName, row.CustomerName) || ex.OrderDate != row.OrderDate ||
+        !StrEq(ex.Status, row.Status) || !StrEq(ex.SecondaryStatus, row.SecondaryStatus) ||
+        !StrEq(ex.CustomerPo, row.CustomerPo) || ex.DeliveryDate != row.DeliveryDate ||
+        !NumEq(ex.NetAmount, row.NetAmount) || !NumEq(ex.GrossAmount, row.GrossAmount) ||
+        !NumEq(ex.PctPaid, row.PctPaid) || !NumEq(ex.Weight, row.Weight);
+
+    private static bool StrEq(string? a, string? b) => string.Equals(a ?? "", b ?? "", StringComparison.Ordinal);
+    private static bool NumEq(double? a, double? b) =>
+        (a is null && b is null) || (a is not null && b is not null && Math.Abs(a.Value - b.Value) < 0.005);
+
+    private static void ApplyRow(SalesOrderRecord ex, CustomerImportService.SalesOrderRow row)
+    {
+        ex.CustomerName = row.CustomerName; ex.OrderDate = row.OrderDate;
+        ex.Status = row.Status; ex.SecondaryStatus = row.SecondaryStatus; ex.CustomerPo = row.CustomerPo;
+        ex.NetAmount = row.NetAmount; ex.GrossAmount = row.GrossAmount; ex.PctPaid = row.PctPaid;
+        ex.DeliveryDate = row.DeliveryDate; ex.Weight = row.Weight;
+    }
+
+    private static SalesOrderRecord ToRecord(CustomerImportService.SalesOrderRow row, string? spItemId) => new()
+    {
+        SpItemId = spItemId, OrderId = row.OrderId, CustomerName = row.CustomerName, OrderDate = row.OrderDate,
+        Status = row.Status, SecondaryStatus = row.SecondaryStatus, CustomerPo = row.CustomerPo,
+        NetAmount = row.NetAmount, GrossAmount = row.GrossAmount, PctPaid = row.PctPaid,
+        DeliveryDate = row.DeliveryDate, Weight = row.Weight, Source = "export",
+    };
 
     private static Dictionary<string, object?> BuildSalesOrderFields(
         CustomerImportService.SalesOrderRow row, string source) => new()

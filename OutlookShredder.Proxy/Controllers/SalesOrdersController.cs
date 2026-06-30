@@ -60,8 +60,9 @@ public class SalesOrdersController(
                 parsed = parsed.Rows.Count,
                 distinctCustomers,
                 existingRows = existing.Count,
-                alreadyPresent = present,
+                alreadyPresent = present,        // present by OrderId — the real load splits these into changed vs unchanged
                 toAdd = parsed.Rows.Count - present,
+                lastLoadUtc = history.LastLoadUtc,   // delta marker — when the cache was last fully (re)loaded
                 warnings = parsed.Warnings,
             });
         }
@@ -72,12 +73,14 @@ public class SalesOrdersController(
         if (!history.StartImport(parsed.Rows, out var message))
             return Conflict(new { message, status = history.ImportStatus });
 
-        return Accepted(new { file = Path.GetFileName(path), message, status = history.ImportStatus });
+        return Accepted(new { file = Path.GetFileName(path), message, status = history.ImportStatus, lastLoadUtc = history.LastLoadUtc });
     }
 
-    /// <summary>GET /api/sales-orders/import-history/status — live progress of the background bulk load.</summary>
+    /// <summary>GET /api/sales-orders/import-history/status — live progress of the background delta load, plus
+    /// the delta marker (when the cache was last fully loaded) and the current cached order count.</summary>
     [HttpGet("import-history/status")]
-    public IActionResult ImportStatus() => Ok(history.ImportStatus);
+    public IActionResult ImportStatus() =>
+        Ok(new { status = history.ImportStatus, lastLoadUtc = history.LastLoadUtc, orderCount = history.OrderCount });
 
     /// <summary>GET /api/sales-orders/by-customer?customer={bp}&amp;top=5 — a customer's recent orders +
     /// summary header for the Raptor call card. Served from the in-memory cache.</summary>

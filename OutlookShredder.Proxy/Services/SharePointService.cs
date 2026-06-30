@@ -11171,7 +11171,7 @@ public partial class SharePointService
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=Title,PopupMessage,Active,PaymentTerms)"];
-                r.QueryParameters.Top    = 999;
+                r.QueryParameters.Top    = 5000;   // ~13k customers: 5000/page = ~3 serial pages, not ~13
             }, ct);
 
         while (page?.Value is not null)
@@ -11922,7 +11922,7 @@ public partial class SharePointService
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand = ["fields($select=CustomerName,ContactName,Phone)"];
-                r.QueryParameters.Top    = 999;
+                r.QueryParameters.Top    = 5000;   // ~14k contacts: 5000/page = ~3 serial pages, not ~14
             }, ct);
 
         while (page?.Value is not null)
