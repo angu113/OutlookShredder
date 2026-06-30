@@ -106,13 +106,16 @@ public sealed class SalesOrderHistoryService : IHostedService
         return Task.FromResult(Project(orders ?? [], top));
     }
 
-    private static CustomerOrdersResponse Project(IReadOnlyList<SalesOrderRecord> orders, int top)
+    internal static CustomerOrdersResponse Project(IReadOnlyList<SalesOrderRecord> orders, int top)
     {
         var sorted = orders
             .OrderByDescending(o => o.OrderDate ?? DateTimeOffset.MinValue)
             .ToList();
 
-        double lifetimeNet = sorted.Sum(o => o.DisplayAmount ?? 0);
+        // The headline $ total counts only REALIZED revenue: Booked orders whose secondary status is
+        // Completed (quotes, open/in-progress, and cancelled orders are excluded). The order COUNT and the
+        // listed orders below stay as the full history — only this dollar figure is filtered.
+        double lifetimeNet = sorted.Where(IsBookedCompleted).Sum(o => o.DisplayAmount ?? 0);
         var lastDate = sorted.FirstOrDefault(o => o.OrderDate is not null)?.OrderDate;
 
         var summary = new CustomerOrdersSummary(
@@ -131,6 +134,13 @@ public sealed class SalesOrderHistoryService : IHostedService
 
         return new CustomerOrdersResponse(summary, dtos);
     }
+
+    /// <summary>A realized sale for the call-card $ total: primary status "Booked" AND secondary status
+    /// "Completed" (case-insensitive, trimmed). Everything else — quotes, open/processing, cancelled — is
+    /// excluded from the headline lifetime figure.</summary>
+    private static bool IsBookedCompleted(SalesOrderRecord o) =>
+        string.Equals(o.Status?.Trim(), "Booked", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(o.SecondaryStatus?.Trim(), "Completed", StringComparison.OrdinalIgnoreCase);
 
     // ── Cache build / persistence ───────────────────────────────────────────────
 
