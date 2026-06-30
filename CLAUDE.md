@@ -23,6 +23,12 @@ Also installs:
 
 ### Controllers
 
+> **This table is a curated subset, not exhaustive.** The proxy has ~44 controllers; the routes below are
+> the ones you'll touch most. The source of truth for any route is the `[Route(...)]` + `[Http*]` attributes
+> on the controller class — `grep -rn "\[Http" Controllers/` to enumerate. Newer surfaces (Pulse/CX SMS,
+> Workflow, Forge, ShadowCat/Reconciliation, MailEval/MailRules/MailClassify, CutOptimizer, Statements,
+> Steve/OpenBravo relay, Archive, Drawing, Todos, Cache, etc.) each have their own wip/implementation doc.
+
 | Controller | Prefix | Purpose |
 |-----------|--------|---------|
 | `ExtractController` | `/api` | Office.js calls `POST /api/extract` to extract one email/attachment via Claude |
@@ -38,7 +44,10 @@ Also installs:
 | `CustomersController` | `/api/customers` | CRM — lookup by phone, import partners/contacts/customer-info (enrichment), list contacts, per-customer payment `terms` |
 | `ImportController` | `/api/import` | Drop-and-run CSV import for BP/contact bulk loads (see Import directory below) |
 | `ErpController` | `/api/erp` | Proxy SP PDFs (with FAB-drawing append), build a slip's combined DXF, ERP document records + stamp annotations |
-| `DiagController` | `/api/diag` | Read-only extraction-pipeline traces (live email vs extracted/stored), for forensic review |
+| `DiagController` | `/api/diag` | Read-only extraction-pipeline traces (live email vs extracted/stored) + `GET /api/diag/sp-contract` (SP data-contract round-trip self-check) |
+| `InquiriesController` | `/api/inquiries` | **Pulse / CX SMS customer inquiries** (Phases 0–7) — list/detail, send SMS + outbound MMS, notes, quotations, read-state, AI draft accept/dismiss/regenerate, identity/media backfill |
+| `MessagingController` | `/api/messages` | Generic messaging gateway — conversation summaries/threads, `POST /api/messages/send` (sms/email/internal), mark-read, known users (predates Pulse; powers the older Messages surface) |
+| `SmsWebhookController` | `/api/sms` | SignalWire inbound webhook + delivery-status callback (HMAC-validated, enqueues to `sms-inbound-jobs`) + dev-seed. Auth-exempt + loopback-bound. **Public ingress is now the `OutlookShredder.SmsWebhook` Azure Function** (see below); this controller is the in-proxy receiver/status sink. |
 
 **ExtractController endpoints:**
 - `POST /api/extract` — body: `ExtractRequest` → `ExtractResponse`; calls Claude, writes SharePoint, stamps "RFQ-Processed" on message, publishes notification
@@ -118,6 +127,38 @@ Also installs:
 - `GET /api/items/by-rfq/{rfqId}` — SLI items for one RFQ (always includes `SpItemId`)
 - `DELETE /api/sr/{srId}` — delete all SLIs under an SR then the SR itself
 - `DELETE /api/sli/{itemId}` — delete a single SLI by its SP item ID
+
+**InquiriesController endpoints (`/api/inquiries`) — Pulse / CX SMS inquiries.** Thin over `InquiryService`; all
+threading / opt-out / draft / notification logic lives in the service. Inquiry ids are `CINQ-…`.
+- `GET /api/inquiries?status=&q=` — list inquiries (status tab + text filter)
+- `GET /api/inquiries/unread-total` — total unread inbound across active inquiries (the taskbar + Pulse-icon badge)
+- `GET /api/inquiries/find?phone=` — does a thread already exist for this number? → `{ found, inquiryId }` (one-thread-per-customer)
+- `POST /api/inquiries/start` body `{ phone }` — get-or-create-or-reopen the one thread for a number (operator-initiated); 400 on invalid US number
+- `GET /api/inquiries/{id}` — detail aggregate (inquiry + messages + notes + quotations + drafts + CRM card)
+- `GET /api/inquiries/{id}/media?name=` — stream a stored inbound media file (proxy holds bytes durably via app-only Graph; client never needs carrier auth)
+- `POST /api/inquiries/{id}/backfill-media` body `{ sid, mediaJson }` — dev/recovery re-pull of media for a message by SID (gated by `SignalWire:AllowDevSeed`)
+- `POST /api/inquiries/backfill-identity` body `{ from, to, apply }` — admin one-time: rewrite an operator identity (Windows login → Shredder username) across `Inquiries.AssignedTo` / `InquiryNotes.NoteAuthor` / `InquiryQuotations.LinkedBy`. Dry-run unless `apply=true`; returns per-list matched/patched + affected inquiry ids
+- `POST /api/inquiries/{id}/messages` body `{ body, from, fromDraftSpItemId? }` — send an SMS reply (opt-out-aware → 409; auto-assigns owner)
+- `POST /api/inquiries/{id}/messages/mms` (multipart/form-data: `body`, `from`, `fromDraftSpItemId?`, `files[]`) — outbound MMS; images send as MMS, a PDF is rasterized to one image per page; durable copy kept in SharePoint `InquiryMedia`. 30 MB limit
+- `POST /api/inquiries/{id}/notes` body `{ author, body }` — append-only note
+- `POST /api/inquiries/{id}/quotations` body `{ hskNumber, linkedBy }` — link an HSK# quote (→ Quoted; validated `(HSK-)?(SO|PO|Q)<digits>`)
+- `PATCH /api/inquiries/{id}` body `{ status?, assignedTo? }` — update status / reassign (steal)
+- `POST /api/inquiries/{id}/read` — mark the whole inquiry read
+- `POST /api/inquiries/{id}/messages/{messageSpItemId}/read` body `{ read }` — per-message read toggle (read state is button-only)
+- `POST /api/inquiries/{id}/read-all` body `{ read }` — mark all messages read/unread
+- `POST /api/inquiries/{id}/regenerate-draft` — regenerate the AI suggestion for the latest inbound (supersedes prior pending drafts)
+- `POST /api/inquiries/{id}/drafts/{draftId}/accept` body `{ from? }` — send the AI draft (opt-out → 409)
+- `POST /api/inquiries/{id}/drafts/{draftId}/dismiss` — dismiss a pending draft
+
+**MessagingController endpoints (`/api/messages`)** — the older generic messaging surface (predates Pulse):
+- `GET /api/messages/conversations?top=` · `GET /api/messages/conversation/{id}?top=` — thread summaries / one thread
+- `POST /api/messages/send` body `{ from, to, body, subject?, channel }` — `channel` ∈ sms | email | internal
+- `POST /api/messages/read/{conversationId}` · `GET /api/messages/users`
+
+**SmsWebhookController endpoints (`/api/sms`)** — SignalWire ingress (auth-exempt, loopback-bound; HMAC-validated):
+- `POST /api/sms/inbound` — inbound SMS/MMS webhook: validates the SignalWire signature, acks fast (empty TwiML), enqueues a `Job` (From/To/Body/Sid/MediaUrls) to the `sms-inbound-jobs` dedup queue. **The public ingress is the `OutlookShredder.SmsWebhook` Azure Function**, which enqueues to the same queue; this in-proxy route is the loopback/Cloudflare receiver.
+- `POST /api/sms/status` — delivery-status callback → `InquiryService.UpdateMessageStatusAsync(sid, status)`
+- `POST /api/sms/dev-seed` body `{ from, body }` — DEV-ONLY (gated by `SignalWire:AllowDevSeed`, 404 otherwise): inject an inbound straight into the pipeline, bypassing the signature, to populate a thread without a live webhook
 
 ### Services
 
