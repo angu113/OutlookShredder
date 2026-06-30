@@ -97,7 +97,7 @@ public sealed class SupplierUnreadIndexService : BackgroundService, ICacheStatus
         // Build once at startup, then a 5-min safety re-scan (write-through + bus keep it fresh between).
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await RefreshAsync(stoppingToken); }
+            try { await StartupTimings.MeasureAsync("supplier-unread-index", null, () => RefreshAsync(stoppingToken)); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _log.LogWarning(ex, "[UnreadIndex] scheduled refresh failed"); }
             try { await Task.Delay(SafetyInterval, stoppingToken); }

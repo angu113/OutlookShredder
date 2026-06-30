@@ -59,12 +59,12 @@ public class SupplierCacheService : BackgroundService, ICacheStatusProvider
     {
         // Ensure the contact columns (ManagerContact, OooContact, PrimaryContactFirstName,
         // ManagerContactFirstName, OooContactFirstName) exist before first read.
-        await EnsureColumnsAsync();
+        await StartupTimings.MeasureAsync("supplier-cache", "ensure-columns", () => EnsureColumnsAsync());
 
         // Refresh immediately on startup, then every hour.
         while (!stoppingToken.IsCancellationRequested)
         {
-            await RefreshAsync();
+            await StartupTimings.MeasureAsync("supplier-cache", "fetch", () => RefreshAsync());
             try { await Task.Delay(TimeSpan.FromHours(1), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }

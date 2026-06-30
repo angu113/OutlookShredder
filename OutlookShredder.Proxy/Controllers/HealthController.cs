@@ -37,6 +37,13 @@ public class HealthController : ControllerBase
         _customers = customers;
     }
 
+    /// <summary>Startup / cache-warm timing profile, per dataset — GET /api/startup. Reports time-to-serve
+    /// (when Kestrel began listening — the moment UI health/version polls start succeeding), the sum of
+    /// critical-path (blocking) warms, and every warm span with its dataset + row count, so we can see what
+    /// delays first-paint health and which dataset is slow. Populated by <see cref="StartupTimings"/>.</summary>
+    [HttpGet("/api/startup")]
+    public IActionResult Startup() => Ok(StartupTimings.Snapshot());
+
     [HttpGet]
     public IActionResult Get()
     {

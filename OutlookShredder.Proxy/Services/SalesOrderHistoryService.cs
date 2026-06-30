@@ -33,7 +33,8 @@ public sealed class SalesOrderHistoryService : IHostedService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        await SafeRefreshAsync();
+        // Critical-path: StartAsync awaits this SP read before the host finishes starting.
+        await StartupTimings.MeasureAsync("sales-order-history", null, () => SafeRefreshAsync(), critical: true);
         _timer = new Timer(_ => _ = SafeRefreshAsync(), null, SafetyInterval, SafetyInterval);
     }
 

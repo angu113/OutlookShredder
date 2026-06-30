@@ -84,7 +84,7 @@ public class ProductCatalogService : BackgroundService, ICacheStatusProvider
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            await RefreshAsync();
+            await StartupTimings.MeasureAsync("product-catalog", null, () => RefreshAsync());
             try { await Task.Delay(TimeSpan.FromHours(1), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }

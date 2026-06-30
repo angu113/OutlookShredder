@@ -112,8 +112,12 @@ public class CustomerCacheService : IHostedService, ICacheStatusProvider
 
     private async Task RefreshAsync(CancellationToken ct)
     {
-        var contactsTask = _sp.ReadAllContactsAsync(ct);
-        var partnersTask = _sp.ReadAllCustomersAsync(ct);
+        // Two independent SP reads in parallel — each timed as its own dataset (startup only; later refreshes
+        // reuse the same labels but the recorder keeps just the first). Critical-path: StartAsync awaits this.
+        var contactsTask = StartupTimings.MeasureAsync("customer-cache", "contacts",
+            () => _sp.ReadAllContactsAsync(ct), r => r.Count, critical: true);
+        var partnersTask = StartupTimings.MeasureAsync("customer-cache", "customers",
+            () => _sp.ReadAllCustomersAsync(ct), r => r.Count, critical: true);
         await Task.WhenAll(contactsTask, partnersTask);
 
         var contacts = await contactsTask;

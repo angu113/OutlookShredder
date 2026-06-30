@@ -69,8 +69,9 @@ public sealed class InquiryService : IHostedService
         // index-at-construction invariant holds.
         try
         {
-            await _store.EnsureProvisionedAsync(ct);
-            await _messages.EnsureProvisionedAsync(ct);
+            // Critical-path: StartAsync awaits these two SP provisioning calls before the host finishes starting.
+            await StartupTimings.MeasureAsync("inquiry-provision", "inquiries", () => _store.EnsureProvisionedAsync(ct), critical: true);
+            await StartupTimings.MeasureAsync("inquiry-provision", "messages", () => _messages.EnsureProvisionedAsync(ct), critical: true);
             _log.LogInformation("[Inquiry] storage provisioned");
         }
         catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] startup provisioning failed — will retry lazily"); }

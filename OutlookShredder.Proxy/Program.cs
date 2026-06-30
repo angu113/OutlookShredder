@@ -28,6 +28,7 @@ try
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
         ?.InformationalVersion ?? "unknown";
     Log.Information("ShredderProxy {Version} starting — logs: {LogPath}", version, logPath);
+    StartupTimings.UseLogger(Log.Logger);   // capture warm timings from here on (incl. the vault load below)
 
     // Use the exe directory as the base for config files so that appsettings files are found
     // whether the process runs as a Windows service (working dir = System32) or from a terminal.
@@ -69,7 +70,10 @@ try
     // JSON files so it wins, and BEFORE the host is built so DI-time config readers see vault values.
     // Vault-first, file fallback: never throws — on any failure the file secrets above remain in effect.
     if (builder.Configuration.GetValue("KeyVault:Enabled", true))
+    {
+        using var _secretsSpan = StartupTimings.Track("secrets-vault-load", critical: true);
         SecretsBootstrap.LoadInto(builder.Configuration, Log.Logger);
+    }
 
     // Replace the default Microsoft.Extensions.Logging with Serilog so all
     // ILogger<T> calls (including from third-party libraries) go through Serilog.
@@ -376,12 +380,13 @@ try
     var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
     lifetime.ApplicationStarted.Register(() =>
     {
+        StartupTimings.MarkListening();   // Kestrel is now serving — UI health/version polls start succeeding here
         _ = Task.Run(async () =>
         {
             try
             {
                 var sp = app.Services.GetRequiredService<SharePointService>();
-                await sp.PrewarmAsync();
+                await StartupTimings.MeasureAsync("sharepoint-prewarm", null, () => sp.PrewarmAsync());
 
                 // WS1 cleanup: SharePoint app-only auth (using the vault's ClientSecret) just succeeded, so
                 // the vault credentials are proven healthy — delete the local cleartext secret copies. No-op
@@ -391,7 +396,7 @@ try
                 // Load synonym dictionary from SP into the AI extraction cache.
                 // Seeds from product-synonyms.json on first run if SP list is empty.
                 var synonyms = app.Services.GetRequiredService<ProductSynonymService>();
-                await synonyms.LoadAsync();
+                await StartupTimings.MeasureAsync("synonyms-load", null, () => synonyms.LoadAsync());
 
                 // Pre-populate the SLI cache so the first /api/items request
                 // is served from memory rather than paginating SP live.
@@ -399,7 +404,7 @@ try
                 // a previous session — disk data can be hours old and would otherwise be
                 // served as "fresh" for 5 minutes before expiring.
                 var sliCache = app.Services.GetRequiredService<SliCacheService>();
-                await sliCache.PopulateAsync(force: true);
+                await StartupTimings.MeasureAsync("sli-cache", "populate", () => sliCache.PopulateAsync(force: true));
 
                 // Subscribe this proxy to the rfq-updates topic so peer-proxy SR events
                 // trigger targeted SliCache updates (MergeRfqRows / InvalidateRfq) rather
