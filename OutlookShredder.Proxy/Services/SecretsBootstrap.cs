@@ -89,50 +89,80 @@ public static class SecretsBootstrap
             return;
         }
 
-        try
+        var cred = BuildSilentBrokerCredential(config["KeyVault:TenantId"]);
+        var clientOpts = new SecretClientOptions
         {
-            var cred = BuildSilentBrokerCredential(config["KeyVault:TenantId"]);
-            var clientOpts = new SecretClientOptions
-            {
-                Retry = { MaxRetries = 2, NetworkTimeout = TimeSpan.FromSeconds(10) }
-            };
-            var client = new SecretClient(new Uri(uri), cred, clientOpts);
+            Retry = { MaxRetries = 2, NetworkTimeout = TimeSpan.FromSeconds(10) }
+        };
+        var client = new SecretClient(new Uri(uri), cred, clientOpts);
 
-            // Bound the whole fetch so a hung token broker / network can't stall startup.
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-
-            var overlay = new Dictionary<string, string?>();
-            var missing = new List<string>();
-            foreach (var key in ConfigKeys)
+        // The Windows WAM broker is frequently not warm yet on a fresh per-user logon task — its first
+        // silent token call can come back "operation was canceled" even though a retry seconds later
+        // succeeds (observed 2026-06-29: cold start fell back to file → empty secrets → hard crash; a
+        // manual restart then loaded 8 secrets cleanly). So retry the vault fetch a few times with a short
+        // backoff BEFORE falling back to the (now-retired) local file. A genuine "interaction required"
+        // (no silent token possible) is NOT retried — it can't self-heal — and falls back immediately.
+        const int maxAttempts = 4;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
             {
-                var name = ConfigKeyToVaultName(key);
-                try
+                // Bound each attempt so a hung token broker / network can't stall startup.
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+                var overlay = new Dictionary<string, string?>();
+                var missing = new List<string>();
+                foreach (var key in ConfigKeys)
                 {
-                    var secret = client.GetSecret(name, cancellationToken: cts.Token);
-                    overlay[key] = secret.Value.Value;
+                    var name = ConfigKeyToVaultName(key);
+                    try
+                    {
+                        var secret = client.GetSecret(name, cancellationToken: cts.Token);
+                        overlay[key] = secret.Value.Value;
+                    }
+                    catch (RequestFailedException ex) when (ex.Status == 404)
+                    {
+                        missing.Add(name);   // not in the vault yet — keep the file value for this key
+                    }
                 }
-                catch (RequestFailedException ex) when (ex.Status == 404)
-                {
-                    missing.Add(name);   // not in the vault yet — keep the file value for this key
-                }
+
+                if (overlay.Count == 0)
+                    throw new InvalidOperationException("vault reachable but returned none of the expected secrets");
+
+                config.AddInMemoryCollection(overlay);   // added last -> overrides the file sources
+                Source = "keyvault";
+                Complete = missing.Count == 0;
+                Detail = missing.Count == 0
+                    ? $"{overlay.Count} secrets"
+                    : $"{overlay.Count} secrets, {missing.Count} missing ({string.Join(", ", missing)}) fell back to file";
+                log.Information("[Secrets] source=keyvault ({Detail}){Attempt}",
+                    Detail, attempt > 1 ? $" on attempt {attempt}/{maxAttempts}" : "");
+                return;   // success
             }
-
-            if (overlay.Count == 0)
-                throw new InvalidOperationException("vault reachable but returned none of the expected secrets");
-
-            config.AddInMemoryCollection(overlay);   // added last -> overrides the file sources
-            Source = "keyvault";
-            Complete = missing.Count == 0;
-            Detail = missing.Count == 0
-                ? $"{overlay.Count} secrets"
-                : $"{overlay.Count} secrets, {missing.Count} missing ({string.Join(", ", missing)}) fell back to file";
-            log.Information("[Secrets] source=keyvault ({Detail})", Detail);
-        }
-        catch (Exception ex)
-        {
-            Source = "file";
-            Detail = $"vault unreachable: {ex.Message}";
-            log.Warning("[Secrets] source=file ({Detail})", Detail);
+            catch (AuthenticationRequiredException ex)
+            {
+                // Silent broker has no usable token (not signed in / no PRT). Retrying silent auth can't help.
+                Source = "file";
+                Detail = $"vault auth unavailable (silent, no interaction): {ex.Message}";
+                log.Warning("[Secrets] source=file ({Detail})", Detail);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                // Transient (cold WAM broker cancellation, network blip) — back off and retry before fallback.
+                var delay = TimeSpan.FromSeconds(2 * attempt);
+                log.Warning("[Secrets] Key Vault attempt {Attempt}/{Max} failed ({Err}) — retrying in {Delay}s",
+                    attempt, maxAttempts, ex.Message, delay.TotalSeconds);
+                Thread.Sleep(delay);
+            }
+            catch (Exception ex)
+            {
+                // Every attempt failed — fall back to file (the historical behaviour).
+                Source = "file";
+                Detail = $"vault unreachable after {maxAttempts} attempts: {ex.Message}";
+                log.Warning("[Secrets] source=file ({Detail})", Detail);
+                return;
+            }
         }
     }
 
