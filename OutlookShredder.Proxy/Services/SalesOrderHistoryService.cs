@@ -31,11 +31,14 @@ public sealed class SalesOrderHistoryService : IHostedService
         _sp.SalesOrderAppended += MergeOrder;
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
-        // Critical-path: StartAsync awaits this SP read before the host finishes starting.
-        await StartupTimings.MeasureAsync("sales-order-history", null, () => SafeRefreshAsync(), critical: true);
+        // Warm in the BACKGROUND so the host finishes starting (Kestrel listens) immediately. This SP read
+        // was the single worst startup blocker (~31s measured), serially delaying /api/health by its full
+        // duration. It no longer blocks listening; readiness reports it "warming" until the first load lands.
+        _ = Task.Run(() => StartupTimings.MeasureAsync("sales-order-history", null, () => SafeRefreshAsync()));
         _timer = new Timer(_ => _ = SafeRefreshAsync(), null, SafetyInterval, SafetyInterval);
+        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken ct)

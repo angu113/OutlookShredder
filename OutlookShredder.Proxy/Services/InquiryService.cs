@@ -63,18 +63,23 @@ public sealed class InquiryService : IHostedService
         _log      = log;
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
-        // Provision the lists/tables up front so the first inbound isn't slowed by creation and so the
-        // index-at-construction invariant holds.
-        try
+        // Provision the lists/tables in the BACKGROUND so the host finishes starting (Kestrel listens)
+        // immediately — these two SP provisioning calls (~3.7s) used to block listening. The lists already
+        // exist on any restart (provisioning is idempotent), and inbound SMS is queued (sms-inbound-jobs),
+        // so a message arriving in the brief warm window is processed once provisioning lands. Lazy-retried.
+        _ = Task.Run(async () =>
         {
-            // Critical-path: StartAsync awaits these two SP provisioning calls before the host finishes starting.
-            await StartupTimings.MeasureAsync("inquiry-provision", "inquiries", () => _store.EnsureProvisionedAsync(ct), critical: true);
-            await StartupTimings.MeasureAsync("inquiry-provision", "messages", () => _messages.EnsureProvisionedAsync(ct), critical: true);
-            _log.LogInformation("[Inquiry] storage provisioned");
-        }
-        catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] startup provisioning failed — will retry lazily"); }
+            try
+            {
+                await StartupTimings.MeasureAsync("inquiry-provision", "inquiries", () => _store.EnsureProvisionedAsync(ct));
+                await StartupTimings.MeasureAsync("inquiry-provision", "messages", () => _messages.EnsureProvisionedAsync(ct));
+                _log.LogInformation("[Inquiry] storage provisioned");
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] startup provisioning failed — will retry lazily"); }
+        });
+        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken ct) => Task.CompletedTask;

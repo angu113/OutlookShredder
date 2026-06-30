@@ -29,11 +29,17 @@ public class CustomerCacheService : IHostedService, ICacheStatusProvider
         _config = config;
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
-        await RefreshAsync(ct);
+        // Warm in the BACKGROUND so the host finishes starting (Kestrel listens) immediately. A blocking
+        // SP read here (12k customers + 14k contacts, ~12s) used to sit on the critical path and delay
+        // /api/health by the full warm — the proxy looked "down" to every UI until it finished. Readiness
+        // reports this cache as "warming" via CacheBuiltUtc until the first refresh lands. Also more robust:
+        // a transient SP error at startup no longer crashes host start — it just retries on the timer.
+        _ = Task.Run(SafeRefreshAsync);
         _timer = new Timer(_ => _ = SafeRefreshAsync(), null,
             TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken ct)
@@ -115,9 +121,9 @@ public class CustomerCacheService : IHostedService, ICacheStatusProvider
         // Two independent SP reads in parallel — each timed as its own dataset (startup only; later refreshes
         // reuse the same labels but the recorder keeps just the first). Critical-path: StartAsync awaits this.
         var contactsTask = StartupTimings.MeasureAsync("customer-cache", "contacts",
-            () => _sp.ReadAllContactsAsync(ct), r => r.Count, critical: true);
+            () => _sp.ReadAllContactsAsync(ct), r => r.Count);
         var partnersTask = StartupTimings.MeasureAsync("customer-cache", "customers",
-            () => _sp.ReadAllCustomersAsync(ct), r => r.Count, critical: true);
+            () => _sp.ReadAllCustomersAsync(ct), r => r.Count);
         await Task.WhenAll(contactsTask, partnersTask);
 
         var contacts = await contactsTask;
