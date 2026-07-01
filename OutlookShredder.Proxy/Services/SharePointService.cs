@@ -86,6 +86,17 @@ public partial class SharePointService
     private DateTime          _completedRfqCacheExpiry = DateTime.MinValue;
     private readonly SemaphoreSlim _completedRfqCacheLock = new(1, 1);
 
+    // Per-MessageId write gate for EnsureSupplierResponseAsync — same-process stopgap against the
+    // cross-proxy poller race documented in todos.md (fetch→stamp race: two concurrent processing
+    // attempts for the SAME email both call FindExistingSupplierResponseAsync before either has
+    // committed its create, so both see "not found" and both insert a duplicate SR row). This only
+    // closes the race WITHIN this proxy process (e.g. a manual reprocess overlapping the regular
+    // poll cycle) — a genuinely different proxy process on another machine still needs the planned
+    // queue-based dedup. Never cleaned up; grows one entry per unique MessageId ever seen, which is
+    // fine for a process that restarts periodically.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim>
+        _srWriteLocks = new();
+
     private static readonly string[] _regretPhrases =
         ["regret", "no stock", "unable to supply", "cannot supply", "unable to quote", "cannot quote",
          "not available", "out of stock", "do not carry", "no quote", "do not stock", "do not sell",
@@ -2542,6 +2553,26 @@ public partial class SharePointService
     // ??"?????"??? Upsert SupplierResponses (private) ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
 
     private async Task<(string Id, bool IsNew, string? ContactEmail)> EnsureSupplierResponseAsync(
+        string siteId, string listId,
+        string jobRef, string supplier,
+        RfqExtraction header, ExtractRequest emailMeta,
+        string source, string? sourceFile,
+        string? messageId = null)
+    {
+        // Serialize find-or-create per MessageId (fallback: jobRef+supplier) so two concurrent calls on
+        // THIS process for the same email can't both see "not found" and both insert a duplicate SR row.
+        var lockKey = string.IsNullOrEmpty(messageId) ? $"{jobRef}|{supplier}" : messageId;
+        var gate = _srWriteLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            return await EnsureSupplierResponseCoreAsync(
+                siteId, listId, jobRef, supplier, header, emailMeta, source, sourceFile, messageId);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<(string Id, bool IsNew, string? ContactEmail)> EnsureSupplierResponseCoreAsync(
         string siteId, string listId,
         string jobRef, string supplier,
         RfqExtraction header, ExtractRequest emailMeta,
