@@ -1202,68 +1202,48 @@ public static class DrawingPdfRenderer
         DimH(gfx, dimFont, P(0, 0).X, P(len, 0).X, P(0, 0).Y, oy + drawH + 22, Fq(len), true);
 
         // Real flange/leg/OD dimension (the axis the bevel tapers along) — same value + styling as
-        // the matching dimension on the cross-section view.
-        DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, Fq(hgt), false);
+        // the matching dimension on the cross-section view. The "A" prefix matches the isometric's
+        // own flange/leg/OD label (same value, same axis) so the shop can trace it between views.
+        DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, $"A {Fq(hgt)}", false);
 
         // End-angle callouts near each slanted edge. Degrees read as a short decimal (0.# — "45°", "45.5°"),
         // not F()'s fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle.
+        // "B"/"C" prefixes match the isometric's END A / END B angle callouts.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
         var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
-        gfx.DrawString($"{Deg(s.MiterAngleLeft)}°", angFont, TextBrush,
-            new XRect(P(0, 0).X - 4, P(0, hgt / 2).Y - 6, 40, 12), XStringFormats.TopLeft);
-        gfx.DrawString($"{Deg(s.MiterAngleRight)}°", angFont, TextBrush,
-            new XRect(P(len, hgt / 2).X - 36, P(len, hgt / 2).Y - 6, 40, 12), XStringFormats.TopRight);
+        gfx.DrawString($"B {Deg(s.MiterAngleLeft)}°", angFont, TextBrush,
+            new XRect(P(0, 0).X - 4, P(0, hgt / 2).Y - 6, 44, 12), XStringFormats.TopLeft);
+        gfx.DrawString($"C {Deg(s.MiterAngleRight)}°", angFont, TextBrush,
+            new XRect(P(len, hgt / 2).X - 44, P(len, hgt / 2).Y - 6, 44, 12), XStringFormats.TopRight);
     }
 
     /// <summary>Two independent isometric "bevel detail" sketches, one per cut end, so the shop sees
-    /// the TRUE 3D shape of each mitered end — which leg/face the bevel runs through and which way it
-    /// leans — instead of inferring it from the flat cross-section + elevation. Each shows a
-    /// REPRESENTATIVE length of material, not the true length (96" of part vs 2-4" of cross-section
-    /// would make the end detail unreadable at one scale — the true length lives on the elevation).
-    /// Same single-plane bevel model as the cross-section's face highlight and the elevation's angle
-    /// callouts (<see cref="MiterTaperOnDepthAxis"/>), so all three views agree, and the same accent
-    /// colour marks "the face to reference" everywhere it appears.</summary>
+    /// the TRUE 3D shape of the part — which leg/face the bevel runs through and which way each end
+    /// leans — instead of inferring it from the flat cross-section + elevation. ONE continuous stick
+    /// (both ends of the SAME solid, not two separate sketches — two disconnected pictures read as
+    /// "which one is really the part?" and invite exactly the confusion this view exists to prevent).
+    /// Drawn at a REPRESENTATIVE length, not true length (96" of part vs 2-4" of cross-section would
+    /// make either end unreadable at one true scale — the true length lives on the elevation, and
+    /// every drawing already carries a blanket "NOT TO SCALE" footer). Same single-plane bevel model
+    /// as the cross-section's face highlight and the elevation's dimensions/angles
+    /// (<see cref="MiterTaperOnDepthAxis"/>), and the SAME lettered tags (A/B/C) as the elevation, so
+    /// every view agrees on which physical edge is which. Same true-isometric convention as
+    /// <see cref="DrawPanIso"/> (x/y recede at 30°, z is vertical).</summary>
     private static void DrawMiterIsometric(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
         var s = fp.Spec;
         var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
-
-        gfx.DrawString(Bi.T("miter.isometric"), titleFont, XBrushes.Black,
-            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
-        var area = new XRect(box.X, box.Y + 16, box.Width, box.Height - 16);
-        if (s.MiterOuterWidth <= 0) return;
-
-        const double gap = 26;
-        double halfW = (area.Width - gap) / 2;
-        var boxA = new XRect(area.X, area.Y, halfW, area.Height);
-        var boxB = new XRect(area.X + halfW + gap, area.Y, halfW, area.Height);
-
-        DrawMiterIsoDetail(gfx, s, boxA, isEndA: true);
-        DrawMiterIsoDetail(gfx, s, boxB, isEndA: false);
-
-        var dividerPen = new XPen(XColor.FromArgb(210, 210, 210), 0.6) { DashStyle = XDashStyle.Dash };
-        gfx.DrawLine(dividerPen, area.X + halfW + gap / 2, area.Y + 10, area.X + halfW + gap / 2, area.Y + area.Height - 10);
-    }
-
-    /// <summary>One end's isometric bevel detail — a short representative stub of the true cross-
-    /// section (angle L / tube box / round / flat bar), sliced by the single bevel plane at the
-    /// specified angle, with the selected miter face highlighted in accent colour. Same true-
-    /// isometric convention as <see cref="DrawPanIso"/> (x/y recede at 30°, z is vertical) for a
-    /// consistent 3D "look" across every Pixar drawing.</summary>
-    private static void DrawMiterIsoDetail(XGraphics gfx, PartSpec s, XRect box, bool isEndA)
-    {
-        var titleFont = new XFont("Arial", 8.5, XFontStyleEx.Bold);
         var angFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFontIso = new XFont("Arial", 7.5, XFontStyleEx.Bold);
         var cutPen = new XPen(CutColor, 1.1);
-        var breakPen = new XPen(XColor.FromArgb(150, 150, 150), 0.8);
         var facePen = new XPen(AccentColor, 2.2);
         var cutFaceFill = new XSolidBrush(XColor.FromArgb(235, 235, 240));
         var faceFill = new XSolidBrush(XColor.FromArgb(60, AccentColor.R, AccentColor.G, AccentColor.B));
 
-        double angleDeg = isEndA ? s.MiterAngleLeft : s.MiterAngleRight;
-        gfx.DrawString(isEndA ? "END A — bevel detail" : "END B — bevel detail", titleFont, TextBrush,
-            new XRect(box.X, box.Y, box.Width, 11), XStringFormats.TopCenter);
-        var area = new XRect(box.X, box.Y + 13, box.Width, box.Height - 27);   // room for the angle label below
+        gfx.DrawString(Bi.T("miter.isometric"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 16, box.Width, box.Height - 30);   // room for END A/B + angle labels below
+        if (s.MiterOuterWidth <= 0) return;
 
         var poly = MiterCrossSectionPoints(s);   // local (v, w): v = width/long-leg axis, w = depth/short-leg axis
         if (poly.Count < 3) return;
@@ -1273,28 +1253,29 @@ public static class DrawingPdfRenderer
         double vExt = poly.Max(p => p.v), wExt = poly.Max(p => p.w);
         double maxExt = Math.Max(vExt, wExt);
         if (maxExt <= 0) return;
-        double Ls = maxExt * 2.6;   // representative stub length, proportioned to the cross-section — NOT the true part length
-        double k = 1.0 / Math.Tan(Math.Clamp(angleDeg, 3, 87) * Math.PI / 180.0);
-        double CutU((double v, double w) p)
-        {
-            double inset = Math.Min((taperOnDepth ? p.w : p.v) * k, Ls * 0.8);
-            return Ls - inset;
-        }
+
+        // A representative TOTAL length for the whole stick — proportioned to the cross-section, NOT
+        // the true part length. Each end's bevel is capped at 42% of it, always leaving a visible
+        // straight middle span (the "rest of the material") even at extreme angles.
+        double Lrep = maxExt * 5.5;
+        double capEach = Lrep * 0.42;
+        double kA = 1.0 / Math.Tan(Math.Clamp(s.MiterAngleLeft, 3, 87) * Math.PI / 180.0);
+        double kB = 1.0 / Math.Tan(Math.Clamp(s.MiterAngleRight, 3, 87) * Math.PI / 180.0);
+        double UA((double v, double w) p) => Math.Min((taperOnDepth ? p.w : p.v) * kA, capEach);
+        double UB((double v, double w) p) => Lrep - Math.Min((taperOnDepth ? p.w : p.v) * kB, capEach);
 
         // True isometric (same convention as the Pan formed-part view): x/y both recede at 30°, z is
-        // vertical. u = length, v = cross-section width axis, w = cross-section depth axis. uDir
-        // flips which way the length axis points on screen (End A's tip points left, End B's right) —
-        // v/w stay fixed so both end details share one consistent camera angle.
+        // vertical. u = length (left = End A, right = End B), v = cross-section width axis, w =
+        // cross-section depth axis.
         const double c30 = 0.8660254, s30 = 0.5;
-        double uDir = isEndA ? -1 : 1;
-        (double px, double py) Iso(double u, double v, double w) => ((uDir * u - v) * c30, (uDir * u + v) * s30 - w);
+        (double px, double py) Iso(double u, double v, double w) => ((u - v) * c30, (u + v) * s30 - w);
 
-        XPoint Front(int i) { var (v, w) = poly[i]; var (px, py) = Iso(0, v, w); return new XPoint(px, py); }
-        XPoint Tip(int i) { var (v, w) = poly[i]; var (px, py) = Iso(CutU(poly[i]), v, w); return new XPoint(px, py); }
+        XPoint RingA(int i) { var (v, w) = poly[i]; var (px, py) = Iso(UA(poly[i]), v, w); return new XPoint(px, py); }
+        XPoint RingB(int i) { var (v, w) = poly[i]; var (px, py) = Iso(UB(poly[i]), v, w); return new XPoint(px, py); }
 
         double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
         void Acc(XPoint p) { if (p.X < minX) minX = p.X; if (p.X > maxX) maxX = p.X; if (p.Y < minY) minY = p.Y; if (p.Y > maxY) maxY = p.Y; }
-        for (int i = 0; i < poly.Count; i++) { Acc(Front(i)); Acc(Tip(i)); }
+        for (int i = 0; i < poly.Count; i++) { Acc(RingA(i)); Acc(RingB(i)); }
         double gw = Math.Max(maxX - minX, 1e-6), gh = Math.Max(maxY - minY, 1e-6);
 
         const double pad = 16;
@@ -1303,35 +1284,66 @@ public static class DrawingPdfRenderer
         double oy = area.Y + (area.Height - gh * scale) / 2 - minY * scale;
         XPoint S(XPoint p) => new(ox + p.X * scale, oy + p.Y * scale);
 
-        // Break ring (u=0 — a light/thin outline: not a real cut, just where this zoomed detail stops;
-        // the part continues to its true length, dimensioned on the elevation view).
-        var frontPts = Enumerable.Range(0, poly.Count).Select(i => S(Front(i))).ToArray();
-        gfx.DrawPolygon(breakPen, frontPts);
+        var aPts = Enumerable.Range(0, poly.Count).Select(i => S(RingA(i))).ToArray();
+        var bPts = Enumerable.Range(0, poly.Count).Select(i => S(RingB(i))).ToArray();
 
-        // Longitudinal edges (break -> cut face) at every cross-section vertex.
+        // Longitudinal edges connecting the two cut faces — the constant-cross-section material
+        // between them (drawn first so the two end faces layer cleanly on top).
         for (int i = 0; i < poly.Count; i++)
-            gfx.DrawLine(cutPen, S(Front(i)), S(Tip(i)));
+            gfx.DrawLine(cutPen, aPts[i], bPts[i]);
 
-        // The cut face itself — the actual exposed miter plane — filled so it reads as a solid surface.
-        var tipPts = Enumerable.Range(0, poly.Count).Select(i => S(Tip(i))).ToArray();
-        gfx.DrawPolygon(cutFaceFill, tipPts, XFillMode.Winding);
-        gfx.DrawPolygon(cutPen, tipPts);
+        // The two cut faces themselves — the actual exposed miter planes — filled so each reads as a
+        // solid surface, not just an outline.
+        gfx.DrawPolygon(cutFaceFill, aPts, XFillMode.Winding);
+        gfx.DrawPolygon(cutPen, aPts);
+        gfx.DrawPolygon(cutFaceFill, bPts, XFillMode.Winding);
+        gfx.DrawPolygon(cutPen, bPts);
 
-        // Highlight the SAME reference face the cross-section view calls "MITER FACE" — identical
-        // accent colour, so a shop worker matches this 3D picture to that 2D callout on sight.
+        // Highlight the SAME reference face the cross-section view calls "MITER FACE", on BOTH ends
+        // (one physical face, shared the whole length) — identical accent colour, so a shop worker
+        // matches this 3D picture to that 2D callout on sight.
         if (refEdge.HasValue)
         {
             var (r0, r1) = refEdge.Value;
-            var fA = S(Front(r0)); var fB = S(Front(r1)); var tA = S(Tip(r0)); var tB = S(Tip(r1));
-            gfx.DrawPolygon(faceFill, new[] { fA, fB, tB, tA }, XFillMode.Winding);
-            gfx.DrawLine(facePen, tA, tB);
-            gfx.DrawLine(facePen, fA, tA);
-            gfx.DrawLine(facePen, fB, tB);
+            gfx.DrawPolygon(faceFill, new[] { aPts[r0], aPts[r1], bPts[r1], bPts[r0] }, XFillMode.Winding);
+            gfx.DrawLine(facePen, aPts[r0], aPts[r1]);
+            gfx.DrawLine(facePen, bPts[r0], bPts[r1]);
+            gfx.DrawLine(facePen, aPts[r0], bPts[r0]);
+            gfx.DrawLine(facePen, aPts[r1], bPts[r1]);
         }
 
+        // END A / END B + angle labels, positioned under each respective cut face. "B"/"C" prefixes
+        // match the elevation's own End A / End B angle callouts.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
-        gfx.DrawString($"{Deg(angleDeg)}°", angFont, AccentBrush,
-            new XRect(box.X, box.Y + box.Height - 13, box.Width, 12), XStringFormats.TopCenter);
+        double aCx = aPts.Average(p => p.X), bCx = bPts.Average(p => p.X);
+        double labelY = box.Y + box.Height - 24;
+        gfx.DrawString("END A", angFont, TextBrush, new XRect(aCx - 40, labelY, 80, 11), XStringFormats.TopCenter);
+        gfx.DrawString("END B", angFont, TextBrush, new XRect(bCx - 40, labelY, 80, 11), XStringFormats.TopCenter);
+        gfx.DrawString($"B {Deg(s.MiterAngleLeft)}°", angFont, AccentBrush, new XRect(aCx - 40, labelY + 12, 80, 12), XStringFormats.TopCenter);
+        gfx.DrawString($"C {Deg(s.MiterAngleRight)}°", angFont, AccentBrush, new XRect(bCx - 40, labelY + 12, 80, 12), XStringFormats.TopCenter);
+
+        // Compact cross-section dimension labels — a quick visual size check (the cross-section view
+        // carries the precise, fully-dimensioned callouts). The "A" prefix matches the elevation's
+        // flange/leg/OD dimension exactly (same axis, same value); the other extent has no elevation
+        // counterpart to cross-reference, so it's shown plain, un-prefixed.
+        double cx = aPts.Average(p => p.X), cy = aPts.Average(p => p.Y);
+        void EdgeLabel(XPoint a, XPoint b, string text)
+        {
+            double mx = (a.X + b.X) / 2, my = (a.Y + b.Y) / 2;
+            double dx = mx - cx, dy = my - cy;
+            double dl = Math.Sqrt(dx * dx + dy * dy); if (dl < 1e-6) dl = 1;
+            double lx = mx + dx / dl * 16, ly = my + dy / dl * 16;
+            gfx.DrawString(text, dimFontIso, DimBrush, new XRect(lx - 24, ly - 5, 48, 10), XStringFormats.Center);
+        }
+        if (s.MiterShape == "tube_round")
+            EdgeLabel(aPts[0], aPts[poly.Count / 2], $"A {Fq(vExt)} OD");   // round: vExt == wExt, either axis is "A"
+        else
+        {
+            // Elevation's "A" = hgt = taperOnDepth ? wExt(D) : vExt(W) — match that EXACT axis here, not the
+            // edge that happens to share the same w/v-constant condition (that flip is the actual bug this fixes).
+            EdgeLabel(aPts[0], aPts[1], taperOnDepth ? Fq(vExt) : $"A {Fq(vExt)}");            // w=0 edge — spans vExt
+            EdgeLabel(aPts[poly.Count - 1], aPts[0], taperOnDepth ? $"A {Fq(wExt)}" : Fq(wExt));   // v=0 edge — spans wExt
+        }
     }
 
     /// <summary>Cross-section boundary in LOCAL (v, w) coordinates — v = width/long-leg axis, w =
