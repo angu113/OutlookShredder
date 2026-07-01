@@ -28,6 +28,7 @@ internal static class Bi
         ["miter.crossSection"]   = ("Cross-section",             "Sección transversal"),
         ["miter.elevation"]      = ("Elevation — outside length + end angles", "Alzado — largo exterior + ángulos de extremo"),
         ["miter.face"]           = ("MITER FACE",                "CARA DE INGLETE"),
+        ["miter.isometric"]      = ("Isometric — bevel detail, both ends", "Isométrico — detalle del bisel, ambos extremos"),
 
         // ── callouts ────────────────────────────────────────────────────────
         ["finish"]               = ("Finish",                    "Acabado"),

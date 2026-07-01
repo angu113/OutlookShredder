@@ -1042,12 +1042,35 @@ public static class DrawingPdfRenderer
     // ── Miter Cut: cross-section (mitered face highlighted) + elevation (both end angles + outside length) ──
     private static void DrawMiterCut(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
-        const double gap = 16;
+        const double rowGap = 10, colGap = 16;
+        // The isometric is the PRIMARY view — it's the one a shop worker actually reads for
+        // orientation (which end, which way the bevel leans, which face it runs through); the
+        // section + elevation below are the secondary, precisely-dimensioned engineering views.
+        double topH = box.Height * 0.56, botH = box.Height - topH - rowGap;
+        DrawMiterIsometric(gfx, fp, new XRect(box.X, box.Y, box.Width, topH));
+
+        double secY = box.Y + topH + rowGap;
         double wSect = box.Width * 0.30;
-        double wElev = box.Width - wSect - gap;
-        DrawMiterSection(gfx, fp, new XRect(box.X, box.Y, wSect, box.Height));
-        DrawMiterElevation(gfx, fp, new XRect(box.X + wSect + gap, box.Y, wElev, box.Height));
+        double wElev = box.Width - wSect - colGap;
+        DrawMiterSection(gfx, fp, new XRect(box.X, secY, wSect, botH));
+        DrawMiterElevation(gfx, fp, new XRect(box.X + wSect + colGap, secY, wElev, botH));
     }
+
+    /// <summary>True when the miter's single bevel-plane taper runs along the cross-section's
+    /// "depth" axis (angle's short-leg direction / tube's D) rather than its "width" axis (angle's
+    /// long-leg direction / tube's W / flat bar's W) — i.e. which axis the SELECTED miter face is
+    /// referenced against. The reference face itself lies at a CONSTANT position on that axis (e.g.
+    /// angle's long leg sits at depth≈0 for its whole width), so the visible taper is necessarily
+    /// carried by the OTHER, perpendicular axis. Shared by the elevation (which axis gets a real,
+    /// dimensioned height) and the isometric (which cross-section vertices taper) so every Miter
+    /// view agrees on the same physical cut.</summary>
+    private static bool MiterTaperOnDepthAxis(PartSpec s) => s.MiterShape switch
+    {
+        "angle" => s.MiterFace != 1,                            // long leg (face 0) ref -> tapers with D; short leg (face 1) -> tapers with W
+        "tube_square" or "tube_rect" => s.MiterFace is 0 or 2,  // bottom/top ref -> tapers with D; left/right -> tapers with W
+        "flatbar" => false,                                     // always the long diagonal across the flat face (tapers with W)
+        _ => true,                                              // tube_round: symmetric, axis choice doesn't change the result
+    };
 
     /// <summary>Shape cross-section — angle L, tube outline (square/rect/round), or flat bar — with the
     /// selected miter face highlighted in accent colour + a "MITER FACE" leader. Round tube/pipe and flat
@@ -1152,9 +1175,11 @@ public static class DrawingPdfRenderer
         var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
 
         double len = s.Length;
-        // A representative silhouette depth — not to scale with the true cross-section (the section
-        // view already carries the real dims); just tall enough that the end bevels read clearly.
-        double hgt = Math.Max(s.MiterOuterWidth, s.MiterWall * 4);
+        // Real cross-section dimension, not a schematic stand-in — whichever axis the bevel actually
+        // tapers along (see MiterTaperOnDepthAxis), so this panel is self-sufficient: the shop reads
+        // length, both end angles, AND the flange/leg/OD size without cross-referencing the section view.
+        bool taperOnDepth = MiterTaperOnDepthAxis(s);
+        double hgt = taperOnDepth ? s.MiterOuterDepth : s.MiterOuterWidth;
         if (len <= 0 || hgt <= 0) return;
 
         const double band = 50;
@@ -1176,6 +1201,10 @@ public static class DrawingPdfRenderer
         // Outside (long-point) length — the as-specified accent dimension.
         DimH(gfx, dimFont, P(0, 0).X, P(len, 0).X, P(0, 0).Y, oy + drawH + 22, Fq(len), true);
 
+        // Real flange/leg/OD dimension (the axis the bevel tapers along) — same value + styling as
+        // the matching dimension on the cross-section view.
+        DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, Fq(hgt), false);
+
         // End-angle callouts near each slanted edge. Degrees read as a short decimal (0.# — "45°", "45.5°"),
         // not F()'s fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
@@ -1185,6 +1214,165 @@ public static class DrawingPdfRenderer
         gfx.DrawString($"{Deg(s.MiterAngleRight)}°", angFont, TextBrush,
             new XRect(P(len, hgt / 2).X - 36, P(len, hgt / 2).Y - 6, 40, 12), XStringFormats.TopRight);
     }
+
+    /// <summary>Two independent isometric "bevel detail" sketches, one per cut end, so the shop sees
+    /// the TRUE 3D shape of each mitered end — which leg/face the bevel runs through and which way it
+    /// leans — instead of inferring it from the flat cross-section + elevation. Each shows a
+    /// REPRESENTATIVE length of material, not the true length (96" of part vs 2-4" of cross-section
+    /// would make the end detail unreadable at one scale — the true length lives on the elevation).
+    /// Same single-plane bevel model as the cross-section's face highlight and the elevation's angle
+    /// callouts (<see cref="MiterTaperOnDepthAxis"/>), so all three views agree, and the same accent
+    /// colour marks "the face to reference" everywhere it appears.</summary>
+    private static void DrawMiterIsometric(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var s = fp.Spec;
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+
+        gfx.DrawString(Bi.T("miter.isometric"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 16, box.Width, box.Height - 16);
+        if (s.MiterOuterWidth <= 0) return;
+
+        const double gap = 26;
+        double halfW = (area.Width - gap) / 2;
+        var boxA = new XRect(area.X, area.Y, halfW, area.Height);
+        var boxB = new XRect(area.X + halfW + gap, area.Y, halfW, area.Height);
+
+        DrawMiterIsoDetail(gfx, s, boxA, isEndA: true);
+        DrawMiterIsoDetail(gfx, s, boxB, isEndA: false);
+
+        var dividerPen = new XPen(XColor.FromArgb(210, 210, 210), 0.6) { DashStyle = XDashStyle.Dash };
+        gfx.DrawLine(dividerPen, area.X + halfW + gap / 2, area.Y + 10, area.X + halfW + gap / 2, area.Y + area.Height - 10);
+    }
+
+    /// <summary>One end's isometric bevel detail — a short representative stub of the true cross-
+    /// section (angle L / tube box / round / flat bar), sliced by the single bevel plane at the
+    /// specified angle, with the selected miter face highlighted in accent colour. Same true-
+    /// isometric convention as <see cref="DrawPanIso"/> (x/y recede at 30°, z is vertical) for a
+    /// consistent 3D "look" across every Pixar drawing.</summary>
+    private static void DrawMiterIsoDetail(XGraphics gfx, PartSpec s, XRect box, bool isEndA)
+    {
+        var titleFont = new XFont("Arial", 8.5, XFontStyleEx.Bold);
+        var angFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.1);
+        var breakPen = new XPen(XColor.FromArgb(150, 150, 150), 0.8);
+        var facePen = new XPen(AccentColor, 2.2);
+        var cutFaceFill = new XSolidBrush(XColor.FromArgb(235, 235, 240));
+        var faceFill = new XSolidBrush(XColor.FromArgb(60, AccentColor.R, AccentColor.G, AccentColor.B));
+
+        double angleDeg = isEndA ? s.MiterAngleLeft : s.MiterAngleRight;
+        gfx.DrawString(isEndA ? "END A — bevel detail" : "END B — bevel detail", titleFont, TextBrush,
+            new XRect(box.X, box.Y, box.Width, 11), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 13, box.Width, box.Height - 27);   // room for the angle label below
+
+        var poly = MiterCrossSectionPoints(s);   // local (v, w): v = width/long-leg axis, w = depth/short-leg axis
+        if (poly.Count < 3) return;
+        var refEdge = MiterFaceEdge(s);
+        bool taperOnDepth = MiterTaperOnDepthAxis(s);
+
+        double vExt = poly.Max(p => p.v), wExt = poly.Max(p => p.w);
+        double maxExt = Math.Max(vExt, wExt);
+        if (maxExt <= 0) return;
+        double Ls = maxExt * 2.6;   // representative stub length, proportioned to the cross-section — NOT the true part length
+        double k = 1.0 / Math.Tan(Math.Clamp(angleDeg, 3, 87) * Math.PI / 180.0);
+        double CutU((double v, double w) p)
+        {
+            double inset = Math.Min((taperOnDepth ? p.w : p.v) * k, Ls * 0.8);
+            return Ls - inset;
+        }
+
+        // True isometric (same convention as the Pan formed-part view): x/y both recede at 30°, z is
+        // vertical. u = length, v = cross-section width axis, w = cross-section depth axis. uDir
+        // flips which way the length axis points on screen (End A's tip points left, End B's right) —
+        // v/w stay fixed so both end details share one consistent camera angle.
+        const double c30 = 0.8660254, s30 = 0.5;
+        double uDir = isEndA ? -1 : 1;
+        (double px, double py) Iso(double u, double v, double w) => ((uDir * u - v) * c30, (uDir * u + v) * s30 - w);
+
+        XPoint Front(int i) { var (v, w) = poly[i]; var (px, py) = Iso(0, v, w); return new XPoint(px, py); }
+        XPoint Tip(int i) { var (v, w) = poly[i]; var (px, py) = Iso(CutU(poly[i]), v, w); return new XPoint(px, py); }
+
+        double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
+        void Acc(XPoint p) { if (p.X < minX) minX = p.X; if (p.X > maxX) maxX = p.X; if (p.Y < minY) minY = p.Y; if (p.Y > maxY) maxY = p.Y; }
+        for (int i = 0; i < poly.Count; i++) { Acc(Front(i)); Acc(Tip(i)); }
+        double gw = Math.Max(maxX - minX, 1e-6), gh = Math.Max(maxY - minY, 1e-6);
+
+        const double pad = 16;
+        double scale = Math.Min((area.Width - pad * 2) / gw, (area.Height - pad * 2) / gh);
+        double ox = area.X + (area.Width - gw * scale) / 2 - minX * scale;
+        double oy = area.Y + (area.Height - gh * scale) / 2 - minY * scale;
+        XPoint S(XPoint p) => new(ox + p.X * scale, oy + p.Y * scale);
+
+        // Break ring (u=0 — a light/thin outline: not a real cut, just where this zoomed detail stops;
+        // the part continues to its true length, dimensioned on the elevation view).
+        var frontPts = Enumerable.Range(0, poly.Count).Select(i => S(Front(i))).ToArray();
+        gfx.DrawPolygon(breakPen, frontPts);
+
+        // Longitudinal edges (break -> cut face) at every cross-section vertex.
+        for (int i = 0; i < poly.Count; i++)
+            gfx.DrawLine(cutPen, S(Front(i)), S(Tip(i)));
+
+        // The cut face itself — the actual exposed miter plane — filled so it reads as a solid surface.
+        var tipPts = Enumerable.Range(0, poly.Count).Select(i => S(Tip(i))).ToArray();
+        gfx.DrawPolygon(cutFaceFill, tipPts, XFillMode.Winding);
+        gfx.DrawPolygon(cutPen, tipPts);
+
+        // Highlight the SAME reference face the cross-section view calls "MITER FACE" — identical
+        // accent colour, so a shop worker matches this 3D picture to that 2D callout on sight.
+        if (refEdge.HasValue)
+        {
+            var (r0, r1) = refEdge.Value;
+            var fA = S(Front(r0)); var fB = S(Front(r1)); var tA = S(Tip(r0)); var tB = S(Tip(r1));
+            gfx.DrawPolygon(faceFill, new[] { fA, fB, tB, tA }, XFillMode.Winding);
+            gfx.DrawLine(facePen, tA, tB);
+            gfx.DrawLine(facePen, fA, tA);
+            gfx.DrawLine(facePen, fB, tB);
+        }
+
+        string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
+        gfx.DrawString($"{Deg(angleDeg)}°", angFont, AccentBrush,
+            new XRect(box.X, box.Y + box.Height - 13, box.Width, 12), XStringFormats.TopCenter);
+    }
+
+    /// <summary>Cross-section boundary in LOCAL (v, w) coordinates — v = width/long-leg axis, w =
+    /// depth/short-leg axis — same shape conventions as <see cref="DrawMiterSection"/>'s 2D polygons,
+    /// reused here for the isometric's 3D extrusion. Round tube/pipe is approximated as a 28-gon.</summary>
+    private static List<(double v, double w)> MiterCrossSectionPoints(PartSpec s)
+    {
+        double W = s.MiterOuterWidth, D = s.MiterOuterDepth > 0 ? s.MiterOuterDepth : W, wall = s.MiterWall;
+        switch (s.MiterShape)
+        {
+            case "angle":
+                return new() { (0, 0), (W, 0), (W, wall), (wall, wall), (wall, D), (0, D) };
+            case "tube_round":
+            {
+                var pts = new List<(double, double)>();
+                double r = W / 2;
+                const int n = 28;
+                for (int i = 0; i < n; i++)
+                {
+                    double th = 2 * Math.PI * i / n;
+                    pts.Add((r + r * Math.Cos(th), r + r * Math.Sin(th)));
+                }
+                return pts;
+            }
+            case "flatbar":
+                return new() { (0, 0), (W, 0), (W, wall), (0, wall) };
+            default:   // tube_square, tube_rect
+                return new() { (0, 0), (W, 0), (W, D), (0, D) };
+        }
+    }
+
+    /// <summary>Which cross-section polygon edge (vertex-index pair, matching
+    /// <see cref="MiterCrossSectionPoints"/>) is the selected miter face — same edges
+    /// <see cref="DrawMiterSection"/> highlights in 2D. Null for round tube/pipe and flat bar (no
+    /// face concept — symmetric / single meaningful face).</summary>
+    private static (int, int)? MiterFaceEdge(PartSpec s) => s.MiterShape switch
+    {
+        "angle" => s.MiterFace == 1 ? (5, 0) : (0, 1),
+        "tube_square" or "tube_rect" => s.MiterFace switch { 1 => (1, 2), 2 => (2, 3), 3 => (3, 0), _ => (0, 1) },
+        _ => null,
+    };
 
     // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──
     private static void DrawPan(XGraphics gfx, FlatPatternResult fp, XRect box)
