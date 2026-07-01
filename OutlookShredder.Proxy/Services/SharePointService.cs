@@ -50,7 +50,6 @@ public partial class SharePointService
     private string? _salesOrderHistoryListId; // SalesOrderHistory
     private string? _callLogListId;          // PhoneCallLog
     private string? _messagesListId;         // Messages
-    private string? _leaseListId;            // ProxyLease
     private string? _todoListId;             // ShredderTodos
     private string? _stockNeededListId;      // StockNeeded
     private string? _forgeTasksListId;      // ForgeTasks (scheduled task registry + result store)
@@ -255,7 +254,6 @@ public partial class SharePointService
             await TrySwallowAsync(async () => { await EnsureCallLogListAsync(ct); _log.LogInformation("[SP] Call log list ensured"); });
             await TrySwallowAsync(async () => { await EnsureMessagesListAsync(ct); _log.LogInformation("[SP] Messages list ensured"); });
             await TrySwallowAsync(async () => { await EnsureWorkflowCardsListAsync(ct); _log.LogInformation("[SP] WorkflowCards list ensured"); });
-            await TrySwallowAsync(async () => { await EnsureProxyLeaseListAsync(); _log.LogInformation("[SP] ProxyLease list ensured"); });
 
             _log.LogInformation("[SP] Pre-warm complete");
         }
@@ -309,161 +307,6 @@ public partial class SharePointService
         if (_sliListId is not null) return _sliListId;
         _sliListId = await ResolveListIdAsync("SupplierLineItems");
         return _sliListId;
-    }
-
-    private async Task<string> GetLeaseListIdAsync(string siteId)
-    {
-        if (_leaseListId is not null) return _leaseListId;
-        await EnsureProxyLeaseListAsync(siteId);
-        _leaseListId = await ResolveListIdAsync("ProxyLease");
-        return _leaseListId;
-    }
-
-    private async Task EnsureProxyLeaseListAsync(string? siteId = null)
-    {
-        siteId ??= await GetSiteIdAsync();
-        await EnsureListColumnsAsync(siteId, "ProxyLease",
-        [
-            ("MachineName", "text"),
-            ("LeaseExpiry", "dateTime"),
-        ]);
-
-        // Index Title — it is used in the $filter query on every lease check.
-        var listId = await ResolveListIdAsync("ProxyLease");
-        var allCols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync();
-        var titleCol = allCols?.Value?.FirstOrDefault(c =>
-            string.Equals(c.Name, "Title", StringComparison.OrdinalIgnoreCase));
-        if (titleCol?.Id is not null && titleCol.Indexed != true)
-        {
-            try
-            {
-                await GetGraph().Sites[siteId].Lists[listId].Columns[titleCol.Id]
-                    .PatchAsync(new ColumnDefinition { Indexed = true });
-                _log.LogInformation("[SP] Indexed ProxyLease column 'Title'");
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "[SP] Could not index ProxyLease column 'Title'");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Attempts to acquire or renew the named lease in the ProxyLease SharePoint list.
-    /// Returns true if this machine now holds the lease; false if another machine holds it.
-    /// Thread-safe — safe to call concurrently (last writer wins on the SP row, which is fine
-    /// for a 30-second renewal cycle with a 60-second expiry window).
-    /// </summary>
-    public async Task<bool> AcquireOrRenewLeaseAsync(
-        string serviceName, string machineName, int leaseSeconds, CancellationToken ct = default)
-    {
-        var siteId = await GetSiteIdAsync();
-        var listId = await GetLeaseListIdAsync(siteId);
-        var now    = DateTimeOffset.UtcNow;
-        var expiry = now.AddSeconds(leaseSeconds).ToString("o");
-
-        var existing = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields($select=MachineName,LeaseExpiry)"];
-                req.QueryParameters.Top    = 1;
-                req.QueryParameters.Filter = $"fields/Title eq '{serviceName.Replace("'", "''")}'";
-            }, ct);
-
-        if (existing?.Value is null || existing.Value.Count == 0)
-        {
-            // No lease row — create it and claim immediately.
-            await GetGraph().Sites[siteId].Lists[listId].Items
-                .PostAsync(new ListItem
-                {
-                    Fields = new FieldValueSet
-                    {
-                        AdditionalData = new Dictionary<string, object?>
-                        {
-                            ["Title"]       = serviceName,
-                            ["MachineName"] = machineName,
-                            ["LeaseExpiry"] = expiry,
-                        }
-                    }
-                }, cancellationToken: ct);
-            return true;
-        }
-
-        var item    = existing.Value[0];
-        var fields  = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
-        var holder  = GetStr(fields!, "MachineName") ?? "";
-        var expiryS = GetStr(fields!, "LeaseExpiry") ?? "";
-
-        var expired = !DateTimeOffset.TryParse(expiryS, out var expiryDt) || expiryDt <= now;
-        var ours    = string.Equals(holder, machineName, StringComparison.OrdinalIgnoreCase);
-
-        if (!ours && !expired) return false; // Another machine holds a live lease.
-
-        // Claim or renew.
-        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
-            .PatchAsync(new FieldValueSet
-            {
-                AdditionalData = new Dictionary<string, object?>
-                {
-                    ["MachineName"] = machineName,
-                    ["LeaseExpiry"] = expiry,
-                }
-            }, cancellationToken: ct);
-        return true;
-    }
-
-    /// <summary>
-    /// Force-steals the named lease regardless of which machine currently holds it.
-    /// Returns the previous holder's machine name, or null if no lease existed.
-    /// ProxyLeaseService picks up the stolen lease within its next 30 s renewal tick.
-    /// </summary>
-    public async Task<string?> ForceClaimLeaseAsync(
-        string serviceName, string machineName, int leaseSeconds = 60, CancellationToken ct = default)
-    {
-        var siteId = await GetSiteIdAsync();
-        var listId = await GetLeaseListIdAsync(siteId);
-        var expiry = DateTimeOffset.UtcNow.AddSeconds(leaseSeconds).ToString("o");
-
-        var existing = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields($select=MachineName,LeaseExpiry)"];
-                req.QueryParameters.Top    = 1;
-                req.QueryParameters.Filter = $"fields/Title eq '{serviceName.Replace("'", "''")}'";
-            }, ct);
-
-        if (existing?.Value is null || existing.Value.Count == 0)
-        {
-            await GetGraph().Sites[siteId].Lists[listId].Items
-                .PostAsync(new ListItem
-                {
-                    Fields = new FieldValueSet
-                    {
-                        AdditionalData = new Dictionary<string, object?>
-                        {
-                            ["Title"]       = serviceName,
-                            ["MachineName"] = machineName,
-                            ["LeaseExpiry"] = expiry,
-                        }
-                    }
-                }, cancellationToken: ct);
-            return null;
-        }
-
-        var item       = existing.Value[0];
-        var prevHolder = GetStr(item.Fields?.AdditionalData ?? new Dictionary<string, object?>(), "MachineName");
-
-        await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
-            .PatchAsync(new FieldValueSet
-            {
-                AdditionalData = new Dictionary<string, object?>
-                {
-                    ["MachineName"] = machineName,
-                    ["LeaseExpiry"] = expiry,
-                }
-            }, cancellationToken: ct);
-
-        return prevHolder;
     }
 
     /// <summary>

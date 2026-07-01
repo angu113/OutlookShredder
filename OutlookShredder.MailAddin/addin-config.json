@@ -1,8 +1,0 @@
-{
-  "ProxyUrl": "http://localhost:7000",
-  "ListenPort": 7002,
-  "MonitoredMailboxes": [
-    "hackensack@metalsupermarkets.com"
-  ],
-  "MaxAttachmentBytes": 52428800
-}

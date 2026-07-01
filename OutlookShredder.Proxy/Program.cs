@@ -1,6 +1,5 @@
 // OutlookShredder.Proxy — Program.cs
 using System.Reflection;
-using OutlookShredder.Proxy.Extensions;
 using OutlookShredder.Proxy.Models;
 using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Ai;
@@ -195,8 +194,6 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<HackensackPollerService>());
     builder.Services.AddHostedService<LqUpdateService>();
     builder.Services.AddHostedService<RfqAutoCompleteService>();
-    builder.Services.AddSingleton<ProxyLeaseService>();
-    builder.Services.AddHostedService(sp => sp.GetRequiredService<ProxyLeaseService>());
     builder.Services.AddHostedService<ZoomCallWatcherService>();
     builder.Services.AddSingleton<SignalWireService>();
     builder.Services.AddSingleton<MessagingService>();

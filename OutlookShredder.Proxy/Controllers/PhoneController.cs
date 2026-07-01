@@ -9,7 +9,6 @@ namespace OutlookShredder.Proxy.Controllers;
 public class PhoneController : ControllerBase
 {
     private readonly SharePointService    _sp;
-    private readonly ProxyLeaseService    _lease;
     private readonly RfqNotificationService _notify;
     private readonly CustomerCacheService _crm;
     private readonly CallLogCrmBackfillService _backfill;
@@ -18,7 +17,6 @@ public class PhoneController : ControllerBase
 
     public PhoneController(
         SharePointService sp,
-        ProxyLeaseService lease,
         RfqNotificationService notify,
         CustomerCacheService crm,
         CallLogCrmBackfillService backfill,
@@ -26,7 +24,6 @@ public class PhoneController : ControllerBase
         ILogger<PhoneController> log)
     {
         _sp     = sp;
-        _lease  = lease;
         _notify = notify;
         _crm    = crm;
         _backfill = backfill;
@@ -228,27 +225,6 @@ public class PhoneController : ControllerBase
             name, phone, resolvedBp ?? "none", spItemId);
 
         return Ok(new { name, phone, bp = resolvedBp, contact = resolvedContact, popup = resolvedPopup, spItemId });
-    }
-
-    /// <summary>
-    /// Force-steals the Zoom watcher lease from whichever machine currently holds it.
-    /// The ProxyLeaseService on this instance will start the Zoom hook within 30 s.
-    /// </summary>
-    [HttpPost("zoom/claim-lease")]
-    public async Task<IActionResult> ClaimZoomLease(CancellationToken ct)
-    {
-        try
-        {
-            var machine = Environment.MachineName;
-            var prev    = await _sp.ForceClaimLeaseAsync(ProxyLeaseService.ServiceName, machine, ct: ct);
-            _log.LogInformation("[Phone] Zoom lease force-claimed on {Machine} (was: {Prev})", machine, prev ?? "none");
-            return Ok(new { machine, previousHolder = prev ?? "none", message = "Lease claimed — Zoom watcher will start within 30 s" });
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "[Phone] Failed to claim Zoom lease");
-            return StatusCode(500, new { error = ex.Message });
-        }
     }
 }
 
