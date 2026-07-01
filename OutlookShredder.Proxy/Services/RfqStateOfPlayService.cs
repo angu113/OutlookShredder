@@ -76,7 +76,12 @@ public class RfqStateOfPlayService
 
     /// <summary>Generates the state-of-play from the SLI+SR merged rows for one RFQ (the rows are the
     /// dicts returned by <c>SharePointService.ReadSupplierItemsByRfqIdAsync</c>). Returns null on AI
-    /// failure (the caller keeps the prior cached summary / the client keeps its deterministic baseline).</summary>
+    /// failure (the caller keeps the prior cached summary / the client keeps its deterministic baseline).
+    /// Validates the model actually included every priced/regretted supplier as its own column — despite
+    /// the system prompt's explicit "NEVER drop a supplier" instruction, Claude has been observed silently
+    /// omitting one (e.g. a 4-supplier/1-line RFQ where two suppliers just vanished from the table, no
+    /// error, no partial mention) — and retries ONCE with a corrective nudge before giving up, rather than
+    /// caching a comparison that quietly hides a real quote.</summary>
     public async Task<Result?> GenerateAsync(string rfqId, List<Dictionary<string, object?>> rows,
         bool includePdfs, string? sentAgo, CancellationToken ct)
     {
@@ -90,7 +95,44 @@ public class RfqStateOfPlayService
         if (string.IsNullOrWhiteSpace(input)) return null;
 
         var model = _config["Claude:Model"] ?? "claude-sonnet-4-6";
+        var expectedSuppliers = ExpectedSuppliers(rows);
+
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            var summary = await CallClaudeAsync(rfqId, model, input, ct);
+            if (summary is null) return null;   // API failure — don't retry, caller keeps the prior cache
+
+            var missing = expectedSuppliers.Where(s => !summary.Contains(s, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (missing.Count == 0) return new Result(summary, hash, model, mode);
+
+            if (attempt == 1)
+            {
+                _log.LogWarning("[StateOfPlay] {Rfq} dropped supplier(s) {Missing} from the table on attempt 1 — retrying",
+                    rfqId, string.Join(", ", missing));
+                input += $"\n\nCORRECTION: your table is missing a column for: {string.Join(", ", missing)}. " +
+                         "Every supplier listed above who responded MUST have their own column — regenerate the table with ALL of them included.";
+            }
+            else
+            {
+                _log.LogWarning("[StateOfPlay] {Rfq} still dropped supplier(s) {Missing} after retry — discarding (not caching an incomplete table)",
+                    rfqId, string.Join(", ", missing));
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Distinct suppliers whose response must appear in the table — same grouping <see cref="BuildInput"/>
+    /// uses (any row with a non-blank SupplierName, priced or regretted).</summary>
+    private static List<string> ExpectedSuppliers(List<Dictionary<string, object?>> rows)
+        => rows.Select(r => S(r, "SupplierName")).Where(s => s.Length > 0)
+               .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>One Claude call → the trimmed markdown table text, or null on any API/parse failure.</summary>
+    private async Task<string?> CallClaudeAsync(string rfqId, string model, string input, CancellationToken ct)
+    {
         int maxTokens = _config.GetValue("RfqStateOfPlay:MaxTokens", 1200);
+        var apiKey    = _config["Anthropic:ApiKey"];
 
         // v1: text-only content. (PDF mode wires document blocks here in the next phase.)
         var body = JsonSerializer.Serialize(new
@@ -125,7 +167,7 @@ public class RfqStateOfPlayService
                     text.Append(txt.GetString());
 
             var summary = text.ToString().Trim();
-            return string.IsNullOrWhiteSpace(summary) ? null : new Result(summary, hash, model, mode);
+            return string.IsNullOrWhiteSpace(summary) ? null : summary;
         }
         catch (Exception ex)
         {
