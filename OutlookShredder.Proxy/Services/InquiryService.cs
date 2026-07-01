@@ -166,9 +166,21 @@ public sealed class InquiryService : IHostedService
 
         var msg = await AppendMessageAsync(from, to, effectiveBody, sid, inquiry.Id, now, mediaStored, ct);
 
+        // Update THIS proxy's own in-memory cache synchronously — we already hold the mutated objects, no
+        // SP re-read needed (that's what RefreshOneAsync is for: a PEER proxy reacting to our bus event
+        // below, which has no in-memory copy). Must happen BEFORE NotifyInquiry/NotifyInquiryMessage: the
+        // client re-fetches the list on that event, and if the cache's LastMessageAt/message list haven't
+        // caught up yet, the new message sorts into its stale position instead of to the top ("write → SP →
+        // bus" — the fire-and-forget RefreshOneAsync that used to sit here raced the notify and lost).
+        _cache.ApplyInquiry(inquiry);
+        _cache.ApplyMessage(inquiry.Id, msg);
+
         _notify.NotifyInquiry(isNew ? "Created" : "Updated", inquiry);
         _notify.NotifyInquiryMessage(inquiry.Id, msg);
-        _ = _cache.RefreshOneAsync(inquiry.Id);   // full populate (contact + new message); off the read path
+        // Still worth a background full rebuild for a BRAND NEW inquiry — ApplyInquiry seeded a bare-bones
+        // entry (no notes/quotations/drafts/contact yet, all genuinely empty for a fresh thread, but this
+        // fills them in without blocking / without affecting sort, which is already correct above).
+        if (isNew) _ = _cache.RefreshOneAsync(inquiry.Id);
         _log.LogInformation("[Inquiry] {Action} {Id} from {Phone} (unread={Unread}, media={Media})",
             action, inquiry.Id, phone, inquiry.UnreadCount, msg.Media.Count);
 

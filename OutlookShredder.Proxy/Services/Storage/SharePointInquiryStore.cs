@@ -216,19 +216,23 @@ public sealed class SharePointInquiryStore : IInquiryStore
     public async Task<IReadOnlyList<Inquiry>> GetInquiriesByPhoneAsync(string phone, CancellationToken ct = default)
     {
         var listId = await GetInquiriesListIdAsync(ct);
+        // No SP-side $orderby: LastMessageAt is a TEXT column and the list holds a genuine mix of ISO and
+        // locale-formatted timestamps (see ParseTimestampSortKey) — SharePoint's OData sort on text is
+        // lexicographic and silently misorders that mix (this fed DecideThread's "existing[0] = most recent"
+        // assumption, so a wrong SP-side order could reopen the WRONG thread, not just misdisplay one).
         var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
-            filter: $"fields/CustomerPhone eq '{phone.Replace("'", "''")}'",
-            orderby: ["fields/LastMessageAt desc"], ct: ct);
-        return items.Select(ItemToInquiry).ToList();
+            filter: $"fields/CustomerPhone eq '{phone.Replace("'", "''")}'", ct: ct);
+        return items.Select(ItemToInquiry)
+            .OrderByDescending(i => InquiryRules.ParseTimestampSortKey(i.LastMessageAt)).ToList();
     }
 
     public async Task<IReadOnlyList<Inquiry>> GetInquiriesAsync(string? status = null, string? query = null, CancellationToken ct = default)
     {
         var listId = await GetInquiriesListIdAsync(ct);
         // Status is indexed → filter server-side when given; free-text query is a small in-memory pass.
+        // No SP-side $orderby — see the note in GetInquiriesByPhoneAsync above; sorted below instead.
         var filter = string.IsNullOrWhiteSpace(status) ? null : $"fields/IqStatus eq '{status.Replace("'", "''")}'";
-        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
-            filter: filter, orderby: ["fields/LastMessageAt desc"], ct: ct);
+        var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"], filter: filter, ct: ct);
         var all = items.Select(ItemToInquiry);
         if (!string.IsNullOrWhiteSpace(query))
         {
@@ -237,7 +241,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
                 i.CustomerPhone.Contains(q, StringComparison.OrdinalIgnoreCase) ||
                 i.Id.Contains(q, StringComparison.OrdinalIgnoreCase));
         }
-        return all.ToList();
+        return all.OrderByDescending(i => InquiryRules.ParseTimestampSortKey(i.LastMessageAt)).ToList();
     }
 
     public async Task<Inquiry?> GetInquiryByIdAsync(string cinqId, CancellationToken ct = default)

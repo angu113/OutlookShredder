@@ -177,7 +177,7 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
                     (i.Id?.Contains(ql, StringComparison.OrdinalIgnoreCase) ?? false) ||
                     (i.CustomerName?.Contains(ql, StringComparison.OrdinalIgnoreCase) ?? false));
             }
-            return q.OrderByDescending(i => i.LastMessageAt ?? "", StringComparer.Ordinal).ToList();
+            return q.OrderByDescending(i => InquiryRules.ParseTimestampSortKey(i.LastMessageAt)).ToList();
         }
         return await _store.GetInquiriesAsync(status, query, ct);
     }

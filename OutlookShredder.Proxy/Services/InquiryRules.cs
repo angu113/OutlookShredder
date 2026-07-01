@@ -49,6 +49,26 @@ public static partial class InquiryRules
     public static string NormalizeE164(string? phone)
         => "+" + new string((phone ?? "").Where(char.IsDigit).ToArray());
 
+    /// <summary>Parses an Inquiry timestamp field (LastMessageAt/CreatedAt/UpdatedAt) for use as a SORT KEY —
+    /// never compare these fields as raw strings. Current code always writes
+    /// <c>DateTimeOffset.UtcNow.ToString("o")</c>, but a message can be threaded through any of several
+    /// channels (SMS/email/phone) and older rows were written before that convention, so the SP list holds a
+    /// genuine mix of ISO ("o") and locale-formatted ("M/d/yyyy h:mm:ss tt") strings — ordinal string
+    /// comparison silently interleaves them wrong (e.g. "9:04 AM" sorts ahead of "10:19 AM" because '9' > '1').
+    /// Tries round-trip ISO first, then falls back to general parsing (current + invariant culture) so both
+    /// formats — and anything else already sitting in the list — resolve to a real, comparable instant.
+    /// Unparseable/empty values sort as the oldest possible instant rather than throwing.</summary>
+    public static DateTimeOffset ParseTimestampSortKey(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return DateTimeOffset.MinValue;
+        if (DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var dt)) return dt;
+        if (DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out dt)) return dt;
+        if (DateTimeOffset.TryParse(s, out dt)) return dt;   // last resort: current culture
+        return DateTimeOffset.MinValue;
+    }
+
     /// <summary>A fresh CINQ inquiry id: "CINQ-" + 5 random Crockford Base32 chars (25 bits of entropy,
     /// ~33.5M space, no check symbol). Collision handling is the caller's job (see <see cref="NewCinqId"/>).</summary>
     public static string RandomCinqId()
