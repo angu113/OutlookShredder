@@ -1206,15 +1206,28 @@ public static class DrawingPdfRenderer
         // own flange/leg/OD label (same value, same axis) so the shop can trace it between views.
         DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, $"A {Fq(hgt)}", false);
 
-        // End-angle callouts near each slanted edge. Degrees read as a short decimal (0.# — "45°", "45.5°"),
-        // not F()'s fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle.
-        // "B"/"C" prefixes match the isometric's END A / END B angle callouts.
+        // End-angle callouts near each slanted edge, pushed clear of the material along that edge's own
+        // outward normal (away from the shape's centroid), with a short witness tick — never sitting on
+        // top of the drawn trapezoid. Degrees read as a short decimal (0.# — "45°", "45.5°"), not F()'s
+        // fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle. "B"/"C"
+        // prefixes match the isometric's END A / END B angle callouts.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
         var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
-        gfx.DrawString($"B {Deg(s.MiterAngleLeft)}°", angFont, TextBrush,
-            new XRect(P(0, 0).X - 4, P(0, hgt / 2).Y - 6, 44, 12), XStringFormats.TopLeft);
-        gfx.DrawString($"C {Deg(s.MiterAngleRight)}°", angFont, TextBrush,
-            new XRect(P(len, hgt / 2).X - 44, P(len, hgt / 2).Y - 6, 44, 12), XStringFormats.TopRight);
+        var elevCentroid = new XPoint(pts.Average(p => p.X), pts.Average(p => p.Y));
+        var witnessPen = new XPen(DimColor, 0.6);
+        void SlantLabel(XPoint a, XPoint b, string text)
+        {
+            double ex = b.X - a.X, ey = b.Y - a.Y, el = Math.Sqrt(ex * ex + ey * ey); if (el < 1e-6) el = 1;
+            double nx = -ey / el, ny = ex / el;
+            double mx = (a.X + b.X) / 2, my = (a.Y + b.Y) / 2;
+            if (nx * (mx - elevCentroid.X) + ny * (my - elevCentroid.Y) < 0) { nx = -nx; ny = -ny; }
+            var w1 = new XPoint(mx, my);
+            var w2 = new XPoint(mx + nx * 22, my + ny * 22);
+            gfx.DrawLine(witnessPen, w1, w2);
+            gfx.DrawString(text, angFont, TextBrush, new XRect(w2.X - 24, w2.Y - 6, 48, 12), XStringFormats.Center);
+        }
+        SlantLabel(P(0, 0), P(insetL, hgt), $"B {Deg(s.MiterAngleLeft)}°");
+        SlantLabel(P(len, 0), P(len - insetR, hgt), $"C {Deg(s.MiterAngleRight)}°");
     }
 
     /// <summary>Two independent isometric "bevel detail" sketches, one per cut end, so the shop sees
@@ -1278,7 +1291,7 @@ public static class DrawingPdfRenderer
         for (int i = 0; i < poly.Count; i++) { Acc(RingA(i)); Acc(RingB(i)); }
         double gw = Math.Max(maxX - minX, 1e-6), gh = Math.Max(maxY - minY, 1e-6);
 
-        const double pad = 16;
+        const double pad = 60;   // room for the END-label leaders + dimension witness lines pushed outside the shape
         double scale = Math.Min((area.Width - pad * 2) / gw, (area.Height - pad * 2) / gh);
         double ox = area.X + (area.Width - gw * scale) / 2 - minX * scale;
         double oy = area.Y + (area.Height - gh * scale) / 2 - minY * scale;
@@ -1312,31 +1325,68 @@ public static class DrawingPdfRenderer
             gfx.DrawLine(facePen, aPts[r1], bPts[r1]);
         }
 
-        // END A / END B + angle labels, positioned under each respective cut face. "B"/"C" prefixes
-        // match the elevation's own End A / End B angle callouts.
+        // END A / END B + angle labels — anchored to each end's own OUTERMOST corner (the true tip,
+        // not a generic average position), then pushed further out along that same direction with a
+        // thin witness leader, so the callout sits clearly outside the drawn material and still points
+        // straight at the corner it's describing. "B"/"C" prefixes match the elevation's own End A /
+        // End B angle callouts.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
-        double aCx = aPts.Average(p => p.X), bCx = bPts.Average(p => p.X);
-        double labelY = box.Y + box.Height - 24;
-        gfx.DrawString("END A", angFont, TextBrush, new XRect(aCx - 40, labelY, 80, 11), XStringFormats.TopCenter);
-        gfx.DrawString("END B", angFont, TextBrush, new XRect(bCx - 40, labelY, 80, 11), XStringFormats.TopCenter);
-        gfx.DrawString($"B {Deg(s.MiterAngleLeft)}°", angFont, AccentBrush, new XRect(aCx - 40, labelY + 12, 80, 12), XStringFormats.TopCenter);
-        gfx.DrawString($"C {Deg(s.MiterAngleRight)}°", angFont, AccentBrush, new XRect(bCx - 40, labelY + 12, 80, 12), XStringFormats.TopCenter);
+        double acx = aPts.Average(p => p.X), acy = aPts.Average(p => p.Y);
+        double bcx = bPts.Average(p => p.X), bcy = bPts.Average(p => p.Y);
+        double outAx = acx - bcx, outAy = acy - bcy;   // "away from End B" = outward for End A
+        double outAl = Math.Sqrt(outAx * outAx + outAy * outAy); if (outAl < 1e-6) outAl = 1;
+        outAx /= outAl; outAy /= outAl;
+        var dimPen = new XPen(DimColor, 0.6);
+
+        void EndLabel(XPoint[] ring, double ox2, double oy2, string endName, string angleText)
+        {
+            int tipI = 0; double best = double.MinValue;
+            for (int i = 0; i < ring.Length; i++)
+            {
+                double proj = ring[i].X * ox2 + ring[i].Y * oy2;
+                if (proj > best) { best = proj; tipI = i; }
+            }
+            var tip = ring[tipI];
+            var anchor = new XPoint(tip.X + ox2 * 34, tip.Y + oy2 * 34);
+            gfx.DrawLine(dimPen, tip, anchor);
+            var box2 = new XRect(anchor.X - 40, anchor.Y - 12, 80, 24);
+            gfx.DrawString(endName, angFont, TextBrush, new XRect(box2.X, box2.Y, box2.Width, 11), XStringFormats.TopCenter);
+            gfx.DrawString(angleText, angFont, AccentBrush, new XRect(box2.X, box2.Y + 12, box2.Width, 12), XStringFormats.TopCenter);
+        }
+        EndLabel(aPts, outAx, outAy, "END A", $"B {Deg(s.MiterAngleLeft)}°");
+        EndLabel(bPts, -outAx, -outAy, "END B", $"C {Deg(s.MiterAngleRight)}°");
 
         // Compact cross-section dimension labels — a quick visual size check (the cross-section view
         // carries the precise, fully-dimensioned callouts). The "A" prefix matches the elevation's
         // flange/leg/OD dimension exactly (same axis, same value); the other extent has no elevation
-        // counterpart to cross-reference, so it's shown plain, un-prefixed.
+        // counterpart to cross-reference, so it's shown plain, un-prefixed. Offset along the EDGE's own
+        // outward normal (not a distance-from-centroid heuristic, which under-clears a long thin part),
+        // with a short witness tick from the material edge to the value.
         double cx = aPts.Average(p => p.X), cy = aPts.Average(p => p.Y);
         void EdgeLabel(XPoint a, XPoint b, string text)
         {
+            double ex = b.X - a.X, ey = b.Y - a.Y, el = Math.Sqrt(ex * ex + ey * ey); if (el < 1e-6) el = 1;
+            double nx = -ey / el, ny = ex / el;
             double mx = (a.X + b.X) / 2, my = (a.Y + b.Y) / 2;
-            double dx = mx - cx, dy = my - cy;
-            double dl = Math.Sqrt(dx * dx + dy * dy); if (dl < 1e-6) dl = 1;
-            double lx = mx + dx / dl * 16, ly = my + dy / dl * 16;
-            gfx.DrawString(text, dimFontIso, DimBrush, new XRect(lx - 24, ly - 5, 48, 10), XStringFormats.Center);
+            if (nx * (mx - cx) + ny * (my - cy) < 0) { nx = -nx; ny = -ny; }
+            var w1 = new XPoint(mx, my);
+            var w2 = new XPoint(mx + nx * 26, my + ny * 26);
+            gfx.DrawLine(dimPen, w1, w2);
+            gfx.DrawString(text, dimFontIso, DimBrush, new XRect(w2.X - 24, w2.Y - 5, 48, 10), XStringFormats.Center);
         }
         if (s.MiterShape == "tube_round")
-            EdgeLabel(aPts[0], aPts[poly.Count / 2], $"A {Fq(vExt)} OD");   // round: vExt == wExt, either axis is "A"
+        {
+            // Round has no flat edge to offset from — lead off the ring's topmost point instead (same
+            // "extreme point, then push further out" technique as the END A/B labels).
+            int topI = 0; double bestY = double.MaxValue;
+            for (int i = 0; i < aPts.Length; i++) if (aPts[i].Y < bestY) { bestY = aPts[i].Y; topI = i; }
+            var top = aPts[topI];
+            double dxr = top.X - cx, dyr = top.Y - cy;
+            double dlr = Math.Sqrt(dxr * dxr + dyr * dyr); if (dlr < 1e-6) { dxr = 0; dyr = -1; dlr = 1; }
+            var w2r = new XPoint(top.X + dxr / dlr * 26, top.Y + dyr / dlr * 26);
+            gfx.DrawLine(dimPen, top, w2r);
+            gfx.DrawString($"A {Fq(vExt)} OD", dimFontIso, DimBrush, new XRect(w2r.X - 30, w2r.Y - 5, 60, 10), XStringFormats.Center);
+        }
         else
         {
             // Elevation's "A" = hgt = taperOnDepth ? wExt(D) : vExt(W) — match that EXACT axis here, not the
