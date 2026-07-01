@@ -20,4 +20,8 @@ public interface ISmsGateway
     /// <summary>Fetches an inbound media part (MMS attachment) from the carrier's auth-protected media store.
     /// Returns (contentType, bytes), or null if unavailable. Used at ingest to store media durably.</summary>
     Task<(string ContentType, byte[] Bytes)?> DownloadMediaAsync(string mediaUrl, CancellationToken ct = default);
+
+    /// <summary>Looks up a sent message's CURRENT delivery status by provider SID — for backfilling rows whose
+    /// status callback never landed. Returns null on failure/not-found.</summary>
+    Task<string?> GetStatusAsync(string sid, CancellationToken ct = default);
 }

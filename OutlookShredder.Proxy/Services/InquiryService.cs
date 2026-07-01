@@ -267,6 +267,42 @@ public sealed class InquiryService : IHostedService
         return true;
     }
 
+    public sealed record BackfillStatusResult(int Scanned, int Stuck, int Resolved, int Unchanged, int LookupFailed);
+
+    /// <summary>One-time backfill for outbound messages whose delivery status never got applied (see the
+    /// 2026-07-01 fix: SmsStatus callbacks were silently dropped before the Function -&gt; sms-status-jobs ->
+    /// SmsStatusQueueProcessor wiring existed, so every message sent before that stayed frozen on "queued").
+    /// SignalWire never re-fires a status callback for an old message, so this looks up each stuck row's
+    /// CURRENT status directly via the SignalWire API and applies it through the same
+    /// UpdateMessageStatusAsync path (SP + cache + notify). dryRun=true reports counts without writing.</summary>
+    public async Task<BackfillStatusResult> BackfillMessageStatusesAsync(bool dryRun, CancellationToken ct = default)
+    {
+        int scanned = 0, stuck = 0, resolved = 0, unchanged = 0, lookupFailed = 0;
+        var inquiries = await _store.GetInquiriesAsync(null, null, ct);   // every status, not just active — the cache only covers active
+        foreach (var inq in inquiries)
+        {
+            if (ct.IsCancellationRequested) break;
+            var messages = await _messages.GetByInquiryAsync(inq.Id, 500, ct);
+            foreach (var m in messages)
+            {
+                if (!string.Equals(m.Direction, "out", StringComparison.OrdinalIgnoreCase)) continue;
+                scanned++;
+                if (!string.Equals(m.Status, "queued", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(m.ExternalId)) continue;
+                stuck++;
+
+                var current = await _sms.GetStatusAsync(m.ExternalId!, ct);
+                if (current is null) { lookupFailed++; continue; }
+                if (string.Equals(current, "queued", StringComparison.OrdinalIgnoreCase)) { unchanged++; continue; }   // genuinely still queued — leave it
+
+                if (!dryRun) await UpdateMessageStatusAsync(m.ExternalId!, current, ct);
+                resolved++;
+            }
+        }
+        _log.LogInformation("[Inquiry] status backfill (dryRun={Dry}): scanned={Scanned} stuck={Stuck} resolved={Resolved} unchanged={Unchanged} lookupFailed={Failed}",
+            dryRun, scanned, stuck, resolved, unchanged, lookupFailed);
+        return new BackfillStatusResult(scanned, stuck, resolved, unchanged, lookupFailed);
+    }
+
     /// <summary>Operator-triggered: dismiss any prior pending drafts and generate a FRESH AI suggestion for the
     /// latest inbound message (so a stale/early draft can be replaced on demand). False if no inbound exists.</summary>
     public async Task<bool> RegenerateDraftAsync(string inquiryId, CancellationToken ct = default)

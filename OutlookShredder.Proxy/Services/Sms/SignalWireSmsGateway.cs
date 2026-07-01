@@ -17,4 +17,7 @@ public sealed class SignalWireSmsGateway : ISmsGateway
 
     public Task<(string ContentType, byte[] Bytes)?> DownloadMediaAsync(string mediaUrl, CancellationToken ct = default)
         => _sw.DownloadMediaAsync(mediaUrl, ct);
+
+    public Task<string?> GetStatusAsync(string sid, CancellationToken ct = default)
+        => _sw.GetMessageStatusAsync(sid, ct);
 }

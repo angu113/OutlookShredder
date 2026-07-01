@@ -84,6 +84,42 @@ public class SignalWireService
         }
     }
 
+    /// <summary>Looks up a message's CURRENT delivery status by its SignalWire MessageSid — for backfilling
+    /// rows whose status callback never landed (see SmsStatusQueueProcessor / the 2026-07-01 "stuck on
+    /// Queued" fix). Returns null on any failure/not-found so the caller can skip that row, not crash a batch.</summary>
+    public async Task<string?> GetMessageStatusAsync(string sid, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(sid)) return null;
+        var projectId = _config["SignalWire:ProjectId"];
+        var apiToken  = _config["SignalWire:ApiToken"];
+        var spaceUrl  = _config["SignalWire:SpaceUrl"]?.TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(apiToken) || string.IsNullOrWhiteSpace(spaceUrl))
+            return null;
+
+        var url  = $"https://{spaceUrl}/api/laml/2010-04-01/Accounts/{projectId}/Messages/{sid}.json";
+        var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{projectId}:{apiToken}"));
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        try
+        {
+            using var resp = await _http.SendAsync(req, ct);
+            var content = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.LogWarning("[SignalWire] status lookup {Status} for {Sid}: {Error}", (int)resp.StatusCode, sid, content);
+                return null;
+            }
+            using var doc = JsonDocument.Parse(content);
+            return doc.RootElement.TryGetProperty("status", out var status) ? status.GetString() : null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[SignalWire] status lookup exception for {Sid}", sid);
+            return null;
+        }
+    }
+
     /// <summary>Downloads an inbound MMS media part from SignalWire's media store (Basic auth, ProjectId:ApiToken).
     /// Returns (contentType, bytes), or null on failure. The media URLs arrive on the inbound webhook and expire
     /// after the carrier's retention window — callers store the bytes durably at ingest.</summary>

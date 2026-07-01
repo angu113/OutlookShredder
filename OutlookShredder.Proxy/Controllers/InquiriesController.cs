@@ -137,6 +137,16 @@ public class InquiriesController : ControllerBase
         public bool    Apply { get; set; }
     }
 
+    /// <summary>One-time backfill for outbound messages stuck on "queued" from before the SmsStatus callback
+    /// was wired up (2026-07-01) — looks up each one's current status directly via SignalWire and applies it.
+    /// dryRun=true (default) reports counts without writing.</summary>
+    [HttpPost("backfill-message-statuses")]
+    public async Task<IActionResult> BackfillMessageStatuses([FromQuery] bool dryRun = true, CancellationToken ct = default)
+    {
+        try { return Ok(await _inquiries.BackfillMessageStatusesAsync(dryRun, ct)); }
+        catch (Exception ex) { return Fail(ex, "backfill-message-statuses"); }
+    }
+
     [HttpPost("{id}/messages")]
     public async Task<IActionResult> SendMessage(string id, [FromBody] SendReplyRequest req, CancellationToken ct)
     {
