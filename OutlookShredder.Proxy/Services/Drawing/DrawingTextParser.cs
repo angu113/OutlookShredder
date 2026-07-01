@@ -55,6 +55,12 @@ public static class DrawingTextParser
         if (type == PartType.Column)
             return ParseColumn(text, lower, materialLabel, polish);
 
+        // ── Miter Cut / Picture Frame — long-product shapes, no bends; own field set; parsed + returned here ──
+        if (type == PartType.MiterCut)
+            return ParseMiter(text, lower, materialLabel);
+        if (type == PartType.PictureFrame)
+            return ParsePictureFrame(text, lower, materialLabel);
+
         double thickness = ResolveThickness(lower, family, materialLabel);
 
         // ── Bend params ─────────────────────────────────────────────────────
@@ -229,6 +235,10 @@ public static class DrawingTextParser
     {
         // Column first — its clause contains "base"/"bearing" which must not trip the plate checks.
         if (Regex.IsMatch(lower, @"\bcolumn\b")) return PartType.Column;
+        // Picture Frame before Miter Cut — "picture frame" text would otherwise never reach here (Miter
+        // Cut's own regex doesn't match "frame"), but keep the order explicit/defensive.
+        if (Regex.IsMatch(lower, @"\bpicture\s*frame\b")) return PartType.PictureFrame;
+        if (Regex.IsMatch(lower, @"\bmiter\b")) return PartType.MiterCut;
         // Flat shapes (no bends) — distinct lead words, checked before the single-letter U/Z/L matches.
         if (Regex.IsMatch(lower, @"\b(circle|disc|disk|donut|doughnut)\b")) return PartType.Circle;
         if (Regex.IsMatch(lower, @"\bsheet\b")) return PartType.Sheet;
@@ -578,6 +588,141 @@ public static class DrawingTextParser
             Thickness = baseIncl ? baseT : (bearIncl ? bearT : 0),   // representative only
             Material = material, Units = "in", PolishDirection = polish,
         };
+    }
+
+    /// <summary>
+    /// Parses a miter cut —
+    ///   "Miter [qty=N] {shape-clause}, length L, [face F,] angle1 A1 angle2 A2, {material} [\"label\"]".
+    /// Shape clause (one of):
+    ///   "angle D1 [x D2] wall W"        — D1 = long leg, D2 = short leg (defaults to D1 ⇒ equal-leg)
+    ///   "tube square D wall W"          — square tube, outer D
+    ///   "tube rect D1 x D2 wall W"      — rect tube, outer D1 x D2
+    ///   "tube round D wall W" / "pipe D wall W" — round tube/pipe, OD D
+    ///   "flatbar T x Wd"                — thickness T, width Wd (thickness-first, matches RFQ convention)
+    /// Length is the OUTSIDE (long-point) dimension — the standard miter convention. Angle1/angle2 are
+    /// per-end (default 45 each if omitted); face is a single 0-based index for the whole part (meaning
+    /// depends on shape — see PartSpec.MiterFace) and is ignored/omitted for round tube/pipe + flat bar.
+    /// </summary>
+    private static PartSpec ParseMiter(string text, string lower, string material)
+    {
+        var (shape, w, d, wall) = ParseMiterShapeClause(lower);
+
+        double length = MatchNum(lower, $@"\blength\s*[:=]?\s*({Num})")
+            ?? throw new DrawingParseException("Miter needs a length, e.g. \"Miter angle 3 x 2 wall 0.25, length 96, …\".");
+        if (length <= 0) throw new DrawingParseException("Miter length must be positive.");
+
+        int face = MatchInt(lower, @"\bface\s*[:=]?\s*(\d+)") ?? 0;
+        double a1 = MatchNum(lower, $@"\bangle1\s*[:=]?\s*({Num})") ?? 45.0;
+        double a2 = MatchNum(lower, $@"\bangle2\s*[:=]?\s*({Num})") ?? 45.0;
+        if (a1 <= 0 || a1 >= 90 || a2 <= 0 || a2 >= 90)
+            throw new DrawingParseException("Miter angles must be between 0 and 90 degrees.");
+
+        int qty = (int)(MatchNum(lower, @"\bqty\s*=\s*(\d+)\b") ?? 1);
+        if (qty < 1) qty = 1;
+
+        return new PartSpec
+        {
+            Type = PartType.MiterCut,
+            MiterShape = shape, MiterOuterWidth = w, MiterOuterDepth = d, MiterWall = wall,
+            Length = length, MiterFace = face, MiterAngleLeft = a1, MiterAngleRight = a2,
+            MiterLabel = MatchQuotedLabel(text), MiterProductName = MatchQuotedLabel(text),
+            MiterQty = qty, Thickness = wall,
+            Material = material, Units = "in",
+        };
+    }
+
+    /// <summary>
+    /// Parses a picture frame — "Picture Frame [qty=N] {shape-clause}, width W height H, [face F,]
+    /// {material} [\"label\"]". Rectangular assembly of 4 miter-cut pieces of the SAME product (2 @ width,
+    /// 2 @ height), all corners 45/45 (a rectangle has no other option). Width/height are OUTSIDE
+    /// (long-point) dimensions, same convention as Miter Cut's length. Shape clause is shared with Miter
+    /// Cut (see <see cref="ParseMiter"/>).
+    /// </summary>
+    private static PartSpec ParsePictureFrame(string text, string lower, string material)
+    {
+        var (shape, w, d, wall) = ParseMiterShapeClause(lower);
+
+        double fw = MatchNum(lower, $@"\bwidth\s*[:=]?\s*({Num})")
+            ?? throw new DrawingParseException("Picture Frame needs a width, e.g. \"Picture Frame angle 2 x 2 wall 0.1875, width 24 height 18, …\".");
+        double fh = MatchNum(lower, $@"\bheight\s*[:=]?\s*({Num})")
+            ?? throw new DrawingParseException("Picture Frame needs a height, e.g. \"Picture Frame angle 2 x 2 wall 0.1875, width 24 height 18, …\".");
+        if (fw <= 0 || fh <= 0) throw new DrawingParseException("Picture Frame dimensions must be positive.");
+
+        int face = MatchInt(lower, @"\bface\s*[:=]?\s*(\d+)") ?? 0;
+        int qty = (int)(MatchNum(lower, @"\bqty\s*=\s*(\d+)\b") ?? 1);
+        if (qty < 1) qty = 1;
+
+        return new PartSpec
+        {
+            Type = PartType.PictureFrame,
+            MiterShape = shape, MiterOuterWidth = w, MiterOuterDepth = d, MiterWall = wall,
+            FrameOutsideWidth = fw, FrameOutsideHeight = fh, MiterFace = face,
+            MiterAngleLeft = 45.0, MiterAngleRight = 45.0,   // a rectangle's corners are always 90° — 45/45 each side
+            MiterLabel = MatchQuotedLabel(text), MiterProductName = MatchQuotedLabel(text),
+            MiterQty = qty, Thickness = wall,
+            Material = material, Units = "in",
+        };
+    }
+
+    /// <summary>Shape clause shared by Miter Cut and Picture Frame — see <see cref="ParseMiter"/> for the
+    /// grammar. Returns (shape, outerWidth, outerDepth, wall).</summary>
+    private static (string Shape, double W, double D, double Wall) ParseMiterShapeClause(string lower)
+    {
+        var angleM = Regex.Match(lower, $@"\bangle\s+({Num})(?:\s*x\s*({Num}))?\s+wall\s+({Num})");
+        if (angleM.Success)
+        {
+            double legLong = NumOf(angleM.Groups[1].Value);
+            double legShort = angleM.Groups[2].Success && angleM.Groups[2].Value.Length > 0
+                ? NumOf(angleM.Groups[2].Value) : legLong;
+            double wall = NumOf(angleM.Groups[3].Value);
+            if (legLong <= 0 || legShort <= 0 || wall <= 0)
+                throw new DrawingParseException("Angle dimensions must be positive.");
+            return ("angle", legLong, legShort, wall);
+        }
+
+        var tubeSquareM = Regex.Match(lower, $@"\btube\s+square\s+({Num})\s+wall\s+({Num})");
+        if (tubeSquareM.Success)
+        {
+            double dd = NumOf(tubeSquareM.Groups[1].Value), wall = NumOf(tubeSquareM.Groups[2].Value);
+            if (dd <= 0 || wall <= 0) throw new DrawingParseException("Tube dimensions must be positive.");
+            return ("tube_square", dd, dd, wall);
+        }
+
+        var tubeRectM = Regex.Match(lower, $@"\btube\s+rect(?:angle|angular)?\s+({Num})\s*x\s*({Num})\s+wall\s+({Num})");
+        if (tubeRectM.Success)
+        {
+            double w = NumOf(tubeRectM.Groups[1].Value), d = NumOf(tubeRectM.Groups[2].Value), wall = NumOf(tubeRectM.Groups[3].Value);
+            if (w <= 0 || d <= 0 || wall <= 0) throw new DrawingParseException("Tube dimensions must be positive.");
+            return ("tube_rect", w, d, wall);
+        }
+
+        var roundM = Regex.Match(lower, $@"\b(?:tube\s+round|pipe)\s+({Num})\s+wall\s+({Num})");
+        if (roundM.Success)
+        {
+            double od = NumOf(roundM.Groups[1].Value), wall = NumOf(roundM.Groups[2].Value);
+            if (od <= 0 || wall <= 0) throw new DrawingParseException("Pipe dimensions must be positive.");
+            return ("tube_round", od, od, wall);
+        }
+
+        var flatM = Regex.Match(lower, $@"\bflatbar\s+({Num})\s*x\s*({Num})");
+        if (flatM.Success)
+        {
+            double thk = NumOf(flatM.Groups[1].Value), width = NumOf(flatM.Groups[2].Value);
+            if (thk <= 0 || width <= 0) throw new DrawingParseException("Flat bar dimensions must be positive.");
+            return ("flatbar", width, 0, thk);
+        }
+
+        throw new DrawingParseException(
+            "Needs a product shape: \"angle 3 x 2 wall 0.25\", \"tube square 4 wall 0.25\", " +
+            "\"tube rect 4 x 2 wall 0.188\", \"tube round 2.375 wall 0.154\", \"pipe 2.375 wall 0.154\", " +
+            "or \"flatbar 0.25 x 2\".");
+    }
+
+    /// <summary>Trailing quoted product label (original-case text) — same convention as Column's.</summary>
+    private static string MatchQuotedLabel(string text)
+    {
+        var m = Regex.Match(text, "\"([^\"]+)\"");
+        return m.Success ? m.Groups[1].Value.Trim() : "";
     }
 
     /// <summary>Corner-hole spec for one column plate, scoped to that plate's clause in the text.</summary>

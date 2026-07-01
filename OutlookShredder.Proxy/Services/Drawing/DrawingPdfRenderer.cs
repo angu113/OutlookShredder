@@ -154,6 +154,10 @@ public static class DrawingPdfRenderer
                 DrawPaddleBlind(gfx, fp, new XRect(M, top, usable, h));
                 DrawPolishCallout(gfx, fp, new XRect(M, top, usable, h), polishBilingual);
             }
+            else if (fp.IsMiterCut)
+            {
+                DrawMiterCut(gfx, fp, new XRect(M, top, usable, h));
+            }
             else
             {
                 DrawFlatPattern(gfx, fp, new XRect(M, top, wFlat, h));
@@ -1035,6 +1039,153 @@ public static class DrawingPdfRenderer
         gfx.DrawString(hlabel, dimFont, TextBrush, hr, XStringFormats.Center);
     }
 
+    // ── Miter Cut: cross-section (mitered face highlighted) + elevation (both end angles + outside length) ──
+    private static void DrawMiterCut(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        const double gap = 16;
+        double wSect = box.Width * 0.30;
+        double wElev = box.Width - wSect - gap;
+        DrawMiterSection(gfx, fp, new XRect(box.X, box.Y, wSect, box.Height));
+        DrawMiterElevation(gfx, fp, new XRect(box.X + wSect + gap, box.Y, wElev, box.Height));
+    }
+
+    /// <summary>Shape cross-section — angle L, tube outline (square/rect/round), or flat bar — with the
+    /// selected miter face highlighted in accent colour + a "MITER FACE" leader. Round tube/pipe and flat
+    /// bar have no face concept (symmetric / single face), so no highlight is drawn for them.</summary>
+    private static void DrawMiterSection(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var s = fp.Spec;
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var labelFont = new XFont("Arial", 7.5, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+        var facePen = new XPen(AccentColor, 2.5);
+
+        gfx.DrawString(Bi.T("miter.crossSection"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 34);   // leave room for a face callout below
+
+        double W = s.MiterOuterWidth, D = s.MiterShape == "flatbar" ? s.MiterWall : (s.MiterOuterDepth > 0 ? s.MiterOuterDepth : W);
+        double wall = s.MiterWall;
+        if (W <= 0) return;
+        const double band = 40;
+        double availW = area.Width - band * 2, availH = area.Height - band * 2;
+        double scale = Math.Min(availW / W, availH / D);
+        double ox = area.X + (area.Width - W * scale) / 2;
+        double oy = area.Y + (area.Height - D * scale) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + D * scale - my * scale);
+
+        string? faceCallout = null;
+        switch (s.MiterShape)
+        {
+            case "angle":
+            {
+                // L-shape: long leg along X (width W), short leg up Y (depth D), outer corner at origin.
+                var pts = new[]
+                {
+                    P(0, 0), P(W, 0), P(W, wall), P(wall, wall), P(wall, D), P(0, D),
+                };
+                gfx.DrawPolygon(cutPen, pts);
+                if (s.MiterFace == 1)   // short leg
+                { gfx.DrawLine(facePen, P(0, 0), P(0, D)); faceCallout = Bi.T("miter.face"); }
+                else                    // long leg (default)
+                { gfx.DrawLine(facePen, P(0, 0), P(W, 0)); faceCallout = Bi.T("miter.face"); }
+                break;
+            }
+            case "tube_square":
+            case "tube_rect":
+            {
+                gfx.DrawRectangle(cutPen, P(0, D).X, P(0, D).Y, W * scale, D * scale);
+                double iw = Math.Max(0, W - 2 * wall), id = Math.Max(0, D - 2 * wall);
+                if (iw > 0 && id > 0)
+                    gfx.DrawRectangle(cutPen, P(wall, D - wall).X, P(wall, D - wall).Y, iw * scale, id * scale);
+                // 4 faces, 0-based: 0=bottom, 1=right, 2=top, 3=left.
+                (XPoint a, XPoint b) edge = s.MiterFace switch
+                {
+                    1 => (P(W, 0), P(W, D)),
+                    2 => (P(0, D), P(W, D)),
+                    3 => (P(0, 0), P(0, D)),
+                    _ => (P(0, 0), P(W, 0)),
+                };
+                gfx.DrawLine(facePen, edge.a, edge.b);
+                faceCallout = Bi.T("miter.face");
+                break;
+            }
+            case "tube_round":
+            {
+                double r = W / 2 * scale;
+                var c = P(W / 2, D / 2);
+                gfx.DrawEllipse(cutPen, c.X - r, c.Y - r, 2 * r, 2 * r);
+                double ir = Math.Max(0, W / 2 - wall) * scale;
+                if (ir > 0) gfx.DrawEllipse(cutPen, c.X - ir, c.Y - ir, 2 * ir, 2 * ir);
+                break;   // symmetric — no face to highlight
+            }
+            default:   // flatbar
+                gfx.DrawRectangle(cutPen, P(0, D).X, P(0, D).Y, W * scale, D * scale);
+                break;   // one meaningful face (through the width) — not worth a callout
+        }
+
+        // Dimensions along the bottom + left.
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        DimH(gfx, dimFont, P(0, 0).X, P(W, 0).X, P(0, 0).Y, oy + D * scale + 20, Fq(W), false);
+        if (s.MiterShape != "tube_round") DimV(gfx, dimFont, P(0, 0).X, ox - 32, P(0, D).Y, P(0, 0).Y, Fq(D), false);
+
+        if (faceCallout is not null)
+        {
+            var f = new XFont("Arial", 8, XFontStyleEx.Bold);
+            gfx.DrawString(faceCallout, f, AccentBrush,
+                new XRect(box.X, box.Y + box.Height - 14, box.Width, 12), XStringFormats.TopCenter);
+        }
+    }
+
+    /// <summary>Elevation/profile view — a schematic side silhouette of the part with both ends cut at
+    /// their specified angle (measured from the length axis; 90° would be a square cut, smaller angles cut
+    /// more aggressively), dimensioned with the OUTSIDE (long-point) length and both end angles.</summary>
+    private static void DrawMiterElevation(XGraphics gfx, FlatPatternResult fp, XRect box)
+    {
+        var s = fp.Spec;
+        var titleFont = new XFont("Arial", 9, XFontStyleEx.Bold);
+        var dimFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        var cutPen = new XPen(CutColor, 1.2);
+
+        gfx.DrawString(Bi.T("miter.elevation"), titleFont, XBrushes.Black,
+            new XRect(box.X, box.Y, box.Width, 12), XStringFormats.TopCenter);
+        var area = new XRect(box.X, box.Y + 18, box.Width, box.Height - 18);
+
+        double len = s.Length;
+        // A representative silhouette depth — not to scale with the true cross-section (the section
+        // view already carries the real dims); just tall enough that the end bevels read clearly.
+        double hgt = Math.Max(s.MiterOuterWidth, s.MiterWall * 4);
+        if (len <= 0 || hgt <= 0) return;
+
+        const double band = 50;
+        double availW = area.Width - band * 2, availH = area.Height - band * 2 - 20;
+        double scale = Math.Min(availW / len, availH / hgt);
+        double drawH = hgt * scale;
+        double ox = area.X + (area.Width - len * scale) / 2;
+        double oy = area.Y + (area.Height - drawH) / 2;
+        XPoint P(double mx, double my) => new(ox + mx * scale, oy + drawH - my * scale);
+
+        double insetL = hgt / Math.Tan(s.MiterAngleLeft * Math.PI / 180.0);
+        double insetR = hgt / Math.Tan(s.MiterAngleRight * Math.PI / 180.0);
+        insetL = Math.Clamp(insetL, 0, len / 2 - 0.01);
+        insetR = Math.Clamp(insetR, 0, len / 2 - 0.01);
+
+        var pts = new[] { P(0, 0), P(len, 0), P(len - insetR, hgt), P(insetL, hgt) };
+        gfx.DrawPolygon(cutPen, pts);
+
+        // Outside (long-point) length — the as-specified accent dimension.
+        DimH(gfx, dimFont, P(0, 0).X, P(len, 0).X, P(0, 0).Y, oy + drawH + 22, Fq(len), true);
+
+        // End-angle callouts near each slanted edge. Degrees read as a short decimal (0.# — "45°", "45.5°"),
+        // not F()'s fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle.
+        string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
+        var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
+        gfx.DrawString($"{Deg(s.MiterAngleLeft)}°", angFont, TextBrush,
+            new XRect(P(0, 0).X - 4, P(0, hgt / 2).Y - 6, 40, 12), XStringFormats.TopLeft);
+        gfx.DrawString($"{Deg(s.MiterAngleRight)}°", angFont, TextBrush,
+            new XRect(P(len, hgt / 2).X - 36, P(len, hgt / 2).Y - 6, 40, 12), XStringFormats.TopRight);
+    }
+
     // ── Pan: single flat-pattern top view (cut outline + bend lines + corner reliefs) ──
     private static void DrawPan(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
@@ -1271,14 +1422,18 @@ public static class DrawingPdfRenderer
         // Thickness — single-sheet parts; a column carries several (its plates/wall are on the drawing).
         if (!fp.IsColumn) rows.Add((Bi.T("thickness"), thk));
 
-        // Flat blank / cut-to — cut dimensions in decimal inches.
-        string Dec(double v) => DrawFormat.DecInch(v);
-        string blankLabel = fp.IsColumn ? Bi.T("cutTo") : fp.IsPaddle ? Bi.T("plateToCut") : Bi.T("flatBlank");
-        string blankValue = fp.IsColumn ? $"tube {Dec(fp.ColumnTubeLength)} + plates"
-            : fp.IsCircle ? (s.InnerDiameter > 0 ? $"{thk} x Ø{Dec(s.Diameter)} / Ø{Dec(s.InnerDiameter)}" : $"{thk} x Ø{Dec(s.Diameter)}")
-            : (fp.IsPlate || fp.IsPaddle) ? $"{thk} x {Dec(fp.FlatHeight)} x {Dec(fp.FlatWidth)}"
-            : $"{Dec(fp.FlatWidth)} x {Dec(fp.FlatHeight)}";
-        rows.Add((blankLabel, blankValue));
+        // Flat blank / cut-to — cut dimensions in decimal inches. Miter Cut has no flat blank (no DXF) —
+        // the mitered face + both end angles are called out on the drawing itself instead.
+        if (!fp.IsMiterCut)
+        {
+            string Dec(double v) => DrawFormat.DecInch(v);
+            string blankLabel = fp.IsColumn ? Bi.T("cutTo") : fp.IsPaddle ? Bi.T("plateToCut") : Bi.T("flatBlank");
+            string blankValue = fp.IsColumn ? $"tube {Dec(fp.ColumnTubeLength)} + plates"
+                : fp.IsCircle ? (s.InnerDiameter > 0 ? $"{thk} x Ø{Dec(s.Diameter)} / Ø{Dec(s.InnerDiameter)}" : $"{thk} x Ø{Dec(s.Diameter)}")
+                : (fp.IsPlate || fp.IsPaddle) ? $"{thk} x {Dec(fp.FlatHeight)} x {Dec(fp.FlatWidth)}"
+                : $"{Dec(fp.FlatWidth)} x {Dec(fp.FlatHeight)}";
+            rows.Add((blankLabel, blankValue));
+        }
 
         // ── layout ──
         var labelFont = new XFont("Arial", 8.5, XFontStyleEx.Regular);
@@ -1386,8 +1541,8 @@ public static class DrawingPdfRenderer
             gfx.DrawString(line, font, XBrushes.Black, new XRect(box.X + 8, y, innerW, 10), XStringFormats.TopLeft);
             y += 10;
         }
-        // Paddle blinds and columns have no bends — drop the bend/Ri legend bits that don't apply.
-        string legend = fp.IsPaddle || fp.IsColumn
+        // Paddle blinds, columns, and miter cuts have no bends — drop the bend/Ri legend bits that don't apply.
+        string legend = fp.IsPaddle || fp.IsColumn || fp.IsMiterCut
             ? $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.fracInches")}"
             : $"{Bi.T("legend.solidCut")}  |  {Bi.T("legend.dashedBend")}  |  {Bi.T("legend.boldSpec")}  |  {Bi.T("legend.insideRadius")} {F(fp.Spec.InsideRadius)}\"  |  {Bi.T("legend.fracInches")}";
         var legFont = new XFont("Arial", 6, XFontStyleEx.Regular);

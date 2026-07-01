@@ -25,6 +25,9 @@ internal static class Bi
         ["bearingPlate.topView"] = ("Bearing plate",             "Placa de apoyo"),
         ["columnElevation"]      = ("Column elevation",          "Alzado de columna"),
         ["spade.faceView"]       = ("Spade — face view",         "Disco — vista frontal"),
+        ["miter.crossSection"]   = ("Cross-section",             "Sección transversal"),
+        ["miter.elevation"]      = ("Elevation — outside length + end angles", "Alzado — largo exterior + ángulos de extremo"),
+        ["miter.face"]           = ("MITER FACE",                "CARA DE INGLETE"),
 
         // ── callouts ────────────────────────────────────────────────────────
         ["finish"]               = ("Finish",                    "Acabado"),

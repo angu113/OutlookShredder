@@ -51,6 +51,7 @@ public static class FlatPattern
         PartType.Circle      => DevelopCircle(spec),
         PartType.Sheet       => DevelopSheet(spec),
         PartType.Gusset      => DevelopGusset(spec),
+        PartType.MiterCut    => DevelopMiterCut(spec),
         _ => throw new NotSupportedException($"Part type {spec.Type} is not implemented yet."),
     };
 
@@ -272,6 +273,107 @@ public static class FlatPattern
         lines.Add(dxfPlates > 0
             ? $"DXF contains {dxfPlates} plate flat pattern(s).  Plates welded centred on the column."
             : "No plates to cut.  Tube cut to length only.");
+        return string.Join("\n", lines);
+    }
+
+    // ── Miter Cut (long product, both ends angle-cut; PDF + fab note only — no DXF) ──
+    private static FlatPatternResult DevelopMiterCut(PartSpec spec)
+    {
+        if (spec.MiterOuterWidth <= 0 || spec.MiterWall <= 0)
+            throw new InvalidOperationException("Miter cut needs a positive shape size and wall/thickness.");
+        if (spec.Length <= 0)
+            throw new InvalidOperationException("Miter cut needs a positive length.");
+
+        string slug = $"miter_{spec.MiterShape}_{Trim(spec.MiterOuterWidth)}x{Trim(spec.MiterOuterDepth)}_{Trim(spec.Length)}l";
+        var cut = new CutGeometry
+        {
+            Units = spec.Units, Part = slug,
+            Layers = { new CutLayer { Name = CutLayer, Color = CutColor } },
+            Entities = new(),   // no cut geometry — Miter Cut is PDF + fab note only, never DXF
+        };
+
+        return new FlatPatternResult
+        {
+            Spec = spec,
+            WebOutside = 0, FlangeLeftOutside = 0, FlangeRightOutside = 0,
+            FlatWidth = 0, FlatHeight = 0,
+            BendLinesX = Array.Empty<double>(),
+            Cut = cut, Profile = new(),
+            IsMiterCut = true,
+            MiterShape = spec.MiterShape,
+            MiterOuterWidth = spec.MiterOuterWidth,
+            MiterOuterDepth = spec.MiterOuterDepth,
+            MiterWall = spec.MiterWall,
+            MiterFace = spec.MiterFace,
+            MiterAngleLeft = spec.MiterAngleLeft,
+            MiterAngleRight = spec.MiterAngleRight,
+            MiterLabel = spec.MiterLabel,
+            MiterProductName = spec.MiterProductName,
+            MiterQty = spec.MiterQty,
+            Summary = MiterSummary(spec),
+            Title = MiterTitle(spec),
+        };
+    }
+
+    private static string MiterShapeName(string shape) => shape switch
+    {
+        "tube_square" => "Square Tube",
+        "tube_rect"   => "Rect Tube",
+        "tube_round"  => "Round Tube/Pipe",
+        "flatbar"     => "Flat Bar",
+        _             => "Angle",
+    };
+
+    private static string MiterDimText(PartSpec s, Func<double, string>? fmt = null)
+    {
+        fmt ??= v => N(v) + "\"";
+        return s.MiterShape switch
+        {
+            "tube_square" => $"{fmt(s.MiterOuterWidth)} x {fmt(s.MiterOuterWidth)}",
+            "tube_rect"   => $"{fmt(s.MiterOuterWidth)} x {fmt(s.MiterOuterDepth)}",
+            "tube_round"  => $"{fmt(s.MiterOuterWidth)} OD",
+            "flatbar"     => $"{fmt(s.MiterWall)} x {fmt(s.MiterOuterWidth)}",
+            _             => Math.Abs(s.MiterOuterWidth - s.MiterOuterDepth) < 0.01
+                                ? $"{fmt(s.MiterOuterWidth)} x {fmt(s.MiterOuterWidth)}"
+                                : $"{fmt(s.MiterOuterWidth)} x {fmt(s.MiterOuterDepth)}",
+        };
+    }
+
+    /// <summary>Human-readable label for which face the miter plane passes through — shape-dependent
+    /// (see <see cref="PartSpec.MiterFace"/>). Round tube/pipe and flat bar have no face concept.</summary>
+    private static string MiterFaceLabel(PartSpec s)
+    {
+        var u = U(s.Units);
+        return s.MiterShape switch
+        {
+            "angle" => s.MiterFace == 1
+                ? $"short leg ({N(s.MiterOuterDepth)}{u})"
+                : $"long leg ({N(s.MiterOuterWidth)}{u})",
+            "tube_square" or "tube_rect" => $"face {s.MiterFace + 1} of 4",
+            _ => "n/a (symmetric)",
+        };
+    }
+
+    private static string MiterTitle(PartSpec s)
+    {
+        string prod = s.MiterLabel.Length > 0
+            ? s.MiterLabel
+            : MiterShapeName(s.MiterShape) + " " + MiterDimText(s, DrawFormat.FracInch);
+        return $"{MaterialPlain(s.Material)} Miter Cut — {DrawFormat.FracInch(s.Length)} outside  ({prod})".Trim();
+    }
+
+    private static string MiterSummary(PartSpec s)
+    {
+        string u = U(s.Units);
+        var lines = new List<string>
+        {
+            $"Miter cut  {MaterialPlain(s.Material)}" + (s.MiterLabel.Length > 0 ? $"   [{s.MiterLabel}]" : ""),
+            $"{MiterShapeName(s.MiterShape)}  {MiterDimText(s)}, wall {F(s.MiterWall)}{u}",
+            $"Length (outside/long-point) {F(s.Length)}{u}",
+            $"Miter face: {MiterFaceLabel(s)}",
+            $"End A {F(s.MiterAngleLeft)}°   End B {F(s.MiterAngleRight)}°",
+            "No DXF — PDF + fab note only.",
+        };
         return string.Join("\n", lines);
     }
 
@@ -1256,6 +1358,26 @@ public sealed class FlatPatternResult
     public bool   ColumnBearingIncluded { get; init; } = true;
     public bool   ColumnBearingWelded   { get; init; } = true;
     public string ColumnPlateMetal      { get; init; } = "Hot Roll";
+
+    // ── Miter Cut (long product, angle-cut both ends) + Picture Frame (4 miters, assembled) ──
+    /// <summary>True for a single miter-cut part — drawn as a cross-section view + an elevation/profile
+    /// view (both end angles + outside length). No DXF (no cut geometry to develop).</summary>
+    public bool IsMiterCut { get; init; }
+    /// <summary>True for a picture frame — 4 miter-cut pieces of the same product assembled into a
+    /// rectangle. No DXF.</summary>
+    public bool IsPictureFrame { get; init; }
+    public string MiterShape { get; init; } = "angle";
+    public double MiterOuterWidth { get; init; }
+    public double MiterOuterDepth { get; init; }
+    public double MiterWall { get; init; }
+    public int MiterFace { get; init; }
+    public double MiterAngleLeft { get; init; } = 45.0;
+    public double MiterAngleRight { get; init; } = 45.0;
+    public string MiterLabel { get; init; } = "";
+    public string MiterProductName { get; init; } = "";
+    public int MiterQty { get; init; } = 1;
+    public double FrameOutsideWidth { get; init; }
+    public double FrameOutsideHeight { get; init; }
 
     public required string Summary { get; init; }
     public string Title { get; init; } = "";

@@ -15,6 +15,8 @@ public enum PartType
     Circle,
     Sheet,
     Gusset,
+    MiterCut,
+    PictureFrame,
     Custom,
 }
 
@@ -176,6 +178,39 @@ public sealed class PartSpec
     public bool ColumnBearingWelded { get; init; } = true;
     /// <summary>Plate metal grade (Hot Roll / Cold Roll / Stainless / Galvanized / Aluminum). Shared by both plates.</summary>
     public string ColumnPlateMetal { get; init; } = "Hot Roll";
+
+    // ── Miter Cut (long product, angle-cut both ends) + Picture Frame (4 miters, assembled) ──
+    /// <summary>"angle", "tube_square", "tube_rect", "tube_round", or "flatbar".</summary>
+    public string MiterShape { get; init; } = "angle";
+    /// <summary>Angle: long-leg dimension. Square/rect tube: outer width. Round tube/pipe: OD.
+    /// Flat bar: width.</summary>
+    public double MiterOuterWidth { get; init; }
+    /// <summary>Angle: short-leg dimension (equals <see cref="MiterOuterWidth"/> for equal-leg angle).
+    /// Rect tube: outer depth (equals width for square). Round/flat bar: unused.</summary>
+    public double MiterOuterDepth { get; init; }
+    /// <summary>Wall/leg thickness (angle, tube) or bar thickness (flat bar).</summary>
+    public double MiterWall { get; init; }
+    /// <summary>Which face the miter plane passes through — meaning depends on <see cref="MiterShape"/>:
+    /// angle 0/1 = long leg/short leg (moot when legs are equal); square/rect tube 0..3 = one of the 4
+    /// faces; round tube/pipe and flat bar ignore this (symmetric / single meaningful face). One choice
+    /// applies to the WHOLE part — both ends miter through the same identified face; only the angle
+    /// varies end to end.</summary>
+    public int MiterFace { get; init; }
+    /// <summary>End-A miter angle in degrees (45 = standard miter; 90 = square cut/no miter).</summary>
+    public double MiterAngleLeft { get; init; } = 45.0;
+    /// <summary>End-B miter angle in degrees.</summary>
+    public double MiterAngleRight { get; init; } = 45.0;
+    /// <summary>Product label for the title / cut note, e.g. "3x2x1/4 Angle A36".</summary>
+    public string MiterLabel { get; init; } = "";
+    /// <summary>Full catalog product name, e.g. "Hot Roll Angle 3x2 1/4".</summary>
+    public string MiterProductName { get; init; } = "";
+    /// <summary>Order quantity (Miter Cut: pieces; Picture Frame: number of frames — each frame is 4 pieces).</summary>
+    public int MiterQty { get; init; } = 1;
+    /// <summary>Picture Frame outside width — the long-point horizontal dimension. Miter Cut leaves this
+    /// unused (its single length lives in <see cref="Length"/>, also a long-point/outside measurement).</summary>
+    public double FrameOutsideWidth { get; init; }
+    /// <summary>Picture Frame outside height — the long-point vertical dimension.</summary>
+    public double FrameOutsideHeight { get; init; }
 
     // ── Material + bend parameters ──────────────────────────────────────────
     /// <summary>Resolved material thickness T, in the spec's units.</summary>

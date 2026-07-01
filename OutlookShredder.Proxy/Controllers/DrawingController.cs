@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using OutlookShredder.Proxy.Models.Drawing;
 using OutlookShredder.Proxy.Services;
 using OutlookShredder.Proxy.Services.Drawing;
 using PdfSharp.Drawing;
@@ -87,7 +88,9 @@ public class DrawingController : ControllerBase
             var fp = FlatPattern.Develop(spec, req.Quantity);
 
             byte[] pdf = DrawingPdfRenderer.Render(fp, req.Calibrate, createdBy: req.CreatedBy);
-            byte[] dxf = DrawingDxfWriter.Write(fp.Cut);
+            // Miter Cut / Picture Frame have no cut geometry to develop — PDF + fab note only, ever.
+            byte[]? dxf = spec.Type is PartType.MiterCut or PartType.PictureFrame
+                ? null : DrawingDxfWriter.Write(fp.Cut);
 
             // Calibration: the cross-section dimensions in draw order, each keyed to its drawing letter,
             // so the user can say "letter B should be the return lip OD" and we fix that anchor.
@@ -109,7 +112,7 @@ public class DrawingController : ControllerBase
                 ok = true,
                 input = req.Text,
                 pdfBase64 = Convert.ToBase64String(pdf),
-                dxfBase64 = Convert.ToBase64String(dxf),
+                dxfBase64 = dxf is null ? null : Convert.ToBase64String(dxf),
                 suggestedFileName = fp.Cut.Part,
                 spec = new
                 {
