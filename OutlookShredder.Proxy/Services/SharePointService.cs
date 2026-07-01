@@ -537,6 +537,30 @@ public partial class SharePointService
         }
     }
 
+    /// <summary>RFQ IDs marked Complete=true whose <c>CompletedAt</c> falls within <paramref name="window"/> of
+    /// now — the "still worth checking the Mailbox for" set (see <see cref="RfqAutoCompleteService"/> and
+    /// <see cref="SetRfqCompleteAsync"/> for where CompletedAt is stamped). Rows with no CompletedAt (completed
+    /// before that column existed, or a stub with the field never set) are excluded rather than assumed
+    /// recent — an unknown completion time is not "recent". Uncached (called rarely — Mailbox load only).</summary>
+    public async Task<HashSet<string>> GetRecentlyCompletedRfqIdsAsync(TimeSpan window)
+    {
+        var refs   = await ReadRfqReferencesAsync();
+        var cutoff = DateTimeOffset.UtcNow - window;
+        var set    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in refs)
+        {
+            var complete = r.TryGetValue("Complete", out var cv) && cv is
+                true or System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True };
+            if (!complete) continue;
+            var completedAtRaw = r.TryGetValue("CompletedAt", out var cav) ? cav?.ToString() : null;
+            if (string.IsNullOrEmpty(completedAtRaw) ||
+                !DateTimeOffset.TryParse(completedAtRaw, out var completedAt) || completedAt < cutoff) continue;
+            var rid = r.TryGetValue("RFQ_ID", out var idv) ? idv?.ToString() : null;
+            if (!string.IsNullOrEmpty(rid)) set.Add(rid!);
+        }
+        return set;
+    }
+
     private async Task<string> GetRfqReferencesListIdAsync()
     {
         if (_rfqRefListId is not null) return _rfqRefListId;
@@ -1069,6 +1093,7 @@ public partial class SharePointService
                 ["Created"]          = i.CreatedDateTime?.UtcDateTime.ToString("o"),
                 ["EmailRecipients"]  = FieldStr(d, "EmailRecipients"),
                 ["Complete"]         = d.TryGetValue("Complete",    out var co) ? co : null,
+                ["CompletedAt"]      = FieldStr(d, "CompletedAt"),
                 ["Flagged"]          = d.TryGetValue("Flagged",     out var fl) ? fl : null,
                 ["RequestComments"]  = FieldStr(d, "RequestComments"),
                 ["Priority"]         = FieldStr(d, "Priority"),
@@ -1080,7 +1105,7 @@ public partial class SharePointService
         var page = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
             {
-                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,Flagged,RequestComments,Priority,CustomerName,HskNumber)"];
+                req.QueryParameters.Expand = [$"fields($select={col},Notes,Requester,DateCreated,EmailRecipients,Complete,CompletedAt,Flagged,RequestComments,Priority,CustomerName,HskNumber)"];
                 req.QueryParameters.Top    = 5000;
             });
 
@@ -1329,6 +1354,9 @@ public partial class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
+        // Stamped so GetRecentlyCompletedRfqIdsAsync can tell WHEN this happened (the boolean alone
+        // can't) — cleared on un-complete so re-completing later gets a fresh timestamp, not the old one.
+        var completedAt = complete ? DateTimeOffset.UtcNow.ToString("o") : null;
 
         var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(req =>
@@ -1354,8 +1382,9 @@ public partial class SharePointService
                     {
                         AdditionalData = new Dictionary<string, object?>
                         {
-                            [col]          = rfqId,
-                            ["Complete"]   = complete,
+                            [col]            = rfqId,
+                            ["Complete"]     = complete,
+                            ["CompletedAt"]  = completedAt,
                         }
                     }
                 });
@@ -1367,7 +1396,7 @@ public partial class SharePointService
         await GetGraph().Sites[siteId].Lists[listId].Items[primary.Id!].Fields
             .PatchAsync(new FieldValueSet
             {
-                AdditionalData = new Dictionary<string, object?> { ["Complete"] = complete }
+                AdditionalData = new Dictionary<string, object?> { ["Complete"] = complete, ["CompletedAt"] = completedAt }
             });
         _log.LogInformation("[SP] Set Complete={Complete} for RFQ '{Id}'", complete, rfqId);
     }
@@ -5413,6 +5442,7 @@ public partial class SharePointService
                 ("Priority",        "text"),
                 ("CustomerName",    "text"),
                 ("HskNumber",       "text"),
+                ("CompletedAt",     "dateTime"),
             ]),
             ["PurchaseOrders"] = await EnsureListColumnsAsync(siteId, "PurchaseOrders",
             [

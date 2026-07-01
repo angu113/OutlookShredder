@@ -160,6 +160,26 @@ public class SupplierConversationsController : ControllerBase
         }
     }
 
+    /// <summary>RFQ ids completed within the last N hours (default + config key
+    /// <c>Mailbox:RecentlyCompletedHours</c>, default 48) — the Shredder Mailbox view unions these with its
+    /// live RFQ ids so a supplier email doesn't vanish from Mailbox the moment its RFQ gets marked complete;
+    /// suppliers keep replying on old threads for a few days and that history still needs to be reachable.</summary>
+    [HttpGet("rfq/recently-completed")]
+    public async Task<IActionResult> RecentlyCompletedRfqIds([FromQuery] double? hours)
+    {
+        var windowHours = hours ?? _config.GetValue("Mailbox:RecentlyCompletedHours", 48.0);
+        try
+        {
+            var ids = await _sp.GetRecentlyCompletedRfqIdsAsync(TimeSpan.FromHours(windowHours));
+            return Ok(new { rfqIds = ids, windowHours });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[Mailbox] recently-completed lookup failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Marks one inbound supplier message read/unread FOR THE CALLING USER (per-user read state, keyed by
     /// UserId) by MessageId, then publishes a user-scoped "SupplierMsgRead" bus event so only THAT user's

@@ -103,8 +103,9 @@ public sealed class RfqAutoCompleteService : BackgroundService
             {
                 await _sp.PatchRfqReferenceByItemIdAsync(itemId!, new Dictionary<string, object?>
                 {
-                    ["Complete"] = true,
-                    ["Notes"]    = newNotes,
+                    ["Complete"]    = true,
+                    ["CompletedAt"] = DateTimeOffset.UtcNow.ToString("o"),
+                    ["Notes"]       = newNotes,
                 });
                 completed++;
                 _log.LogInformation(
