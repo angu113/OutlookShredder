@@ -1178,6 +1178,7 @@ public static class DrawingPdfRenderer
         // Real cross-section dimension, not a schematic stand-in — whichever axis the bevel actually
         // tapers along (see MiterTaperOnDepthAxis), so this panel is self-sufficient: the shop reads
         // length, both end angles, AND the flange/leg/OD size without cross-referencing the section view.
+        // Same value as the matching dimension on the cross-section view.
         bool taperOnDepth = MiterTaperOnDepthAxis(s);
         double hgt = taperOnDepth ? s.MiterOuterDepth : s.MiterOuterWidth;
         if (len <= 0 || hgt <= 0) return;
@@ -1202,15 +1203,13 @@ public static class DrawingPdfRenderer
         DimH(gfx, dimFont, P(0, 0).X, P(len, 0).X, P(0, 0).Y, oy + drawH + 22, Fq(len), true);
 
         // Real flange/leg/OD dimension (the axis the bevel tapers along) — same value + styling as
-        // the matching dimension on the cross-section view. The "A" prefix matches the isometric's
-        // own flange/leg/OD label (same value, same axis) so the shop can trace it between views.
-        DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, $"A {Fq(hgt)}", false);
+        // the matching dimension on the cross-section view.
+        DimV(gfx, dimFont, P(0, 0).X, ox - 30, P(0, hgt).Y, P(0, 0).Y, Fq(hgt), false);
 
         // End-angle callouts near each slanted edge, pushed clear of the material along that edge's own
         // outward normal (away from the shape's centroid), with a short witness tick — never sitting on
         // top of the drawn trapezoid. Degrees read as a short decimal (0.# — "45°", "45.5°"), not F()'s
-        // fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle. "B"/"C"
-        // prefixes match the isometric's END A / END B angle callouts.
+        // fixed 3-decimal money-style formatting ("45.000°"), which reads oddly for an angle.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
         var angFont = new XFont("Arial", 8, XFontStyleEx.Bold);
         var elevCentroid = new XPoint(pts.Average(p => p.X), pts.Average(p => p.Y));
@@ -1226,8 +1225,8 @@ public static class DrawingPdfRenderer
             gfx.DrawLine(witnessPen, w1, w2);
             gfx.DrawString(text, angFont, TextBrush, new XRect(w2.X - 24, w2.Y - 6, 48, 12), XStringFormats.Center);
         }
-        SlantLabel(P(0, 0), P(insetL, hgt), $"B {Deg(s.MiterAngleLeft)}°");
-        SlantLabel(P(len, 0), P(len - insetR, hgt), $"C {Deg(s.MiterAngleRight)}°");
+        SlantLabel(P(0, 0), P(insetL, hgt), $"{Deg(s.MiterAngleLeft)}°");
+        SlantLabel(P(len, 0), P(len - insetR, hgt), $"{Deg(s.MiterAngleRight)}°");
     }
 
     /// <summary>Two independent isometric "bevel detail" sketches, one per cut end, so the shop sees
@@ -1239,9 +1238,8 @@ public static class DrawingPdfRenderer
     /// make either end unreadable at one true scale — the true length lives on the elevation, and
     /// every drawing already carries a blanket "NOT TO SCALE" footer). Same single-plane bevel model
     /// as the cross-section's face highlight and the elevation's dimensions/angles
-    /// (<see cref="MiterTaperOnDepthAxis"/>), and the SAME lettered tags (A/B/C) as the elevation, so
-    /// every view agrees on which physical edge is which. Same true-isometric convention as
-    /// <see cref="DrawPanIso"/> (x/y recede at 30°, z is vertical).</summary>
+    /// (<see cref="MiterTaperOnDepthAxis"/>), so every view agrees on which physical edge is which.
+    /// Same true-isometric convention as <see cref="DrawPanIso"/> (x/y recede at 30°, z is vertical).</summary>
     private static void DrawMiterIsometric(XGraphics gfx, FlatPatternResult fp, XRect box)
     {
         var s = fp.Spec;
@@ -1328,8 +1326,7 @@ public static class DrawingPdfRenderer
         // END A / END B + angle labels — anchored to each end's own OUTERMOST corner (the true tip,
         // not a generic average position), then pushed further out along that same direction with a
         // thin witness leader, so the callout sits clearly outside the drawn material and still points
-        // straight at the corner it's describing. "B"/"C" prefixes match the elevation's own End A /
-        // End B angle callouts.
+        // straight at the corner it's describing.
         string Deg(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
         double acx = aPts.Average(p => p.X), acy = aPts.Average(p => p.Y);
         double bcx = bPts.Average(p => p.X), bcy = bPts.Average(p => p.Y);
@@ -1353,15 +1350,14 @@ public static class DrawingPdfRenderer
             gfx.DrawString(endName, angFont, TextBrush, new XRect(box2.X, box2.Y, box2.Width, 11), XStringFormats.TopCenter);
             gfx.DrawString(angleText, angFont, AccentBrush, new XRect(box2.X, box2.Y + 12, box2.Width, 12), XStringFormats.TopCenter);
         }
-        EndLabel(aPts, outAx, outAy, "END A", $"B {Deg(s.MiterAngleLeft)}°");
-        EndLabel(bPts, -outAx, -outAy, "END B", $"C {Deg(s.MiterAngleRight)}°");
+        EndLabel(aPts, outAx, outAy, "END A", $"{Deg(s.MiterAngleLeft)}°");
+        EndLabel(bPts, -outAx, -outAy, "END B", $"{Deg(s.MiterAngleRight)}°");
 
         // Compact cross-section dimension labels — a quick visual size check (the cross-section view
-        // carries the precise, fully-dimensioned callouts). The "A" prefix matches the elevation's
-        // flange/leg/OD dimension exactly (same axis, same value); the other extent has no elevation
-        // counterpart to cross-reference, so it's shown plain, un-prefixed. Offset along the EDGE's own
-        // outward normal (not a distance-from-centroid heuristic, which under-clears a long thin part),
-        // with a short witness tick from the material edge to the value.
+        // carries the precise, fully-dimensioned callouts). The flange/leg/OD value here is the same
+        // value + axis as the matching dimension on the elevation. Offset along the EDGE's own outward
+        // normal (not a distance-from-centroid heuristic, which under-clears a long thin part), with a
+        // short witness tick from the material edge to the value.
         double cx = aPts.Average(p => p.X), cy = aPts.Average(p => p.Y);
         void EdgeLabel(XPoint a, XPoint b, string text)
         {
@@ -1385,14 +1381,12 @@ public static class DrawingPdfRenderer
             double dlr = Math.Sqrt(dxr * dxr + dyr * dyr); if (dlr < 1e-6) { dxr = 0; dyr = -1; dlr = 1; }
             var w2r = new XPoint(top.X + dxr / dlr * 26, top.Y + dyr / dlr * 26);
             gfx.DrawLine(dimPen, top, w2r);
-            gfx.DrawString($"A {Fq(vExt)} OD", dimFontIso, DimBrush, new XRect(w2r.X - 30, w2r.Y - 5, 60, 10), XStringFormats.Center);
+            gfx.DrawString($"{Fq(vExt)} OD", dimFontIso, DimBrush, new XRect(w2r.X - 30, w2r.Y - 5, 60, 10), XStringFormats.Center);
         }
         else
         {
-            // Elevation's "A" = hgt = taperOnDepth ? wExt(D) : vExt(W) — match that EXACT axis here, not the
-            // edge that happens to share the same w/v-constant condition (that flip is the actual bug this fixes).
-            EdgeLabel(aPts[0], aPts[1], taperOnDepth ? Fq(vExt) : $"A {Fq(vExt)}");            // w=0 edge — spans vExt
-            EdgeLabel(aPts[poly.Count - 1], aPts[0], taperOnDepth ? $"A {Fq(wExt)}" : Fq(wExt));   // v=0 edge — spans wExt
+            EdgeLabel(aPts[0], aPts[1], Fq(vExt));                        // w=0 edge — spans vExt
+            EdgeLabel(aPts[poly.Count - 1], aPts[0], Fq(wExt));           // v=0 edge — spans wExt
         }
     }
 
