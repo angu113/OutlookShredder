@@ -68,8 +68,10 @@ public interface IMessageStore
     Task EnsureProvisionedAsync(CancellationToken ct = default);
     /// <summary>Appends a message row; sets <see cref="MessageRecord.SpItemId"/> on success.</summary>
     Task AppendAsync(MessageRecord message, CancellationToken ct = default);
-    /// <summary>Updates an outbound message's delivery status by its provider SID. False if no row matched.</summary>
-    Task<bool> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default);
+    /// <summary>Updates an outbound message's delivery status by its provider SID. Returns the owning
+    /// InquiryId on success (so the caller can also refresh its in-memory cache — see
+    /// InquiryService.UpdateMessageStatusAsync), or null if no row matched.</summary>
+    Task<string?> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default);
     /// <summary>The inquiry's messages, oldest-first, capped at <paramref name="take"/> — for AI thread context.</summary>
     Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default);
 

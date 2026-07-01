@@ -239,6 +239,10 @@ try
     // Inbound SMS coverage: all-ingress webhook -> dedup queue (MessageSid) -> one competing-consumer.
     builder.Services.AddSingleton<SmsInboundQueue>();
     builder.Services.AddHostedService<SmsInboundQueueProcessor>();
+    // Outbound delivery-status coverage: the Function ingress has no SharePoint access, so it enqueues
+    // status callbacks here instead of applying them directly (mirrors the inbound path above).
+    builder.Services.AddSingleton<SmsStatusQueue>();
+    builder.Services.AddHostedService<SmsStatusQueueProcessor>();
     builder.Services.AddSingleton<ForgeSchedulerQueue>();
     builder.Services.AddSingleton<ForgeTaskService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ForgeTaskService>());

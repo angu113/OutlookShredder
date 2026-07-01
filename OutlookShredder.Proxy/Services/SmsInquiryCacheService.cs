@@ -221,6 +221,21 @@ public sealed class SmsInquiryCacheService : IHostedService, ICacheStatusProvide
         _ = PrefetchMessageMediaAsync(inquiryId, msg, CancellationToken.None);
     }
 
+    /// <summary>In-place delivery-status update for one cached outbound message, by provider SID — a targeted
+    /// mutation (not ApplyMessage, which would replace the whole record and drop Body/MediaJson/etc. since the
+    /// status callback only carries the SID + new status). No-op if the inquiry/message isn't cached.</summary>
+    public void ApplyMessageStatus(string inquiryId, string sid, string status)
+    {
+        if (!_entries.TryGetValue(inquiryId, out var e)) return;
+        lock (e)
+        {
+            var msg = e.Messages.FirstOrDefault(m => !string.IsNullOrEmpty(sid) && m.ExternalId == sid);
+            if (msg is null) return;
+            msg.Status = status;
+        }
+        MarkDirty();
+    }
+
     public void ApplyDraft(InquiryDraft d)
     {
         if (!_entries.TryGetValue(d.InquiryId, out var e)) return;

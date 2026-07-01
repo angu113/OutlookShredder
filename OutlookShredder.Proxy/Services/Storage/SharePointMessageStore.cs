@@ -17,7 +17,7 @@ public sealed class SharePointMessageStore : IMessageStore
 
     public Task AppendAsync(MessageRecord message, CancellationToken ct = default) => _sp.WriteMessageAsync(message, ct);
 
-    public Task<bool> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default)
+    public Task<string?> UpdateStatusBySidAsync(string sid, string status, CancellationToken ct = default)
         => _sp.UpdateMessageStatusBySidAsync(sid, status, ct);
 
     public async Task<IReadOnlyList<MessageRecord>> GetByInquiryAsync(string inquiryId, int take = 20, CancellationToken ct = default)

@@ -12321,10 +12321,11 @@ public partial class SharePointService
     }
 
     /// <summary>Updates an outbound SMS row's delivery status by its SignalWire MessageSid (stored in
-    /// ExternalId). Called from the SignalWire status callback. No-op when no row matches the SID.</summary>
-    public async Task<bool> UpdateMessageStatusBySidAsync(string sid, string status, CancellationToken ct = default)
+    /// ExternalId). Called from the status-callback pipeline. Returns the row's InquiryId on success (so the
+    /// caller can also refresh its in-memory cache) or null when no row matches the SID.</summary>
+    public async Task<string?> UpdateMessageStatusBySidAsync(string sid, string status, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(sid)) return false;
+        if (string.IsNullOrWhiteSpace(sid)) return null;
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateMessagesListIdAsync(ct);
 
@@ -12336,12 +12337,12 @@ public partial class SharePointService
         }, ct);
 
         var item = match?.Value?.FirstOrDefault();
-        if (item?.Id is null) return false;
+        if (item?.Id is null) return null;
 
         await GetGraph().Sites[siteId].Lists[listId].Items[item.Id].Fields
             .PatchAsync(new FieldValueSet { AdditionalData = new Dictionary<string, object?> { ["MsgStatus"] = status } },
                 cancellationToken: ct);
-        return true;
+        return item.Fields?.AdditionalData?.TryGetValue("InquiryId", out var iid) == true ? iid?.ToString() : null;
     }
 
     /// <summary>Patches an existing message row's Body + MediaJson by its provider SID (ExternalId) — used by

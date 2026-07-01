@@ -255,9 +255,17 @@ public sealed class InquiryService : IHostedService
         catch (Exception ex) { _log.LogWarning(ex, "[Inquiry] AI draft generation failed for {Id}", inquiryId); }
     }
 
-    /// <summary>Updates an outbound message's delivery status by SID (SignalWire status callback).</summary>
-    public Task<bool> UpdateMessageStatusAsync(string sid, string status, CancellationToken ct = default)
-        => _messages.UpdateStatusBySidAsync(sid, status, ct);
+    /// <summary>Updates an outbound message's delivery status by SID (SignalWire status callback), then
+    /// refreshes the in-memory cache entry in place and notifies — the SP write alone is invisible to Pulse,
+    /// which reads the cache, not SharePoint, on the hot path.</summary>
+    public async Task<bool> UpdateMessageStatusAsync(string sid, string status, CancellationToken ct = default)
+    {
+        var inquiryId = await _messages.UpdateStatusBySidAsync(sid, status, ct);
+        if (inquiryId is null) return false;
+        _cache.ApplyMessageStatus(inquiryId, sid, status);
+        _notify.NotifyInquiry("Updated", new Inquiry { Id = inquiryId });
+        return true;
+    }
 
     /// <summary>Operator-triggered: dismiss any prior pending drafts and generate a FRESH AI suggestion for the
     /// latest inbound message (so a stale/early draft can be replaced on demand). False if no inbound exists.</summary>

@@ -20,16 +20,19 @@ namespace OutlookShredder.SmsWebhook;
 public class SmsWebhookFunction
 {
     private readonly ServiceBusClient _sb;
+    private readonly ServiceBusClient _sbStatus;
     private readonly IConfiguration   _config;
     private readonly ILogger<SmsWebhookFunction> _log;
 
     private static readonly JsonSerializerOptions _json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-    public SmsWebhookFunction(ServiceBusClient sb, IConfiguration config, ILogger<SmsWebhookFunction> log)
+    public SmsWebhookFunction(ServiceBusClient sb, StatusServiceBusClient sbStatus,
+        IConfiguration config, ILogger<SmsWebhookFunction> log)
     {
-        _sb     = sb;
-        _config = config;
-        _log    = log;
+        _sb       = sb;
+        _sbStatus = sbStatus.Client;
+        _config   = config;
+        _log      = log;
     }
 
     /// <summary>Inbound SMS webhook. Wire in SignalWire: POST https://&lt;func&gt;.azurewebsites.net/api/sms/inbound</summary>
@@ -55,15 +58,24 @@ public class SmsWebhookFunction
         return Twiml(req);
     }
 
-    /// <summary>Outbound delivery-status callback. Validates + acks; status persistence is deferred to a proxy
-    /// (the SharePoint Messages row is the proxy's concern) — when wired, enqueue a status job here.</summary>
+    /// <summary>Outbound delivery-status callback. Validates + acks, then enqueues onto <c>sms-status-jobs</c>
+    /// — this Function has no SharePoint access, so applying the status (the Messages row + a proxy's
+    /// in-memory cache) is deferred to a proxy consumer (<c>SmsStatusQueueProcessor</c>).</summary>
     [Function("SmsStatus")]
     public async Task<HttpResponseData> Status(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "sms/status")] HttpRequestData req)
     {
         var form = await ReadFormAsync(req);
         if (!ValidateRequest(req, form)) return req.CreateResponse(HttpStatusCode.Forbidden);
-        _log.LogInformation("[SmsWebhook] status sid {Sid} -> {Status}", Get(form, "MessageSid"), Get(form, "MessageStatus"));
+
+        var sid    = Get(form, "MessageSid");
+        var status = Get(form, "MessageStatus");
+        _log.LogInformation("[SmsWebhook] status sid {Sid} -> {Status}", sid, status);
+        if (!string.IsNullOrWhiteSpace(sid) && !string.IsNullOrWhiteSpace(status))
+        {
+            try { await EnqueueStatusAsync(sid, status); }
+            catch (Exception ex) { _log.LogError(ex, "[SmsWebhook] status enqueue failed"); }
+        }
         return Twiml(req);
     }
 
@@ -81,6 +93,20 @@ public class SmsWebhookFunction
         var payload = JsonSerializer.Serialize(new { from, to, body, sid, mediaUrls }, _json);
         var msg = new ServiceBusMessage(payload) { ContentType = "application/json" };
         if (!string.IsNullOrWhiteSpace(sid)) msg.MessageId = sid;   // duplicate-detection key (the proxy queue dedups on this)
+        await sender.SendMessageAsync(msg);
+    }
+
+    // No MessageId/dedup here (unlike EnqueueAsync above): a status callback legitimately repeats for the
+    // SAME sid with a DIFFERENT status (queued -> sent -> delivered), so a sid-keyed dedup would collapse
+    // real, distinct events. The queue (sms-status-jobs) is provisioned by the proxy without duplicate
+    // detection to match. If the queue doesn't exist yet (proxy hasn't started since this was wired), the
+    // send throws and the caller logs + drops it — never fatal to the webhook ack.
+    private async Task EnqueueStatusAsync(string sid, string status)
+    {
+        var queue = _config["ServiceBus:SmsStatusQueueName"] ?? "sms-status-jobs";
+        await using var sender = _sbStatus.CreateSender(queue);
+        var payload = JsonSerializer.Serialize(new { sid, status }, _json);
+        var msg = new ServiceBusMessage(payload) { ContentType = "application/json" };
         await sender.SendMessageAsync(msg);
     }
 
