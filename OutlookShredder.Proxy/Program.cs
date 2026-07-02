@@ -194,6 +194,7 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<HackensackPollerService>());
     builder.Services.AddHostedService<LqUpdateService>();
     builder.Services.AddHostedService<RfqAutoCompleteService>();
+    builder.Services.AddHostedService<DateTimeBackfillSweepService>();  // heals text-date drift from not-yet-updated fleet proxies
     builder.Services.AddHostedService<ZoomCallWatcherService>();
     builder.Services.AddSingleton<SignalWireService>();
     builder.Services.AddSingleton<MessagingService>();
