@@ -395,6 +395,15 @@ public class ErpController : ControllerBase
         return Ok(new { scanned, patched, failed });
     }
 
+    /// <summary>One-time migration: populate the native DocumentDateDt dateTime column from the legacy text
+    /// DocumentDate (parsed; "&lt;UNKNOWN&gt;"/blank skipped). Idempotent.</summary>
+    [HttpPost("/api/erp/backfill-document-date-dt")]
+    public async Task<IActionResult> BackfillDocumentDateDt(CancellationToken ct)
+    {
+        var (scanned, patched, failed) = await _sp.BackfillErpDocumentDateDtAsync(ct);
+        return Ok(new { scanned, patched, failed });
+    }
+
     /// <summary>
     /// Deletes ErpDocuments records matching the given document types (comma-separated).
     /// Example: DELETE /api/erp/clean-by-type?types=Payment,Quotation

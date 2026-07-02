@@ -10186,6 +10186,7 @@ public partial class SharePointService
             ("ContactName",    "text"),
             ("CustomerRef",    "text"),
             ("DocumentDate",   "text"),
+            ("DocumentDateDt", "dateTime"),   // native, indexed — parsed from the text DocumentDate (AzureSQL/date-range prep)
             ("TotalAmount",    "text"),
             ("Currency",       "text"),
             ("ReceivedAt",     "text"),
@@ -10218,7 +10219,7 @@ public partial class SharePointService
         }
 
         // Ensure columns used in $filter/$orderby queries are indexed — never use HonorNonIndexedQueries header.
-        foreach (var colName in new[] { "Title", "IsArchived", "ReceivedAt", "ReceivedAtDt" })
+        foreach (var colName in new[] { "Title", "IsArchived", "ReceivedAt", "ReceivedAtDt", "DocumentDateDt" })
         {
             if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
             if (col.Indexed == true) continue;
@@ -10273,6 +10274,7 @@ public partial class SharePointService
             ["ContactName"]    = extraction.ContactName,
             ["CustomerRef"]    = extraction.CustomerReference,
             ["DocumentDate"]   = extraction.DocumentDate,
+            ["DocumentDateDt"] = ToIsoOrNull(extraction.DocumentDate),   // parsed → native dateTime
             ["TotalAmount"]    = extraction.TotalAmount,
             ["Currency"]       = extraction.Currency ?? "USD",
             ["ReceivedAt"]     = receivedAt.ToString("o"),
@@ -10338,6 +10340,7 @@ public partial class SharePointService
             ["ContactName"]     = extraction.ContactName,
             ["CustomerRef"]     = extraction.CustomerReference,
             ["DocumentDate"]    = extraction.DocumentDate,
+            ["DocumentDateDt"]  = ToIsoOrNull(extraction.DocumentDate),   // parsed → native dateTime
             ["TotalAmount"]     = extraction.TotalAmount,
             ["Currency"]        = extraction.Currency ?? "USD",
             ["LineItemsJson"]   = lineItemsJson,
@@ -10625,6 +10628,12 @@ public partial class SharePointService
     public async Task<(int Scanned, int Patched, int Failed)> BackfillErpReceivedAtDtAsync(CancellationToken ct = default)
         => await BackfillTextDateToDateTimeAsync(await GetOrCreateErpDocumentsListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
 
+    /// <summary>Populate ErpDocuments' native <c>DocumentDateDt</c> from the legacy text <c>DocumentDate</c>
+    /// ("Jul-01-2026" etc.; parsed via the shared engine, "&lt;UNKNOWN&gt;"/blank skipped). Trigger via
+    /// POST /api/erp/backfill-document-date-dt. Idempotent.</summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillErpDocumentDateDtAsync(CancellationToken ct = default)
+        => await BackfillTextDateToDateTimeAsync(await GetOrCreateErpDocumentsListIdAsync(ct), "DocumentDate", "DocumentDateDt", ct);
+
     /// <summary>Populate PhoneCallLog's native <c>ReceivedAtDt</c> from the legacy text <c>ReceivedAt</c>.
     /// Trigger via POST /api/phone/backfill-received-dt. Idempotent.</summary>
     public async Task<(int Scanned, int Patched, int Failed)> BackfillCallLogReceivedAtDtAsync(CancellationToken ct = default)
@@ -10645,6 +10654,12 @@ public partial class SharePointService
                 System.Globalization.DateTimeStyles.AssumeUniversal, out dt)) return true;
         return DateTimeOffset.TryParse(s, out dt);   // last resort: current culture
     }
+
+    /// <summary>Parse a legacy text date (ISO, "MMM-dd-yyyy", or locale) to an ISO string for a dateTime
+    /// column, or null if blank/unparseable (e.g. the "&lt;UNKNOWN&gt;" sentinel). Used by dual-writes whose
+    /// text source is NOT already ISO — e.g. ErpDocuments.DocumentDate ("Jul-01-2026").</summary>
+    private static string? ToIsoOrNull(string? raw) =>
+        !string.IsNullOrWhiteSpace(raw) && TryParseFlexible(raw, out var dt) ? dt.ToString("o") : null;
 
     /// <summary>
     /// Generic one-time migration engine: populate a native <paramref name="dtColumn"/> dateTime column from
