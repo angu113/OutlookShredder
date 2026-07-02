@@ -360,8 +360,8 @@ public class CatalogAnalysisService
                 var text = doc.RootElement.GetProperty("content")[0]
                               .GetProperty("text").GetString() ?? "[]";
                 text = text.Trim();
-                if (text.StartsWith("```")) text = text[(text.IndexOf('\n') + 1)..];
-                if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
+                if (text.StartsWith("```", StringComparison.Ordinal)) text = text[(text.IndexOf('\n') + 1)..];
+                if (text.EndsWith("```", StringComparison.Ordinal))   text = text[..text.LastIndexOf("```", StringComparison.Ordinal)].TrimEnd();
 
                 var dtos = JsonSerializer.Deserialize<List<DictDefDto>>(text,
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
@@ -1166,8 +1166,8 @@ public class CatalogAnalysisService
 
             // Strip any accidental markdown fences
             text = text.Trim();
-            if (text.StartsWith("```")) text = text[(text.IndexOf('\n') + 1)..];
-            if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
+            if (text.StartsWith("```", StringComparison.Ordinal)) text = text[(text.IndexOf('\n') + 1)..];
+            if (text.EndsWith("```", StringComparison.Ordinal))   text = text[..text.LastIndexOf("```", StringComparison.Ordinal)].TrimEnd();
 
             var tokenDtos = JsonSerializer.Deserialize<List<ProductTokens>>(text, Json)
                             ?? [];
@@ -1598,8 +1598,8 @@ public class CatalogAnalysisService
                 .GetString() ?? "[]";
 
             text = text.Trim();
-            if (text.StartsWith("```")) text = text[(text.IndexOf('\n') + 1)..];
-            if (text.EndsWith("```"))   text = text[..text.LastIndexOf("```")].TrimEnd();
+            if (text.StartsWith("```", StringComparison.Ordinal)) text = text[(text.IndexOf('\n') + 1)..];
+            if (text.EndsWith("```", StringComparison.Ordinal))   text = text[..text.LastIndexOf("```", StringComparison.Ordinal)].TrimEnd();
 
             var tokenDtos = JsonSerializer.Deserialize<List<ProductTokens>>(text, Json) ?? [];
             foreach (var t in tokenDtos) DimensionNormalizer.Apply(t);   // canonical decimal-inch dims

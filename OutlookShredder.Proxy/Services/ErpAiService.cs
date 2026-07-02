@@ -20,7 +20,7 @@ public class ErpAiService
 
     private const string ClaudeApiUrl = "https://api.anthropic.com/v1/messages";
     private const string GeminiApiUrlTemplate =
-        "https://generativelanguage.googleapis.com/v1beta/models/{0}:generateContent?key={1}";
+        "https://generativelanguage.googleapis.com/v1beta/models/{0}:generateContent";
 
     private const string SystemPromptText = """
         You are a data extraction assistant for Metal Supermarkets Hackensack, a metals
@@ -358,7 +358,7 @@ public class ErpAiService
         }
 
         var model = _config["Gemini:Model"] ?? "gemini-2.0-flash";
-        var url   = string.Format(GeminiApiUrlTemplate, model, apiKey);
+        var url   = string.Format(GeminiApiUrlTemplate, model);
 
         var body = new
         {
@@ -398,6 +398,7 @@ public class ErpAiService
                 {
                     Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
                 };
+                req.Headers.Add("x-goog-api-key", apiKey);  // key in header, not the URL (avoids leaking it into logs/traces)
                 response = await _geminiHttp.SendAsync(req, ct);
             }
             catch (Exception ex) when (attempt < maxRetries)
