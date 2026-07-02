@@ -88,6 +88,17 @@ public class MessagingController : ControllerBase
 
     [HttpGet("users")]
     public IActionResult GetUsers() => Ok(_messaging.KnownUsers);
+
+    /// <summary>
+    /// One-time migration: populate the native MsgTimeDt dateTime column on Messages from the legacy text
+    /// MsgTime so conversation/thread reads order server-side on a real datetime. Idempotent.
+    /// </summary>
+    [HttpPost("backfill-msgtime-dt")]
+    public async Task<IActionResult> BackfillMsgTimeDt(CancellationToken ct)
+    {
+        var (scanned, patched, failed) = await _sp.BackfillMessagesMsgTimeDtAsync(ct);
+        return Ok(new { scanned, patched, failed });
+    }
 }
 
 [ApiController]

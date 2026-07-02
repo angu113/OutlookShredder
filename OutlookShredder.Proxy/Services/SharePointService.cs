@@ -10630,6 +10630,11 @@ public partial class SharePointService
     public async Task<(int Scanned, int Patched, int Failed)> BackfillCallLogReceivedAtDtAsync(CancellationToken ct = default)
         => await BackfillTextDateToDateTimeAsync(await GetOrCreateCallLogListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
 
+    /// <summary>Populate Messages' native <c>MsgTimeDt</c> from the legacy text <c>MsgTime</c>.
+    /// Trigger via POST /api/messages/backfill-msgtime-dt. Idempotent.</summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillMessagesMsgTimeDtAsync(CancellationToken ct = default)
+        => await BackfillTextDateToDateTimeAsync(await GetOrCreateMessagesListIdAsync(ct), "MsgTime", "MsgTimeDt", ct);
+
     /// <summary>
     /// Generic one-time migration engine: populate a native <paramref name="dtColumn"/> dateTime column from
     /// a legacy text <paramref name="textColumn"/> on <paramref name="listId"/>. Parses each text value in
@@ -12058,6 +12063,7 @@ public partial class SharePointService
             ("Body",       "note"),
             ("ConvId",     "text"),
             ("MsgTime",    "text"),
+            ("MsgTimeDt",  "dateTime"),   // native, indexed — the sortable one (text MsgTime kept for back-compat)
             ("IsRead",     "boolean"),
             ("ExternalId", "text"),
             ("InquiryId",  "text"),    // CINQ thread this message belongs to (SMS inquiry pipeline)
@@ -12077,9 +12083,10 @@ public partial class SharePointService
             {
                 var col = type switch
                 {
-                    "note"    => new ColumnDefinition { Name = name, Text    = new TextColumn { AllowMultipleLines = true } },
-                    "boolean" => new ColumnDefinition { Name = name, Boolean = new BooleanColumn() },
-                    _         => new ColumnDefinition { Name = name, Text    = new TextColumn() },
+                    "note"     => new ColumnDefinition { Name = name, Text     = new TextColumn { AllowMultipleLines = true } },
+                    "boolean"  => new ColumnDefinition { Name = name, Boolean  = new BooleanColumn() },
+                    "dateTime" => new ColumnDefinition { Name = name, DateTime = new DateTimeColumn() },
+                    _          => new ColumnDefinition { Name = name, Text     = new TextColumn() },
                 };
                 await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
                 _log.LogInformation("[SP] Created Messages column '{Name}'", name);
@@ -12093,7 +12100,7 @@ public partial class SharePointService
         var allCols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name is not ("ConvId" or "MsgTime" or "InquiryId" or "ExternalId")) continue;
+            if (col.Name is not ("ConvId" or "MsgTime" or "MsgTimeDt" or "InquiryId" or "ExternalId")) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
@@ -12124,6 +12131,7 @@ public partial class SharePointService
             ["Body"]       = msg.Body,
             ["ConvId"]     = msg.ConversationId,
             ["MsgTime"]    = msg.TimestampUtc,
+            ["MsgTimeDt"]  = msg.TimestampUtc,   // native dateTime — server-side sortable
             ["IsRead"]     = msg.IsRead,
             ["ExternalId"] = msg.ExternalId,
             ["InquiryId"]  = msg.InquiryId,
@@ -12241,7 +12249,7 @@ public partial class SharePointService
             .GetAsync(r =>
             {
                 r.QueryParameters.Expand  = ["fields"];
-                r.QueryParameters.Orderby = ["fields/MsgTime desc"];
+                r.QueryParameters.Orderby = ["fields/MsgTimeDt desc"];
                 r.QueryParameters.Top     = top;
             }, ct);
 
@@ -12315,7 +12323,7 @@ public partial class SharePointService
             {
                 r.QueryParameters.Expand  = ["fields"];
                 r.QueryParameters.Filter  = $"fields/ConvId eq '{escaped}'";
-                r.QueryParameters.Orderby = ["fields/MsgTime asc"];
+                r.QueryParameters.Orderby = ["fields/MsgTimeDt asc"];
                 r.QueryParameters.Top     = top;
             }, ct);
 
@@ -12355,7 +12363,7 @@ public partial class SharePointService
         var listId = await GetOrCreateMessagesListIdAsync(ct);
         var items  = await ReadAllListItemsAsync(listId, expand: ["fields"],
             filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
-            orderby: ["fields/MsgTime asc"], ct: ct);
+            orderby: ["fields/MsgTimeDt asc"], ct: ct);
 
         var result = new List<Models.MessageRecord>();
         foreach (var item in items)
