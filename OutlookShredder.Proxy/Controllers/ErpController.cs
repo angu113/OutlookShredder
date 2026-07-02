@@ -384,23 +384,14 @@ public class ErpController : ControllerBase
         return Ok(new { success = true, message = "ErpDocuments list ensured" });
     }
 
-    /// <summary>
-    /// One-time migration: populate the native ReceivedAtDt dateTime column from the legacy text
-    /// ReceivedAt so server-side newest-first ordering works. Idempotent.
-    /// </summary>
-    [HttpPost("/api/erp/backfill-received-dt")]
-    public async Task<IActionResult> BackfillReceivedDt(CancellationToken ct)
+    /// <summary>Rollout migration: backfill ALL native *Dt dateTime columns on this service's lists
+    /// (ErpDocuments ReceivedAt + DocumentDate, PhoneCallLog ReceivedAt, Messages MsgTime) from their legacy
+    /// text columns. Registry-driven + idempotent; the self-healing sweep runs the same set automatically.
+    /// (Inquiry-cluster columns: POST /api/inquiries/backfill-datetime-columns.)</summary>
+    [HttpPost("/api/erp/backfill-datetime-columns")]
+    public async Task<IActionResult> BackfillDateTimeColumns(CancellationToken ct)
     {
-        var (scanned, patched, failed) = await _sp.BackfillErpReceivedAtDtAsync(ct);
-        return Ok(new { scanned, patched, failed });
-    }
-
-    /// <summary>One-time migration: populate the native DocumentDateDt dateTime column from the legacy text
-    /// DocumentDate (parsed; "&lt;UNKNOWN&gt;"/blank skipped). Idempotent.</summary>
-    [HttpPost("/api/erp/backfill-document-date-dt")]
-    public async Task<IActionResult> BackfillDocumentDateDt(CancellationToken ct)
-    {
-        var (scanned, patched, failed) = await _sp.BackfillErpDocumentDateDtAsync(ct);
+        var (scanned, patched, failed) = await _sp.BackfillAllDateTimeColumnsAsync(ct);
         return Ok(new { scanned, patched, failed });
     }
 

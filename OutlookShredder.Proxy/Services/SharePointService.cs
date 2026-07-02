@@ -10620,29 +10620,35 @@ public partial class SharePointService
     }
 
     /// <summary>
-    /// One-time migration: populate the native <c>ReceivedAtDt</c> dateTime column from the legacy text
-    /// <c>ReceivedAt</c> (written in mixed ISO / US-locale formats, so it can't be ordered server-side).
-    /// Parses each text value in memory (culture-tolerant) and patches the dateTime column. Idempotent —
-    /// skips rows already carrying ReceivedAtDt. Trigger via POST /api/erp/backfill-received-dt.
+    /// SINGLE SOURCE OF TRUTH for the text-date → native-dateTime migrations on THIS service's lists. The
+    /// self-healing sweep (<see cref="DateTimeBackfillSweepService"/>) and <see cref="BackfillAllDateTimeColumnsAsync"/>
+    /// both iterate this list, so a NEW column migration is registered in exactly ONE place and is
+    /// automatically backfilled + swept — nothing can be silently missed. (The inquiry-cluster lists have
+    /// their own equivalent list in <c>SharePointInquiryStore.BackfillDateTimeColumnsAsync</c>.)
+    /// ➤ To add a migration: add the native `("XxxDt","dateTime")` column + index in provisioning, dual-write
+    /// it at every write site, then add one row here.
     /// </summary>
-    public async Task<(int Scanned, int Patched, int Failed)> BackfillErpReceivedAtDtAsync(CancellationToken ct = default)
-        => await BackfillTextDateToDateTimeAsync(await GetOrCreateErpDocumentsListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
+    private (Func<CancellationToken, Task<string>> ListId, string TextCol, string DtCol)[] DateTimeColumnMigrations() =>
+    [
+        (GetOrCreateErpDocumentsListIdAsync, "ReceivedAt",   "ReceivedAtDt"),
+        (GetOrCreateErpDocumentsListIdAsync, "DocumentDate", "DocumentDateDt"),
+        (GetOrCreateCallLogListIdAsync,      "ReceivedAt",   "ReceivedAtDt"),
+        (GetOrCreateMessagesListIdAsync,     "MsgTime",      "MsgTimeDt"),
+    ];
 
-    /// <summary>Populate ErpDocuments' native <c>DocumentDateDt</c> from the legacy text <c>DocumentDate</c>
-    /// ("Jul-01-2026" etc.; parsed via the shared engine, "&lt;UNKNOWN&gt;"/blank skipped). Trigger via
-    /// POST /api/erp/backfill-document-date-dt. Idempotent.</summary>
-    public async Task<(int Scanned, int Patched, int Failed)> BackfillErpDocumentDateDtAsync(CancellationToken ct = default)
-        => await BackfillTextDateToDateTimeAsync(await GetOrCreateErpDocumentsListIdAsync(ct), "DocumentDate", "DocumentDateDt", ct);
-
-    /// <summary>Populate PhoneCallLog's native <c>ReceivedAtDt</c> from the legacy text <c>ReceivedAt</c>.
-    /// Trigger via POST /api/phone/backfill-received-dt. Idempotent.</summary>
-    public async Task<(int Scanned, int Patched, int Failed)> BackfillCallLogReceivedAtDtAsync(CancellationToken ct = default)
-        => await BackfillTextDateToDateTimeAsync(await GetOrCreateCallLogListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
-
-    /// <summary>Populate Messages' native <c>MsgTimeDt</c> from the legacy text <c>MsgTime</c>.
-    /// Trigger via POST /api/messages/backfill-msgtime-dt. Idempotent.</summary>
-    public async Task<(int Scanned, int Patched, int Failed)> BackfillMessagesMsgTimeDtAsync(CancellationToken ct = default)
-        => await BackfillTextDateToDateTimeAsync(await GetOrCreateMessagesListIdAsync(ct), "MsgTime", "MsgTimeDt", ct);
+    /// <summary>Run every registered dateTime-column backfill on this service's lists (idempotent — skips
+    /// rows already carrying the dateTime value). Used by the sweep + the backfill-all endpoint. Returns the
+    /// aggregate (scanned, patched, failed).</summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillAllDateTimeColumnsAsync(CancellationToken ct = default)
+    {
+        int scanned = 0, patched = 0, failed = 0;
+        foreach (var (listId, textCol, dtCol) in DateTimeColumnMigrations())
+        {
+            var (s, p, f) = await BackfillTextDateToDateTimeAsync(await listId(ct), textCol, dtCol, ct);
+            scanned += s; patched += p; failed += f;
+        }
+        return (scanned, patched, failed);
+    }
 
     /// <summary>Robust timestamp parse for migrations: ISO (RoundtripKind) → AssumeUniversal → current
     /// culture (US-locale). Mirrors InquiryRules.ParseTimestampSortKey so mixed ISO/locale text migrates right.</summary>

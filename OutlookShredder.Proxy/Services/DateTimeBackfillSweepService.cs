@@ -49,11 +49,10 @@ public sealed class DateTimeBackfillSweepService : BackgroundService
                 int healed = 0;
                 async Task Sweep(Task<(int Scanned, int Patched, int Failed)> backfill) => healed += (await backfill).Patched;
 
-                await Sweep(_sp.BackfillErpReceivedAtDtAsync(stoppingToken));
-                await Sweep(_sp.BackfillErpDocumentDateDtAsync(stoppingToken));
-                await Sweep(_sp.BackfillCallLogReceivedAtDtAsync(stoppingToken));
-                await Sweep(_sp.BackfillMessagesMsgTimeDtAsync(stoppingToken));
-                await Sweep(_inquiries.BackfillDateTimeColumnsAsync(stoppingToken));
+                // Both are registry-driven (one entry per migrated column), so a newly-migrated column is
+                // swept automatically — nothing to update here.
+                await Sweep(_sp.BackfillAllDateTimeColumnsAsync(stoppingToken));    // ErpDocuments x2, PhoneCallLog, Messages
+                await Sweep(_inquiries.BackfillDateTimeColumnsAsync(stoppingToken)); // Inquiries / Drafts / Notes / Quotations
 
                 if (healed > 0)
                     _log.LogInformation("[DtSweep] healed {N} drifted row(s) this cycle", healed);
