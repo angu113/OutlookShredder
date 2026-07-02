@@ -10623,13 +10623,26 @@ public partial class SharePointService
     /// skips rows already carrying ReceivedAtDt. Trigger via POST /api/erp/backfill-received-dt.
     /// </summary>
     public async Task<(int Scanned, int Patched, int Failed)> BackfillErpReceivedAtDtAsync(CancellationToken ct = default)
+        => await BackfillTextDateToDateTimeAsync(await GetOrCreateErpDocumentsListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
+
+    /// <summary>Populate PhoneCallLog's native <c>ReceivedAtDt</c> from the legacy text <c>ReceivedAt</c>.
+    /// Trigger via POST /api/phone/backfill-received-dt. Idempotent.</summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillCallLogReceivedAtDtAsync(CancellationToken ct = default)
+        => await BackfillTextDateToDateTimeAsync(await GetOrCreateCallLogListIdAsync(ct), "ReceivedAt", "ReceivedAtDt", ct);
+
+    /// <summary>
+    /// Generic one-time migration engine: populate a native <paramref name="dtColumn"/> dateTime column from
+    /// a legacy text <paramref name="textColumn"/> on <paramref name="listId"/>. Parses each text value in
+    /// memory (culture-tolerant — handles ISO + US-locale) and patches the dateTime column in throttle-safe
+    /// parallel batches. Idempotent (skips rows already carrying the dateTime value). Reused by every
+    /// text-date → native-dateTime migration (see wip/datetime-column-migration.md).
+    /// </summary>
+    private async Task<(int Scanned, int Patched, int Failed)> BackfillTextDateToDateTimeAsync(
+        string listId, string textColumn, string dtColumn, CancellationToken ct)
     {
         var siteId = await GetSiteIdAsync();
-        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
-        var items  = await ReadAllListItemsAsync(listId, expand: ["fields($select=ReceivedAt,ReceivedAtDt)"], ct: ct);
+        var items  = await ReadAllListItemsAsync(listId, expand: [$"fields($select={textColumn},{dtColumn})"], ct: ct);
 
-        // Collect rows needing migration — parse the legacy text ReceivedAt in memory (culture-tolerant,
-        // handles the ISO + US-locale mix); skip any row that already has ReceivedAtDt.
         var work = new List<(string ItemId, string Iso)>();
         int scanned = 0, parseFailed = 0;
         foreach (var item in items)
@@ -10637,34 +10650,33 @@ public partial class SharePointService
             var d = item.Fields?.AdditionalData;
             if (d is null || item.Id is null) continue;
             scanned++;
-            var existing = d.TryGetValue("ReceivedAtDt", out var ev) ? ev?.ToString() : null;
+            var existing = d.TryGetValue(dtColumn, out var ev) ? ev?.ToString() : null;
             if (!string.IsNullOrWhiteSpace(existing)) continue;   // already migrated
-            var raw = d.TryGetValue("ReceivedAt", out var rv) ? rv?.ToString() : null;
+            var raw = d.TryGetValue(textColumn, out var rv) ? rv?.ToString() : null;
             if (string.IsNullOrWhiteSpace(raw) || !DateTimeOffset.TryParse(raw, out var parsed)) { parseFailed++; continue; }
             work.Add((item.Id, parsed.ToString("o")));
         }
 
-        // Patch in throttle-safe parallel batches (same helper the CSV imports use).
         int patched = 0, patchFailed = 0;
-        await RunBatchedAsync(work, 100, 8, "ErpReceivedAtDt-backfill",
+        await RunBatchedAsync(work, 100, 8, $"{dtColumn}-backfill",
             async (w, token) =>
             {
                 try
                 {
                     await PatchListItemWithRetryAsync(siteId, listId, w.ItemId,
-                        new Dictionary<string, object?> { ["ReceivedAtDt"] = w.Iso }, token);
+                        new Dictionary<string, object?> { [dtColumn] = w.Iso }, token);
                     System.Threading.Interlocked.Increment(ref patched);
                 }
                 catch (Exception ex)
                 {
                     System.Threading.Interlocked.Increment(ref patchFailed);
-                    _log.LogWarning(ex, "[SP] ReceivedAtDt backfill failed for item {Id}", w.ItemId);
+                    _log.LogWarning(ex, "[SP] {Col} backfill failed for item {Id}", dtColumn, w.ItemId);
                 }
             }, ct);
 
         int failed = parseFailed + patchFailed;
-        _log.LogInformation("[SP] ErpDocuments ReceivedAtDt backfill complete: scanned={S} patched={P} failed={F} (parse={PF}/patch={PtF})",
-            scanned, patched, failed, parseFailed, patchFailed);
+        _log.LogInformation("[SP] {List} {Col} backfill complete: scanned={S} patched={P} failed={F} (parse={PF}/patch={PtF})",
+            listId, dtColumn, scanned, patched, failed, parseFailed, patchFailed);
         return (scanned, patched, failed);
     }
 
@@ -11848,32 +11860,48 @@ public partial class SharePointService
             }, cancellationToken: ct);
             listId = created?.Id ?? throw new Exception("PhoneCallLog list creation returned no ID");
             _log.LogInformation("[SP] Created PhoneCallLog list: {Id}", listId);
+        }
 
-            // Add columns
-            var cols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
-            var byName = (cols?.Value ?? [])
-                .Where(c => c.Name is not null)
-                .Select(c => c.Name!)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Ensure columns (idempotent — runs for both new AND existing lists so schema additions like
+        // ReceivedAtDt land on lists created before the column existed).
+        var cols = await GetGraph().Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
+        var byName = (cols?.Value ?? [])
+            .Where(c => c.Name is not null)
+            .ToDictionary(c => c.Name!, c => c, StringComparer.OrdinalIgnoreCase);
 
-            var schema = new (string Name, string Type)[]
+        var schema = new (string Name, string Type)[]
+        {
+            ("CallerPhone",  "text"),
+            ("BpName",       "text"),
+            ("ContactName",  "text"),
+            ("PopupMessage", "note"),
+            ("ReceivedAt",   "text"),
+            ("ReceivedAtDt", "dateTime"),   // native, indexed — the sortable/filterable one
+            ("Notes",        "note"),
+        };
+        foreach (var (name, type) in schema)
+        {
+            if (byName.ContainsKey(name)) continue;
+            var col = type switch
             {
-                ("CallerPhone",  "text"),
-                ("BpName",       "text"),
-                ("ContactName",  "text"),
-                ("PopupMessage", "note"),
-                ("ReceivedAt",   "text"),
-                ("Notes",        "note"),
+                "dateTime" => new ColumnDefinition { Name = name, DateTime = new DateTimeColumn() },
+                "note"     => new ColumnDefinition { Name = name, Text = new TextColumn { AllowMultipleLines = true, LinesForEditing = 3 } },
+                _          => new ColumnDefinition { Name = name, Text = new TextColumn() }
             };
-            foreach (var (name, type) in schema)
+            try { var made = await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct); if (made is not null) byName[name] = made; }
+            catch (Exception ex) { _log.LogWarning("[SP] PhoneCallLog column '{Name}': {Err}", name, ex.Message); }
+        }
+
+        // Index ReceivedAtDt so the windowed read can $filter/$orderby it server-side.
+        if (byName.TryGetValue("ReceivedAtDt", out var rdt) && rdt.Id is not null && rdt.Indexed != true)
+        {
+            try
             {
-                if (byName.Contains(name)) continue;
-                var col = type == "note"
-                    ? new ColumnDefinition { Name = name, Text = new TextColumn { AllowMultipleLines = true, LinesForEditing = 3 } }
-                    : new ColumnDefinition { Name = name, Text = new TextColumn() };
-                try { await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct); }
-                catch (Exception ex) { _log.LogWarning("[SP] PhoneCallLog column '{Name}': {Err}", name, ex.Message); }
+                await GetGraph().Sites[siteId].Lists[listId].Columns[rdt.Id]
+                    .PatchAsync(new ColumnDefinition { Indexed = true }, cancellationToken: ct);
+                _log.LogInformation("[SP] Indexed PhoneCallLog column 'ReceivedAtDt'");
             }
+            catch (Exception ex) { _log.LogWarning(ex, "[SP] Could not index PhoneCallLog column 'ReceivedAtDt'"); }
         }
 
         _callLogListId = listId;
@@ -11897,6 +11925,7 @@ public partial class SharePointService
             ["ContactName"]  = contactName,
             ["PopupMessage"] = popupMessage,
             ["ReceivedAt"]   = receivedAt.ToString("o"),
+            ["ReceivedAtDt"] = receivedAt.ToString("o"),   // native dateTime — server-side sortable/filterable
         };
 
         var result = await GetGraph().Sites[siteId].Lists[listId].Items.PostAsync(
@@ -11908,20 +11937,39 @@ public partial class SharePointService
     }
 
     /// <summary>Returns all call log entries with ReceivedAt >= <paramref name="since"/>, newest first.
-    /// Reads the FULL list (paginated via <see cref="ReadAllPhoneCallLogAsync"/>) so recent calls are never
-    /// missed once the list grows past one page — a single Top=N fetch returns the OLDEST N by item id and
-    /// silently hides newer calls. (Future optimization for very large lists: index ReceivedAt and filter
-    /// server-side by the ISO instant instead of reading every row.)</summary>
+    /// Filters + orders server-side on the native indexed <c>ReceivedAtDt</c> column, so only rows in the
+    /// window are read (not the whole growing list) and ordering is chronological (not lexical). Legacy rows
+    /// are populated by <see cref="BackfillCallLogReceivedAtDtAsync"/>; new rows dual-write ReceivedAtDt.</summary>
     public async Task<List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>> ReadPhoneCallLogAsync(
         DateTimeOffset since, CancellationToken ct = default)
     {
-        var all = await ReadAllPhoneCallLogAsync(ct);   // paginated; normalizes ReceivedAt to UTC ISO
-        static DateTimeOffset RxTime(string? s) =>
-            DateTimeOffset.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var t)
-                ? t : DateTimeOffset.MinValue;
-        return [.. all
-            .Where(r => RxTime(r.ReceivedAt) >= since)
-            .OrderByDescending(r => RxTime(r.ReceivedAt))];
+        var listId   = await GetOrCreateCallLogListIdAsync(ct);
+        var sinceUtc = since.ToUniversalTime();
+        var items = await ReadAllListItemsAsync(listId,
+            expand:  ["fields($select=Title,CallerPhone,BpName,ContactName,PopupMessage,ReceivedAt,ReceivedAtDt,Notes)"],
+            filter:  $"fields/ReceivedAtDt ge '{sinceUtc:yyyy-MM-ddTHH:mm:ss}Z'",
+            orderby: ["fields/ReceivedAtDt desc"],
+            ct: ct);
+
+        var results = new List<OutlookShredder.Proxy.Models.PhoneCallLogRecord>();
+        foreach (var item in items)
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null) continue;
+            string? Get(string k) => d.TryGetValue(k, out var v) ? v?.ToString() : null;
+            results.Add(new OutlookShredder.Proxy.Models.PhoneCallLogRecord
+            {
+                SpItemId     = item.Id ?? "",
+                CallerName   = Get("Title") ?? "",
+                CallerPhone  = Get("CallerPhone"),
+                BpName       = Get("BpName"),
+                ContactName  = Get("ContactName"),
+                PopupMessage = Get("PopupMessage"),
+                ReceivedAt   = NormalizeInstant(Get("ReceivedAt")),
+                Notes        = Get("Notes"),
+            });
+        }
+        return results;
     }
 
     /// <summary>Patches the Notes field on an existing PhoneCallLog item.</summary>

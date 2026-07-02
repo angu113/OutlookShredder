@@ -226,6 +226,17 @@ public class PhoneController : ControllerBase
 
         return Ok(new { name, phone, bp = resolvedBp, contact = resolvedContact, popup = resolvedPopup, spItemId });
     }
+
+    /// <summary>
+    /// One-time migration: populate the native ReceivedAtDt dateTime column on PhoneCallLog from the legacy
+    /// text ReceivedAt so the call log can be filtered/ordered server-side. Idempotent.
+    /// </summary>
+    [HttpPost("backfill-received-dt")]
+    public async Task<IActionResult> BackfillReceivedDt(CancellationToken ct)
+    {
+        var (scanned, patched, failed) = await _sp.BackfillCallLogReceivedAtDtAsync(ct);
+        return Ok(new { scanned, patched, failed });
+    }
 }
 
 public record UpdateNotesRequest(string? Notes);
