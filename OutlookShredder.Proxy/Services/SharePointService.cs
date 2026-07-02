@@ -10634,6 +10634,7 @@ public partial class SharePointService
         (GetOrCreateErpDocumentsListIdAsync, "DocumentDate", "DocumentDateDt"),
         (GetOrCreateCallLogListIdAsync,      "ReceivedAt",   "ReceivedAtDt"),
         (GetOrCreateMessagesListIdAsync,     "MsgTime",      "MsgTimeDt"),
+        (GetOrCreateWorkflowCardsListIdAsync, "AssignedDate", "AssignedDateDt"),
     ];
 
     /// <summary>Run every registered dateTime-column backfill on this service's lists (idempotent — skips
@@ -12588,6 +12589,7 @@ public partial class SharePointService
         {
             ("Tab",             "text"),
             ("AssignedDate",    "text"),
+            ("AssignedDateDt",  "dateTime"),   // native, indexed — parsed from the yyyy-MM-dd text AssignedDate
             ("SortOrder",       "number"),
             ("Notes",           "note"),
             ("CustomerName",    "text"),
@@ -12613,17 +12615,18 @@ public partial class SharePointService
             if (byName.ContainsKey(name)) continue;
             var def = type switch
             {
-                "number"  => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Number  = new Microsoft.Graph.Models.NumberColumn() },
-                "note"    => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text    = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
-                "boolean" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean = new Microsoft.Graph.Models.BooleanColumn() },
-                _         => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text    = new Microsoft.Graph.Models.TextColumn() },
+                "number"   => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Number   = new Microsoft.Graph.Models.NumberColumn() },
+                "dateTime" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, DateTime = new Microsoft.Graph.Models.DateTimeColumn() },
+                "note"     => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
+                "boolean"  => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean  = new Microsoft.Graph.Models.BooleanColumn() },
+                _          => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn() },
             };
             await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
             _log.LogInformation("[SP] Created WorkflowCards column '{Col}'", name);
         }
 
         // Index AssignedDate + Tab for fast per-week queries
-        foreach (var colName in new[] { "AssignedDate", "Tab" })
+        foreach (var colName in new[] { "AssignedDate", "AssignedDateDt", "Tab" })
         {
             if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
             if (col.Indexed == true) continue;
@@ -12793,6 +12796,7 @@ public partial class SharePointService
                         ["Title"]           = card.DocumentNumber,
                         ["Tab"]             = card.Tab,
                         ["AssignedDate"]    = card.AssignedDate,
+                        ["AssignedDateDt"]  = ToIsoOrNull(card.AssignedDate),
                         ["SortOrder"]       = (double)card.SortOrder,
                         ["Notes"]           = card.Notes,
                         ["CustomerName"]    = card.CustomerName,
@@ -12827,7 +12831,7 @@ public partial class SharePointService
 
         var fields = new Dictionary<string, object?>();
         if (req.Tab          is not null) fields["Tab"]          = req.Tab;
-        if (req.AssignedDate is not null) fields["AssignedDate"] = req.AssignedDate;
+        if (req.AssignedDate is not null) { fields["AssignedDate"] = req.AssignedDate; fields["AssignedDateDt"] = ToIsoOrNull(req.AssignedDate); }
         if (req.SortOrder    is not null) fields["SortOrder"]    = (double)req.SortOrder.Value;
         if (req.Notes        is not null) fields["Notes"]        = req.Notes;
         if (req.IsCompleted     is not null) fields["IsCompleted"]     = req.IsCompleted.Value;
