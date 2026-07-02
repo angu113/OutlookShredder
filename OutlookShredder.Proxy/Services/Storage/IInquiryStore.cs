@@ -48,6 +48,10 @@ public interface IInquiryStore
     /// When <paramref name="apply"/> is false it only counts the matches (dry run — no writes). Returns the
     /// per-list match/patch counts plus the affected inquiry ids so the caller can refresh the cache.</summary>
     Task<IdentityBackfillResult> BackfillIdentityAsync(string fromName, string toName, bool apply, CancellationToken ct = default);
+
+    /// <summary>One-time migration: populate native *Dt dateTime columns from the legacy text date columns
+    /// across the inquiry lists. Idempotent. Returns (scanned, patched, failed).</summary>
+    Task<(int Scanned, int Patched, int Failed)> BackfillDateTimeColumnsAsync(CancellationToken ct = default);
 }
 
 /// <summary>Result of <see cref="IInquiryStore.BackfillIdentityAsync"/> — matches found and (when applied) rows

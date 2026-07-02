@@ -10635,14 +10635,25 @@ public partial class SharePointService
     public async Task<(int Scanned, int Patched, int Failed)> BackfillMessagesMsgTimeDtAsync(CancellationToken ct = default)
         => await BackfillTextDateToDateTimeAsync(await GetOrCreateMessagesListIdAsync(ct), "MsgTime", "MsgTimeDt", ct);
 
+    /// <summary>Robust timestamp parse for migrations: ISO (RoundtripKind) → AssumeUniversal → current
+    /// culture (US-locale). Mirrors InquiryRules.ParseTimestampSortKey so mixed ISO/locale text migrates right.</summary>
+    private static bool TryParseFlexible(string s, out DateTimeOffset dt)
+    {
+        if (DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out dt)) return true;
+        if (DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out dt)) return true;
+        return DateTimeOffset.TryParse(s, out dt);   // last resort: current culture
+    }
+
     /// <summary>
     /// Generic one-time migration engine: populate a native <paramref name="dtColumn"/> dateTime column from
     /// a legacy text <paramref name="textColumn"/> on <paramref name="listId"/>. Parses each text value in
-    /// memory (culture-tolerant — handles ISO + US-locale) and patches the dateTime column in throttle-safe
-    /// parallel batches. Idempotent (skips rows already carrying the dateTime value). Reused by every
-    /// text-date → native-dateTime migration (see wip/datetime-column-migration.md).
+    /// memory (robust ISO/locale — see <see cref="TryParseFlexible"/>) and patches the dateTime column in
+    /// throttle-safe parallel batches. Idempotent (skips rows already carrying the dateTime value). Reused by
+    /// every text-date → native-dateTime migration (see wip/datetime-column-migration.md).
     /// </summary>
-    private async Task<(int Scanned, int Patched, int Failed)> BackfillTextDateToDateTimeAsync(
+    internal async Task<(int Scanned, int Patched, int Failed)> BackfillTextDateToDateTimeAsync(
         string listId, string textColumn, string dtColumn, CancellationToken ct)
     {
         var siteId = await GetSiteIdAsync();
@@ -10658,7 +10669,7 @@ public partial class SharePointService
             var existing = d.TryGetValue(dtColumn, out var ev) ? ev?.ToString() : null;
             if (!string.IsNullOrWhiteSpace(existing)) continue;   // already migrated
             var raw = d.TryGetValue(textColumn, out var rv) ? rv?.ToString() : null;
-            if (string.IsNullOrWhiteSpace(raw) || !DateTimeOffset.TryParse(raw, out var parsed)) { parseFailed++; continue; }
+            if (string.IsNullOrWhiteSpace(raw) || !TryParseFlexible(raw, out var parsed)) { parseFailed++; continue; }
             work.Add((item.Id, parsed.ToString("o")));
         }
 

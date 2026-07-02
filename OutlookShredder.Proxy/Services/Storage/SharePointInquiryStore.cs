@@ -81,10 +81,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
             ("AssignedTo",    "text"),
             ("CustomerName",  "text"),
             ("ContactName",   "text"),
-            ("CreatedAt",     "text"),
-            ("UpdatedAt",     "text"),
-            ("LastMessageAt", "text"),
-            ("UnreadCount",   "number"),
+            ("CreatedAt",       "text"),
+            ("CreatedAtDt",     "dateTime"),
+            ("UpdatedAt",       "text"),
+            ("UpdatedAtDt",     "dateTime"),
+            ("LastMessageAt",   "text"),
+            ("LastMessageAtDt", "dateTime"),   // native, indexed — the sortable one
+            ("UnreadCount",     "number"),
             ("AwaitingReply", "boolean"),
         ];
         foreach (var (name, type) in cols)
@@ -94,9 +97,10 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 var col = type switch
                 {
-                    "number"  => new Graph.ColumnDefinition { Name = name, Number  = new Graph.NumberColumn() },
-                    "boolean" => new Graph.ColumnDefinition { Name = name, Boolean = new Graph.BooleanColumn() },
-                    _         => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn() },
+                    "number"   => new Graph.ColumnDefinition { Name = name, Number   = new Graph.NumberColumn() },
+                    "boolean"  => new Graph.ColumnDefinition { Name = name, Boolean  = new Graph.BooleanColumn() },
+                    "dateTime" => new Graph.ColumnDefinition { Name = name, DateTime = new Graph.DateTimeColumn() },
+                    _          => new Graph.ColumnDefinition { Name = name, Text     = new Graph.TextColumn() },
                 };
                 await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
                 _log.LogInformation("[Inquiry] Created Inquiries column '{Name}'", name);
@@ -107,7 +111,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name is not ("CinqId" or "CustomerPhone" or "LastMessageAt" or "IqStatus")) continue;
+            if (col.Name is not ("CinqId" or "CustomerPhone" or "LastMessageAt" or "LastMessageAtDt" or "IqStatus")) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
@@ -134,10 +138,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
                 ["AssignedTo"]    = inq.AssignedTo,
                 ["CustomerName"]  = inq.CustomerName,
                 ["ContactName"]   = inq.ContactName,
-                ["CreatedAt"]     = inq.CreatedAt,
-                ["UpdatedAt"]     = inq.UpdatedAt,
-                ["LastMessageAt"] = inq.LastMessageAt,
-                ["UnreadCount"]   = (double)inq.UnreadCount,
+                ["CreatedAt"]       = inq.CreatedAt,
+                ["CreatedAtDt"]     = inq.CreatedAt,
+                ["UpdatedAt"]       = inq.UpdatedAt,
+                ["UpdatedAtDt"]     = inq.UpdatedAt,
+                ["LastMessageAt"]   = inq.LastMessageAt,
+                ["LastMessageAtDt"] = inq.LastMessageAt,
+                ["UnreadCount"]     = (double)inq.UnreadCount,
                 ["AwaitingReply"] = inq.AwaitingReply,
             },
         },
@@ -204,9 +211,11 @@ public sealed class SharePointInquiryStore : IInquiryStore
             ["AssignedTo"]    = inquiry.AssignedTo,
             ["CustomerName"]  = inquiry.CustomerName,
             ["ContactName"]   = inquiry.ContactName,
-            ["UpdatedAt"]     = inquiry.UpdatedAt,
-            ["LastMessageAt"] = inquiry.LastMessageAt,
-            ["UnreadCount"]   = (double)inquiry.UnreadCount,
+            ["UpdatedAt"]       = inquiry.UpdatedAt,
+            ["UpdatedAtDt"]     = inquiry.UpdatedAt,
+            ["LastMessageAt"]   = inquiry.LastMessageAt,
+            ["LastMessageAtDt"] = inquiry.LastMessageAt,
+            ["UnreadCount"]     = (double)inquiry.UnreadCount,
             ["AwaitingReply"] = inquiry.AwaitingReply,
         };
         await graph.Sites[siteId].Lists[listId].Items[inquiry.SpItemId.Value.ToString()].Fields
@@ -441,6 +450,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
             ("OptionsJson",         "note"),
             ("DraftStatus",         "text"),
             ("CreatedAt",           "text"),
+            ("CreatedAtDt",         "dateTime"),
         ];
         foreach (var (name, type) in cols)
         {
@@ -449,9 +459,10 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 var col = type switch
                 {
-                    "boolean" => new Graph.ColumnDefinition { Name = name, Boolean = new Graph.BooleanColumn() },
-                    "note"    => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn { AllowMultipleLines = true } },
-                    _         => new Graph.ColumnDefinition { Name = name, Text    = new Graph.TextColumn() },
+                    "boolean"  => new Graph.ColumnDefinition { Name = name, Boolean  = new Graph.BooleanColumn() },
+                    "note"     => new Graph.ColumnDefinition { Name = name, Text     = new Graph.TextColumn { AllowMultipleLines = true } },
+                    "dateTime" => new Graph.ColumnDefinition { Name = name, DateTime = new Graph.DateTimeColumn() },
+                    _          => new Graph.ColumnDefinition { Name = name, Text     = new Graph.TextColumn() },
                 };
                 await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
                 _log.LogInformation("[Inquiry] Created Drafts column '{Name}'", name);
@@ -462,7 +473,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var allCols = await graph.Sites[siteId].Lists[listId].Columns.GetAsync(cancellationToken: ct);
         foreach (var col in allCols?.Value ?? [])
         {
-            if (col.Name is not ("InquiryId" or "CreatedAt")) continue;
+            if (col.Name is not ("InquiryId" or "CreatedAt" or "CreatedAtDt")) continue;
             if (col.Indexed == true || col.Id is null) continue;
             try
             {
@@ -499,6 +510,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
                     ["OptionsJson"]         = draft.OptionsJson,
                     ["DraftStatus"]         = draft.Status,
                     ["CreatedAt"]           = draft.CreatedAt,
+                    ["CreatedAtDt"]         = draft.CreatedAt,
                 },
             },
         };
@@ -514,7 +526,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var listId = await GetDraftsListIdAsync(ct);
         var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
             filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
-            orderby: ["fields/CreatedAt desc"], ct: ct);
+            orderby: ["fields/CreatedAtDt desc"], ct: ct);
 
         var result = new List<InquiryDraft>();
         foreach (var item in items)
@@ -596,8 +608,9 @@ public sealed class SharePointInquiryStore : IInquiryStore
             {
                 var col = type switch
                 {
-                    "note" => new Graph.ColumnDefinition { Name = name, Text = new Graph.TextColumn { AllowMultipleLines = true } },
-                    _      => new Graph.ColumnDefinition { Name = name, Text = new Graph.TextColumn() },
+                    "note"     => new Graph.ColumnDefinition { Name = name, Text     = new Graph.TextColumn { AllowMultipleLines = true } },
+                    "dateTime" => new Graph.ColumnDefinition { Name = name, DateTime = new Graph.DateTimeColumn() },
+                    _          => new Graph.ColumnDefinition { Name = name, Text     = new Graph.TextColumn() },
                 };
                 await graph.Sites[siteId].Lists[listId].Columns.PostAsync(col, cancellationToken: ct);
                 _log.LogInformation("[Inquiry] Created {List} column '{Name}'", listName, name);
@@ -625,13 +638,13 @@ public sealed class SharePointInquiryStore : IInquiryStore
         // "NoteAuthor" not "Author" — Author is a RESERVED SharePoint internal field (built-in "Created By"),
         // so a text column named Author silently collides with it and writes to it fail (500).
         => _notesListId ??= await GetChildListIdAsync("InquiryNotes",
-            [("InquiryId", "text"), ("NoteAuthor", "text"), ("Body", "note"), ("CreatedAt", "text")],
-            ["InquiryId", "CreatedAt"], ct);
+            [("InquiryId", "text"), ("NoteAuthor", "text"), ("Body", "note"), ("CreatedAt", "text"), ("CreatedAtDt", "dateTime")],
+            ["InquiryId", "CreatedAt", "CreatedAtDt"], ct);
 
     private async Task<string> GetQuotationsListIdAsync(CancellationToken ct)
         => _quotationsListId ??= await GetChildListIdAsync("InquiryQuotations",
-            [("InquiryId", "text"), ("HskNumber", "text"), ("LinkedAt", "text"), ("LinkedBy", "text")],
-            ["InquiryId", "LinkedAt"], ct);
+            [("InquiryId", "text"), ("HskNumber", "text"), ("LinkedAt", "text"), ("LinkedAtDt", "dateTime"), ("LinkedBy", "text")],
+            ["InquiryId", "LinkedAt", "LinkedAtDt"], ct);
 
     public async Task<int> CreateNoteAsync(InquiryNote note, CancellationToken ct = default)
     {
@@ -647,8 +660,9 @@ public sealed class SharePointInquiryStore : IInquiryStore
                     ["Title"]      = note.InquiryId,
                     ["InquiryId"]  = note.InquiryId,
                     ["NoteAuthor"] = note.Author,
-                    ["Body"]       = note.Body,
-                    ["CreatedAt"]  = note.CreatedAt,
+                    ["Body"]        = note.Body,
+                    ["CreatedAt"]   = note.CreatedAt,
+                    ["CreatedAtDt"] = note.CreatedAt,
                 },
             },
         };
@@ -663,7 +677,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var listId = await GetNotesListIdAsync(ct);
         var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
             filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
-            orderby: ["fields/CreatedAt asc"], ct: ct);
+            orderby: ["fields/CreatedAtDt asc"], ct: ct);
         return items.Select(item =>
         {
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
@@ -694,6 +708,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
                     ["InquiryId"] = quotation.InquiryId,
                     ["HskNumber"] = quotation.HskNumber,
                     ["LinkedAt"]  = quotation.LinkedAt,
+                    ["LinkedAtDt"] = quotation.LinkedAt,
                     ["LinkedBy"]  = quotation.LinkedBy,
                 },
             },
@@ -709,7 +724,7 @@ public sealed class SharePointInquiryStore : IInquiryStore
         var listId = await GetQuotationsListIdAsync(ct);
         var items  = await _sp.ReadAllListItemsAsync(listId, expand: ["fields"],
             filter: $"fields/InquiryId eq '{inquiryId.Replace("'", "''")}'",
-            orderby: ["fields/LinkedAt asc"], ct: ct);
+            orderby: ["fields/LinkedAtDt asc"], ct: ct);
         return items.Select(item =>
         {
             var d = item.Fields?.AdditionalData ?? new Dictionary<string, object?>();
@@ -723,6 +738,29 @@ public sealed class SharePointInquiryStore : IInquiryStore
                 LinkedBy  = S("LinkedBy"),
             };
         }).ToList();
+    }
+
+    /// <summary>One-time migration: populate the native *Dt dateTime columns across the inquiry lists
+    /// (Inquiries CreatedAt/UpdatedAt/LastMessageAt, Drafts CreatedAt, InquiryNotes CreatedAt,
+    /// InquiryQuotations LinkedAt) from their legacy text columns. Idempotent; delegates to the shared
+    /// backfill engine (see wip/datetime-column-migration.md).</summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillDateTimeColumnsAsync(CancellationToken ct = default)
+    {
+        int scanned = 0, patched = 0, failed = 0;
+        async Task Run(string listId, string textCol, string dtCol)
+        {
+            var (s, p, f) = await _sp.BackfillTextDateToDateTimeAsync(listId, textCol, dtCol, ct);
+            scanned += s; patched += p; failed += f;
+        }
+        var inq = await GetInquiriesListIdAsync(ct);
+        await Run(inq, "CreatedAt",     "CreatedAtDt");
+        await Run(inq, "UpdatedAt",     "UpdatedAtDt");
+        await Run(inq, "LastMessageAt", "LastMessageAtDt");
+        await Run(await GetDraftsListIdAsync(ct),     "CreatedAt", "CreatedAtDt");
+        await Run(await GetNotesListIdAsync(ct),      "CreatedAt", "CreatedAtDt");
+        await Run(await GetQuotationsListIdAsync(ct), "LinkedAt",  "LinkedAtDt");
+        _log.LogInformation("[Inquiry] dateTime-columns backfill complete: scanned={S} patched={P} failed={F}", scanned, patched, failed);
+        return (scanned, patched, failed);
     }
 
     // ── One-time identity backfill (Windows login -> Shredder username) ──────────────────────────────

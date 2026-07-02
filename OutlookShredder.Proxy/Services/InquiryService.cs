@@ -767,6 +767,10 @@ public sealed class InquiryService : IHostedService
     /// <summary>One-time operator-identity backfill (Windows login -> Shredder username), rewriting AssignedTo /
     /// note author / quote linker. Dry-run by default; when applied it patches SP then refreshes the active-inquiry
     /// cache and pushes a live update per affected inquiry so peers + open clients pick up the rename.</summary>
+    /// <summary>Passthrough to the store's one-time dateTime-column migration.</summary>
+    public Task<(int Scanned, int Patched, int Failed)> BackfillDateTimeColumnsAsync(CancellationToken ct = default)
+        => _store.BackfillDateTimeColumnsAsync(ct);
+
     public async Task<IdentityBackfillResult> BackfillIdentityAsync(string fromName, string toName, bool apply, CancellationToken ct = default)
     {
         var result = await _store.BackfillIdentityAsync(fromName, toName, apply, ct);

@@ -130,6 +130,19 @@ public class InquiriesController : ControllerBase
         catch (Exception ex) { return Fail(ex, "backfill-identity"); }
     }
 
+    /// <summary>One-time migration: populate native *Dt dateTime columns from the legacy text date columns
+    /// across the inquiry lists (Inquiries/Drafts/InquiryNotes/InquiryQuotations). Idempotent.</summary>
+    [HttpPost("backfill-datetime-columns")]
+    public async Task<IActionResult> BackfillDateTimeColumns(CancellationToken ct)
+    {
+        try
+        {
+            var (scanned, patched, failed) = await _inquiries.BackfillDateTimeColumnsAsync(ct);
+            return Ok(new { scanned, patched, failed });
+        }
+        catch (Exception ex) { return Fail(ex, "backfill-datetime-columns"); }
+    }
+
     public sealed class BackfillIdentityRequest
     {
         public string? From  { get; set; }
