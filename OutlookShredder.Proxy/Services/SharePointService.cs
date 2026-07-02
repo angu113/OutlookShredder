@@ -327,9 +327,8 @@ public partial class SharePointService
                 return _srRowCache;
 
             _log.LogDebug("[SP] SR cache miss  --  fetching all SupplierResponses from Graph");
-            var resp = await GetGraph().Sites[siteId].Lists[srListId].Items
-                .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 5000; });
-            _srRowCache    = resp?.Value ?? [];
+            var resp = await ReadAllListItemsAsync(srListId, expand: ["fields"]);
+            _srRowCache    = resp;
             _srRowCacheExpiry = DateTime.UtcNow.AddMinutes(5);
             _log.LogDebug("[SP] SR cache populated: {Count} rows", _srRowCache.Count);
             return _srRowCache;
@@ -1104,14 +1103,9 @@ public partial class SharePointService
 
         // Fetch all refs client-side  -- OData filter on unindexed columns is unreliable
         // and was causing duplicate rows to be created on every note save.
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col})"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1162,14 +1156,9 @@ public partial class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col})"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1201,14 +1190,9 @@ public partial class SharePointService
         // can't) — cleared on un-complete so re-completing later gets a fresh timestamp, not the old one.
         var completedAt = complete ? DateTimeOffset.UtcNow.ToString("o") : null;
 
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col})"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1266,14 +1250,9 @@ public partial class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col})"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1305,14 +1284,9 @@ public partial class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select=id,{col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col})"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1564,15 +1538,10 @@ public partial class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var items = await ReadAllListItemsAsync(listId, expand: [$"fields($select={col})"]);
 
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in items?.Value ?? [])
+        foreach (var item in items)
         {
             if (item.Fields?.AdditionalData is null) continue;
             var d  = item.Fields.AdditionalData;
@@ -1600,14 +1569,9 @@ public partial class SharePointService
 
         // Fetch existing items for this RFQ_ID (same client-side filter approach as UpdateRfqNotesAsync
         //  -- OData filter on unindexed columns is unreliable).
-        var allItems = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req2 =>
-            {
-                req2.QueryParameters.Expand = [$"fields($select=id,{col},Requester,DateCreated,EmailRecipients)"];
-                req2.QueryParameters.Top    = 5000;
-            });
+        var allItems = await ReadAllListItemsAsync(listId, expand: [$"fields($select=id,{col},Requester,DateCreated,EmailRecipients)"]);
 
-        var matches = (allItems?.Value ?? [])
+        var matches = allItems
             .Where(i => i.Fields?.AdditionalData is { } d &&
                         string.Equals(
                             d.TryGetValue(col, out var v) ? v?.ToString() : null,
@@ -1699,15 +1663,10 @@ public partial class SharePointService
         var listId = await GetRfqLineItemsListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col})"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var items = await ReadAllListItemsAsync(listId, expand: [$"fields($select={col})"]);
 
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in items?.Value ?? [])
+        foreach (var item in items)
         {
             if (item.Fields?.AdditionalData is null) continue;
             var d = item.Fields.AdditionalData;
@@ -1730,15 +1689,10 @@ public partial class SharePointService
         var listId = await GetRfqLineItemsListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,IsPurchased,PoNumber,Notes)"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var items = await ReadAllListItemsAsync(listId, expand: [$"fields($select={col},MSPC,Product,Units,SizeOfUnits,IsPurchased,PoNumber,Notes)"]);
 
         var result = new List<(string, string?, string?, string?, string?, bool, string?, string?)>();
-        foreach (var item in items?.Value ?? [])
+        foreach (var item in items)
         {
             if (item.Fields?.AdditionalData is null) continue;
             var d = item.Fields.AdditionalData;
@@ -4376,31 +4330,15 @@ public partial class SharePointService
         // ??"?????"??? Fetch all SR rows ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
         // RFQ_x005F_ID is the SP internal column name in some list configurations;
         // select both so the fallback in FldRfqId always finds a value.
-        var srResponse = await GetGraph().Sites[siteId].Lists[srListId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Expand = ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName," +
-                    "ProcessingSource,SourceFile,QuoteReference,DateOfQuote," +
-                    "EstimatedDeliveryDate,FreightTerms,EmailBody)"];
-                r.QueryParameters.Top = 5000;
-            });
-        var srItems = srResponse?.Value ?? [];
-        if (srItems.Count >= 5000)
-            _log.LogWarning("[Dedupe-SR] SR fetch hit the 5 000-row limit  -- re-run to catch any remaining duplicates");
+        var srItems = await ReadAllListItemsAsync(srListId, expand: ["fields($select=id,RFQ_ID,RFQ_x005F_ID,SupplierName," +
+            "ProcessingSource,SourceFile,QuoteReference,DateOfQuote," +
+            "EstimatedDeliveryDate,FreightTerms,EmailBody)"]);
 
         // ??"?????"??? Fetch all SLI rows ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
         // SupplierProductComments included so we can rescue AI commentary
         // before deleting a duplicate SLI that covers the same product.
-        var sliResponse = await GetGraph().Sites[siteId].Lists[sliListId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Expand = ["fields($select=id,SupplierResponseId,ProductName," +
-                    "PricePerPound,PricePerFoot,PricePerPiece,TotalPrice,SupplierProductComments,MSPCMatch)"];
-                r.QueryParameters.Top = 5000;
-            });
-        var sliItems = sliResponse?.Value ?? [];
-        if (sliItems.Count >= 5000)
-            _log.LogWarning("[Dedupe-SR] SLI fetch hit the 5 000-row limit  -- re-run to catch any remaining duplicates");
+        var sliItems = await ReadAllListItemsAsync(sliListId, expand: ["fields($select=id,SupplierResponseId,ProductName," +
+            "PricePerPound,PricePerFoot,PricePerPiece,TotalPrice,SupplierProductComments,MSPCMatch)"]);
 
         // ??"?????"??? Helpers ??"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"?????"???
         static string? Fld(ListItem item, string key)
@@ -5034,12 +4972,10 @@ public partial class SharePointService
     /// <summary>All SupplierParameters rows as flat dicts (for the front end + extraction pre-bias).</summary>
     public async Task<List<Dictionary<string, object?>>> ReadSupplierParametersAsync()
     {
-        var siteId = await GetSiteIdAsync();
         var listId = await ResolveListIdAsync("SupplierParameters");
-        var resp = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 500; });
+        var resp = await ReadAllListItemsAsync(listId, expand: ["fields"]);
         var result = new List<Dictionary<string, object?>>();
-        foreach (var it in resp?.Value ?? [])
+        foreach (var it in resp)
         {
             if (it.Fields?.AdditionalData is null) continue;
             var row = it.Fields.AdditionalData.Where(kv => IsAppField(kv.Key)).ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
@@ -5061,9 +4997,8 @@ public partial class SharePointService
         foreach (var kv in fields) if (kv.Value is not null) data[kv.Key] = kv.Value;
         data["Title"] = name;
 
-        var existing = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req => { req.QueryParameters.Expand = ["fields"]; req.QueryParameters.Top = 500; });
-        var match = existing?.Value?.FirstOrDefault(i =>
+        var existing = await ReadAllListItemsAsync(listId, expand: ["fields"]);
+        var match = existing.FirstOrDefault(i =>
             i.Fields?.AdditionalData is { } ad && ad.TryGetValue("SupplierName", out var v)
             && string.Equals(v?.ToString(), name, StringComparison.OrdinalIgnoreCase));
 
@@ -7004,12 +6939,7 @@ public partial class SharePointService
         _log.LogInformation("[SP] ReadProductCatalog: list='{Name}'", listName);
 
         // Fetch catalog items + lookup tables for Category and Shape in parallel.
-        var itemsTask = GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var itemsTask = ReadAllListItemsAsync(listId, expand: ["fields"]);
 
         // Category lookup: Metals list item-id ?????' category name
         var categoryMapTask = BuildLookupMapAsync(siteId, ["Metals", "Metal", "Product Categories"], "Title");
@@ -7019,7 +6949,7 @@ public partial class SharePointService
 
         await Task.WhenAll(itemsTask, categoryMapTask, shapeMapTask);
 
-        var raw         = itemsTask.Result?.Value ?? [];
+        var raw         = itemsTask.Result;
         var categoryMap = categoryMapTask.Result;
         var shapeMap    = shapeMapTask.Result;
 
@@ -7336,14 +7266,9 @@ public partial class SharePointService
         _log.LogInformation("[SP] ReadMetalCategories  -- Metals list not found, deriving from Product Catalog");
         var catalogListName = _config["ProductCatalog:ListName"] ?? "Product Catalog";
         var catalogListId   = await ResolveListIdAsync(catalogListName);
-        var catalogItems = await GetGraph().Sites[siteId].Lists[catalogListId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var catalogItems = await ReadAllListItemsAsync(catalogListId, expand: ["fields"]);
 
-        return (catalogItems?.Value ?? [])
+        return catalogItems
             .Where(i => i.Fields?.AdditionalData is not null)
             .Select(i => RfqField(i.Fields!.AdditionalData!, "Metal", "ProductCategory", "Category"))
             .Where(s => !string.IsNullOrWhiteSpace(s))
@@ -7398,14 +7323,9 @@ public partial class SharePointService
         var relListId = await ResolveListIdAsync("Supplier Relationships");
         _log.LogInformation("[SP] ReadSupplierRelationships");
 
-        var relItems = await GetGraph().Sites[siteId].Lists[relListId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var relItems = await ReadAllListItemsAsync(relListId, expand: ["fields"]);
 
-        var relRaw = relItems?.Value ?? [];
+        var relRaw = relItems;
         if (relRaw.Count == 0) return [];
 
         if (relRaw.Count > 0)
@@ -7697,14 +7617,9 @@ public partial class SharePointService
 
     public async Task<RfqSummaryRecord?> ReadRfqSummaryAsync(string rfqId)
     {
-        var siteId = await GetSiteIdAsync();
         var listId = await GetRfqSummariesListIdAsync();
-        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-        {
-            req.QueryParameters.Expand = ["fields($select=RfqId,Summary,InputsHash,GeneratedAt,Model,Mode)"];
-            req.QueryParameters.Top    = 5000;
-        });
-        foreach (var item in page?.Value ?? new())
+        var items = await ReadAllListItemsAsync(listId, expand: ["fields($select=RfqId,Summary,InputsHash,GeneratedAt,Model,Mode)"]);
+        foreach (var item in items)
         {
             var f = item.Fields?.AdditionalData;
             if (f is null) continue;
@@ -7767,15 +7682,10 @@ public partial class SharePointService
     /// <summary>All summaries carrying feedback (optionally filtered by rating, e.g. "down"), newest first.</summary>
     public async Task<List<SummaryFeedbackRecord>> ReadSummaryFeedbackAsync(string? ratingFilter)
     {
-        var siteId = await GetSiteIdAsync();
         var listId = await GetRfqSummariesListIdAsync();
-        var page = await GetGraph().Sites[siteId].Lists[listId].Items.GetAsync(req =>
-        {
-            req.QueryParameters.Expand = ["fields($select=RfqId,Summary,GeneratedAt,Feedback,FeedbackNote,FeedbackBy,FeedbackAt)"];
-            req.QueryParameters.Top    = 5000;
-        });
+        var items = await ReadAllListItemsAsync(listId, expand: ["fields($select=RfqId,Summary,GeneratedAt,Feedback,FeedbackNote,FeedbackBy,FeedbackAt)"]);
         var result = new List<SummaryFeedbackRecord>();
-        foreach (var item in page?.Value ?? new())
+        foreach (var item in items)
         {
             var f = item.Fields?.AdditionalData;
             if (f is null) continue;
@@ -8089,13 +7999,8 @@ public partial class SharePointService
         // Dedup by PoNumber (ERP file-originated POs that have no messageId)
         if (string.IsNullOrEmpty(messageId) && !string.IsNullOrEmpty(poNumber))
         {
-            var allPos = await GetGraph().Sites[siteId].Lists[listId].Items
-                .GetAsync(r =>
-                {
-                    r.QueryParameters.Expand = ["fields($select=PoNumber,SalesOrders)"];
-                    r.QueryParameters.Top    = 5000;
-                });
-            var dupItem = (allPos?.Value ?? []).FirstOrDefault(i =>
+            var allPos = await ReadAllListItemsAsync(listId, expand: ["fields($select=PoNumber,SalesOrders)"]);
+            var dupItem = allPos.FirstOrDefault(i =>
             {
                 var d = i.Fields?.AdditionalData;
                 return d is not null &&
@@ -9295,14 +9200,9 @@ public partial class SharePointService
         var listId = await GetRfqReferencesListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var all = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col},Complete)"];
-                req.QueryParameters.Top    = 500;
-            });
+        var all = await ReadAllListItemsAsync(listId, expand: [$"fields($select={col},Complete)"]);
 
-        return (all?.Value ?? []).Any(i =>
+        return all.Any(i =>
         {
             var d = i.Fields?.AdditionalData;
             if (d is null) return false;
@@ -9464,15 +9364,10 @@ public partial class SharePointService
         var rliListId = await GetRfqLineItemsListIdAsync();
         var rliCol    = await ResolveRfqIdColumnAsync(siteId, rliListId);
 
-        var rliPage = await GetGraph().Sites[siteId].Lists[rliListId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={rliCol},MSPC,Units)"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var rliRows = await ReadAllListItemsAsync(rliListId, expand: [$"fields($select={rliCol},MSPC,Units)"]);
 
         var rliItems = new List<(string Mspc, double Units)>();
-        foreach (var item in rliPage?.Value ?? [])
+        foreach (var item in rliRows)
         {
             if (item.Fields?.AdditionalData is not { } d) continue;
             var itemRfqId = d.TryGetValue(rliCol,         out var v0) ? v0?.ToString()
@@ -9766,17 +9661,12 @@ public partial class SharePointService
         var listId = await GetRfqLineItemsListIdAsync();
         var col    = await ResolveRfqIdColumnAsync(siteId, listId);
 
-        var page = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = [$"fields($select={col},IsPurchased)"];
-                req.QueryParameters.Top    = 5000;
-            });
+        var items = await ReadAllListItemsAsync(listId, expand: [$"fields($select={col},IsPurchased)"]);
 
         bool hasItems = false;
         bool allPurchased = true;
 
-        foreach (var item in page?.Value ?? [])
+        foreach (var item in items)
         {
             if (item.Fields?.AdditionalData is not { } d) continue;
             var itemRfqId = d.TryGetValue(col,            out var v0) ? v0?.ToString()
@@ -10777,14 +10667,9 @@ public partial class SharePointService
         var siteId  = await GetSiteIdAsync();
         var listId  = await GetOrCreateErpDocumentsListIdAsync(ct);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Expand = ["fields($select=DocumentType)"];
-                req.QueryParameters.Top    = 999;
-            }, ct);
+        var items = await ReadAllListItemsAsync(listId, expand: ["fields($select=DocumentType)"], ct: ct);
 
-        var ids = (items?.Value ?? [])
+        var ids = items
             .Where(i => {
                 var dt = i.Fields?.AdditionalData?.TryGetValue("DocumentType", out var v) == true ? v?.ToString() : null;
                 return dt is not null && typeSet.Contains(dt);
@@ -10819,14 +10704,9 @@ public partial class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(req =>
-            {
-                req.QueryParameters.Select = ["id"];
-                req.QueryParameters.Top    = 999;
-            }, ct);
+        var items = await ReadAllListItemsAsync(listId, ct: ct);
 
-        var ids = (items?.Value ?? []).Select(i => i.Id).Where(i => i is not null).ToList();
+        var ids = items.Select(i => i.Id).Where(i => i is not null).ToList();
         int deleted = 0;
         foreach (var id in ids)
         {
@@ -10856,17 +10736,12 @@ public partial class SharePointService
         var drive   = await GetGraph().Sites[siteId].Drive.GetAsync(cancellationToken: ct);
         var driveId = drive?.Id ?? throw new Exception("Could not resolve site drive ID");
 
-        var items = await GetGraph().Sites[siteId].Lists[listId].Items
-            .GetAsync(r =>
-            {
-                r.QueryParameters.Expand = ["fields($select=Title,FileName,DocumentDate,PdfUrl)"];
-                r.QueryParameters.Top    = 500;
-            }, ct);
+        var items = await ReadAllListItemsAsync(listId, expand: ["fields($select=Title,FileName,DocumentDate,PdfUrl)"], ct: ct);
 
         var cutoff = DateTime.UtcNow - olderThan;
         int cleaned = 0;
 
-        foreach (var item in (items?.Value ?? []))
+        foreach (var item in items)
         {
             var d = item.Fields?.AdditionalData;
             if (d is null || item.Id is null) continue;
