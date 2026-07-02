@@ -441,6 +441,17 @@ This approach gives deterministic diagnosis. Inference from code reading alone i
 
 ## Rules
 
+- **Date/time columns are native `dateTime`, never text.** SharePoint string-sorts text, which misorders dates
+  (proven 0/25 correct on the legacy ErpDocuments text date). Store timestamps in native **indexed** `dateTime`
+  columns and sort/filter server-side (`$orderby=fields/XxxDt desc`, `$filter=fields/XxxDt ge '…Z'`). Legacy text
+  date columns are being migrated to native — see `wip/datetime-column-migration.md`. Pattern: add native `XxxDt`
+  column + index; **dual-write it at EVERY write site** (values that aren't already ISO — e.g. "Jul-01-2026" —
+  parse via `ToIsoOrNull` first); backfill via `SharePointService.BackfillTextDateToDateTimeAsync`; register one
+  row in `SharePointService.DateTimeColumnMigrations()` (SP lists) or `SharePointInquiryStore
+  .BackfillDateTimeColumnsAsync` (inquiry cluster) so the sweep + backfill-all cover it automatically. The
+  `DateTimeBackfillSweepService` heals text-date drift from not-yet-updated fleet proxies every 30 min —
+  **DISABLE it (`DateTimeBackfill:SweepEnabled=false`) once the whole fleet is on the dual-write build** and the
+  log shows `[DtSweep] no drift`. See [[feedback_inquiry_timestamp_sort]].
 - **Full-regret rule:** a SupplierResponse is a FULL regret (`IsRegret=true` at SR level) only when the email **body expresses regret AND there is no priced line in the extraction** (no PDF attachment with valid pricing — any price counts). A priced attachment means a real quote, or — when the body regrets but the PDF prices items — a substitute/partial; never a full regret. Per-line `IsRegret` on each SLI is computed independently (`!HasPrice(product) && (product.IsRegret || regret phrase)`). Set in `EnsureSupplierResponseAsync` (`blanketRegret`).
 - **Job-ref mismatch:** when a PDF's AI-extracted JobReference is a valid RFQ id that differs from the email-subject ref, the priced data files under the PDF's **own** ref and a `⚠` warning is written to `SupplierProductComments` (visible in the grid). A foreign PDF that leaks a stale `SourceFile` pointer onto the wrong SR is cleaned with `POST /api/sr/{srId}/detach-file`. Diagnose any RFQ with `GET /api/diag/extraction-trace?rfqId=` (live email vs extracted vs stored, each block carries its source).
 - **Graph MessageId is case-SENSITIVE.** Immutable message IDs are case-sensitive base64 — two IDs differing only by one character's case are DIFFERENT emails. Always compare/group MessageId with `StringComparison.Ordinal` / `StringComparer.Ordinal`, never `OrdinalIgnoreCase`. An ignore-case compare in the SupplierResponse dedup collapsed two distinct supplier emails (IDs differing by `P` vs `p`) onto one SR row, letting each overwrite the other's RFQ/attachment/line items — the root cause of the RSX9K3 wrong-PDF misroute (Penn Steel quote `…RPAAA=`→RSX9JW vs regret `…RpAAA=`→RSX9K3). Diagnose collisions with the extraction-trace; recover with detach-file / delete-SR + targeted reprocess.
