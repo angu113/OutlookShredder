@@ -10189,6 +10189,7 @@ public partial class SharePointService
             ("TotalAmount",    "text"),
             ("Currency",       "text"),
             ("ReceivedAt",     "text"),
+            ("ReceivedAtDt",   "dateTime"),   // native, indexed — the sortable one (text ReceivedAt kept for back-compat)
             ("FileName",       "text"),
             ("PdfUrl",         "text"),
             ("IsArchived",     "boolean"),
@@ -10206,9 +10207,10 @@ public partial class SharePointService
             if (byName.ContainsKey(name)) continue;
             var def = type switch
             {
-                "boolean" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean  = new Microsoft.Graph.Models.BooleanColumn() },
-                "note"    => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
-                _         => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn() }
+                "boolean"  => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Boolean  = new Microsoft.Graph.Models.BooleanColumn() },
+                "dateTime" => new Microsoft.Graph.Models.ColumnDefinition { Name = name, DateTime = new Microsoft.Graph.Models.DateTimeColumn() },
+                "note"     => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn { AllowMultipleLines = true, LinesForEditing = 4 } },
+                _          => new Microsoft.Graph.Models.ColumnDefinition { Name = name, Text     = new Microsoft.Graph.Models.TextColumn() }
             };
             var created = await GetGraph().Sites[siteId].Lists[listId].Columns.PostAsync(def, cancellationToken: ct);
             if (created is not null) byName[name] = created;
@@ -10216,7 +10218,7 @@ public partial class SharePointService
         }
 
         // Ensure columns used in $filter/$orderby queries are indexed — never use HonorNonIndexedQueries header.
-        foreach (var colName in new[] { "Title", "IsArchived", "ReceivedAt" })
+        foreach (var colName in new[] { "Title", "IsArchived", "ReceivedAt", "ReceivedAtDt" })
         {
             if (!byName.TryGetValue(colName, out var col) || col.Id is null) continue;
             if (col.Indexed == true) continue;
@@ -10274,6 +10276,7 @@ public partial class SharePointService
             ["TotalAmount"]    = extraction.TotalAmount,
             ["Currency"]       = extraction.Currency ?? "USD",
             ["ReceivedAt"]     = receivedAt.ToString("o"),
+            ["ReceivedAtDt"]   = receivedAt.ToString("o"),   // native dateTime — server-side sortable
             ["FileName"]       = fileName,
             ["PdfUrl"]         = pdfUrl,
             ["IsArchived"]     = false,
@@ -10553,11 +10556,15 @@ public partial class SharePointService
         var siteId = await GetSiteIdAsync();
         var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
 
+        // Order by the native dateTime column server-side so we get the genuinely-newest `top` rows
+        // (the legacy text ReceivedAt can't be ordered chronologically — mixed ISO/US-locale formats).
+        // ReceivedAtDt is indexed; run BackfillErpReceivedAtDtAsync once to populate it on legacy rows.
         var items = await GetGraph().Sites[siteId].Lists[listId].Items
             .GetAsync(r =>
             {
-                r.QueryParameters.Expand = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerEmail,ContactName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
-                r.QueryParameters.Top    = top;
+                r.QueryParameters.Expand  = ["fields($select=Title,DocumentType,DocumentDate,CustomerName,CustomerEmail,ContactName,CustomerRef,TotalAmount,Currency,FileName,PdfUrl,ReceivedAt,ReceivedAtDt,IsArchived,SourceMachine,SourceUser,UserAnnotations,DeliveryAddress,DeliveryMethod,LineItemsJson)"];
+                r.QueryParameters.Orderby = ["fields/ReceivedAtDt desc"];
+                r.QueryParameters.Top     = top;
             }, ct);
 
         var results = new List<OutlookShredder.Proxy.Models.ErpDocumentRecord>();
@@ -10607,6 +10614,58 @@ public partial class SharePointService
 
         return [.. results.OrderByDescending(r =>
             DateTimeOffset.TryParse(r.ReceivedAt, out var dt) ? dt : DateTimeOffset.MinValue)];
+    }
+
+    /// <summary>
+    /// One-time migration: populate the native <c>ReceivedAtDt</c> dateTime column from the legacy text
+    /// <c>ReceivedAt</c> (written in mixed ISO / US-locale formats, so it can't be ordered server-side).
+    /// Parses each text value in memory (culture-tolerant) and patches the dateTime column. Idempotent —
+    /// skips rows already carrying ReceivedAtDt. Trigger via POST /api/erp/backfill-received-dt.
+    /// </summary>
+    public async Task<(int Scanned, int Patched, int Failed)> BackfillErpReceivedAtDtAsync(CancellationToken ct = default)
+    {
+        var siteId = await GetSiteIdAsync();
+        var listId = await GetOrCreateErpDocumentsListIdAsync(ct);
+        var items  = await ReadAllListItemsAsync(listId, expand: ["fields($select=ReceivedAt,ReceivedAtDt)"], ct: ct);
+
+        // Collect rows needing migration — parse the legacy text ReceivedAt in memory (culture-tolerant,
+        // handles the ISO + US-locale mix); skip any row that already has ReceivedAtDt.
+        var work = new List<(string ItemId, string Iso)>();
+        int scanned = 0, parseFailed = 0;
+        foreach (var item in items)
+        {
+            var d = item.Fields?.AdditionalData;
+            if (d is null || item.Id is null) continue;
+            scanned++;
+            var existing = d.TryGetValue("ReceivedAtDt", out var ev) ? ev?.ToString() : null;
+            if (!string.IsNullOrWhiteSpace(existing)) continue;   // already migrated
+            var raw = d.TryGetValue("ReceivedAt", out var rv) ? rv?.ToString() : null;
+            if (string.IsNullOrWhiteSpace(raw) || !DateTimeOffset.TryParse(raw, out var parsed)) { parseFailed++; continue; }
+            work.Add((item.Id, parsed.ToString("o")));
+        }
+
+        // Patch in throttle-safe parallel batches (same helper the CSV imports use).
+        int patched = 0, patchFailed = 0;
+        await RunBatchedAsync(work, 100, 8, "ErpReceivedAtDt-backfill",
+            async (w, token) =>
+            {
+                try
+                {
+                    await PatchListItemWithRetryAsync(siteId, listId, w.ItemId,
+                        new Dictionary<string, object?> { ["ReceivedAtDt"] = w.Iso }, token);
+                    System.Threading.Interlocked.Increment(ref patched);
+                }
+                catch (Exception ex)
+                {
+                    System.Threading.Interlocked.Increment(ref patchFailed);
+                    _log.LogWarning(ex, "[SP] ReceivedAtDt backfill failed for item {Id}", w.ItemId);
+                }
+            }, ct);
+
+        int failed = parseFailed + patchFailed;
+        _log.LogInformation("[SP] ErpDocuments ReceivedAtDt backfill complete: scanned={S} patched={P} failed={F} (parse={PF}/patch={PtF})",
+            scanned, patched, failed, parseFailed, patchFailed);
+        return (scanned, patched, failed);
     }
 
     /// <summary>

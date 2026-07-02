@@ -385,6 +385,17 @@ public class ErpController : ControllerBase
     }
 
     /// <summary>
+    /// One-time migration: populate the native ReceivedAtDt dateTime column from the legacy text
+    /// ReceivedAt so server-side newest-first ordering works. Idempotent.
+    /// </summary>
+    [HttpPost("/api/erp/backfill-received-dt")]
+    public async Task<IActionResult> BackfillReceivedDt(CancellationToken ct)
+    {
+        var (scanned, patched, failed) = await _sp.BackfillErpReceivedAtDtAsync(ct);
+        return Ok(new { scanned, patched, failed });
+    }
+
+    /// <summary>
     /// Deletes ErpDocuments records matching the given document types (comma-separated).
     /// Example: DELETE /api/erp/clean-by-type?types=Payment,Quotation
     /// Does NOT clear the processed-file cache — ignored files remain ignored.
